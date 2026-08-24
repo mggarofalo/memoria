@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Memoria.Api/Memoria.Api.csproj" />
+    <Project Path="src/Memoria.Core/Memoria.Core.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Memoria.Api.Tests/Memoria.Api.Tests.csproj" />
+  </Folder>
+</Solution>

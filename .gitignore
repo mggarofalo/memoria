@@ -1,0 +1,48 @@
+# ---- .NET ----
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+artifacts/
+*.user
+*.suo
+*.userprefs
+*.nupkg
+*.snupkg
+.vs/
+TestResults/
+coverage/
+*.coverage
+*.trx
+BenchmarkDotNet.Artifacts/
+
+# ---- Go ----
+cli/memoria
+cli/memoria.exe
+cli/dist/
+*.test
+*.out
+
+# ---- Node (OpenAPI / lint tooling) ----
+node_modules/
+npm-debug.log*
+
+# ---- Editors ----
+.idea/
+*.swp
+.DS_Store
+
+# ---- Local runtime state ----
+*.local.json
+appsettings.Development.local.json
+.env
+.env.*
+!.env.example
+data/
+qmd-index/
+
+# ---- Worktrees ----
+.worktrees/
+
+# ---- Claude ----
+.claude/settings.local.json
