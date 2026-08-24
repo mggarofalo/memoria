@@ -24,7 +24,6 @@ Every issue needs at least one **layer** label. Add **type** labels as appropria
 
 Issues labeled `epic` are parent containers — skip and work their children.
 
-> Labels are not yet created in the workspace. Create them before the first issue that needs one.
 
 ## Modules
 
@@ -37,9 +36,22 @@ ID=$(plane issue create --name "..." --labels api --priority medium --id-only -p
 plane module add-work-items --module-id "Host" --issues "$ID" -p MEMORIA
 ```
 
-Planned modules: **Host**, **API**, **Auth**, **Ingest**, **CLI**, **Sources**, and **Maintenance Backlog** as the default bucket for hardening and bug fixes that don't belong to a phase.
+Modules: **Host**, **API**, **Auth**, **Ingest**, **CLI**, **Sources**, and **Maintenance Backlog** — the default bucket for hardening and bug fixes that don't belong to a phase.
 
-> Modules are not yet created in the workspace.
+## Epics
+
+Six epics track the phases, each attached to its matching module. Work their children, not the epics themselves.
+
+| Issue | Module | Priority |
+|---|---|---|
+| `MEMORIA-1` Host: provision the always-on QMD node | Host | Urgent — ready now |
+| `MEMORIA-2` API: Memoria.Api front door over QMD | API | High |
+| `MEMORIA-3` Auth: API keys and collection scoping | Auth | Medium |
+| `MEMORIA-4` Ingest: redaction, envelope, and queue | Ingest | Medium |
+| `MEMORIA-5` CLI: the memoria Go binary | CLI | Medium |
+| `MEMORIA-6` Sources: sync workers beyond transcripts | Sources | Low |
+
+`MEMORIA-1` is the only epic in Todo. Its `qmd query` benchmark gates the API's default search mode, so it blocks meaningful progress on `MEMORIA-2`.
 
 ## Priority
 
