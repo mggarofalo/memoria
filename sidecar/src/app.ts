@@ -3,7 +3,7 @@ import swagger from "@fastify/swagger";
 import { bearerMatches } from "./auth.ts";
 import type { SidecarConfig } from "./config.ts";
 import { HttpError } from "./errors.ts";
-import { JobQueue, type JobResult, type ReindexRequest } from "./jobs.ts";
+import { JobQueue, type EmbedSummary, type JobResult, type ReindexRequest } from "./jobs.ts";
 import { MetadataIndex } from "./metadata.ts";
 import { registerRoutes } from "./routes.ts";
 import { documentSchema, errorSchema, jobSchema, metadataSchema } from "./schemas.ts";
@@ -51,12 +51,22 @@ export async function buildApp(options: BuildAppOptions): Promise<App> {
 
   const runJob = async (request: ReindexRequest): Promise<JobResult> => {
     const update = await backend.update(request.collections ? { collections: request.collections } : {});
-    let embed = null;
+    let embed: EmbedSummary | null = null;
     if (request.embed) {
-      embed =
-        request.collections && request.collections.length === 1
-          ? await backend.embed({ force: request.force, collection: request.collections[0]! })
-          : await backend.embed({ force: request.force });
+      if (request.collections === null) {
+        embed = await backend.embed({ force: request.force });
+      } else {
+        // The SDK embeds one collection per call; keep the job scoped to
+        // exactly the collections that were updated.
+        embed = { docsProcessed: 0, chunksEmbedded: 0, errors: 0, durationMs: 0 };
+        for (const collection of request.collections) {
+          const r = await backend.embed({ force: request.force, collection });
+          embed.docsProcessed += r.docsProcessed;
+          embed.chunksEmbedded += r.chunksEmbedded;
+          embed.errors += r.errors;
+          embed.durationMs += r.durationMs;
+        }
+      }
     }
     const meta = metadata.refresh();
     return { update, embed, metadata: meta };

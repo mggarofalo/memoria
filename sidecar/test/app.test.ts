@@ -439,6 +439,19 @@ test("POST /reindex queues serialized jobs and exposes them", async () => {
     assert.equal(done2.result.embed, null);
     assert.deepEqual(backend.calls.filter((c) => c.method === "embed").map((c) => c.args[0]), [{ force: false }]);
 
+    // Several explicit collections embed each one separately, never the whole index.
+    backend.calls.length = 0;
+    const multi = await app.inject({ method: "POST", url: "/reindex", headers: authHeaders, payload: { collections: ["claude-sessions", "codex-sessions"], force: true } });
+    assert.equal(multi.statusCode, 202, multi.body);
+    await app.ctx.jobs.idle();
+    const multiJob = (await app.inject({ method: "GET", url: `/reindex/jobs/${multi.json().job.id}`, headers: authHeaders })).json().job;
+    assert.equal(multiJob.state, "succeeded");
+    assert.deepEqual(
+      backend.calls.filter((c) => c.method === "embed").map((c) => c.args[0]),
+      [{ force: true, collection: "claude-sessions" }, { force: true, collection: "codex-sessions" }],
+    );
+    assert.deepEqual(multiJob.result.embed, { docsProcessed: 0, chunksEmbedded: 0, errors: 0, durationMs: 2 });
+
     const unknown = await app.inject({ method: "POST", url: "/reindex", headers: authHeaders, payload: { collections: ["ghost"] } });
     assert.equal(unknown.statusCode, 400);
     const noJob = await app.inject({ method: "GET", url: "/reindex/jobs/nope", headers: authHeaders });
