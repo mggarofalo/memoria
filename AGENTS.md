@@ -86,10 +86,13 @@ clients (Claude Code / CLI / scripts)
 |---|---|
 | `src/Memoria.Api/` | ASP.NET Core host: REST endpoints, outward MCP server, auth handler, ingest |
 | `src/Memoria.Core/` | Document envelope, search contracts, redaction rules |
-| `tests/Memoria.Api.Tests/` | xUnit tests against `WebApplicationFactory<Program>` |
+| `tests/Memoria.Api.Tests/` | xUnit tests against `WebApplicationFactory<Program>` with a scripted `FakeSidecar` handler |
+| `tests/Memoria.Core.Tests/` | Client unit tests and `SidecarContractTests`, which pins the C# wire types to `sidecar/openapi.json` |
 | `sidecar/` | `memoria-qmd`: TypeScript REST service over the QMD SDK; `openapi.json` is its contract |
 | `cli/` | Go module `github.com/mggarofalo/memoria/cli`, binary `memoria` |
-| `docs/` | Plane workflow, deployment, API guidelines |
+| `docs/` | Plane workflow (`plane.md`), API configuration (`configuration.md`), deployment |
+
+**Inside `Memoria.Api`:** `Configuration/` (the `Memoria` options root and its validator), `Sidecar/` (typed-client registration and trace propagation), `Http/` (request logging, problem-details mapping, the `MemoriaScope` and `ICallerScope` seams for MEMORIA-3), `Endpoints/` (`/health`, `/ready`, `/v1/*`), `OpenApi/`. The sidecar client itself (`IMemoriaQmdClient`, its wire records) lives in `Memoria.Core/Sidecar/`; the public v1 contracts in `Memoria.Core/Contracts/`. When the sidecar contract changes, update the records in `Memoria.Core/Sidecar/SidecarContracts.cs` — `SidecarContractTests` fails until they match the committed `openapi.json`.
 
 **Key invariants:**
 
@@ -97,6 +100,7 @@ clients (Claude Code / CLI / scripts)
 - **Redaction is a precondition of indexing, not a post-filter.** Transcripts carry live credentials. If a document reaches the index unredacted, the secret is already searchable.
 - **API keys are scoped to collections.** Never issue an all-collections key by default; the corpus mixes sensitivity levels.
 - **The markdown corpus is the durable artifact.** `index.sqlite` is derived and may be deleted and rebuilt at any time. Never treat it as a source of truth.
+- **Every request is traceable.** `Memoria.Api` returns `X-Trace-Id`, logs one structured line per request, and forwards the same id to the sidecar as `request-id` (its pino `reqId`) plus W3C `traceparent`. Problem-details responses carry `traceId`. Keep new endpoints inside the `/v1` group so they inherit this and the scope metadata.
 - **Reindexing is serialized.** Concurrent `qmd update`/`qmd embed` runs contend over the model and the database. Ingest enqueues; a single worker drains (`POST /reindex` and `POST /documents` on the sidecar share one queue).
 
 ## Coding Standards

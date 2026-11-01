@@ -85,6 +85,9 @@ export async function buildApp(options: BuildAppOptions): Promise<App> {
     logger: options.logger ?? false,
     bodyLimit: config.bodyLimitBytes,
     trustProxy: false,
+    // Memoria.Api sends its W3C trace id here; adopting it as reqId lets one id
+    // join the API's request log line and this process's pino lines.
+    requestIdHeader: "request-id",
     ajv: { customOptions: { removeAdditional: false, useDefaults: true, coerceTypes: "array", allErrors: false } },
   });
   const app = Object.assign(fastify, { ctx }) as App;
