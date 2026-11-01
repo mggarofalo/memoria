@@ -1,0 +1,13 @@
+**/bin/
+**/obj/
+**/node_modules/
+.git/
+.github/
+.claude/
+.vs/
+cli/
+sidecar/
+tests/
+docs/
+*.md
+appsettings.local.json
