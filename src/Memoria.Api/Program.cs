@@ -1,10 +1,19 @@
 using Memoria.Api.Configuration;
 using Memoria.Api.Endpoints;
+using Memoria.Api.Hosting;
 using Memoria.Api.Http;
+using Memoria.Api.Mcp;
 using Memoria.Api.OpenApi;
 using Memoria.Api.Sidecar;
 using Microsoft.Extensions.Options;
 using Microsoft.OpenApi;
+
+// `dotnet Memoria.Api.dll --health-check` is the container HEALTHCHECK: probe
+// the running instance's /health and exit 0 or 1 without starting a host.
+if (HealthProbe.IsRequested(args))
+{
+	return await HealthProbe.RunAsync(Environment.GetEnvironmentVariable("ASPNETCORE_URLS"));
+}
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
@@ -35,11 +44,21 @@ builder.Services.AddProblemDetails(options =>
 		context.ProblemDetails.Extensions["traceId"] = RequestLoggingMiddleware.CurrentTraceId(context.HttpContext));
 builder.Services.AddExceptionHandler<MemoriaExceptionHandler>();
 
+// MCP is decided at build time because the endpoint and its services are
+// registered together; the section is also validated with the rest of the options.
+McpOptions mcpOptions = builder.Configuration.GetSection(MemoriaOptions.SectionName).GetSection(nameof(MemoriaOptions.Mcp)).Get<McpOptions>() ?? new McpOptions();
+if (mcpOptions.Enabled)
+{
+	builder.Services.AddMemoriaMcpServer();
+}
+
 builder.Services.AddOpenApi("v1", options =>
 {
 	// 3.0 rather than 3.1: oapi-codegen (the Go CLI's generator) reads 3.0.
 	options.OpenApiVersion = OpenApiSpecVersion.OpenApi3_0;
 	options.AddDocumentTransformer<MemoriaDocumentTransformer>();
+	options.AddSchemaTransformer<PlainNumberSchemaTransformer>();
+	options.AddDocumentTransformer<NullableReferenceDocumentTransformer>();
 });
 
 WebApplication app = builder.Build();
@@ -51,8 +70,13 @@ app.UseStatusCodePages();
 app.MapOpenApi();
 app.MapHealth();
 app.MapV1();
+if (mcpOptions.Enabled)
+{
+	app.MapMemoriaMcp(mcpOptions);
+}
 
-app.Run();
+await app.RunAsync();
+return 0;
 
 // Exposed so WebApplicationFactory<Program> can boot the app in tests.
 public partial class Program;

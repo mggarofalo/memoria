@@ -15,6 +15,18 @@ public sealed class MemoriaOptions
 	public SidecarOptions Sidecar { get; set; } = new();
 
 	public SearchOptions Search { get; set; } = new();
+
+	public McpOptions Mcp { get; set; } = new();
+}
+
+/// <summary>The outward MCP server Claude clients connect to.</summary>
+public sealed class McpOptions
+{
+	/// <summary>Serve the MCP endpoint. Off leaves only REST.</summary>
+	public bool Enabled { get; set; } = true;
+
+	/// <summary>Route of the Streamable HTTP endpoint.</summary>
+	public string Path { get; set; } = "/mcp";
 }
 
 /// <summary>How to reach the memoria-qmd sidecar.</summary>

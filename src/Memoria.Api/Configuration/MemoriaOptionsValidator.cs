@@ -40,6 +40,11 @@ public sealed class MemoriaOptionsValidator : IValidateOptions<MemoriaOptions>
 			failures.Add("Memoria:Search:DefaultLimit must be between 1 and Memoria:Search:MaxLimit.");
 		}
 
+		if (options.Mcp.Enabled && (string.IsNullOrWhiteSpace(options.Mcp.Path) || !options.Mcp.Path.StartsWith('/') || options.Mcp.Path.StartsWith("/v1", StringComparison.OrdinalIgnoreCase)))
+		{
+			failures.Add("Memoria:Mcp:Path must start with '/' and must not sit under /v1.");
+		}
+
 		return failures.Count == 0 ? ValidateOptionsResult.Success : ValidateOptionsResult.Fail(failures);
 	}
 

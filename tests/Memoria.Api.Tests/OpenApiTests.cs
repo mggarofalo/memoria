@@ -33,6 +33,7 @@ public sealed class OpenApiTests(MemoriaApiFactory factory) : IClassFixture<Memo
 			}
 		}
 
+		Assert.DoesNotContain(operations.Keys, key => key.Contains("/mcp", StringComparison.Ordinal));
 		Assert.Equal("search", operations["GET /v1/search"]);
 		Assert.Equal("getDocument", operations["GET /v1/docs/{id}"]);
 		Assert.Equal("getDocuments", operations["POST /v1/docs:multiGet"]);

@@ -1,0 +1,9 @@
+# oapi-codegen configuration for the Memoria.Api client.
+# https://github.com/oapi-codegen/oapi-codegen#usage
+package: api
+output: client.gen.go
+generate:
+  models: true
+  client: true
+output-options:
+  skip-prune: false

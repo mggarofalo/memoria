@@ -26,6 +26,10 @@ jobs:
         run: dotnet build Memoria.slnx --no-restore -p:TreatWarningsAsErrors=true
       - name: Test
         run: dotnet test Memoria.slnx --no-build --verbosity normal
+      # The served document is pinned to src/Memoria.Api/openapi.json by
+      # OpenApiContractTests above; this lints the committed copy.
+      - name: OpenAPI lint
+        run: npx --yes @stoplight/spectral-cli@6.17.0 lint --fail-severity warn src/Memoria.Api/openapi.json
 
   format:
     name: Code Formatting
@@ -115,3 +119,7 @@ jobs:
         run: |
           go mod tidy
           git diff --exit-code go.mod go.sum
+      - name: Generated client drift
+        run: |
+          go generate ./...
+          git diff --exit-code internal/api
