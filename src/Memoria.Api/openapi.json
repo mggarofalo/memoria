@@ -1,0 +1,1233 @@
+{
+  "openapi": "3.0.4",
+  "info": {
+    "title": "Memoria API",
+    "description": "Search API over your own accumulated record: agent transcripts, issues, pull requests and notes, served from a QMD index behind one authenticated front door. Retrieval is QMD's hybrid BM25 plus vector search with LLM reranking; Memoria adds network exposure, collection scoping and client tooling.",
+    "contact": {
+      "name": "Memoria",
+      "url": "https://github.com/mggarofalo/memoria"
+    },
+    "license": {
+      "name": "MIT",
+      "url": "https://github.com/mggarofalo/memoria/blob/main/LICENSE"
+    },
+    "version": "v1"
+  },
+  "servers": [
+    {
+      "url": "/",
+      "description": "The origin this document was fetched from."
+    }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "Liveness",
+        "description": "The API process is up. Does not contact the search backend; use `/ready` for that.",
+        "operationId": "health",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthReport"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ready": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "Readiness",
+        "description": "Probes the memoria-qmd sidecar. 200 when its index is open and, by default, its models are resident; 503 with the same body shape while it warms up or when it cannot be reached.",
+        "operationId": "ready",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadinessReport"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadinessReport"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/search": {
+      "get": {
+        "tags": [
+          "Search"
+        ],
+        "summary": "Search the corpus",
+        "description": "Hybrid search over the indexed documents: BM25 and vector retrieval fused by reciprocal rank, then reranked by a cross-encoder unless `rerank=false`. Reranked queries take a few seconds; `rerank=false` returns fused results in well under a second. Frontmatter filters (`project`, `branch`, `since`, `until`, `tag`) are applied after retrieval, so a filtered result set can be shorter than `limit` even when more matches exist.",
+        "operationId": "search",
+        "parameters": [
+          {
+            "name": "query",
+            "in": "query",
+            "description": "Plain-text query. QMD expands it into lexical and semantic sub-queries.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "collection",
+            "in": "query",
+            "description": "Collection to search. Repeat for several. Defaults to the configured default set, else QMD's default-included collections.",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum results, 1 to the configured ceiling (100). Default 10.",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "minScore",
+            "in": "query",
+            "description": "Drop results scoring below this, 0 to 1.",
+            "schema": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          {
+            "name": "rerank",
+            "in": "query",
+            "description": "Run the LLM reranker. Default true (full hybrid). false returns sub-second lexical plus vector fusion.",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "intent",
+            "in": "query",
+            "description": "Background context that steers reranking and snippet selection. Does not search on its own.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "candidateLimit",
+            "in": "query",
+            "description": "Candidates handed to the reranker, 1 to 1000. QMD's default is 40.",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "project",
+            "in": "query",
+            "description": "Frontmatter filter: `project` equals any of these (case-insensitive). Repeatable.",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "name": "branch",
+            "in": "query",
+            "description": "Frontmatter filter: `git_branch` equals any of these (case-insensitive). Repeatable.",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "description": "Frontmatter filter: inclusive lower bound on the document's start time, `YYYY-MM-DD` or ISO timestamp.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "description": "Frontmatter filter: inclusive upper bound; a bare date covers the whole day.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tag",
+            "in": "query",
+            "description": "Frontmatter filter: every listed tag must be present (case-insensitive). Repeatable.",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        ],
+        "responses": {
+          "502": {
+            "description": "Bad Gateway",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Gateway Timeout",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpValidationProblemDetails"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/docs/{id}": {
+      "get": {
+        "tags": [
+          "Documents"
+        ],
+        "summary": "Get one document",
+        "description": "Fetch a document by display path (`collection/path.md`), by `qmd://` URI, or by its six-character docid. `fromLine` and `maxLines` narrow the body to the lines around a search hit; `body=false` returns metadata only.",
+        "operationId": "getDocument",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Document reference: `collection/path.md`, `qmd://collection/path.md`, or a docid.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "fromLine",
+            "in": "query",
+            "description": "First line of the body to return (1-indexed).",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "maxLines",
+            "in": "query",
+            "description": "Number of lines to return from `fromLine`.",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "lineNumbers",
+            "in": "query",
+            "description": "Prefix each body line with `N: `.",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "body",
+            "in": "query",
+            "description": "false returns metadata only.",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "502": {
+            "description": "Bad Gateway",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Gateway Timeout",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Document"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/docs:multiGet": {
+      "post": {
+        "tags": [
+          "Documents"
+        ],
+        "summary": "Get several documents",
+        "description": "Batch fetch by a list of references (paths or docids), by a glob such as `claude-sessions/2026-05*.md`, or both. Bodies are capped at `maxBytes` each (default 64 KiB); documents over the cap are listed under `skipped`.",
+        "operationId": "getDocuments",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MultiGetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "502": {
+            "description": "Bad Gateway",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Gateway Timeout",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MultiGetResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpValidationProblemDetails"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/collections": {
+      "get": {
+        "tags": [
+          "Collections"
+        ],
+        "summary": "List collections",
+        "description": "Every collection the caller may search, with its active document count and root context.",
+        "operationId": "listCollections",
+        "responses": {
+          "502": {
+            "description": "Bad Gateway",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Gateway Timeout",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CollectionList"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/status": {
+      "get": {
+        "tags": [
+          "Collections"
+        ],
+        "summary": "Index status",
+        "description": "Totals for the index: documents, documents awaiting embedding, whether a vector index exists, and per-collection counts.",
+        "operationId": "getStatus",
+        "responses": {
+          "502": {
+            "description": "Bad Gateway",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Gateway Timeout",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IndexStatus"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "CollectionInfo": {
+        "required": [
+          "name",
+          "documents",
+          "lastModified",
+          "includeByDefault",
+          "context"
+        ],
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "documents": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "lastModified": {
+            "type": "string",
+            "nullable": true
+          },
+          "includeByDefault": {
+            "type": "boolean"
+          },
+          "context": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "CollectionList": {
+        "required": [
+          "collections"
+        ],
+        "type": "object",
+        "properties": {
+          "collections": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CollectionInfo"
+            }
+          }
+        }
+      },
+      "Document": {
+        "required": [
+          "docid",
+          "file",
+          "collection",
+          "path",
+          "title",
+          "context",
+          "modifiedAt",
+          "bodyLength",
+          "fromLine",
+          "maxLines",
+          "body",
+          "metadata"
+        ],
+        "type": "object",
+        "properties": {
+          "docid": {
+            "type": "string"
+          },
+          "file": {
+            "type": "string"
+          },
+          "collection": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "context": {
+            "type": "string",
+            "nullable": true
+          },
+          "modifiedAt": {
+            "type": "string"
+          },
+          "bodyLength": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "fromLine": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "maxLines": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "body": {
+            "type": "string",
+            "nullable": true
+          },
+          "metadata": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/DocumentMetadata"
+              }
+            ],
+            "nullable": true
+          }
+        }
+      },
+      "DocumentMetadata": {
+        "required": [
+          "project",
+          "branch",
+          "date",
+          "startTime",
+          "endTime",
+          "tags",
+          "sessionId",
+          "source"
+        ],
+        "type": "object",
+        "properties": {
+          "project": {
+            "type": "string",
+            "nullable": true
+          },
+          "branch": {
+            "type": "string",
+            "nullable": true
+          },
+          "date": {
+            "type": "string",
+            "nullable": true
+          },
+          "startTime": {
+            "type": "string",
+            "nullable": true
+          },
+          "endTime": {
+            "type": "string",
+            "nullable": true
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "sessionId": {
+            "type": "string",
+            "nullable": true
+          },
+          "source": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "HealthReport": {
+        "required": [
+          "status",
+          "version"
+        ],
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
+      "HttpValidationProblemDetails": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "nullable": true
+          },
+          "title": {
+            "type": "string",
+            "nullable": true
+          },
+          "status": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "detail": {
+            "type": "string",
+            "nullable": true
+          },
+          "instance": {
+            "type": "string",
+            "nullable": true
+          },
+          "errors": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "IndexCollectionStatus": {
+        "required": [
+          "name",
+          "documents",
+          "lastUpdated"
+        ],
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "documents": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "lastUpdated": {
+            "type": "string"
+          }
+        }
+      },
+      "IndexStatus": {
+        "required": [
+          "totalDocuments",
+          "needsEmbedding",
+          "hasVectorIndex",
+          "collections"
+        ],
+        "type": "object",
+        "properties": {
+          "totalDocuments": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "needsEmbedding": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "hasVectorIndex": {
+            "type": "boolean"
+          },
+          "collections": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IndexCollectionStatus"
+            }
+          }
+        }
+      },
+      "MultiGetRequest": {
+        "required": [
+          "ids",
+          "pattern",
+          "maxBytes",
+          "maxLines",
+          "lineNumbers",
+          "includeBody"
+        ],
+        "type": "object",
+        "properties": {
+          "ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "nullable": true
+          },
+          "pattern": {
+            "type": "string",
+            "nullable": true
+          },
+          "maxBytes": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "maxLines": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "lineNumbers": {
+            "type": "boolean",
+            "nullable": true
+          },
+          "includeBody": {
+            "type": "boolean",
+            "nullable": true
+          }
+        }
+      },
+      "MultiGetResult": {
+        "required": [
+          "docs",
+          "skipped",
+          "errors"
+        ],
+        "type": "object",
+        "properties": {
+          "docs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Document"
+            }
+          },
+          "skipped": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SkippedDocument"
+            }
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "ProblemDetails": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "nullable": true
+          },
+          "title": {
+            "type": "string",
+            "nullable": true
+          },
+          "status": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "detail": {
+            "type": "string",
+            "nullable": true
+          },
+          "instance": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "ReadinessReport": {
+        "required": [
+          "status",
+          "ready",
+          "reason",
+          "sidecar"
+        ],
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "ready": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string",
+            "nullable": true
+          },
+          "sidecar": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SidecarReadiness"
+              }
+            ],
+            "nullable": true
+          }
+        }
+      },
+      "SearchHit": {
+        "required": [
+          "docid",
+          "file",
+          "collection",
+          "path",
+          "title",
+          "score",
+          "line",
+          "snippet",
+          "context",
+          "metadata"
+        ],
+        "type": "object",
+        "properties": {
+          "docid": {
+            "type": "string"
+          },
+          "file": {
+            "type": "string"
+          },
+          "collection": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "score": {
+            "type": "number",
+            "format": "double"
+          },
+          "line": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "snippet": {
+            "type": "string"
+          },
+          "context": {
+            "type": "string",
+            "nullable": true
+          },
+          "metadata": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/DocumentMetadata"
+              }
+            ],
+            "nullable": true
+          }
+        }
+      },
+      "SearchQueryInfo": {
+        "required": [
+          "collections",
+          "rerank",
+          "filtered",
+          "fetched",
+          "limit"
+        ],
+        "type": "object",
+        "properties": {
+          "collections": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "rerank": {
+            "type": "boolean"
+          },
+          "filtered": {
+            "type": "boolean"
+          },
+          "fetched": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "SearchResult": {
+        "required": [
+          "results",
+          "total",
+          "tookMs",
+          "query"
+        ],
+        "type": "object",
+        "properties": {
+          "results": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SearchHit"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "tookMs": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "query": {
+            "$ref": "#/components/schemas/SearchQueryInfo"
+          }
+        }
+      },
+      "SidecarIndexInfo": {
+        "required": [
+          "dbPath",
+          "totalDocuments",
+          "needsEmbedding",
+          "hasVectorIndex"
+        ],
+        "type": "object",
+        "properties": {
+          "dbPath": {
+            "type": "string"
+          },
+          "totalDocuments": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "needsEmbedding": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "hasVectorIndex": {
+            "type": "boolean"
+          }
+        }
+      },
+      "SidecarJobsInfo": {
+        "required": [
+          "pending"
+        ],
+        "type": "object",
+        "properties": {
+          "pending": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "SidecarMetadataIndexInfo": {
+        "required": [
+          "documents",
+          "refreshedAt"
+        ],
+        "type": "object",
+        "properties": {
+          "documents": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "refreshedAt": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "SidecarModelsInfo": {
+        "required": [
+          "embed",
+          "rerank",
+          "generate",
+          "loaded",
+          "resident"
+        ],
+        "type": "object",
+        "properties": {
+          "embed": {
+            "type": "string"
+          },
+          "rerank": {
+            "type": "string"
+          },
+          "generate": {
+            "type": "string"
+          },
+          "loaded": {
+            "$ref": "#/components/schemas/SidecarModelsLoaded"
+          },
+          "resident": {
+            "type": "boolean"
+          }
+        }
+      },
+      "SidecarModelsLoaded": {
+        "required": [
+          "embed",
+          "rerank",
+          "generate"
+        ],
+        "type": "object",
+        "properties": {
+          "embed": {
+            "type": "boolean"
+          },
+          "rerank": {
+            "type": "boolean"
+          },
+          "generate": {
+            "type": "boolean"
+          }
+        }
+      },
+      "SidecarReadiness": {
+        "required": [
+          "status",
+          "version",
+          "uptimeSeconds",
+          "index",
+          "models",
+          "warmup",
+          "metadata",
+          "jobs"
+        ],
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "uptimeSeconds": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "index": {
+            "$ref": "#/components/schemas/SidecarIndexInfo"
+          },
+          "models": {
+            "$ref": "#/components/schemas/SidecarModelsInfo"
+          },
+          "warmup": {
+            "$ref": "#/components/schemas/SidecarWarmupInfo"
+          },
+          "metadata": {
+            "$ref": "#/components/schemas/SidecarMetadataIndexInfo"
+          },
+          "jobs": {
+            "$ref": "#/components/schemas/SidecarJobsInfo"
+          }
+        }
+      },
+      "SidecarWarmupInfo": {
+        "required": [
+          "requested",
+          "done",
+          "error",
+          "durationMs"
+        ],
+        "type": "object",
+        "properties": {
+          "requested": {
+            "type": "boolean"
+          },
+          "done": {
+            "type": "boolean"
+          },
+          "error": {
+            "type": "string",
+            "nullable": true
+          },
+          "durationMs": {
+            "type": "number",
+            "format": "double",
+            "nullable": true
+          }
+        }
+      },
+      "SkippedDocument": {
+        "required": [
+          "file",
+          "reason"
+        ],
+        "type": "object",
+        "properties": {
+          "file": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "Health"
+    },
+    {
+      "name": "Search"
+    },
+    {
+      "name": "Documents"
+    },
+    {
+      "name": "Collections"
+    }
+  ]
+}

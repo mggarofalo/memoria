@@ -1,0 +1,4 @@
+# Lint rules for the committed OpenAPI documents (src/Memoria.Api/openapi.json,
+# sidecar/openapi.json). Run locally with:
+#   npx --yes @stoplight/spectral-cli@6.17.0 lint src/Memoria.Api/openapi.json
+extends: ["spectral:oas"]
