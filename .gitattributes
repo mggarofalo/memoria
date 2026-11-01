@@ -16,6 +16,13 @@
 go.mod    text eol=lf
 go.sum    text eol=lf
 
+# Node sidecar (sidecar/) — LF like everything non-.NET.
+*.ts      text eol=lf
+*.js      text eol=lf
+*.mjs     text eol=lf
+*.cjs     text eol=lf
+*.ps1     text eol=lf
+
 # Everything else
 *.json  text eol=lf
 *.yml   text eol=lf

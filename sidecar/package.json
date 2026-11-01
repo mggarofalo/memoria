@@ -1,0 +1,44 @@
+{
+  "name": "memoria-qmd",
+  "version": "0.1.0",
+  "description": "REST sidecar over the QMD SDK for Memoria. Runs next to the models and the index; Memoria.Api calls it over plain HTTP.",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --test --test-reporter=spec \"test/**/*.test.ts\"",
+    "test:integration": "node --test --test-reporter=spec test/integration.test.ts",
+    "openapi": "node scripts/write-openapi.ts",
+    "openapi:check": "node scripts/write-openapi.ts --check",
+    "check": "npm run typecheck && npm test && npm run openapi:check",
+    "start": "node dist/main.js",
+    "dev": "node src/main.ts"
+  },
+  "dependencies": {
+    "@fastify/swagger": "^9.9.2",
+    "@tobilu/qmd": "2.8.3",
+    "fastify": "^5.12.7",
+    "picomatch": "^4.0.5",
+    "yaml": "^2.9.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.0",
+    "@types/picomatch": "^4.0.2",
+    "typescript": "^5.9.3"
+  },
+  "allowScripts": {
+    "node-llama-cpp@3.20.0": true,
+    "tree-sitter-go@0.25.0": true,
+    "tree-sitter-javascript@0.23.1": true,
+    "tree-sitter-python@0.25.0": true,
+    "tree-sitter-rust@0.24.0": true,
+    "tree-sitter-typescript@0.23.2": true,
+    "better-sqlite3@13.0.3": true
+  }
+}

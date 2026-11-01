@@ -59,6 +59,35 @@ jobs:
       - name: Test
         run: go test ./... -race
 
+  sidecar:
+    name: Sidecar Build & Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sidecar
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: sidecar/package-lock.json
+      - name: Install
+        run: npm ci --no-fund --no-audit
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Unit tests
+        run: npm test
+      - name: OpenAPI drift
+        run: npm run openapi:check
+      - name: Build
+        run: npm run build
+      - name: Integration test (real SDK, fixture index, no models)
+        run: npm run test:integration
+        env:
+          MEMORIA_QMD_INTEGRATION: "1"
+
   cli-lint:
     name: CLI Lint
     runs-on: ubuntu-latest
