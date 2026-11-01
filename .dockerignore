@@ -10,4 +10,7 @@ sidecar/
 tests/
 docs/
 *.md
-appsettings.local.json
+**/appsettings.local.json
+**/*.local.json
+**/.env
+**/.env.*

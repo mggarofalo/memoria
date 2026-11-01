@@ -72,6 +72,10 @@ Once API keys land (MEMORIA-3) the same command takes `--header "Authorization: 
 }
 ```
 
+The file is gitignored, excluded from the Docker build context
+(`.dockerignore`), and excluded from `dotnet publish` by the project file, so
+it can never end up in the container image.
+
 ```bash
 dotnet run --project src/Memoria.Api
 curl -s http://localhost:8080/ready | jq

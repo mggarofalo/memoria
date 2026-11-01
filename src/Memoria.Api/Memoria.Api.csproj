@@ -12,6 +12,16 @@
     <ProjectReference Include="..\Memoria.Core\Memoria.Core.csproj" />
   </ItemGroup>
 
+  <!--
+    appsettings.local.json holds machine-local secrets. Keep it beside the
+    build output for `dotnet run`, but never in a publish (and so never in the
+    container image), even if .dockerignore is bypassed.
+  -->
+  <ItemGroup>
+    <Content Remove="appsettings.local.json" />
+    <None Include="appsettings.local.json" Condition="Exists('appsettings.local.json')" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="Never" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.14" />
     <PackageReference Include="ModelContextProtocol.AspNetCore" Version="2.3.0" />
