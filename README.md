@@ -22,7 +22,7 @@ Container images publish to `ghcr.io/mggarofalo/memoria`.
 
 ## Status
 
-Early scaffolding. Work is tracked in Plane project `MEMORIA` — see [docs/plane.md](docs/plane.md).
+`Memoria.Api` serves REST (`/v1/search`, `/v1/docs/{id}`, `/v1/docs:multiGet`, `/v1/collections`, `/v1/status`), an MCP server at `/mcp`, and `/openapi/v1.json` over the `memoria-qmd` sidecar; see [docs/configuration.md](docs/configuration.md). API keys, ingest and the CLI are in progress. Work is tracked in Plane project `MEMORIA` — see [docs/plane.md](docs/plane.md).
 
 ## Development
 

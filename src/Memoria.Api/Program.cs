@@ -1,6 +1,7 @@
 using Memoria.Api.Configuration;
 using Memoria.Api.Endpoints;
 using Memoria.Api.Http;
+using Memoria.Api.Mcp;
 using Memoria.Api.OpenApi;
 using Memoria.Api.Sidecar;
 using Microsoft.Extensions.Options;
@@ -35,6 +36,14 @@ builder.Services.AddProblemDetails(options =>
 		context.ProblemDetails.Extensions["traceId"] = RequestLoggingMiddleware.CurrentTraceId(context.HttpContext));
 builder.Services.AddExceptionHandler<MemoriaExceptionHandler>();
 
+// MCP is decided at build time because the endpoint and its services are
+// registered together; the section is also validated with the rest of the options.
+McpOptions mcpOptions = builder.Configuration.GetSection(MemoriaOptions.SectionName).GetSection(nameof(MemoriaOptions.Mcp)).Get<McpOptions>() ?? new McpOptions();
+if (mcpOptions.Enabled)
+{
+	builder.Services.AddMemoriaMcpServer();
+}
+
 builder.Services.AddOpenApi("v1", options =>
 {
 	// 3.0 rather than 3.1: oapi-codegen (the Go CLI's generator) reads 3.0.
@@ -51,6 +60,10 @@ app.UseStatusCodePages();
 app.MapOpenApi();
 app.MapHealth();
 app.MapV1();
+if (mcpOptions.Enabled)
+{
+	app.MapMemoriaMcp(mcpOptions);
+}
 
 app.Run();
 

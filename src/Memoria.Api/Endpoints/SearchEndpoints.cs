@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using Memoria.Api.Configuration;
 using Memoria.Api.Http;
+using Memoria.Api.Search;
 using Memoria.Core.Contracts;
 using Memoria.Core.Sidecar;
 using Microsoft.AspNetCore.Http.HttpResults;
@@ -34,70 +35,28 @@ public static class SearchEndpoints
 		IOptions<MemoriaOptions> options,
 		CancellationToken cancellationToken)
 	{
-		SearchOptions defaults = options.Value.Search;
-		Dictionary<string, string[]> errors = [];
+		SearchInput input = new(
+			parameters.Query,
+			parameters.Collection,
+			parameters.Limit,
+			parameters.MinScore,
+			parameters.Rerank,
+			parameters.Intent,
+			parameters.CandidateLimit,
+			parameters.Project,
+			parameters.Branch,
+			parameters.Since,
+			parameters.Until,
+			parameters.Tag);
 
-		if (string.IsNullOrWhiteSpace(parameters.Query))
-		{
-			errors["query"] = ["A non-empty query is required."];
-		}
-		else if (parameters.Query.Length > 4000)
-		{
-			errors["query"] = ["The query may be at most 4000 characters."];
-		}
-
-		if (parameters.Limit is int limit && (limit < 1 || limit > defaults.MaxLimit))
-		{
-			errors["limit"] = [$"limit must be between 1 and {defaults.MaxLimit}."];
-		}
-
-		if (parameters.MinScore is double minScore && (minScore < 0 || minScore > 1))
-		{
-			errors["minScore"] = ["minScore must be between 0 and 1."];
-		}
-
-		if (parameters.CandidateLimit is int candidates && (candidates < 1 || candidates > 1000))
-		{
-			errors["candidateLimit"] = ["candidateLimit must be between 1 and 1000."];
-		}
-
-		if (errors.Count > 0)
+		SidecarSearchRequest? request = SearchRequestFactory.TryBuild(input, options.Value.Search, scope, out Dictionary<string, string[]> errors);
+		if (request is null)
 		{
 			return TypedResults.ValidationProblem(errors);
 		}
 
-		SidecarSearchFilters filters = new(
-			Project: NonEmpty(parameters.Project),
-			Branch: NonEmpty(parameters.Branch),
-			Since: parameters.Since,
-			Until: parameters.Until,
-			Tags: NonEmpty(parameters.Tag));
-
-		SidecarSearchRequest request = new()
-		{
-			Query = parameters.Query,
-			Intent = string.IsNullOrWhiteSpace(parameters.Intent) ? null : parameters.Intent,
-			Collections = scope.Resolve(NonEmpty(parameters.Collection)) ?? defaults.DefaultCollections,
-			Filters = filters.IsEmpty ? null : filters,
-			Limit = parameters.Limit ?? defaults.DefaultLimit,
-			MinScore = parameters.MinScore,
-			CandidateLimit = parameters.CandidateLimit,
-			Rerank = parameters.Rerank ?? defaults.RerankByDefault,
-		};
-
 		SidecarSearchResponse response = await sidecar.SearchAsync(request, cancellationToken);
 		return TypedResults.Ok(response.ToContract());
-	}
-
-	private static IReadOnlyList<string>? NonEmpty(string[]? values)
-	{
-		if (values is null)
-		{
-			return null;
-		}
-
-		string[] kept = values.Where(static v => !string.IsNullOrWhiteSpace(v)).ToArray();
-		return kept.Length == 0 ? null : kept;
 	}
 }
 

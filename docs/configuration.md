@@ -30,6 +30,27 @@ never starts half-configured.
 | `RerankByDefault` | `true` | Full reranked hybrid search unless the caller passes `rerank=false`. Decided in MEMORIA-1 once QMD moved to the desktop. |
 | `DefaultCollections` | unset | Collections searched when the caller names none. Unset defers to QMD's default-included set. |
 
+## `Memoria:Mcp` — the outward MCP server
+
+| Key | Default | Purpose |
+|---|---|---|
+| `Enabled` | `true` | Serve the MCP endpoint. `false` leaves only REST. |
+| `Path` | `/mcp` | Route of the Streamable HTTP endpoint. Must start with `/` and must not sit under `/v1`. |
+
+The server runs stateless: no session ids, no server-to-client requests, so any
+number of Claude Code sessions on any machine share one endpoint without
+affinity. Tools: `search`, `get_document`, `get_documents`, `list_collections`,
+`status`. They go through the same request factory and collection scope as the
+REST endpoints, so a tool call and a `curl` see identical defaults.
+
+Point Claude Code at it from any machine on the LAN:
+
+```bash
+claude mcp add --transport http memoria http://<api-host>:8080/mcp
+```
+
+Once API keys land (MEMORIA-3) the same command takes `--header "Authorization: Bearer <key>"`.
+
 ## Host settings outside `Memoria`
 
 | Key | Default | Purpose |
@@ -67,7 +88,6 @@ deployments do not have to be reorganised when they land:
 | `Memoria:Auth` | MEMORIA-3 | API keys, their collection scopes and the `read` / `ingest` / `admin` scopes endpoints already declare through `MemoriaScopeAttribute`. |
 | `Memoria:Workers` | MEMORIA-12 / MEMORIA-18 | The inference pool: one entry per worker with `name`, `url`, a token *reference* (never the token), `capabilities` (`embed`, `rerank`, `generate`), `priority` and availability thresholds. |
 | `Memoria:Queue` | MEMORIA-17 / MEMORIA-18 | Queue policy: concurrency per worker, embedding batch byte budget, priority classes (interactive before background). |
-| `Memoria:Mcp` | MEMORIA-24 | The outward MCP server: enabled flag and path. |
 
 The sidecar keeps its own environment-variable configuration (see
 `sidecar/.env.example`). The control-plane issue (MEMORIA-18) decides how much
