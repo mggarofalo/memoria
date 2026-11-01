@@ -36,11 +36,11 @@ ID=$(plane issue create --name "..." --labels api --priority medium --id-only -p
 plane module add-work-items --module-id "Host" --issues "$ID" -p MEMORIA
 ```
 
-Modules: **Host**, **API**, **Auth**, **Ingest**, **CLI**, **Sources**, and **Maintenance Backlog** — the default bucket for hardening and bug fixes that don't belong to a phase.
+Modules: **Host**, **API**, **Auth**, **Ingest**, **CLI**, **Sources**, **Workers**, and **Maintenance Backlog** — the default bucket for hardening and bug fixes that don't belong to a phase.
 
 ## Epics
 
-Six epics track the phases, each attached to its matching module. Work their children, not the epics themselves.
+Seven epics track the phases, each attached to its matching module. Work their children, not the epics themselves.
 
 | Issue | Module | Priority |
 |---|---|---|
@@ -50,8 +50,11 @@ Six epics track the phases, each attached to its matching module. Work their chi
 | `MEMORIA-4` Ingest: redaction, envelope, and queue | Ingest | Medium |
 | `MEMORIA-5` CLI: the memoria Go binary | CLI | Medium |
 | `MEMORIA-6` Sources: sync workers beyond transcripts | Sources | Low |
+| `MEMORIA-12` Workers: inference pool and control plane behind one memoria ingress | Workers | High |
 
 `MEMORIA-1` is the only epic in Todo. Its `qmd query` benchmark gates the API's default search mode, so it blocks meaningful progress on `MEMORIA-2`.
+
+`MEMORIA-12` decouples model inference from the index: the sidecar on the always-on node keeps the index and routes model calls to GPU workers (desktop, MacBook) through QMD's `llm` seam. Its children are `MEMORIA-13` through `MEMORIA-21`; `MEMORIA-13` (remote LLM adapter), `MEMORIA-14` (worker runtime) and `MEMORIA-15` (parity benchmark) are ready now. It changes what `MEMORIA-1` and `MEMORIA-8` mean once `MEMORIA-19` moves the index: the QMD node needs no GPU, and sleeping the desktop costs rerank quality rather than availability.
 
 ## Priority
 
@@ -75,14 +78,15 @@ Priority reflects **execution readiness**, not importance: Urgent = ready now, H
 ## CLI Quick Reference
 
 ```bash
-# Fetch an issue
-plane issue get-by-sequence-id --identifier MEMORIA-<n> --expand state,labels,assignees -o json
+# Fetch an issue (the CLI's own flag names; `--identifier` does not exist)
+plane issue get-by-sequence-id --project-identifier MEMORIA --issue-identifier <n> -o json
 
-# Update issue state
-plane issue update -p MEMORIA --work-item-id <UUID> --state "In Progress"
+# Update issue state (`--resource-id`, not `--work-item-id`; state names resolve)
+plane issue update -p MEMORIA --resource-id <UUID> --state "In Progress"
 
-# Create a new issue
-plane issue create -p MEMORIA --name "<title>" --description-html "<description>" --priority medium
+# Create a new issue. `--labels` takes label UUIDs only (names do not resolve here);
+# `--parent` accepts a UUID or a sequence ID such as MEMORIA-12
+plane issue create -p MEMORIA --name "<title>" --description-html "<description>" --priority medium --labels <label-uuid> --id-only
 
 # Add a comment
 plane comment add -p MEMORIA --work-item-id <UUID> --comment-html "<html>"
