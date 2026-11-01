@@ -5,5 +5,6 @@
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Memoria.Api.Tests/Memoria.Api.Tests.csproj" />
+    <Project Path="tests/Memoria.Core.Tests/Memoria.Core.Tests.csproj" />
   </Folder>
 </Solution>
