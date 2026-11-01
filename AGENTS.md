@@ -9,7 +9,11 @@ dotnet restore Memoria.slnx     # .NET packages
 (cd cli && go mod download)     # Go CLI dependencies
 ```
 
-Requires **.NET 10 SDK** and **Go 1.26+**. A running instance additionally needs **Node 22** and QMD (`npm i -g @tobilu/qmd`) on the host.
+Requires **.NET 10 SDK**, **Go 1.26+**, and **Node 22.18+** (for `sidecar/`). A running instance additionally needs QMD (`npm i -g @tobilu/qmd`), its models, and an index on the sidecar host.
+
+```bash
+(cd sidecar && npm ci)          # memoria-qmd sidecar dependencies
+```
 
 ## Workflow Rules
 
@@ -33,7 +37,7 @@ pushes" in Settings → Rules → Rulesets, then re-enabling it.
 
 ### Commits
 
-Conventional Commits: `<type>(<scope>): <description>`. Scopes track the layout: `api`, `core`, `cli`, `ingest`, `auth`, `docker`, `docs`, `ci`.
+Conventional Commits: `<type>(<scope>): <description>`. Scopes track the layout: `api`, `core`, `cli`, `sidecar`, `ingest`, `auth`, `docker`, `docs`, `ci`.
 
 ## Build and Test
 
@@ -48,9 +52,16 @@ go test ./... -race                                       # test CLI
 gofmt -l .                                                # must print nothing
 go vet ./...
 go mod tidy && git diff --exit-code go.mod go.sum         # tidy gate (CI parity)
+
+cd sidecar
+npm run typecheck                                         # tsc --noEmit
+npm test                                                  # unit tests (fake backend, no SDK load)
+npm run openapi:check                                     # committed openapi.json matches routes
+npm run build                                             # emit dist/ for the service
+MEMORIA_QMD_INTEGRATION=1 npm run test:integration        # real SDK on a temp fixture index
 ```
 
-All four gates run in CI as required status checks: `Build & Test`, `Code Formatting`, `CLI Build & Test`, `CLI Lint`.
+Four gates are required status checks on `main`: `Build & Test`, `Code Formatting`, `CLI Build & Test`, `CLI Lint`. A fifth job, `Sidecar Build & Test`, runs the sidecar commands above; it is not yet in the ruleset's required list.
 
 ## Architecture
 
@@ -60,36 +71,39 @@ Memoria is a **front door over QMD**, not a search engine. QMD owns retrieval �
 clients (Claude Code / CLI / scripts)
         │  HTTPS + Bearer API key
         ▼
-   Memoria.Api  ──── auth, scoping, rate limiting, audit
-        │  loopback only
+   Memoria.Api  (Docker on homelab) ──── auth, scoping, rate limiting, audit
+        │  LAN, plain REST + shared-secret bearer
         ▼
-   qmd mcp --http  (127.0.0.1:8181)
+   memoria-qmd sidecar  (desktop, sidecar/) ── imports the QMD SDK in-process
         │
         ▼
-   index.sqlite  ← derived, rebuildable
+   index.sqlite + GGUF models  ← derived, rebuildable
         ▲
-   ingest workers ── redaction → document envelope → markdown corpus
+   ingest workers ── redaction → document envelope → POST /documents → markdown corpus
 ```
 
 | Path | Contains |
 |---|---|
-| `src/Memoria.Api/` | ASP.NET Core host: MCP proxy, REST endpoints, auth handler, ingest |
+| `src/Memoria.Api/` | ASP.NET Core host: REST endpoints, outward MCP server, auth handler, ingest |
 | `src/Memoria.Core/` | Document envelope, search contracts, redaction rules |
 | `tests/Memoria.Api.Tests/` | xUnit tests against `WebApplicationFactory<Program>` |
+| `sidecar/` | `memoria-qmd`: TypeScript REST service over the QMD SDK; `openapi.json` is its contract |
 | `cli/` | Go module `github.com/mggarofalo/memoria/cli`, binary `memoria` |
 | `docs/` | Plane workflow, deployment, API guidelines |
 
 **Key invariants:**
 
-- **QMD binds loopback and is never exposed directly.** All external traffic goes through `Memoria.Api`. QMD ships no authentication whatsoever — the API is the only thing standing between the corpus and the internet.
+- **QMD is never exposed directly.** The sidecar is the only process that opens the index, and it is reachable only on the LAN behind a shared secret; all external traffic goes through `Memoria.Api`. QMD ships no authentication whatsoever — the API is the only thing standing between the corpus and the internet. QMD's own MCP HTTP transport is not used: it binds `localhost` only, requires an `Mcp-Session-Id` handshake, and cannot filter on frontmatter.
 - **Redaction is a precondition of indexing, not a post-filter.** Transcripts carry live credentials. If a document reaches the index unredacted, the secret is already searchable.
 - **API keys are scoped to collections.** Never issue an all-collections key by default; the corpus mixes sensitivity levels.
 - **The markdown corpus is the durable artifact.** `index.sqlite` is derived and may be deleted and rebuilt at any time. Never treat it as a source of truth.
-- **Reindexing is serialized.** Concurrent `qmd update`/`qmd embed` runs contend over the model and the database. Ingest enqueues; a single worker drains.
+- **Reindexing is serialized.** Concurrent `qmd update`/`qmd embed` runs contend over the model and the database. Ingest enqueues; a single worker drains (`POST /reindex` and `POST /documents` on the sidecar share one queue).
 
 ## Coding Standards
 
 **C#:** File-scoped namespaces, `sealed` by default, nullable enabled, primary constructors where they read cleanly. Style is enforced by `.editorconfig` and gated by `dotnet format`.
+
+**TypeScript (sidecar/):** ESM, strict `tsconfig`, Node's native type stripping for tests (`erasableSyntaxOnly`: no enums, no parameter properties, `import type` for types, `.ts` extensions on relative imports). `@tobilu/qmd` is imported in exactly one file, `src/store.ts`; everything else depends on the `QmdBackend` interface so tests run on the in-memory fake. Route changes must regenerate `openapi.json` (`npm run openapi`).
 
 **Go:** Mirror the conventions in `~/Source/plane-cli` — cobra command tree, `99designs/keyring` for credential storage, and a resolver precedence of flag → env → keyring → config. `gofmt` is authoritative.
 
