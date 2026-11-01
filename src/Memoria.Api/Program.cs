@@ -9,8 +9,9 @@ using Microsoft.OpenApi;
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
 // Machine-local overrides (the sidecar secret, a LAN base URL) live in a file
-// .gitignore excludes. Loaded last so it wins over appsettings.*.json.
-builder.Configuration.AddJsonFile("appsettings.local.json", optional: true, reloadOnChange: true);
+// .gitignore excludes. It outranks appsettings.*.json but not environment
+// variables or --switches.
+LocalSettings.Insert(builder.Configuration, builder.Environment.ContentRootFileProvider);
 
 // Bind the LAN by default so the laptop can reach this host; ASPNETCORE_URLS,
 // --urls or a Kestrel:Endpoints section take precedence. Nothing routes this

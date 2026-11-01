@@ -3,8 +3,9 @@
 Everything the host needs lives under one `Memoria` section. It binds through
 the standard ASP.NET Core configuration stack, so each key can come from
 `appsettings.json`, `appsettings.{Environment}.json`, `appsettings.local.json`
-(gitignored, loaded last, for machine-local values), an environment variable,
-or a command-line switch. Environment variables use `__` as the separator:
+(gitignored, for machine-local values), an environment variable, or a
+command-line switch, in that order of precedence: the local file overrides the
+committed files, and environment variables and switches override everything. Environment variables use `__` as the separator:
 `Memoria__Sidecar__Secret`.
 
 Invalid configuration fails at startup with a message naming the key. The API
