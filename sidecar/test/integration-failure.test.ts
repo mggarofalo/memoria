@@ -788,15 +788,22 @@ test("a clock moved back does not turn force into a silent no-op", { skip }, asy
 
 // --- another process holding the index -----------------------------------------------------------------------------
 
+/** Another process, because POSIX file locks do not conflict within one process. */
 async function holdingLock<T>(dbPath: string, run: () => Promise<T>): Promise<T> {
-  const { DatabaseSync } = await import("node:sqlite");
-  const other = new DatabaseSync(dbPath);
-  other.exec("BEGIN IMMEDIATE");
+  const script = "const d = new (require('node:sqlite').DatabaseSync)(process.argv[1]); d.exec('BEGIN IMMEDIATE'); console.log('held'); setInterval(() => {}, 1000);";
+  const holder = spawn(process.execPath, ["-e", script, dbPath], { stdio: ["ignore", "pipe", "ignore"] });
+  const exited = new Promise<void>((resolve) => holder.once("exit", () => resolve()));
+  await Promise.race([
+    new Promise<void>((resolve) => createInterface({ input: holder.stdout }).once("line", () => resolve())),
+    exited.then(() => {
+      throw new Error("the process meant to hold the lock exited");
+    }),
+  ]);
   try {
     return await run();
   } finally {
-    other.exec("ROLLBACK");
-    other.close();
+    holder.kill("SIGKILL");
+    await exited;
   }
 }
 
