@@ -273,7 +273,6 @@ export class RemoteLlm implements LlmSurface {
     let timer: NodeJS.Timeout;
     const expired = new Promise<never>((_, reject) => {
       timer = setTimeout(() => reject(new Error("the local fallback took too long")), Math.max(0, ms));
-      timer.unref();
     });
     return Promise.race([work, expired]).finally(() => clearTimeout(timer));
   }

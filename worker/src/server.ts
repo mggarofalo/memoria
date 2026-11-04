@@ -237,12 +237,15 @@ export function createWorkerServer(options: WorkerServerOptions): { server: Serv
     },
   };
 
+  // A Map, because the path comes from the client: `__proto__` must not find anything on an object.
+  const operationsByPath = new Map(Object.entries(operations));
+
   const route = async (request: IncomingMessage): Promise<unknown> => {
     const path = (request.url ?? "/").split("?")[0];
     const method = request.method ?? "GET";
     if (method === "GET" && path === "/health") return health();
     if (method === "GET" && path === "/capabilities") return capabilities();
-    const operation = method === "POST" ? operations[path ?? ""] : undefined;
+    const operation = method === "POST" ? operationsByPath.get(path ?? "") : undefined;
     if (!operation) throw new HttpFailure(404, "no_route", "No such route");
     return operation(request);
   };
