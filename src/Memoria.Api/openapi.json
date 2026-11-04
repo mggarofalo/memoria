@@ -26,7 +26,7 @@
           "Health"
         ],
         "summary": "Liveness",
-        "description": "The API process is up. Does not contact the search backend; use `/ready` for that.",
+        "description": "The API process is up. Anonymous. Does not contact the search backend; use `/ready` for that.",
         "operationId": "health",
         "responses": {
           "200": {
@@ -48,8 +48,18 @@
           "Health"
         ],
         "summary": "Readiness",
-        "description": "Probes the memoria-qmd sidecar. 200 when its index is open and, by default, its models are resident; 503 with the same body shape while it warms up or when it cannot be reached.",
+        "description": "Probes the memoria-qmd sidecar. 200 whenever it answers, with `status` of `ready`, `warming` or `degraded`: losing GPU workers makes search rank worse, and must not take the API out of rotation. 503 only when the sidecar cannot be reached, unless `strict=true`, which also answers 503 for anything but `ready`. Anonymous for orchestrators: without an admin key the body carries only the status word, and `not_ready` for an unreachable sidecar, with `reason` and `sidecar` null. An admin key gets the full report, including stuck jobs and documents set aside.",
         "operationId": "ready",
+        "parameters": [
+          {
+            "name": "strict",
+            "in": "query",
+            "description": "Answer 503 unless the sidecar is fully ready, with no degradation.",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "OK",
@@ -80,7 +90,7 @@
           "Search"
         ],
         "summary": "Search the corpus",
-        "description": "Hybrid search over the indexed documents: BM25 and vector retrieval fused by reciprocal rank, then reranked by a cross-encoder unless `rerank=false`. Reranked queries take a few seconds; `rerank=false` returns fused results in well under a second. Frontmatter filters (`project`, `branch`, `since`, `until`, `tag`) are applied after retrieval, so a filtered result set can be shorter than `limit` even when more matches exist.",
+        "description": "Hybrid search over the indexed documents: BM25 and vector retrieval fused by reciprocal rank, then reranked by a cross-encoder unless `rerank=false`. Reranked queries take a few seconds; `rerank=false` returns fused results in well under a second. Frontmatter filters (`project`, `branch`, `since`, `until`, `tag`) are applied after retrieval, so a filtered result set can be shorter than `limit` even when more matches exist. `degraded` means the search ran without something a full search uses, such as the reranker: results are valid but may rank worse, and `degradedReasons` says what. Requires the `read` scope.",
         "operationId": "search",
         "parameters": [
           {
@@ -94,7 +104,7 @@
           {
             "name": "collection",
             "in": "query",
-            "description": "Collection to search. Repeat for several. Defaults to the configured default set, else QMD's default-included collections.",
+            "description": "Collection to search. Repeat for several; names are case-sensitive. Omitted, a collection-scoped key searches all its collections; other callers get the configured default set, else QMD's default-included collections. A collection outside the key's scope is refused with 403.",
             "schema": {
               "type": "array",
               "items": {
@@ -196,6 +206,36 @@
           }
         ],
         "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
           "502": {
             "description": "Bad Gateway",
             "content": {
@@ -246,7 +286,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "apiKey": []
+          }
+        ]
       }
     },
     "/v1/docs/{id}": {
@@ -255,7 +300,7 @@
           "Documents"
         ],
         "summary": "Get one document",
-        "description": "Fetch a document by display path (`collection/path.md`), by `qmd://` URI, or by its six-character docid. `fromLine` and `maxLines` narrow the body to the lines around a search hit; `body=false` returns metadata only.",
+        "description": "Fetch a document by display path (`collection/path.md`), by `qmd://` URI, or by its six-character docid. `fromLine` and `maxLines` narrow the body to the lines around a search hit; `body=false` returns metadata only. Requires the `read` scope.",
         "operationId": "getDocument",
         "parameters": [
           {
@@ -303,6 +348,36 @@
           }
         ],
         "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
           "502": {
             "description": "Bad Gateway",
             "content": {
@@ -353,7 +428,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "apiKey": []
+          }
+        ]
       }
     },
     "/v1/docs:multiGet": {
@@ -362,7 +442,7 @@
           "Documents"
         ],
         "summary": "Get several documents",
-        "description": "Batch fetch by a list of references (paths or docids), by a glob such as `claude-sessions/2026-05*.md`, or both. Bodies are capped at `maxBytes` each (default 64 KiB); documents over the cap are listed under `skipped`.",
+        "description": "Batch fetch by a list of references (paths or docids), by a glob such as `claude-sessions/2026-05*.md`, or both. A glob may use only `*`, `?` and whole-segment `**`; braces, brackets and extglobs are refused with 400. Bodies are capped at `maxBytes` each (default 64 KiB, at most 1 MiB); documents over the cap are listed under `skipped`. For a collection-scoped key every list is filtered per result and `errors` is always empty: a reference that matched nothing the key may read is simply absent. Requires the `read` scope.",
         "operationId": "getDocuments",
         "requestBody": {
           "content": {
@@ -375,6 +455,36 @@
           "required": true
         },
         "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
           "502": {
             "description": "Bad Gateway",
             "content": {
@@ -425,7 +535,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "apiKey": []
+          }
+        ]
       }
     },
     "/v1/collections": {
@@ -434,9 +549,39 @@
           "Collections"
         ],
         "summary": "List collections",
-        "description": "Every collection the caller may search, with its active document count and root context.",
+        "description": "Every collection the caller may search, with its active document count and root context. Requires the `read` scope.",
         "operationId": "listCollections",
         "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
           "502": {
             "description": "Bad Gateway",
             "content": {
@@ -477,7 +622,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "apiKey": []
+          }
+        ]
       }
     },
     "/v1/status": {
@@ -486,9 +636,39 @@
           "Collections"
         ],
         "summary": "Index status",
-        "description": "Totals for the index: documents, documents awaiting embedding, whether a vector index exists, and per-collection counts.",
+        "description": "Totals for the collections the caller may read, whether a vector index exists, and per-collection counts. `needsEmbedding` is the backlog for the whole index, so it is null for a collection-scoped key. Requires the `read` scope.",
         "operationId": "getStatus",
         "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
           "502": {
             "description": "Bad Gateway",
             "content": {
@@ -529,12 +709,376 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "apiKey": []
+          }
+        ]
+      }
+    },
+    "/v1/admin/keys": {
+      "post": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Issue an API key",
+        "description": "Creates a key and returns its plaintext. This response is the only time the plaintext exists. `read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. Requires the `admin` scope.",
+        "operationId": "createApiKey",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateApiKeyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssuedApiKey"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpValidationProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          }
+        ]
+      },
+      "get": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "List API keys",
+        "description": "Every key, including revoked and expired ones. Never includes key material. Requires the `admin` scope.",
+        "operationId": "listApiKeys",
+        "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKeyList"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          }
+        ]
+      }
+    },
+    "/v1/admin/keys/{id}": {
+      "delete": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Revoke an API key",
+        "description": "Takes effect on the key's next request. Revoking a revoked key succeeds and keeps the original timestamp. Requires the `admin` scope.",
+        "operationId": "revokeApiKey",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "No Content"
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          }
+        ]
+      }
+    },
+    "/v1/admin/keys/{id}:rotate": {
+      "post": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Rotate an API key",
+        "description": "Replaces the key's secret and returns the new plaintext, once. The id, scopes, collections and expiry stay; the previous token stops working immediately. A revoked or expired key cannot be rotated (409). Requires the `admin` scope.",
+        "operationId": "rotateApiKey",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssuedApiKey"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          }
+        ]
       }
     }
   },
   "components": {
     "schemas": {
+      "ApiKeyInfo": {
+        "required": [
+          "id",
+          "label",
+          "scopes",
+          "collections",
+          "allCollections",
+          "createdAt",
+          "expiresAt",
+          "revokedAt",
+          "lastUsedAt"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "collections": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "allCollections": {
+            "type": "boolean"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "revokedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "lastUsedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          }
+        }
+      },
+      "ApiKeyList": {
+        "required": [
+          "keys"
+        ],
+        "type": "object",
+        "properties": {
+          "keys": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ApiKeyInfo"
+            }
+          }
+        }
+      },
       "CollectionInfo": {
         "required": [
           "name",
@@ -576,6 +1120,45 @@
             "items": {
               "$ref": "#/components/schemas/CollectionInfo"
             }
+          }
+        }
+      },
+      "CreateApiKeyRequest": {
+        "required": [
+          "label",
+          "scopes",
+          "collections",
+          "allCollections",
+          "expiresAt"
+        ],
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string",
+            "nullable": true
+          },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "nullable": true
+          },
+          "collections": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "nullable": true
+          },
+          "allCollections": {
+            "type": "boolean",
+            "nullable": true
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
           }
         }
       },
@@ -770,7 +1353,8 @@
           "totalDocuments",
           "needsEmbedding",
           "hasVectorIndex",
-          "collections"
+          "collections",
+          "documentsSetAside"
         ],
         "type": "object",
         "properties": {
@@ -780,7 +1364,8 @@
           },
           "needsEmbedding": {
             "type": "integer",
-            "format": "int32"
+            "format": "int32",
+            "nullable": true
           },
           "hasVectorIndex": {
             "type": "boolean"
@@ -790,6 +1375,26 @@
             "items": {
               "$ref": "#/components/schemas/IndexCollectionStatus"
             }
+          },
+          "documentsSetAside": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          }
+        }
+      },
+      "IssuedApiKey": {
+        "required": [
+          "key",
+          "info"
+        ],
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "info": {
+            "$ref": "#/components/schemas/ApiKeyInfo"
           }
         }
       },
@@ -839,7 +1444,8 @@
         "required": [
           "docs",
           "skipped",
-          "errors"
+          "errors",
+          "truncated"
         ],
         "type": "object",
         "properties": {
@@ -860,6 +1466,9 @@
             "items": {
               "type": "string"
             }
+          },
+          "truncated": {
+            "type": "boolean"
           }
         }
       },
@@ -1010,7 +1619,9 @@
           "results",
           "total",
           "tookMs",
-          "query"
+          "query",
+          "degraded",
+          "degradedReasons"
         ],
         "type": "object",
         "properties": {
@@ -1030,6 +1641,15 @@
           },
           "query": {
             "$ref": "#/components/schemas/SearchQueryInfo"
+          },
+          "degraded": {
+            "type": "boolean"
+          },
+          "degradedReasons": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         }
       },
@@ -1067,6 +1687,62 @@
           "pending": {
             "type": "integer",
             "format": "int32"
+          },
+          "persistent": {
+            "type": "boolean",
+            "nullable": true
+          },
+          "stuck": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SidecarStuckJob"
+              }
+            ],
+            "nullable": true
+          }
+        }
+      },
+      "SidecarLlmInfo": {
+        "required": [
+          "mode",
+          "degraded",
+          "unavailable",
+          "workersUp",
+          "workersTotal"
+        ],
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string"
+          },
+          "degraded": {
+            "type": "boolean"
+          },
+          "unavailable": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "workersUp": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "workersTotal": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "embedDisagreement": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "nullable": true
+          },
+          "documentsSetAside": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
           }
         }
       },
@@ -1170,6 +1846,30 @@
           },
           "jobs": {
             "$ref": "#/components/schemas/SidecarJobsInfo"
+          },
+          "llm": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SidecarLlmInfo"
+              }
+            ],
+            "nullable": true
+          }
+        }
+      },
+      "SidecarStuckJob": {
+        "required": [
+          "reason",
+          "attempts"
+        ],
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": "string"
+          },
+          "attempts": {
+            "type": "integer",
+            "format": "int32"
           }
         }
       },
@@ -1214,6 +1914,14 @@
           }
         }
       }
+    },
+    "securitySchemes": {
+      "apiKey": {
+        "type": "http",
+        "description": "A Memoria API key.",
+        "scheme": "bearer",
+        "bearerFormat": "mem_<id>_<secret>"
+      }
     }
   },
   "tags": [
@@ -1228,6 +1936,9 @@
     },
     {
       "name": "Collections"
+    },
+    {
+      "name": "Admin"
     }
   ]
 }

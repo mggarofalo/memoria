@@ -1,0 +1,39 @@
+{
+  "$comment": "Shared by sidecar/test/multi-get.test.ts and Memoria.Api.Tests so the API boundary and the sidecar enforce one grammar.",
+  "accepted": [
+    "claude-sessions/2026-10*.md",
+    "claude-sessions/*.md",
+    "*/*.md",
+    "claude-sessions/**/*.md",
+    "**/*.md",
+    "qmd://claude-sessions/2026-*.md",
+    "claude-sessions/2026-??-01*.md",
+    "2026-02-11_?.md"
+  ],
+  "refused": [
+    "+(*)Z",
+    "*(*)Z",
+    "?(*)Z",
+    "@(*|*)+Z",
+    "!(a)*",
+    "(*)*(*)*(*)*Z",
+    "*?*?*?*?*?*?*?*?*?*?Z",
+    "?*Z",
+    "***Z",
+    "a**b",
+    "a/**b/*.md",
+    "**/**/**/*.md",
+    "*a*a*a*a*a*a*a*a*a*a*a*a*a*Z",
+    "{a,b}*",
+    "{a,b}{a,b}{a,b}{a,b}*",
+    "{1..1000}*",
+    "[a-z]*",
+    "2026-1[0-2]*.md",
+    "[[:alpha:]]*",
+    "a*|b*",
+    "^a*",
+    "a*$",
+    "a\\*",
+    "a*&b"
+  ]
+}

@@ -1,7 +1,6 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
-using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization.Metadata;
 
@@ -16,6 +15,10 @@ namespace Memoria.Core.Sidecar;
 public sealed class MemoriaQmdClient(HttpClient http) : IMemoriaQmdClient
 {
 	private static readonly MediaTypeHeaderValue Json = new("application/json");
+
+	private const int DefaultMultiGetBudget = 16 * 1024 * 1024;
+
+	private const long MultiGetMetadataAllowance = 16 * 1024 * 1024;
 
 	public Task<SidecarHealth> GetHealthAsync(CancellationToken cancellationToken = default)
 	{
@@ -52,13 +55,48 @@ public sealed class MemoriaQmdClient(HttpClient http) : IMemoriaQmdClient
 	public Task<SidecarDocument> GetDocumentAsync(string reference, SidecarDocumentQuery? query = null, CancellationToken cancellationToken = default)
 	{
 		ArgumentException.ThrowIfNullOrWhiteSpace(reference);
+
+		// Dot segments survive percent-encoding and HttpClient would normalize them,
+		// turning `x/../../status` into a call to a different sidecar route.
+		if (reference.Split('/').Any(static segment => segment is "." or ".."))
+		{
+			throw new SidecarException("not_found", $"Document not found: {reference}", HttpStatusCode.NotFound);
+		}
+
 		return GetAsync(DocumentPath(reference, query), SidecarJsonContext.Default.SidecarDocument, cancellationToken);
 	}
 
-	public Task<SidecarMultiGetResponse> MultiGetAsync(SidecarMultiGetRequest request, CancellationToken cancellationToken = default)
+	public async Task<SidecarMultiGetResponse> MultiGetAsync(SidecarMultiGetRequest request, CancellationToken cancellationToken = default)
 	{
 		ArgumentNullException.ThrowIfNull(request);
-		return PostAsync("./docs:multiGet", request, SidecarJsonContext.Default.SidecarMultiGetRequest, SidecarJsonContext.Default.SidecarMultiGetResponse, cancellationToken);
+		using HttpRequestMessage message = new(HttpMethod.Post, "./docs:multiGet")
+		{
+			Content = JsonContent.Create(request, SidecarJsonContext.Default.SidecarMultiGetRequest, Json),
+		};
+		using HttpResponseMessage response = await SendAsync(message, cancellationToken).ConfigureAwait(false);
+		if (!response.IsSuccessStatusCode)
+		{
+			throw await ToExceptionAsync(response, cancellationToken).ConfigureAwait(false);
+		}
+
+		// The body is deserialized as it arrives, so a sidecar that ignores the budget
+		// is cut off while reading instead of being buffered whole.
+		await using Stream body = new BoundedReadStream(await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false), MaxMultiGetWireBytes(request));
+		try
+		{
+			return await JsonSerializer.DeserializeAsync(body, SidecarJsonContext.Default.SidecarMultiGetResponse, cancellationToken).ConfigureAwait(false)
+				?? throw new SidecarException(SidecarException.Malformed, "The sidecar returned an empty body.", response.StatusCode);
+		}
+		catch (JsonException ex)
+		{
+			throw new SidecarException(SidecarException.Malformed, $"The sidecar returned a body that is not valid JSON: {ex.Message}", response.StatusCode, innerException: ex);
+		}
+	}
+
+	/// <summary>The budget at JSON's worst escaping (six bytes per character), plus room for metadata.</summary>
+	internal static long MaxMultiGetWireBytes(SidecarMultiGetRequest request)
+	{
+		return ((long)(request.MaxTotalBytes ?? DefaultMultiGetBudget) * 6) + MultiGetMetadataAllowance;
 	}
 
 	public Task<SidecarCollectionsResponse> ListCollectionsAsync(CancellationToken cancellationToken = default)
@@ -101,51 +139,32 @@ public sealed class MemoriaQmdClient(HttpClient http) : IMemoriaQmdClient
 	/// </summary>
 	internal static string DocumentPath(string reference, SidecarDocumentQuery? query)
 	{
-		StringBuilder url = new("docs/");
-		string[] segments = reference.Split('/');
-		for (int i = 0; i < segments.Length; i++)
-		{
-			if (i > 0)
-			{
-				url.Append('/');
-			}
+		string path = "docs/" + string.Join('/', reference.Split('/').Select(Uri.EscapeDataString));
+		string[] parameters = query is null ? [] : QueryParameters(query);
+		return parameters.Length == 0 ? path : $"{path}?{string.Join('&', parameters)}";
+	}
 
-			url.Append(Uri.EscapeDataString(segments[i]));
-		}
+	private static string[] QueryParameters(SidecarDocumentQuery query)
+	{
+		return
+		[
+			.. Parameter("fromLine", query.FromLine),
+			.. Parameter("maxLines", query.MaxLines),
+			.. Parameter("lineNumbers", query.LineNumbers),
+			.. Parameter("body", query.Body),
+			.. (query.Collections ?? []).Select(static collection => $"collections={Uri.EscapeDataString(collection)}"),
+			.. Parameter("similarFiles", query.SimilarFiles),
+		];
+	}
 
-		if (query is null)
-		{
-			return url.ToString();
-		}
+	private static IEnumerable<string> Parameter(string name, int? value)
+	{
+		return value is int number ? [$"{name}={number.ToString(System.Globalization.CultureInfo.InvariantCulture)}"] : [];
+	}
 
-		char separator = '?';
-		void Add(string name, string value)
-		{
-			url.Append(separator).Append(name).Append('=').Append(value);
-			separator = '&';
-		}
-
-		if (query.FromLine is int from)
-		{
-			Add("fromLine", from.ToString(System.Globalization.CultureInfo.InvariantCulture));
-		}
-
-		if (query.MaxLines is int max)
-		{
-			Add("maxLines", max.ToString(System.Globalization.CultureInfo.InvariantCulture));
-		}
-
-		if (query.LineNumbers is bool numbers)
-		{
-			Add("lineNumbers", numbers ? "true" : "false");
-		}
-
-		if (query.Body is bool body)
-		{
-			Add("body", body ? "true" : "false");
-		}
-
-		return url.ToString();
+	private static IEnumerable<string> Parameter(string name, bool? value)
+	{
+		return value is bool flag ? [$"{name}={(flag ? "true" : "false")}"] : [];
 	}
 
 	private async Task<TResponse> GetAsync<TResponse>(string path, JsonTypeInfo<TResponse> responseType, CancellationToken cancellationToken)

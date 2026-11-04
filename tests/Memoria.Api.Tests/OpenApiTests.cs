@@ -41,6 +41,49 @@ public sealed class OpenApiTests(MemoriaApiFactory factory) : IClassFixture<Memo
 		Assert.Equal("getStatus", operations["GET /v1/status"]);
 		Assert.Equal("health", operations["GET /health"]);
 		Assert.Equal("ready", operations["GET /ready"]);
+		Assert.Equal("createApiKey", operations["POST /v1/admin/keys"]);
+		Assert.Equal("listApiKeys", operations["GET /v1/admin/keys"]);
+		Assert.Equal("revokeApiKey", operations["DELETE /v1/admin/keys/{id}"]);
+		Assert.Equal("rotateApiKey", operations["POST /v1/admin/keys/{id}:rotate"]);
+	}
+
+	[Fact]
+	public async Task Security_IsDeclaredOnScopedOperations_AndNotOnAnonymousOnes()
+	{
+		HttpClient client = factory.CreateClient();
+
+		using JsonDocument document = JsonDocument.Parse(await client.GetStringAsync("/openapi/v1.json"));
+		JsonElement root = document.RootElement;
+
+		JsonElement scheme = root.GetProperty("components").GetProperty("securitySchemes").GetProperty("apiKey");
+		Assert.Equal("http", scheme.GetProperty("type").GetString());
+		Assert.Equal("bearer", scheme.GetProperty("scheme").GetString());
+
+		JsonElement paths = root.GetProperty("paths");
+		Assert.True(paths.GetProperty("/v1/search").GetProperty("get").TryGetProperty("security", out _));
+		Assert.Contains("`read` scope", paths.GetProperty("/v1/search").GetProperty("get").GetProperty("description").GetString());
+		Assert.True(paths.GetProperty("/v1/admin/keys").GetProperty("post").TryGetProperty("security", out _));
+		Assert.Contains("`admin` scope", paths.GetProperty("/v1/admin/keys").GetProperty("post").GetProperty("description").GetString());
+		Assert.False(paths.GetProperty("/health").GetProperty("get").TryGetProperty("security", out _));
+		Assert.False(paths.GetProperty("/ready").GetProperty("get").TryGetProperty("security", out _));
+
+		JsonElement searchResponses = paths.GetProperty("/v1/search").GetProperty("get").GetProperty("responses");
+		Assert.True(searchResponses.TryGetProperty("401", out _));
+		Assert.True(searchResponses.TryGetProperty("403", out _));
+		Assert.True(searchResponses.TryGetProperty("429", out _));
+	}
+
+	[Fact]
+	public async Task IssuedKeyFields_AppearOnlyOnIssuedApiKey_NotInTheListSchema()
+	{
+		HttpClient client = factory.CreateClient();
+
+		using JsonDocument document = JsonDocument.Parse(await client.GetStringAsync("/openapi/v1.json"));
+		JsonElement schemas = document.RootElement.GetProperty("components").GetProperty("schemas");
+
+		Assert.True(schemas.GetProperty("IssuedApiKey").GetProperty("properties").TryGetProperty("key", out _));
+		Assert.False(schemas.GetProperty("ApiKeyInfo").GetProperty("properties").TryGetProperty("key", out _));
+		Assert.False(schemas.GetProperty("ApiKeyInfo").GetProperty("properties").TryGetProperty("sha256Hash", out _));
 	}
 
 	[Fact]

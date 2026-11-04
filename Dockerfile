@@ -30,9 +30,14 @@ WORKDIR /app
 
 ENV ASPNETCORE_URLS=http://0.0.0.0:8080 \
     ASPNETCORE_ENVIRONMENT=Production \
-    DOTNET_EnableDiagnostics=0
+    DOTNET_EnableDiagnostics=0 \
+    Memoria__Auth__DatabasePath=/data/control.db
 
 COPY --from=build /app ./
+
+# The control database (API keys, audit log). A named volume mounted here takes
+# this directory's ownership on first use, so the non-root user can write to it.
+RUN mkdir -p /data && chown "$APP_UID" /data
 
 # The aspnet image defines a non-root user; run as it.
 USER $APP_UID

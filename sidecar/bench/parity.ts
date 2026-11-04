@@ -29,7 +29,9 @@ function side(backend: OpenedBackend): ParitySide {
     rerank: (query, documents) => backend.llm.rerank(query, documents),
     embed: async (text) => (await backend.llm.embedBatch([text]))[0]?.embedding ?? null,
     search: async (query, limit) => {
-      const hits = await backend.search({ queries: query.searches, intent: query.intent, collections: [query.collection], limit, minScore: 0, rerank: true });
+      const { hits, degradedReasons } = await backend.searchDetailed({ queries: query.searches, intent: query.intent, collections: [query.collection], limit, minScore: 0, rerank: true });
+      // A degraded result is not what this measures. Recorded as an error for the query.
+      if (degradedReasons.length > 0) throw new Error(`search ran degraded: ${degradedReasons.join(", ")}`);
       return { files: hits.map((h) => h.displayPath), scores: hits.map((h) => h.score) };
     },
     expand: (query) => backend.llm.expandQuery(query),
@@ -43,6 +45,13 @@ async function copyIndex(source: string, directory: string, name: string): Promi
   // A live SQLite index may hold recent writes in its write-ahead log.
   if (existsSync(`${source}-wal`)) await copyFile(`${source}-wal`, `${target}-wal`);
   return target;
+}
+
+function argumentProblem(db: string | undefined, candidateLimit: number, expansionRuns: number): string | null {
+  if (!db) return "--db is required. There is deliberately no default: name the index to compare against.";
+  if (!existsSync(db)) return `No index at ${db}.`;
+  const valid = Number.isInteger(candidateLimit) && candidateLimit >= 1 && Number.isInteger(expansionRuns) && expansionRuns >= 2;
+  return valid ? null : "--candidate-limit must be at least 1, and --expansion-runs at least 2 so a baseline exists.";
 }
 
 async function main(): Promise<number> {
@@ -59,20 +68,14 @@ async function main(): Promise<number> {
       "expansion-runs": { type: "string", default: "5" },
     },
   });
-  if (!values.db) {
-    console.error("--db is required. There is deliberately no default: name the index to compare against.");
-    return 2;
-  }
-  if (!existsSync(values.db)) {
-    console.error(`No index at ${values.db}.`);
-    return 2;
-  }
   const candidateLimit = Number(values["candidate-limit"]);
   const expansionRuns = Number(values["expansion-runs"]);
-  if (!Number.isInteger(candidateLimit) || candidateLimit < 1 || !Number.isInteger(expansionRuns) || expansionRuns < 2) {
-    console.error("--candidate-limit must be at least 1, and --expansion-runs at least 2 so a baseline exists.");
+  const problem = argumentProblem(values.db, candidateLimit, expansionRuns);
+  if (problem) {
+    console.error(problem);
     return 2;
   }
+  const db = values.db!;
   const config = loadConfig({ ...process.env, MEMORIA_QMD_LLM: "remote" });
   if (config.llm.mode !== "remote") return 2;
 
@@ -86,13 +89,14 @@ async function main(): Promise<number> {
     // Opened local first: remote mode replaces the SDK's process-wide default,
     // which the local side's document path would otherwise share. These runs
     // embed queries only, through each store's own instance, so that is safe.
-    local = await openBackend({ dbPath: await copyIndex(values.db, workspace, "local.sqlite"), keepWarm: true, llm: { mode: "local" } });
+    local = await openBackend({ dbPath: await copyIndex(db, workspace, "local.sqlite"), keepWarm: true, llm: { mode: "local" } });
     remote = await openBackend({
-      dbPath: await copyIndex(values.db, workspace, "remote.sqlite"),
+      dbPath: await copyIndex(db, workspace, "remote.sqlite"),
       keepWarm: true,
       llm: {
         mode: "remote",
-        worker: { url: config.llm.workerUrl, token: config.llm.workerToken, embedDimensions: config.llm.embedDimensions },
+        workers: config.llm.workers,
+        embedDimensions: config.llm.embedDimensions,
         // A silent fallback would make the remote side measure this machine.
         fallback: false,
       },

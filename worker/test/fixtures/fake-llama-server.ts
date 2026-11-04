@@ -42,18 +42,22 @@ const server = createServer((request, response) => {
       case "/detokenize":
         return send(200, { content: (body.tokens as number[]).map((t) => String.fromCodePoint(t - 1)).join("") });
       case "/v1/embeddings":
-        return send(200, { data: (body.input as string[]).map((text, index) => ({ index, embedding: vectorFor(text) })) });
-      case "/rerank": {
-        const terms = String(body.query).toLowerCase().split(/\s+/);
-        const results = (body.documents as string[]).map((doc, index) => {
-          const lower = doc.toLowerCase();
-          const score = terms.filter((t) => lower.includes(t)).length / terms.length;
-          return { index, relevance_score: process.env.FAKE_RERANK_RAW_LOGITS ? score * 20 - 10 : score };
+        return send(200, { data: (body.input as number[][]).map((tokens, index) => ({ index, embedding: vectorFor(tokens.map((t) => String.fromCodePoint(t - 1)).join("")) })) });
+      case "/completion": {
+        // The worker's rerank backend: token arrays in, probabilities of yes and no out.
+        const answers = (body.prompt as number[][]).map((tokens, index) => {
+          const text = tokens.map((t) => String.fromCodePoint(t - 1)).join("");
+          const query = text.slice(text.indexOf("<Query>: ") + 9, text.indexOf("\n<Document>: "));
+          const doc = text.slice(text.indexOf("\n<Document>: ") + 13, text.indexOf("<|im_end|>\n<|im_start|>assistant"));
+          const terms = query.toLowerCase().split(/\s+/);
+          const score = terms.filter((t) => doc.toLowerCase().includes(t)).length / terms.length;
+          const yes = process.env.FAKE_RERANK_RAW_LOGITS ? score * 20 - 10 : score;
+          return { index, completion_probabilities: [{ top_probs: [{ id: "y".codePointAt(0)! + 1, prob: yes }, { id: "n".codePointAt(0)! + 1, prob: 1 - yes }] }] };
         });
-        return send(200, { results: results.reverse() });
+        return send(200, answers.reverse());
       }
       case "/v1/chat/completions": {
-        const prompt = String(body.messages?.[0]?.content);
+        const prompt = String(body.messages?.at(-1)?.content);
         const query = prompt.replace("/no_think Expand this search query: ", "");
         return send(200, { choices: [{ message: { content: body.grammar ? `lex: ${query}\nvec: ${query} explained\n` : "ok" } }] });
       }

@@ -77,7 +77,11 @@ Every route except `/health` and `/openapi.json` requires `Authorization: Bearer
 | `POST /documents` | Ingest by value: writes markdown into the collection directory and queues a debounced update (and embed) job. Returns 202. |
 | `DELETE /documents?collection=&path=` | Delete by value: removes the file and queues a debounced update. Idempotent; returns 202 with `deleted: false` when no file existed. |
 | `POST /reindex` | Queue `update` (+ `embed`) for some or all collections, without waiting on the debounce. One worker runs one job at a time. |
-| `GET /reindex/jobs`, `GET /reindex/jobs/{id}` | Job history for this process. |
+| `GET /reindex/jobs`, `GET /reindex/jobs/{id}` | Job history, which persists across restarts. |
+| `GET /queue`, `POST /queue/jobs/{id}:retry`, `POST /queue/jobs/{id}:cancel` | Queue depth, and operator control of jobs. |
+| `GET /workers` | The worker pool's state, in remote LLM mode. |
+| `GET /queue/dead-letters`, `POST /queue/dead-letters:clear` | Documents no worker could embed, and letting them try again. |
+| `POST /cache:purge` | Drop every cached rerank score and expansion. |
 
 ### Search example
 
@@ -194,7 +198,7 @@ One worker runs one job at a time. Document writes do not start a scan each: the
 - If any write in a burst asks for embedding, the shared job embeds. An embed run sweeps every unembedded document in the collection, so a separate job would not have spared the others.
 - `POST /reindex` does not wait. An identical job that is already waiting is returned and released to run.
 - So a new document is not searchable, and a deleted one is not gone from search, until the job finishes. Call `POST /reindex` for the collection when that delay matters.
-- On SIGINT or SIGTERM the sidecar releases held jobs and waits up to `MEMORIA_QMD_SHUTDOWN_DRAIN_MS` for them. Jobs are not persisted: after a crash the files are safe on disk but stay unindexed until the next scan of that collection.
+- On SIGINT or SIGTERM the sidecar releases held jobs and waits up to `MEMORIA_QMD_SHUTDOWN_DRAIN_MS` for them. Jobs persist in `index.sqlite.queue.sqlite` beside the index, so anything unfinished, including after a crash, runs after the next start. See [`docs/workers.md`](../docs/workers.md#the-job-queue).
 
 ## Develop
 
@@ -220,11 +224,12 @@ Layout:
 | `src/store.ts` | The `QmdBackend` interface and the only import of `@tobilu/qmd`. |
 | `src/metadata.ts` | Frontmatter parsing, filter matching, the in-memory metadata index. |
 | `src/jobs.ts` | Single-worker reindex queue with an injectable debounce clock. |
+| `src/queue-store.ts` | The queue's own SQLite file, beside the index. |
 | `src/ingest.ts` | Path validation, file writes and deletes for `/documents`. |
 | `src/secret-file.ts` | Reads a secret from `<NAME>_FILE`. Kept identical to the worker's copy by a test. |
 | `src/path-rules.ts` | The names a document path may use, on every platform. |
 | `src/multi-get.ts` | Splits a multi-get into the separate calls QMD can read, and merges the results. |
-| `src/llm/` | Remote mode: `RemoteLlm`, the worker client, response validation and the rerank transport. Loaded only when `MEMORIA_QMD_LLM=remote`. |
+| `src/llm/` | Remote mode: `RemoteLlm`, the worker pool, the embedding farm, response validation and the rerank transport. Loaded only when `MEMORIA_QMD_LLM=remote`. |
 | `bench/` | The parity benchmark and its query set. |
 | `test/fake-backend.ts` | In-memory backend used by unit tests and OpenAPI generation. |
 | `test/mock-worker.ts` | Scripted worker over real HTTP. |

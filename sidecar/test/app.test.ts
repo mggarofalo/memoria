@@ -4,7 +4,7 @@ import path from "node:path";
 import { test } from "node:test";
 import { authHeaders, makeApp, ManualScheduler, sampleDocs, TEST_SECRET, testConfig } from "./helpers.ts";
 import { FRONTMATTER_DOC } from "./fake-backend.ts";
-import { buildApp } from "../src/app.ts";
+import { buildApp, warmup } from "../src/app.ts";
 import { resolveVersion } from "../src/version.ts";
 import { FakeBackend } from "./fake-backend.ts";
 
@@ -353,7 +353,7 @@ test("POST /docs:multiGet resolves ids and pattern separately and merges them by
     assert.equal(both.statusCode, 200, both.body);
     assert.deepEqual(paths(both.json()), ["2026-03-05_beta.md", "2026-08-31_gamma.md"]);
     assert.deepEqual(both.json().errors, []);
-    assert.deepEqual(backend.calls.filter((c) => c.method === "multiGet").map((c) => c.args[0]), ["claude-sessions/2026-03*.md", `${gamma.docid},`]);
+    assert.deepEqual(backend.calls.filter((c) => c.method === "multiGet" && !(c.args[1] as { includeBody: boolean }).includeBody).map((c) => c.args[0]), ["qmd://claude-sessions/2026-03-05_beta.md,", `${gamma.docid},`]);
 
     // A file selected by both comes back once.
     const overlap = await multiGet({ pattern: "claude-sessions/2026-*.md", ids: [alpha.docid, "claude-sessions/2026-02-11_alpha.md"] });
@@ -754,13 +754,88 @@ test("GET /openapi.json describes every route and matches the committed contract
     const spec = r.json();
     assert.equal(spec.openapi, "3.1.0");
     const paths = Object.keys(spec.paths).sort();
-    assert.deepEqual(paths, ["/collections", "/docs/{reference}", "/docs:multiGet", "/documents", "/health", "/openapi.json", "/ready", "/reindex", "/reindex/jobs", "/reindex/jobs/{id}", "/search", "/status"]);
+    assert.deepEqual(paths, ["/cache:purge", "/collections", "/docs/{reference}", "/docs:multiGet", "/documents", "/health", "/openapi.json", "/queue", "/queue/dead-letters", "/queue/dead-letters:clear", "/queue/jobs/{id}:cancel", "/queue/jobs/{id}:retry", "/ready", "/reindex", "/reindex/jobs", "/reindex/jobs/{id}", "/search", "/status", "/workers"]);
     assert.ok(spec.components.securitySchemes.bearer);
     assert.deepEqual(spec.paths["/health"].get.security, []);
     assert.equal(spec.paths["/search"].post.security, undefined); // inherits the global requirement
 
     const committed = JSON.parse(await readFile(new URL("../openapi.json", import.meta.url), "utf8"));
     assert.deepEqual(spec, committed, "openapi.json is stale; run `npm run openapi`");
+  } finally {
+    await app.close();
+  }
+});
+
+// --- errors a caller's malformed request can cause ------------------------------------
+
+test("a malformed request gets the error that names the problem, not a 500", async () => {
+  const { app } = await makeApp({ config: { bodyLimitBytes: 64 } });
+  try {
+    const search = { method: "POST" as const, url: "/search", headers: authHeaders };
+    const big = await app.inject({ ...search, payload: { query: "x".repeat(200) } });
+    assert.equal(big.statusCode, 413);
+    assert.equal(big.json().error, "payload_too_large");
+    const media = await app.inject({ ...search, headers: { ...authHeaders, "content-type": "application/xml" }, payload: "<x/>" });
+    assert.equal(media.statusCode, 415);
+    assert.equal(media.json().error, "unsupported_media_type");
+    const json = await app.inject({ ...search, headers: { ...authHeaders, "content-type": "application/json" }, payload: "{nope" });
+    assert.equal(json.statusCode, 400);
+    assert.equal(json.json().error, "bad_request");
+  } finally {
+    await app.close();
+  }
+});
+
+// --- warmup ---------------------------------------------------------------------------
+
+const quietLog = () => {
+  const warned: string[] = [];
+  return { warned, log: { info: () => {}, warn: (_: object, message: string) => void warned.push(message) } };
+};
+
+test("warmup in local mode walks the pipeline and records that it finished", async () => {
+  const { app, backend } = await makeApp({ modelsResident: false });
+  try {
+    app.ctx.warmup.done = false;
+    const { log, warned } = quietLog();
+    await warmup(app.ctx, log);
+    assert.equal(app.ctx.warmup.done, true);
+    assert.equal(typeof app.ctx.warmup.durationMs, "number");
+    assert.deepEqual(warned, []);
+    assert.ok(backend.calls.some((c) => c.method === "search"));
+  } finally {
+    await app.close();
+  }
+});
+
+test("a warmup that fails records why, and models load on first use instead", async () => {
+  const { app, backend } = await makeApp({ modelsResident: false });
+  try {
+    app.ctx.warmup.done = false;
+    backend.search = async () => {
+      throw new Error("no model");
+    };
+    const { log, warned } = quietLog();
+    await warmup(app.ctx, log);
+    assert.equal(app.ctx.warmup.done, false);
+    assert.equal(app.ctx.warmup.error, "no model");
+    assert.match(warned[0]!, /load lazily/);
+  } finally {
+    await app.close();
+  }
+});
+
+test("warmup leaves a remote sidecar alone: workers warm themselves", async () => {
+  const { app, backend } = await makeApp({ modelsResident: false });
+  try {
+    backend.health = { mode: "remote", degraded: false, unavailable: [], workersUp: 1, workersTotal: 1, embedDisagreement: [], documentsSetAside: 0 };
+    backend.search = async () => {
+      throw new Error("must not be called");
+    };
+    const { log, warned } = quietLog();
+    await warmup(app.ctx, log);
+    assert.deepEqual(warned, []);
+    assert.equal(app.ctx.warmup.error, null);
   } finally {
     await app.close();
   }

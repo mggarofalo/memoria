@@ -86,6 +86,35 @@ public static class SidecarFixtures
 		}
 		""";
 
+	/// <summary>Remote mode with no reranker worker, a stuck job, and documents set aside.</summary>
+	public const string DegradedReadiness = """
+		{
+		  "status": "degraded",
+		  "llm": { "mode": "remote", "degraded": true, "unavailable": ["rerank"], "workersUp": 1, "workersTotal": 2, "embedDisagreement": [], "documentsSetAside": 4 },
+		  "version": "0.1.0",
+		  "uptimeSeconds": 120,
+		  "index": { "dbPath": "/index.sqlite", "totalDocuments": 1502, "needsEmbedding": 0, "hasVectorIndex": true },
+		  "models": { "embed": "embed.gguf", "rerank": "rerank.gguf", "generate": "gen.gguf", "loaded": { "embed": true, "rerank": false, "generate": true }, "resident": false },
+		  "warmup": { "requested": true, "done": false, "error": "No worker can serve: rerank", "durationMs": null },
+		  "metadata": { "documents": 1501, "refreshedAt": null },
+		  "jobs": { "pending": 1, "persistent": true, "stuck": { "reason": "worker 192.168.1.30 refused the batch", "attempts": 3 } }
+		}
+		""";
+
+	public const string DegradedSearchResponse = """
+		{
+		  "results": [
+		    { "docid": "f6feba", "file": "claude-sessions/a.md", "collection": "claude-sessions", "path": "a.md", "title": "A", "score": 0.5, "context": null, "line": 1, "snippet": "...", "metadata": null },
+		    { "docid": "a1b2c3", "file": "codex-sessions/b.md", "collection": "codex-sessions", "path": "b.md", "title": "B", "score": 0.4, "context": null, "line": 1, "snippet": "...", "metadata": null }
+		  ],
+		  "total": 2,
+		  "tookMs": 20,
+		  "degraded": true,
+		  "degradedReasons": ["no_rerank", "no_expansion", "worker 192.168.1.30 is down"],
+		  "query": { "collections": ["claude-sessions", "codex-sessions"], "rerank": true, "filtered": false, "fetched": 2, "limit": 10 }
+		}
+		""";
+
 	public static string Readiness(string status, bool resident, int needsEmbedding = 0, string? warmupError = null)
 	{
 		string flag = resident ? "true" : "false";

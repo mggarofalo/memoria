@@ -7,7 +7,7 @@ import { HttpError } from "../src/errors.ts";
 import { removeDocument, resolveTarget, writeDocument } from "../src/ingest.ts";
 import { JobQueue, type JobResult, type ReindexRequest } from "../src/jobs.ts";
 import { parseLineRange } from "../src/line-range.ts";
-import { multiGetSelectors } from "../src/multi-get.ts";
+import { parseSelectors } from "../src/multi-get.ts";
 import { ManualScheduler, tempDir } from "./helpers.ts";
 
 // --- line ranges -------------------------------------------------------------
@@ -140,17 +140,15 @@ test("a symlink at the last segment is removed itself and never written through"
 
 // --- multi-get selectors --------------------------------------------------------
 
-test("multiGetSelectors keeps globs apart from a reference list", () => {
-  assert.deepEqual(multiGetSelectors("a/*.md", undefined), ["a/*.md"]);
-  assert.deepEqual(multiGetSelectors(undefined, ["2f2681"]), ["2f2681,"]);
-  assert.deepEqual(multiGetSelectors(undefined, ["a/x.md", "2f2681"]), ["a/x.md,2f2681,"]);
-  assert.deepEqual(multiGetSelectors("codex-sessions/2026-10-29*.md", ["2f2681"]), ["codex-sessions/2026-10-29*.md", "2f2681,"]);
+test("parseSelectors keeps globs apart from references", () => {
+  assert.deepEqual(parseSelectors("a/*.md", undefined), { globs: ["a/*.md"], references: [] });
+  assert.deepEqual(parseSelectors(undefined, ["2f2681"]), { globs: [], references: ["2f2681"] });
+  assert.deepEqual(parseSelectors(undefined, ["a/x.md", "2f2681"]), { globs: [], references: ["a/x.md", "2f2681"] });
+  assert.deepEqual(parseSelectors("codex-sessions/2026-10-29*.md", ["2f2681"]), { globs: ["codex-sessions/2026-10-29*.md"], references: ["2f2681"] });
   // The mixed string the SDK cannot read on its own.
-  assert.deepEqual(multiGetSelectors("codex-sessions/2026-10-29*.md,2f2681", undefined), ["codex-sessions/2026-10-29*.md", "2f2681,"]);
-  // Commas inside a glob belong to it.
-  assert.deepEqual(multiGetSelectors("{a,b}/*.md,c/[xy,z].md", undefined), ["{a,b}/*.md", "c/[xy,z].md"]);
-  assert.deepEqual(multiGetSelectors("a.md, b.md,,", ["b.md", " "]), ["a.md,b.md,"]);
-  assert.deepEqual(multiGetSelectors(undefined, undefined), []);
+  assert.deepEqual(parseSelectors("codex-sessions/2026-10-29*.md,2f2681", undefined), { globs: ["codex-sessions/2026-10-29*.md"], references: ["2f2681"] });
+  assert.deepEqual(parseSelectors("a.md, b.md,,", ["b.md", " "]), { globs: [], references: ["a.md", "b.md"] });
+  assert.deepEqual(parseSelectors(undefined, undefined), { globs: [], references: [] });
 });
 
 test("writeDocument creates, overwrites, and honours overwrite=false", async () => {

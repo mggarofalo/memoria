@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
-import { EXPANSION_GRAMMAR, EXPANSION_SAMPLING, expansionPrompt } from "../src/llm/expansion.ts";
+import { EXPANSION_GRAMMAR, EXPANSION_SAMPLING, EXPANSION_SYSTEM_PROMPT, SDK_REPEAT_PENALTY_OPTIONS, expansionPrompt } from "../src/llm/expansion.ts";
 import { RemoteLlm } from "../src/llm/remote.ts";
 
 /**
@@ -99,8 +99,78 @@ test("expansion's prompt, grammar and sampling match the SDK's inline values", a
   assert.equal(number("temperature"), EXPANSION_SAMPLING.temperature);
   assert.equal(number("topK"), EXPANSION_SAMPLING.topK);
   assert.equal(number("topP"), EXPANSION_SAMPLING.topP);
-  assert.equal(number("lastTokens"), EXPANSION_SAMPLING.repeatLastN);
-  assert.equal(number("presencePenalty"), EXPANSION_SAMPLING.presencePenalty);
+  assert.equal(number("lastTokens"), SDK_REPEAT_PENALTY_OPTIONS.lastTokens);
+  assert.equal(number("presencePenalty"), SDK_REPEAT_PENALTY_OPTIONS.presencePenalty);
+  assert.doesNotMatch(options, /\bpenalty:/, "the SDK now sets a penalty, so the in-process penalty stage runs and the worker must match it");
+});
+
+test("the system prompt sent to the worker is node-llama-cpp's default, which QMD's session uses", async () => {
+  const llm = await read("llm.js");
+  assert.match(llm, /new LlamaChatSession\(\{ contextSequence: sequence \}\)/, "QMD sets no system prompt of its own");
+  const { defaultChatSystemPrompt } = (await import(new URL("../node_modules/node-llama-cpp/dist/config.js", import.meta.url).href)) as { defaultChatSystemPrompt: string };
+  assert.equal(EXPANSION_SYSTEM_PROMPT, defaultChatSystemPrompt);
+});
+
+test("node-llama-cpp skips the penalty stage and min-p for the options the SDK passes", async () => {
+  const sampler = await readFile(new URL("../node_modules/node-llama-cpp/llama/addon/AddonSampler.cpp", import.meta.url), "utf8");
+  assert.match(sampler, /config\.Get\("repeatPenalty"\)\.As<Napi::Number>\(\)\.FloatValue\(\)\s*: 1;/);
+  assert.match(sampler, /repeatPenaltyEnabled = repeatPenalty != 1 && /);
+  const context = await readFile(new URL("../node_modules/node-llama-cpp/dist/evaluator/LlamaContext/LlamaContext.js", import.meta.url), "utf8");
+  assert.match(context, /_resolveSamplerConfig\(\{ temperature = 0, minP = 0,/);
+  assert.equal(EXPANSION_SAMPLING.minP, 0);
+  assert.equal(EXPANSION_SAMPLING.repeatLastN, 0);
+  assert.equal(EXPANSION_SAMPLING.presencePenalty, 0);
+});
+
+test("the embedding farm's assumptions about the SDK hold", async () => {
+  const [store, llm] = await Promise.all([read("store.js"), read("llm.js")]);
+  for (const name of ["getEmbeddingFingerprint", "chunkDocumentByTokens", "extractTitle", "clearAllEmbeddings", "validateLexQuery", "validateSemanticQuery"]) {
+    assert.match(store, new RegExp(`export (async )?function ${name}\\(`), name);
+  }
+  assert.match(llm, /export function formatDocForEmbedding\(text, title, modelUri\)/);
+  assert.match(store, /ensureVecTable: \(dimensions\) => ensureVecTableInternal\(db, dimensions\),/);
+  assert.match(store, /insertEmbedding: \(hash, seq, pos, embedding, model, embeddedAt, totalChunks, fingerprint\) => insertEmbedding\(/);
+  assert.match(store, /getHashesNeedingEmbedding: \(model\) => getHashesNeedingEmbedding\(/);
+
+  // src/store.ts holds a copy of these two private functions' SQL.
+  const ours = await readFile(new URL("../src/llm/wire.ts", import.meta.url), "utf8");
+  const pending = /function getPendingEmbeddingDocs[\s\S]*?\}\n/.exec(store)![0];
+  const flat = (text: string) => text.replace(/\s+/g, " ");
+  for (const line of [
+    "SELECT d.hash, MIN(d.path) as path, length(CAST(c.doc AS BLOB)) as bytes",
+    "SELECT hash, model, COUNT(*) AS chunk_count, MAX(total_chunks) AS expected_chunks",
+    "WHERE model = ? AND embed_fingerprint = ?",
+    "AND (v.hash IS NULL OR v.chunk_count < v.expected_chunks",
+  ]) {
+    assert.ok(flat(pending).includes(line), `the SDK changed: ${line}`);
+    assert.ok(flat(ours).includes(line), `our copy changed: ${line}`);
+  }
+  // A vector row is keyed as the startup repair and the farm's replacement assume.
+  assert.match(store, /const hashSeq = `\$\{hash\}_\$\{seq\}`;/);
+  assert.match(store, /CREATE VIRTUAL TABLE vectors_vec USING vec0\(hash_seq TEXT PRIMARY KEY/);
+});
+
+test("the SDK's model loader downloads what it cannot find, which is why the fallback is guarded", async () => {
+  const llm = await read("llm.js");
+  assert.match(llm, /resolveModelFile handles HF URIs and downloads to the cache dir/);
+  assert.match(llm, /export const DEFAULT_MODEL_CACHE_DIR = MODEL_CACHE_DIR;/);
+});
+
+test("the SDK writes a vector's two tables with no transaction, which is why startup repairs them", async () => {
+  const store = await read("store.js");
+  const insert = /export function insertEmbedding\([\s\S]*?\n\}\n/.exec(store)![0];
+  assert.ok(!/BEGIN|transaction\(/.test(insert), "if this fails the SDK fixed it: reconsider the repair");
+  assert.ok(insert.indexOf("insertContentVectorStmt.run") < insert.indexOf("insertVecStmt.run"));
+});
+
+test("a failed rerank throws before the SDK's cache write, as degraded search relies on", async () => {
+  const store = await read("store.js");
+  const rerank = /export async function rerank\([\s\S]*?\n\}\n/.exec(store)![0];
+  assert.ok(rerank.indexOf("await llm.rerank(") < rerank.indexOf("setCachedResult("));
+  // And an expansion identical to the query, which is all a failure returns, is not cached.
+  const expand = /export async function expandQuery\([\s\S]*?\n\}\n/.exec(store)![0];
+  assert.match(expand, /\.filter\(r => r\.text !== query\)/);
+  assert.match(expand, /if \(expanded\.length > 0\) \{\s*setCachedResult/);
 });
 
 test("in-process reranking still goes through node-llama-cpp's rank context, as docs/workers.md describes", async () => {
@@ -114,4 +184,11 @@ test("in-process reranking still goes through node-llama-cpp's rank context, as 
   const ranking = await readFile(new URL("../node_modules/node-llama-cpp/dist/evaluator/LlamaRankingContext.js", import.meta.url), "utf8");
   assert.match(ranking, /chat_template\.rerank/, "the prompt comes from the model's own template");
   assert.match(ranking, /_getEvaluationInput\(query, document\)/);
+});
+
+test("the full-size test text is at least as long as the SDK's longest chunk", async () => {
+  const { FULL_CHUNK_TEXT } = await import("../src/llm/remote.ts");
+  const sdk = (await import(new URL("./store.js", import.meta.resolve("@tobilu/qmd")).href)) as { CHUNK_SIZE_TOKENS: number; CHUNK_SIZE_CHARS: number };
+  assert.ok(FULL_CHUNK_TEXT.trim().split(" ").length > sdk.CHUNK_SIZE_TOKENS, "in words, each about a token");
+  assert.ok(FULL_CHUNK_TEXT.length > sdk.CHUNK_SIZE_CHARS, "and in characters");
 });

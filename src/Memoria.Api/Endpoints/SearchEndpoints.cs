@@ -22,7 +22,8 @@ public static class SearchEndpoints
 				+ "then reranked by a cross-encoder unless `rerank=false`. Reranked queries take a few seconds; "
 				+ "`rerank=false` returns fused results in well under a second. Frontmatter filters "
 				+ "(`project`, `branch`, `since`, `until`, `tag`) are applied after retrieval, so a filtered "
-				+ "result set can be shorter than `limit` even when more matches exist.")
+				+ "result set can be shorter than `limit` even when more matches exist. `degraded` means the search ran without "
+				+ "something a full search uses, such as the reranker: results are valid but may rank worse, and `degradedReasons` says what.")
 			.WithTags("Search")
 			.ProducesValidationProblem();
 		return group;
@@ -30,7 +31,7 @@ public static class SearchEndpoints
 
 	private static async Task<Results<Ok<SearchResult>, ValidationProblem>> SearchAsync(
 		[AsParameters] SearchParameters parameters,
-		IMemoriaQmdClient sidecar,
+		ScopedCorpus corpus,
 		ICallerScope scope,
 		IOptions<MemoriaOptions> options,
 		CancellationToken cancellationToken)
@@ -55,8 +56,7 @@ public static class SearchEndpoints
 			return TypedResults.ValidationProblem(errors);
 		}
 
-		SidecarSearchResponse response = await sidecar.SearchAsync(request, cancellationToken);
-		return TypedResults.Ok(response.ToContract());
+		return TypedResults.Ok(await corpus.SearchAsync(request, cancellationToken));
 	}
 }
 
@@ -68,7 +68,7 @@ public sealed class SearchParameters
 	public string? Query { get; set; }
 
 	[FromQuery(Name = "collection")]
-	[Description("Collection to search. Repeat for several. Defaults to the configured default set, else QMD's default-included collections.")]
+	[Description("Collection to search. Repeat for several; names are case-sensitive. Omitted, a collection-scoped key searches all its collections; other callers get the configured default set, else QMD's default-included collections. A collection outside the key's scope is refused with 403.")]
 	public string[]? Collection { get; set; }
 
 	[FromQuery(Name = "limit")]

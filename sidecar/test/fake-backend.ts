@@ -3,12 +3,16 @@ import path from "node:path";
 import picomatch from "picomatch";
 import type { EmbedSummary, UpdateSummary } from "../src/jobs.ts";
 import type { DocumentHead } from "../src/metadata.ts";
+import type { DeadLetter, DegradedReason, LlmHealth, PoolLoad, WorkerView } from "../src/llm/types.ts";
 import type {
+  BackendEmbedOptions,
   BackendSearchOptions,
+  SearchOutcome,
   CollectionRow,
   ContextRow,
   DocumentInfo,
   DocumentLookupError,
+  DocumentRef,
   IndexStatusInfo,
   ModelStatus,
   MultiGetEntry,
@@ -68,6 +72,13 @@ export class FakeBackend implements QmdBackend {
   updateDelayMs = 0;
   /** When set, update() waits on it, so a test can act while a job is mid-run. */
   updateGate: Promise<void> | null = null;
+  /** Replaces embed's default answer, so a test can defer, fail or hold a job. */
+  embedImpl: ((options: BackendEmbedOptions) => Promise<EmbedSummary>) | null = null;
+  degradedReasons: DegradedReason[] = [];
+  health: LlmHealth = { mode: "local", degraded: false, unavailable: [], workersUp: 0, workersTotal: 0, embedDisagreement: [], documentsSetAside: 0 };
+  workerViews: WorkerView[] = [];
+  load: PoolLoad | null = null;
+  deadLetterList: DeadLetter[] = [];
   closed = false;
   /** Docs a scan found on disk. Only these can vanish; seeded docs have no file. */
   readonly #scanned = new Set<FakeDoc>();
@@ -195,6 +206,13 @@ export class FakeBackend implements QmdBackend {
     return { docs: out, errors };
   }
 
+  async listDocumentRefs(collections?: readonly string[]): Promise<DocumentRef[]> {
+    this.#record("listDocumentRefs", collections);
+    return this.docs
+      .filter((d) => !collections || collections.includes(d.collection))
+      .map((d) => ({ collection: d.collection, path: d.path, hash: this.#info(d).hash }));
+  }
+
   ignorePatterns(collection: string): string[] {
     return this.collections.find((c) => c.name === collection)?.ignore ?? [];
   }
@@ -278,9 +296,41 @@ export class FakeBackend implements QmdBackend {
     return { collections: names.length, indexed, updated, unchanged, removed, skipped: 0, needsEmbedding: indexed + updated };
   }
 
-  async embed(options: { force: boolean; collection?: string }): Promise<EmbedSummary> {
-    this.#record("embed", options);
+  async embed(options: BackendEmbedOptions): Promise<EmbedSummary> {
+    this.#record("embed", { force: options.force, ...(options.collection !== undefined ? { collection: options.collection } : {}) });
+    if (this.embedImpl) return this.embedImpl(options);
     return { docsProcessed: 0, chunksEmbedded: 0, errors: 0, durationMs: 1 };
+  }
+
+  async searchDetailed(options: BackendSearchOptions): Promise<SearchOutcome> {
+    return { hits: await this.search(options), degradedReasons: [...this.degradedReasons] };
+  }
+
+  llmHealth(): LlmHealth {
+    return this.health;
+  }
+
+  workers(): WorkerView[] {
+    return this.workerViews;
+  }
+
+  poolLoad(): PoolLoad | null {
+    return this.load;
+  }
+
+  purgeCache(): number {
+    this.#record("purgeCache");
+    return 3;
+  }
+
+  deadLetters(): DeadLetter[] {
+    return this.deadLetterList;
+  }
+
+  clearDeadLetters(): number {
+    const cleared = this.deadLetterList.length;
+    this.deadLetterList = [];
+    return cleared;
   }
 
   async getStatus(): Promise<IndexStatusInfo> {
@@ -288,6 +338,7 @@ export class FakeBackend implements QmdBackend {
     return {
       totalDocuments: this.docs.length,
       needsEmbedding: 0,
+      documentsSetAside: 0,
       hasVectorIndex: true,
       collections: this.collections.map((c) => ({
         name: c.name,
