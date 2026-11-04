@@ -6,7 +6,7 @@ test("defaults bind loopback on 8282 with warm models", () => {
   const c = loadConfig({});
   assert.equal(c.host, "127.0.0.1");
   assert.equal(c.port, 8282);
-  assert.equal(c.secret, undefined);
+  assert.equal(c.secretGenerated, true);
   assert.equal(c.keepWarm, true);
   assert.equal(c.warmup, true);
   assert.equal(c.dbPath, undefined);
@@ -14,7 +14,7 @@ test("defaults bind loopback on 8282 with warm models", () => {
 
 test("a routable bind address requires a secret", () => {
   assert.throws(() => loadConfig({ MEMORIA_QMD_HOST: "192.168.1.20" }), /MEMORIA_QMD_SECRET is required/);
-  const c = loadConfig({ MEMORIA_QMD_HOST: "192.168.1.20", MEMORIA_QMD_SECRET: "0123456789abcdefXYZ" });
+  const c = loadConfig({ MEMORIA_QMD_HOST: "192.168.1.20", MEMORIA_QMD_SECRET: "0123456789abcdefXYZ", MEMORIA_QMD_ALLOW_PLAINTEXT_LAN: "1" });
   assert.equal(c.host, "192.168.1.20");
   assert.equal(c.secret, "0123456789abcdefXYZ");
 });
@@ -45,7 +45,7 @@ test("LLM mode is local by default, and worker settings are ignored unless remot
 
 test("remote mode needs a clean worker URL and, off loopback, a token", () => {
   const TOKEN = "0123456789abcdefXYZ";
-  const remote = (over: NodeJS.ProcessEnv) => loadConfig({ MEMORIA_QMD_LLM: "remote", ...over });
+  const remote = (over: NodeJS.ProcessEnv) => loadConfig({ MEMORIA_QMD_LLM: "remote", MEMORIA_QMD_ALLOW_PLAINTEXT_LAN: "1", ...over });
   assert.throws(() => remote({}), /MEMORIA_QMD_WORKER_URL is required/);
   const one = (url: string, token: string | undefined) => [{ name: new URL(url).host, url, token, capabilities: ["embed", "rerank", "generate"], priority: 100, maxConcurrent: 4 }];
   assert.throws(() => remote({ MEMORIA_QMD_WORKER_URL: "http://192.168.1.20:8383" }), /MEMORIA_QMD_WORKER_TOKEN is required/);
@@ -63,7 +63,7 @@ test("remote mode needs a clean worker URL and, off loopback, a token", () => {
 
 test("a worker list names each token's environment variable and holds no secrets itself", () => {
   const TOKEN = "0123456789abcdefXYZ";
-  const list = (workers: unknown, env: NodeJS.ProcessEnv = {}) => loadConfig({ MEMORIA_QMD_LLM: "remote", MEMORIA_QMD_WORKERS: JSON.stringify(workers), ...env });
+  const list = (workers: unknown, env: NodeJS.ProcessEnv = {}) => loadConfig({ MEMORIA_QMD_LLM: "remote", MEMORIA_QMD_ALLOW_PLAINTEXT_LAN: "1", MEMORIA_QMD_WORKERS: JSON.stringify(workers), ...env });
   const c = list(
     [
       { name: "desktop", url: "http://192.168.1.20:8383", tokenEnv: "DESKTOP_TOKEN", priority: 1, maxConcurrent: 8 },
@@ -103,10 +103,10 @@ test("a pool token can come from a file, like every other secret", async () => {
   await writeFile(file, "0123456789abcdefXYZ\n");
   await chmod(file, 0o600);
   const workers = JSON.stringify([{ name: "a", url: "http://192.168.1.20:1", tokenEnv: "A_TOKEN" }]);
-  const c = loadConfig({ MEMORIA_QMD_LLM: "remote", MEMORIA_QMD_WORKERS: workers, A_TOKEN_FILE: file });
+  const c = loadConfig({ MEMORIA_QMD_LLM: "remote", MEMORIA_QMD_ALLOW_PLAINTEXT_LAN: "1", MEMORIA_QMD_WORKERS: workers, A_TOKEN_FILE: file });
   assert.ok(c.llm.mode === "remote");
   assert.equal(c.llm.workers[0]!.token, "0123456789abcdefXYZ");
-  assert.throws(() => loadConfig({ MEMORIA_QMD_LLM: "remote", MEMORIA_QMD_WORKERS: workers, A_TOKEN_FILE: file, A_TOKEN: "0123456789abcdefXYZ" }), /only one/);
+  assert.throws(() => loadConfig({ MEMORIA_QMD_LLM: "remote", MEMORIA_QMD_ALLOW_PLAINTEXT_LAN: "1", MEMORIA_QMD_WORKERS: workers, A_TOKEN_FILE: file, A_TOKEN: "0123456789abcdefXYZ" }), /only one/);
 });
 
 test("loopback detection covers the usual spellings", () => {

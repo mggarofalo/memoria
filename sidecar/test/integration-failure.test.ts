@@ -1449,3 +1449,60 @@ test("/ready reads degraded with the reason while a job is stuck on a worker fau
     await o.done();
   }
 });
+
+// --- a document or search must not freeze or kill the sidecar, on the real SDK ---------------------------------
+
+test("a vector search over one huge document survives a small heap: its body is read once", { skip, timeout: 120_000 }, async () => {
+  const { dbPath } = await fixture({ "huge.md": `# Huge\n\n${"Ordinary words in a very long session transcript line.\n".repeat(600_000)}` });
+  const fixturePath = fileURLToPath(new URL("./fixtures/vec-heap.ts", import.meta.url));
+  const run = spawnSync(process.execPath, ["--max-old-space-size=256", fixturePath, dbPath], { encoding: "utf8", timeout: 90_000 });
+  assert.equal(run.status, 0, run.stderr.slice(-500));
+  const report = JSON.parse(run.stdout.trim().split("\n").at(-1)!) as { hits: number; bodyLength: number };
+  assert.equal(report.hits, 1);
+  assert.ok(report.bodyLength > 30_000_000, "the body still comes back");
+});
+
+test("while a search chunks several bad documents, other requests are answered", { skip, timeout: 120_000 }, async () => {
+  const docs: Record<string, string> = {};
+  for (let i = 0; i < 6; i++) docs[`fence${i}.md`] = `# Fence ${i}\n\nMatchword here.\n${"```\n".repeat(256 * 1024)}`;
+  const { dbPath } = await fixture(docs);
+  const mock = await new MockWorker(8).start();
+  const backend = await openBackend({ dbPath, keepWarm: false, llm: remoteOptions([worker("w", mock)]) });
+  const app = await buildApp({ backend, config: testConfig(), logger: false });
+  try {
+    // How often anything else gets a turn, with no network waits in this search to give it one.
+    let turns = 0;
+    let searching = true;
+    const turn = (): void => {
+      turns++;
+      if (searching) setImmediate(turn);
+    };
+    setImmediate(turn);
+    const started = performance.now();
+    const search = await app.inject({ method: "POST", url: "/search", headers: authHeaders, payload: { searches: [{ type: "lex", query: "Matchword" }], limit: 6, rerank: false } });
+    const took = performance.now() - started;
+    searching = false;
+    assert.equal(search.statusCode, 200);
+    assert.ok(search.json().total >= 6);
+    assert.ok(took < 30_000, `the search took ${Math.round(took)} ms`);
+    assert.ok(turns >= 6, `only ${turns} turns while chunking 6 documents`);
+  } finally {
+    await app.close();
+    await backend.close();
+    await mock.stop();
+  }
+});
+
+test("a search of only quotes is a 400 on the real SDK, and ordinary quoting still works", { skip }, async () => {
+  const o = await opened();
+  const app = await buildApp({ backend: o.backend, config: testConfig(), logger: false });
+  try {
+    const search = (query: string) => app.inject({ method: "POST", url: "/search", headers: authHeaders, payload: { searches: [{ type: "lex", query }], rerank: false } });
+    assert.equal((await search('"')).statusCode, 400);
+    assert.equal((await search('""')).statusCode, 400);
+    assert.equal((await search('"AuthenticationHandler"')).statusCode, 200);
+  } finally {
+    await app.close();
+    await o.done();
+  }
+});

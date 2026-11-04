@@ -10,6 +10,7 @@
   },
   "main": "dist/main.js",
   "scripts": {
+    "postinstall": "node scripts/patch-qmd.ts",
     "build": "tsc -p tsconfig.build.json && node scripts/write-version.ts",
     "typecheck": "tsc -p tsconfig.json",
     "test": "node --test --test-reporter=spec \"test/**/*.test.ts\" \"../worker/test/**/*.test.ts\" \"../scripts/release/test/**/*.test.ts\"",
@@ -20,7 +21,7 @@
     "openapi": "node scripts/write-openapi.ts",
     "openapi:check": "node scripts/write-openapi.ts --check",
     "check": "npm run typecheck && npm test && npm run openapi:check",
-    "start": "node dist/main.js",
+    "start": "node --max-old-space-size=4096 dist/main.js",
     "dev": "node src/main.ts"
   },
   "dependencies": {

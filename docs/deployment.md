@@ -31,7 +31,7 @@ service on whichever machine owns the models and index:
   not a configuration one.
 
 The sidecar runs under NSSM on Windows (`sidecar/scripts/install-service.ps1`)
-or as a systemd unit on Linux (`node dist/main.js`). See `sidecar/README.md`.
+or as a systemd unit on Linux (`node --max-old-space-size=4096 dist/main.js`). See `sidecar/README.md`.
 Install it from its release package; see
 [releasing.md](releasing.md#installing-the-sidecar-and-worker).
 
@@ -241,6 +241,29 @@ own scoped keys with it; see [configuration.md](configuration.md#memoriaauth--ap
 
 Everything else has a default. Pass secrets through the environment or a
 Docker secret; never bake them into the image or commit them.
+
+## Plain http between machines
+
+The sidecar and worker speak plain http, so anything off loopback sends the shared secret and whole transcripts in clear. They refuse to start that way unless told otherwise.
+
+- **Sidecar bound beyond loopback, or a worker URL on `http://` to another machine:** set `MEMORIA_QMD_ALLOW_PLAINTEXT_LAN=1`, or pass `-AllowPlaintextLan` to the install script. It states that the link is already private. Without it the start fails with a message naming the setting.
+- **The choice:** a WireGuard tunnel between the machines keeps the addresses and needs no changes here, and the setting still applies because the tunnel's address is not loopback. A TLS reverse proxy in front means binding loopback, so the setting is not needed for the sidecar, and pointing clients at `https://`.
+
+**Upgrading a LAN install:** it stops starting until one of these is chosen.
+
+**Host names.** A request must arrive under an IP address, `localhost`, or a name in `MEMORIA_QMD_ALLOWED_HOSTS`, and any request carrying an `Origin` is refused. That stops a web page reaching the service through DNS rebinding. A deployment calling by name, such as `host.docker.internal`, must list it or gets a 421 that says so.
+
+**Secrets.** With no secret set, each run makes its own and nothing else can call it. Placeholders, the old README example and repeated characters are refused.
+
+## Memory and large documents
+
+Run the sidecar with `--max-old-space-size=4096`. The install script sets it; elsewhere use `node --max-old-space-size=4096 dist/main.js`. This is a ceiling, not a target. Node's default on a smaller host can be lower, and a search that reaches the limit kills the process.
+
+`sidecar/scripts/patch-qmd.ts` runs on install and fixes the SDK's scans. Without it, one search over six 21 MB documents froze for 35 s and needed over 1 GB of heap. With it, the same search took 2 to 3 s and fitted in 512 MiB, and other requests get a turn between documents, so the longest stall was about a second.
+
+`POST /documents` refuses anything over `MEMORIA_QMD_MAX_DOCUMENT_BYTES` (2 MiB) with a 413 `document_too_large`, and writes nothing. A file already on disk stays indexed and searchable at any size: the cap applies only at ingest, and the fixes above are what make those files safe. One limit remains: a file of over about 16 MiB that is nearly all blank lines overflows the chunker's break-point table, so a search reaching it fails with a 500. It cannot arrive through the API.
+
+**Why not a worker thread.** Running the SDK in one was evaluated and not adopted. With the scans fixed the longest stall is about a second. It would not reliably contain an out-of-memory error either: of four allocation patterns tried, three failed only the worker and one killed the whole process. It would also mean making about 25 backend methods asynchronous and copying 21 MB bodies between threads.
 
 ## Reverse proxy and TLS
 

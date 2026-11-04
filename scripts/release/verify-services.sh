@@ -39,6 +39,8 @@ test "$reported" = "$version"
 
 (cd "$work/sidecar" && npm ci --omit=dev --no-audit --no-fund)
 cd "$work/sidecar"
+# Installing is what applies the SDK patch, so a package missing it must not pass.
+grep -q memoria-patched node_modules/@tobilu/qmd/dist/store.js
 # The sidecar opens an existing index and never creates one. This also loads the
 # native dependencies that were just installed.
 db="$work/verify.sqlite"

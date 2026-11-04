@@ -38,17 +38,6 @@ test("every route except /health and /openapi.json requires the bearer secret", 
   }
 });
 
-test("without a configured secret on loopback, routes are open", async () => {
-  const backend = new FakeBackend({ collections: [], docs: [] });
-  const app = await buildApp({ backend, config: testConfig({ secret: undefined }), logger: false });
-  try {
-    const r = await app.inject({ method: "GET", url: "/collections" });
-    assert.equal(r.statusCode, 200);
-  } finally {
-    await app.close();
-  }
-});
-
 // --- system --------------------------------------------------------------------
 
 test("/health, /ready and /status report process, model and index state", async () => {

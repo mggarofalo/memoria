@@ -109,3 +109,7 @@ Tests launch `test/fixtures/fake-llama-server.ts` as a real child process in pla
 | `src/server.ts` | HTTP routes, auth, validation, concurrency limits. |
 | `src/probes.ts` | Load, thermal and VRAM readings, and the `busy` policy. |
 | `scripts/smoke.ts` | Exercises every endpoint of a running worker. |
+
+## Requests
+
+`POST` bodies must be sent as `application/json`, or the worker answers 415. A browser can send `text/plain` to any address with no preflight, and cannot send this. The worker speaks plain http, so reach it over loopback, WireGuard or a TLS proxy: see [`docs/deployment.md`](../docs/deployment.md).

@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import type { Capability, PoolWorkerConfig } from "./llm/types.ts";
 
 /**
@@ -13,8 +14,20 @@ export interface SidecarConfig {
   port: number;
   /** Path to QMD's index.sqlite. Undefined means the SDK default (~/.cache/qmd/index.sqlite). */
   dbPath: string | undefined;
-  /** Shared secret for `Authorization: Bearer`. Required unless bound to loopback. */
-  secret: string | undefined;
+  /** Shared secret for `Authorization: Bearer`. There always is one: see `secretGenerated`. */
+  secret: string;
+  /** None was set, on loopback, so this run made its own. */
+  secretGenerated: boolean;
+  /** DNS names a request may arrive under. An IP address is always fine. */
+  allowedHosts: ReadonlySet<string>;
+  /** Largest document `POST /documents` takes. */
+  maxDocumentBytes: number;
+  /** Time a client has to finish sending its request headers. */
+  headersTimeoutMs: number;
+  /** Time a client has to finish sending a whole request. */
+  requestTimeoutMs: number;
+  /** Connections held at once. */
+  maxConnections: number;
   /** Disable the SDK's five-minute idle unload so models stay resident. */
   keepWarm: boolean;
   /** Run one reranked query at startup so the first real request hits the warm path. */
@@ -62,7 +75,7 @@ export type LlmConfig =
 const CAPABILITIES: readonly Capability[] = ["embed", "rerank", "generate"];
 
 /** Checks one worker's address. Messages never quote the URL: it could hold a credential. */
-function checkWorkerUrl(raw: string, setting: string): URL {
+function checkWorkerUrl(raw: string, setting: string, env: NodeJS.ProcessEnv): URL {
   let url: URL;
   try {
     url = new URL(raw);
@@ -72,6 +85,7 @@ function checkWorkerUrl(raw: string, setting: string): URL {
   if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error(`${setting} must be http or https`);
   if (url.username !== "" || url.password !== "") throw new Error(`${setting} must not contain credentials; use a token setting`);
   if (url.search !== "" || url.hash !== "") throw new Error(`${setting} must not contain a query or fragment`);
+  if (url.protocol === "http:" && !isLoopbackHost(url.hostname.replace(/^\[|\]$/g, ""))) requirePlaintextOptIn(env, `${setting} is plain http to another machine`);
   return url;
 }
 
@@ -79,7 +93,7 @@ function checkWorkerToken(token: string | undefined, url: URL, setting: string):
   if (token === undefined && !isLoopbackHost(url.hostname.replace(/^\[|\]$/g, ""))) {
     throw new Error(`${setting} is required when the worker is not on loopback`);
   }
-  if (token !== undefined && token.length < 16) throw new Error(`${setting} must be at least 16 characters`);
+  if (token !== undefined) checkSecretStrength(token, setting);
 }
 
 /**
@@ -104,7 +118,7 @@ function workerFromEntry(env: NodeJS.ProcessEnv, item: unknown, at: string, name
   if ("token" in w) throw new Error(`${at} must not hold a token; name an environment variable with tokenEnv`);
   const name = readWorkerName(w.name, at, names);
   if (typeof w.url !== "string") throw new Error(`${at}.url is required`);
-  const url = checkWorkerUrl(w.url, `${at}.url`);
+  const url = checkWorkerUrl(w.url, `${at}.url`, env);
   const token = readTokenEnv(env, w.tokenEnv, at);
   checkWorkerToken(token, url, `${at}.tokenEnv`);
   return {
@@ -149,6 +163,29 @@ function readCount(value: unknown, fallback: number, name: string, min: number, 
   return value;
 }
 
+/** Text from examples and templates, which someone may well have pasted in as it stood. */
+const PLACEHOLDERS = ["a-long-random", "at-least-16", "changeme", "change-me", "replace-me", "replaceme", "placeholder", "your-secret", "yoursecret", "example", "password"];
+const MIN_SECRET_LENGTH = 16;
+const MIN_DISTINCT_CHARACTERS = 8;
+
+/** Only says what is wrong with a secret, never what the secret is. */
+function checkSecretStrength(secret: string, setting: string): void {
+  if (secret.length < MIN_SECRET_LENGTH) throw new Error(`${setting} must be at least ${MIN_SECRET_LENGTH} characters`);
+  const lower = secret.toLowerCase();
+  const weak = new Set(lower).size < MIN_DISTINCT_CHARACTERS || PLACEHOLDERS.some((p) => lower.includes(p));
+  if (weak) throw new Error(`${setting} is too weak: it looks like a placeholder or repeats itself. Generate one: node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"`);
+}
+
+/**
+ * The shared secret and whole transcripts would cross the network in clear. That can be
+ * a fair choice on a link that is already private, such as WireGuard, but it has to be
+ * someone's choice. See docs/deployment.md.
+ */
+function requirePlaintextOptIn(env: NodeJS.ProcessEnv, what: string): void {
+  if (readBool(env.MEMORIA_QMD_ALLOW_PLAINTEXT_LAN, false)) return;
+  throw new Error(`${what}, so the secret and transcripts would cross the network in clear. Use TLS, or a private link such as WireGuard and set MEMORIA_QMD_ALLOW_PLAINTEXT_LAN=1 to say so.`);
+}
+
 const LOOPBACK_HOSTS = new Set(["localhost", "::1", "0:0:0:0:0:0:0:1"]);
 
 export function isLoopbackHost(host: string): boolean {
@@ -190,7 +227,7 @@ function loadWorkers(env: NodeJS.ProcessEnv): PoolWorkerConfig[] {
   if (list && raw) throw new Error("Set MEMORIA_QMD_WORKERS or MEMORIA_QMD_WORKER_URL, not both");
   if (list) return loadWorkerList(env, list);
   if (!raw) throw new Error("MEMORIA_QMD_WORKERS or MEMORIA_QMD_WORKER_URL is required when MEMORIA_QMD_LLM=remote");
-  const url = checkWorkerUrl(raw, "MEMORIA_QMD_WORKER_URL");
+  const url = checkWorkerUrl(raw, "MEMORIA_QMD_WORKER_URL", env);
   const token = resolveSecret(env, "MEMORIA_QMD_WORKER_TOKEN");
   checkWorkerToken(token, url, "MEMORIA_QMD_WORKER_TOKEN");
   return [{ name: url.host, url: raw, token, capabilities: [...CAPABILITIES], priority: 100, maxConcurrent: 4 }];
@@ -231,9 +268,16 @@ function checkSecret(secret: string | undefined, host: string): void {
         "QMD has no auth of its own and the corpus contains credentials.",
     );
   }
-  if (secret !== undefined && secret.length < 16) {
-    throw new Error("MEMORIA_QMD_SECRET must be at least 16 characters");
-  }
+  if (secret !== undefined) checkSecretStrength(secret, "MEMORIA_QMD_SECRET");
+}
+
+function checkBindAddress(host: string, env: NodeJS.ProcessEnv): void {
+  if (!isLoopbackHost(host)) requirePlaintextOptIn(env, `The sidecar serves plain http, and MEMORIA_QMD_HOST (${host}) is not loopback`);
+}
+
+function readAllowedHosts(env: NodeJS.ProcessEnv): ReadonlySet<string> {
+  const listed = (env.MEMORIA_QMD_ALLOWED_HOSTS ?? "").split(",").map((h) => h.trim().toLowerCase()).filter((h) => h !== "");
+  return new Set(["localhost", ...listed]);
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): SidecarConfig {
@@ -241,6 +285,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): SidecarConfig 
   if (host === "") throw new Error("MEMORIA_QMD_HOST must not be empty");
   const secret = resolveSecret(env, "MEMORIA_QMD_SECRET");
   checkSecret(secret, host);
+  checkBindAddress(host, env);
   const reindexDebounceMs = readInt(env.MEMORIA_QMD_REINDEX_DEBOUNCE_MS, 60_000, "MEMORIA_QMD_REINDEX_DEBOUNCE_MS", 0, 3_600_000);
   const reindexMaxWaitMs = readInt(env.MEMORIA_QMD_REINDEX_MAX_WAIT_MS, 300_000, "MEMORIA_QMD_REINDEX_MAX_WAIT_MS", 0, 86_400_000);
   if (reindexMaxWaitMs < reindexDebounceMs) {
@@ -250,7 +295,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): SidecarConfig 
     host,
     port: readInt(env.MEMORIA_QMD_PORT, 8282, "MEMORIA_QMD_PORT", 1, 65535),
     dbPath: trimmed(env.MEMORIA_QMD_DB_PATH),
-    secret,
+    secret: secret ?? randomBytes(32).toString("base64url"),
+    secretGenerated: secret === undefined,
+    allowedHosts: readAllowedHosts(env),
+    maxDocumentBytes: readInt(env.MEMORIA_QMD_MAX_DOCUMENT_BYTES, 2 * 1024 * 1024, "MEMORIA_QMD_MAX_DOCUMENT_BYTES", 1024, 256 * 1024 * 1024),
+    headersTimeoutMs: readInt(env.MEMORIA_QMD_HEADERS_TIMEOUT_MS, 10_000, "MEMORIA_QMD_HEADERS_TIMEOUT_MS", 100, 120_000),
+    requestTimeoutMs: readInt(env.MEMORIA_QMD_REQUEST_TIMEOUT_MS, 300_000, "MEMORIA_QMD_REQUEST_TIMEOUT_MS", 1_000, 3_600_000),
+    maxConnections: readInt(env.MEMORIA_QMD_MAX_CONNECTIONS, 1024, "MEMORIA_QMD_MAX_CONNECTIONS", 1, 65_536),
     keepWarm: readBool(env.MEMORIA_QMD_KEEP_WARM, true),
     warmup: readBool(env.MEMORIA_QMD_WARMUP, true),
     logLevel: trimmed(env.MEMORIA_QMD_LOG_LEVEL) ?? "info",

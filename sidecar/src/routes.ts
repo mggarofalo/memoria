@@ -80,7 +80,14 @@ function checkedSearchInput(body: SearchBody): string | null {
   const text = body.query?.trim() ?? "";
   const hasSearches = Array.isArray(body.searches) && body.searches.length > 0;
   if ((text !== "") === hasSearches) throw new HttpError(400, "validation", "Provide exactly one of `query` or `searches`");
+  checkSearchable(text, body.searches);
   return text === "" ? null : text;
+}
+
+/** Quotes or punctuation alone are a syntax error in the search engine, and that is the caller's to fix. */
+function checkSearchable(query: string, searches: SearchQuery[] | undefined): void {
+  const lexical = [...(searches ?? []).filter((s) => s.type === "lex").map((s) => s.query), ...(query === "" ? [] : [query])];
+  if (lexical.some((q) => !/[\p{L}\p{N}]/u.test(q))) throw new HttpError(400, "validation", "A search needs at least one letter or number");
 }
 
 /** Bounds are validated up front so a bad date is a 400, not an empty result. */
@@ -210,7 +217,12 @@ interface ReindexBody {
 
 // --- routes ------------------------------------------------------------------
 
+/** Matches the nine digits a line suffix may have. */
+const MAX_LINE = 999_999_999;
+
 function definedRange(fromLine: number | undefined, maxLines: number | undefined): { fromLine?: number; maxLines?: number } {
+  // A long enough string of digits coerces to Infinity, and gets past the schema's maximum.
+  if (!Number.isFinite(fromLine ?? 0) || !Number.isFinite(maxLines ?? 0)) throw new HttpError(400, "validation", "A line number is too large");
   return { ...(fromLine !== undefined ? { fromLine } : {}), ...(maxLines !== undefined ? { maxLines } : {}) };
 }
 
@@ -555,8 +567,8 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         querystring: {
           type: "object",
           properties: {
-            fromLine: { type: "integer", minimum: 1 },
-            maxLines: { type: "integer", minimum: 1 },
+            fromLine: { type: "integer", minimum: 1, maximum: MAX_LINE },
+            maxLines: { type: "integer", minimum: 1, maximum: MAX_LINE },
             lineNumbers: { type: "boolean", default: false, description: "Prefix each body line with `N: `." },
             body: { type: "boolean", default: true, description: "false returns metadata only." },
             collections: {
@@ -612,7 +624,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
             maxBytes: { type: "integer", minimum: 1, maximum: MAX_BYTES_CEILING, default: 65536 },
             maxTotalBytes: { type: "integer", minimum: 1, maximum: MAX_TOTAL_BYTES_CEILING, default: DEFAULT_MAX_TOTAL_BYTES, description: "Budget for all bodies in this response. Documents that would pass it are listed under `skipped` and are not read." },
             similarFiles: { type: "boolean", default: true, description: "false resolves the reference without QMD's scan of every path on a miss, and returns no suggestions. Memoria.Api always sends false." },
-            maxLines: { type: "integer", minimum: 1, description: "Truncate each body to this many lines." },
+            maxLines: { type: "integer", minimum: 1, maximum: MAX_LINE, description: "Truncate each body to this many lines." },
             lineNumbers: { type: "boolean", default: false },
             includeBody: { type: "boolean", default: true },
           },
@@ -699,9 +711,11 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       const row = (await backend.listCollections()).find((c) => c.name === collection);
       if (!row) throw new HttpError(404, "unknown_collection", `Unknown collection: ${collection}`);
       const target = resolveTarget(row.pwd, row.glob_pattern, path, backend.ignorePatterns(collection));
+      if (Buffer.byteLength(content, "utf8") > ctx.config.maxDocumentBytes) throw new HttpError(413, "document_too_large", `A document can be at most ${ctx.config.maxDocumentBytes} bytes. Split it into parts.`);
+      const parsed = ctx.metadata.parse(content);
       const written = await writeDocument(target, content, overwrite);
       const file = `${collection}/${target.relative}`;
-      const metadata = ctx.metadata.set(file, content) ?? null;
+      const metadata = ctx.metadata.store(file, parsed) ?? null;
       const job = ctx.jobs.enqueue({ collections: [collection], embed, force: false, reason: `POST /documents ${file}` }, { debounce: true });
       request.log.info({ file, bytes: written.bytes, created: written.created, jobId: job.id }, "document ingested");
       return reply.code(202).send({ collection, path: target.relative, file, bytes: written.bytes, created: written.created, metadata, job });

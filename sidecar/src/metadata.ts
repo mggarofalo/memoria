@@ -47,7 +47,9 @@ export function parseFrontmatter(text: string): Record<string, unknown> | null {
   const m = text.match(FRONTMATTER_RE);
   if (!m) return null;
   try {
-    const parsed: unknown = parseYaml(m[1]!);
+    // Duplicate-key checks are quadratic, and warnings would send frontmatter text to stderr.
+    // Not "silent", which would also accept malformed YAML instead of throwing.
+    const parsed: unknown = parseYaml(m[1]!, { uniqueKeys: false, logLevel: "error" });
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
       return parsed as Record<string, unknown>;
     }
@@ -121,11 +123,11 @@ export function parseBound(value: string, edge: "since" | "until"): number {
   const trimmed = value.trim();
   if (DATE_ONLY_RE.test(trimmed)) {
     const ms = Date.parse(`${trimmed}T00:00:00Z`);
-    if (Number.isNaN(ms)) throw new Error(`Invalid ${edge} date: ${value}`);
+    if (Number.isNaN(ms)) throw new Error(`Invalid ${edge} date: expected YYYY-MM-DD`);
     return edge === "until" ? ms + 24 * 60 * 60 * 1000 - 1 : ms;
   }
   const ms = Date.parse(trimmed);
-  if (Number.isNaN(ms)) throw new Error(`Invalid ${edge} timestamp: ${value}`);
+  if (Number.isNaN(ms)) throw new Error(`Invalid ${edge} timestamp: expected YYYY-MM-DD or an ISO timestamp`);
   return ms;
 }
 
@@ -242,7 +244,15 @@ export class MetadataIndex {
    * either path.
    */
   set(displayPath: string, text: string): DocumentMetadata | undefined {
-    const meta = metadataFromText(firstCodePoints(text, this.#headBytes));
+    return this.store(displayPath, this.parse(text));
+  }
+
+  /** What `set` would record. Ingest calls this before writing, so a bad head costs nothing on disk. */
+  parse(text: string): DocumentMetadata | undefined {
+    return metadataFromText(firstCodePoints(text, this.#headBytes));
+  }
+
+  store(displayPath: string, meta: DocumentMetadata | undefined): DocumentMetadata | undefined {
     if (meta) this.#entries.set(displayPath, meta);
     else this.#entries.delete(displayPath);
     return meta;

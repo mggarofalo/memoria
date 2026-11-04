@@ -351,3 +351,15 @@ test("an already-running llama-server can stand in for a launched one", async ()
     await host.stop();
   }
 });
+
+test("a body that is not declared JSON is refused, as a browser can send text/plain anywhere", () =>
+  withWorker(async (w) => {
+    const send = (headers: Record<string, string>) => fetch(`${w.url}/v1/embed`, { method: "POST", headers: { authorization: `Bearer ${TOKEN}`, ...headers }, body: JSON.stringify({ texts: ["x"] }) });
+    for (const type of ["text/plain", "application/x-www-form-urlencoded", "application/jsonp", "multipart/form-data"]) {
+      const refused = await send({ "content-type": type });
+      assert.equal(refused.status, 415, type);
+      assert.equal((await json(refused)).error, "unsupported_media_type");
+    }
+    assert.equal((await send({ "content-type": "application/json; charset=utf-8" })).status, 200);
+    assert.equal((await send({ "content-type": "APPLICATION/JSON" })).status, 200);
+  }));

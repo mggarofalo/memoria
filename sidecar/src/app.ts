@@ -1,4 +1,7 @@
-import Fastify, { type FastifyError, type FastifyInstance, type FastifyServerOptions } from "fastify";
+import { randomUUID } from "node:crypto";
+import { createServer } from "node:http";
+import { loggablePath, refuseAtBoundary, validRequestId } from "./boundary.ts";
+import Fastify, { type FastifyError, type FastifyInstance, type FastifyServerOptions, LogController } from "fastify";
 import swagger from "@fastify/swagger";
 import { bearerMatches } from "./auth.ts";
 import type { SidecarConfig } from "./config.ts";
@@ -113,9 +116,18 @@ export async function buildApp(options: BuildAppOptions): Promise<App> {
     logger: options.logger ?? false,
     bodyLimit: config.bodyLimitBytes,
     trustProxy: false,
+    // Logged by the hook below instead: after the auth check, bounded, with no query string.
+    logController: new LogController({ disableRequestLogging: true }),
     // Memoria.Api sends its W3C trace id here; adopting it as reqId lets one id
     // join the API's request log line and this process's pino lines.
-    requestIdHeader: "request-id",
+    requestIdHeader: false,
+    genReqId: (request) => validRequestId(request.headers["request-id"]) ?? randomUUID(),
+    requestTimeout: config.requestTimeoutMs,
+    serverFactory: (handler) => {
+      const server = createServer({ headersTimeout: config.headersTimeoutMs, requestTimeout: config.requestTimeoutMs, connectionsCheckingInterval: Math.min(config.headersTimeoutMs, 5_000) }, handler);
+      server.maxConnections = config.maxConnections;
+      return server;
+    },
     ajv: { customOptions: { removeAdditional: false, useDefaults: true, coerceTypes: "array", allErrors: false } },
   });
   const app = Object.assign(fastify, { ctx }) as App;
@@ -175,7 +187,11 @@ export async function buildApp(options: BuildAppOptions): Promise<App> {
 
   // --- auth -------------------------------------------------------------------
   app.addHook("onRequest", async (request, reply) => {
-    if (config.secret === undefined) return;
+    const refusal = refuseAtBoundary({ host: request.headers.host, origin: request.headers.origin }, config.allowedHosts);
+    if (refusal) {
+      await reply.code(refusal.statusCode).send({ error: refusal.error, message: refusal.message });
+      return reply;
+    }
     const pathname = request.url.split("?")[0] ?? request.url;
     if (PUBLIC_PATHS.has(pathname)) return;
     if (!bearerMatches(request.headers.authorization, config.secret)) {
@@ -184,9 +200,13 @@ export async function buildApp(options: BuildAppOptions): Promise<App> {
     }
   });
 
+  app.addHook("onResponse", async (request, reply) => {
+    request.log.info({ method: request.method, path: loggablePath(request.url), status: reply.statusCode, durationMs: Math.round(reply.elapsedTime) }, "request");
+  });
+
   // --- errors -----------------------------------------------------------------
   app.setNotFoundHandler(async (request, reply) => {
-    await reply.code(404).send({ error: "no_route", message: `${request.method} ${request.url} is not a route` });
+    await reply.code(404).send({ error: "no_route", message: `${request.method} ${loggablePath(request.url)} is not a route` });
   });
 
   app.setErrorHandler(async (error: FastifyError | Error, request, reply) => {

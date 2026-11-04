@@ -92,6 +92,8 @@ export class Gate {
 }
 
 async function readJson(request: IncomingMessage, limit: number): Promise<Record<string, unknown>> {
+  // A browser can send text/plain to any address with no preflight. It cannot send this.
+  if (!/^application\/json\s*(;|$)/i.test(request.headers["content-type"] ?? "")) throw new HttpFailure(415, "unsupported_media_type", "The request body must be application/json");
   const chunks: Buffer[] = [];
   let total = 0;
   for await (const chunk of request) {

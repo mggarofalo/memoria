@@ -97,7 +97,7 @@ test("resolveSecret takes the file or the variable, and refuses both", async () 
 
 test("the sidecar's secret and worker token can come from files", async () => {
   const file = await secretFile(`${SECRET}\n`);
-  const lan = { MEMORIA_QMD_HOST: "192.168.1.20" };
+  const lan = { MEMORIA_QMD_HOST: "192.168.1.20", MEMORIA_QMD_ALLOW_PLAINTEXT_LAN: "1" };
   assert.equal(loadConfig({ ...lan, MEMORIA_QMD_SECRET_FILE: file }).secret, SECRET);
   assert.equal(loadConfig({ ...lan, MEMORIA_QMD_SECRET: SECRET }).secret, SECRET);
   assert.throws(() => loadConfig({ ...lan, MEMORIA_QMD_SECRET_FILE: file, MEMORIA_QMD_SECRET: SECRET }), /Set only one/);
@@ -105,7 +105,7 @@ test("the sidecar's secret and worker token can come from files", async () => {
   const short = await secretFile("short\n");
   assert.throws(() => loadConfig({ MEMORIA_QMD_SECRET_FILE: short }), /at least 16/);
 
-  const remote = loadConfig({ MEMORIA_QMD_LLM: "remote", MEMORIA_QMD_WORKER_URL: "http://192.168.1.20:8383", MEMORIA_QMD_WORKER_TOKEN_FILE: file });
+  const remote = loadConfig({ MEMORIA_QMD_LLM: "remote", MEMORIA_QMD_ALLOW_PLAINTEXT_LAN: "1", MEMORIA_QMD_WORKER_URL: "http://192.168.1.20:8383", MEMORIA_QMD_WORKER_TOKEN_FILE: file });
   assert.equal(remote.llm.mode === "remote" ? remote.llm.workers[0]!.token : undefined, SECRET);
   // Local mode does not read the worker settings at all.
   assert.deepEqual(loadConfig({ MEMORIA_QMD_WORKER_TOKEN_FILE: path.join(path.dirname(file), "absent") }).llm, { mode: "local" });

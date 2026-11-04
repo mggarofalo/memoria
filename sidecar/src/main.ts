@@ -17,8 +17,10 @@ export function defaultDbPath(env: NodeJS.ProcessEnv = process.env): string {
 }
 
 function logExposure(app: App, config: SidecarConfig): void {
-  if (config.secret === undefined) {
-    app.log.warn({ host: config.host }, "MEMORIA_QMD_SECRET is not set; running unauthenticated on loopback only");
+  if (config.secretGenerated) {
+    app.log.warn({ host: config.host }, "MEMORIA_QMD_SECRET is not set, so this run made its own and nothing else can call it. Set one to use this sidecar.");
+    // Only to a person's terminal. Never to a log, which is what stderr is under a service.
+    if (process.stderr.isTTY) process.stderr.write(`Secret for this run: ${config.secret}\n`);
   }
   if (!isLoopbackHost(config.host)) {
     app.log.info({ host: config.host }, "binding a routable address; bearer auth is enforced on every route except /health and /openapi.json");
