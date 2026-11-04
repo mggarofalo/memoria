@@ -22,19 +22,28 @@ public sealed class MemoriaOptions
 }
 
 /// <summary>How callers authenticate.</summary>
-public enum AuthMode
+public static class AuthModes
 {
 	/// <summary>Every <c>/v1</c> and MCP route requires a key. The default: omitting the setting fails closed.</summary>
-	ApiKey = 0,
+	public const string ApiKey = "ApiKey";
 
 	/// <summary>No authentication at all, for development on a trusted LAN. Must be set explicitly.</summary>
-	Disabled = 1,
+	public const string Disabled = "Disabled";
 }
 
 /// <summary>API keys, their rate limits and the audit log.</summary>
 public sealed class AuthOptions
 {
-	public AuthMode Mode { get; set; } = AuthMode.ApiKey;
+	/// <summary>
+	/// Exactly <see cref="AuthModes.ApiKey"/> or <see cref="AuthModes.Disabled"/>;
+	/// the validator stops the host on anything else. A string, not an enum: binding
+	/// an enum accepts <c>1</c>, <c>disabled</c>, <c> Disabled </c> and
+	/// <c>ApiKey,Disabled</c>, each of which turns authentication off.
+	/// </summary>
+	public string? Mode { get; set; } = AuthModes.ApiKey;
+
+	/// <summary>True only for the exact opt-out, so an invalid value can never open anything.</summary>
+	public bool IsDisabled => string.Equals(Mode, AuthModes.Disabled, StringComparison.Ordinal);
 
 	/// <summary>The SQLite control database holding keys and audit records. Durable state: put it on a volume, apart from QMD's index. Required in <see cref="AuthMode.ApiKey"/> mode.</summary>
 	public string? DatabasePath { get; set; }
@@ -42,6 +51,28 @@ public sealed class AuthOptions
 	public RateLimitOptions RateLimit { get; set; } = new();
 
 	public AuditOptions Audit { get; set; } = new();
+
+	public FailedAuthOptions FailedAuth { get; set; } = new();
+
+	/// <summary>
+	/// Proxies whose X-Forwarded-For is believed, as IPs or CIDR ranges. Empty by
+	/// default: the socket address is the client, and the header means nothing.
+	/// </summary>
+	public string[]? TrustedProxies { get; set; }
+}
+
+/// <summary>Per-client-address budget for failed authentication. See <c>FailedAuthLimiter</c>.</summary>
+public sealed class FailedAuthOptions
+{
+	public bool Enabled { get; set; } = true;
+
+	/// <summary>Failures one address may have per <see cref="Window"/> before its credentials stop being looked up.</summary>
+	public int PermitLimit { get; set; } = 20;
+
+	public TimeSpan Window { get; set; } = TimeSpan.FromMinutes(1);
+
+	/// <summary>Addresses tracked at once. A flood of distinct addresses cannot grow memory past this.</summary>
+	public int MaxTrackedAddresses { get; set; } = 10_000;
 }
 
 /// <summary>Per-key request limits. Requests without a key are not limited here; they cannot reach the corpus.</summary>
@@ -63,6 +94,9 @@ public sealed class AuditOptions
 
 	/// <summary>Days to keep audit records. Zero or less keeps them forever.</summary>
 	public int RetentionDays { get; set; } = 90;
+
+	/// <summary>Records kept per key, newest first, so a burst from one key cannot grow the table without bound or evict another key's history.</summary>
+	public int MaxRowsPerKey { get; set; } = 100_000;
 }
 
 /// <summary>The outward MCP server Claude clients connect to.</summary>

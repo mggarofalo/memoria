@@ -263,9 +263,64 @@ Rate limits and the audit trail key on the API key, so they need nothing from th
 proxy. The proxy must terminate TLS: a key on plain HTTP is readable by anyone on
 the path. Do not log the `Authorization` header in the proxy's access log.
 
+### Tell the API who its proxy is
+
+**This is required once the proxy host exists.** Failed authentication is limited
+per client address. With `Memoria:Auth:TrustedProxies` empty the API treats the
+socket peer as the client, and behind a proxy that peer is the proxy, so every
+caller shares one budget: 20 bad tokens from anyone would lock out everyone, valid
+keys included, for the rest of the minute. The API logs a warning naming the address
+when a budget runs out; if that address is the proxy's, this setting is missing.
+
+1. Find the address the API sees. Give nginx-proxy-manager a fixed address on a
+   user-defined Docker network and use that, or use the network's whole subnet if
+   nothing untrusted shares it (`docker network inspect <network>`). If the API is
+   reached through a published port instead of that network, the peer is usually the
+   Docker gateway, not the proxy container. Confirm with `RemoteIp` in the API's log.
+2. Set it:
+
+   ```bash
+   MEMORIA_TRUSTED_PROXY=172.20.0.2 docker compose -f deploy/compose.yaml up -d
+   ```
+
+   More than one entry: `Memoria__Auth__TrustedProxies__0`, `__1`, and so on.
+3. The proxy must send this header, and a custom config must not replace it. Check
+   that your nginx-proxy-manager version does, in `conf.d/include/proxy.conf`:
+
+   ```nginx
+   proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+   ```
+
+   That appends the peer nginx sees to whatever the client sent. The API reads the
+   chain from the right and stops at the first address that is not a trusted proxy,
+   so anything a client writes on the left is ignored.
+4. If Cloudflare or another proxy sits in front of nginx-proxy-manager, what nginx
+   appends depends on its `real_ip` settings. Either nginx resolves the real client,
+   or you add the outer proxy's ranges to `TrustedProxies`. Otherwise every client
+   looks like that proxy.
+5. Check it: send a bad token through the proxy, and confirm the `RemoteIp` in the
+   API's request log is your address, not the proxy's. Then send it again with
+   `X-Forwarded-For: 192.0.2.1` and confirm `RemoteIp` does not change. This check is
+   what counts; the steps above only explain it.
+
+Never trust a range that an untrusted client can connect from, and make sure the API's
+port cannot be reached except through the proxy. A `/0` range is refused at startup.
+
+This limit protects the API from one address at a time. A flood from many addresses
+stays within each one's budget, so limit connections at the proxy as well, for example
+with `limit_req` in the proxy host's custom config.
+
 `/ready` stays anonymous so an orchestrator can probe it, and tells anonymous
 callers only `ready` or `not_ready`. See
 [configuration.md](configuration.md#anonymous-routes).
+
+## Upgrade order
+
+Upgrade the sidecar before the API. The API sends a collection-scoped key's allowlist
+with each document read, and the sidecar's strict body schema makes an older sidecar
+refuse scoped batch reads with `400`. An older sidecar also ignores the allowlist on
+single-document reads and has no glob grammar of its own, so scoped callers would be
+back to QMD's global lookup for as long as the two are mismatched.
 
 ## Exposure is gated
 

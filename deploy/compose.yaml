@@ -23,6 +23,9 @@ services:
       Memoria__Sidecar__ReadyRequiresModels: "true"
       Memoria__Search__RerankByDefault: "true"
       Memoria__Auth__DatabasePath: /data/control.db
+      # The reverse proxy's address as this container sees it. Required once the
+      # proxy host exists; without it all clients share one failed-auth budget.
+      Memoria__Auth__TrustedProxies__0: ${MEMORIA_TRUSTED_PROXY:-}
     volumes:
       # API keys and the audit log. Durable and not rebuildable, unlike QMD's
       # index: losing this volume revokes every key. Keep it on a local disk.

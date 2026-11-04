@@ -26,7 +26,8 @@ public static class DocumentEndpoints
 			.WithSummary("Get several documents")
 			.WithDescription(
 				"Batch fetch by a list of references (paths or docids), by a glob such as `claude-sessions/2026-05*.md`, or both. "
-				+ "Bodies are capped at `maxBytes` each (default 64 KiB); documents over the cap are listed under `skipped`. "
+				+ "A glob may use only `*`, `?` and whole-segment `**`; braces, brackets and extglobs are refused with 400. "
+				+ "Bodies are capped at `maxBytes` each (default 64 KiB, at most 1 MiB); documents over the cap are listed under `skipped`. "
 				+ "For a collection-scoped key every list is filtered per result and `errors` is always empty: "
 				+ "a reference that matched nothing the key may read is simply absent.")
 			.WithTags("Documents")
@@ -64,35 +65,14 @@ public static class DocumentEndpoints
 		ScopedCorpus corpus,
 		CancellationToken cancellationToken)
 	{
-		Dictionary<string, string[]> errors = [];
-		bool hasIds = request.Ids is { Count: > 0 };
-		bool hasPattern = !string.IsNullOrWhiteSpace(request.Pattern);
-
-		if (!hasIds && !hasPattern)
-		{
-			errors["ids"] = ["Provide `ids`, `pattern`, or both."];
-		}
-
-		if (request.Ids is { Count: > 200 })
-		{
-			errors["ids"] = ["At most 200 ids per request."];
-		}
-
-		if (request.MaxBytes is < 1)
-		{
-			errors["maxBytes"] = ["maxBytes must be at least 1."];
-		}
-
-		if (request.MaxLines is < 1)
-		{
-			errors["maxLines"] = ["maxLines must be at least 1."];
-		}
-
+		Dictionary<string, string[]> errors = MultiGetPolicy.Validate(request.Ids, request.Pattern, request.MaxBytes, request.MaxLines);
 		if (errors.Count > 0)
 		{
 			return TypedResults.ValidationProblem(errors);
 		}
 
+		bool hasIds = request.Ids is { Count: > 0 };
+		bool hasPattern = !string.IsNullOrWhiteSpace(request.Pattern);
 		return TypedResults.Ok(await corpus.MultiGetAsync(new SidecarMultiGetRequest
 		{
 			Ids = hasIds ? request.Ids : null,

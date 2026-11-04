@@ -52,8 +52,9 @@ public sealed class ScopedCorpus(IMemoriaQmdClient sidecar, ICallerScope scope, 
 	/// </summary>
 	public async Task<Document?> GetDocumentAsync(string reference, SidecarDocumentQuery query, CancellationToken cancellationToken)
 	{
+		ArgumentNullException.ThrowIfNull(query);
 		audit.SetQuery(reference);
-		if (ReadsNothing)
+		if (ReadsNothing || reference.Length > MultiGetPolicy.MaxReferenceLength)
 		{
 			audit.SetResult([], 0);
 			return null;
@@ -62,7 +63,10 @@ public sealed class ScopedCorpus(IMemoriaQmdClient sidecar, ICallerScope scope, 
 		SidecarDocument document;
 		try
 		{
-			document = await sidecar.GetDocumentAsync(reference, query, cancellationToken);
+			// The allowlist goes to the sidecar so it never looks outside it. A
+			// lookup it had to resolve globally would answer faster for a document
+			// that exists than for one that does not, and would read its body.
+			document = await sidecar.GetDocumentAsync(reference, query with { Collections = scope.Collections?.ToArray() }, cancellationToken);
 		}
 		catch (SidecarException ex) when (IsRestricted && ex.StatusCode == HttpStatusCode.NotFound)
 		{
@@ -96,7 +100,7 @@ public sealed class ScopedCorpus(IMemoriaQmdClient sidecar, ICallerScope scope, 
 			return new MultiGetResult([], [], []);
 		}
 
-		SidecarMultiGetResponse response = await sidecar.MultiGetAsync(request, cancellationToken);
+		SidecarMultiGetResponse response = await sidecar.MultiGetAsync(request with { Collections = scope.Collections?.ToArray() }, cancellationToken);
 		SidecarDocument[] docs = response.Docs.Where(doc => scope.Allows(doc.Collection)).ToArray();
 		audit.SetResult(docs.Select(static doc => doc.Collection), docs.Length);
 		return new MultiGetResult(

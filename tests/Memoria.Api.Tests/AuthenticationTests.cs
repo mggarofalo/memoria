@@ -370,12 +370,31 @@ public sealed class AuthConfigurationTests
 		Assert.Contains("Memoria:Auth:DatabasePath", failure.ToString());
 	}
 
-	[Fact]
-	public void UnknownMode_FailsAtStartup()
+	[Theory]
+	[InlineData("Off")]
+	[InlineData("1")]
+	[InlineData("0")]
+	[InlineData("disabled")]
+	[InlineData("DISABLED")]
+	[InlineData("apikey")]
+	[InlineData(" Disabled ")]
+	[InlineData("ApiKey,Disabled")]
+	[InlineData("Disabled,ApiKey")]
+	[InlineData("")]
+	[InlineData(" ")]
+	public void AnythingButTheExactMode_FailsAtStartup(string mode)
 	{
-		using UnconfiguredFactory factory = new(builder => builder.UseSetting("Memoria:Auth:Mode", "Off"));
+		// A database is configured, so only the mode itself can be what stops the host.
+		string path = Path.Combine(Path.GetTempPath(), "memoria-tests", Guid.NewGuid().ToString("N"), "control.db");
+		using UnconfiguredFactory factory = new(builder =>
+		{
+			builder.UseSetting("Memoria:Auth:DatabasePath", path);
+			builder.UseSetting("Memoria:Auth:Mode", mode);
+		});
 
-		Assert.ThrowsAny<Exception>(() => factory.CreateClient());
+		Exception failure = Assert.ThrowsAny<Exception>(() => factory.CreateClient());
+
+		Assert.Contains("Memoria:Auth:Mode must be exactly", failure.ToString());
 	}
 
 	[Fact]

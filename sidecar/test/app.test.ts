@@ -353,7 +353,7 @@ test("POST /docs:multiGet resolves ids and pattern separately and merges them by
     assert.equal(both.statusCode, 200, both.body);
     assert.deepEqual(paths(both.json()), ["2026-03-05_beta.md", "2026-08-31_gamma.md"]);
     assert.deepEqual(both.json().errors, []);
-    assert.deepEqual(backend.calls.filter((c) => c.method === "multiGet").map((c) => c.args[0]), ["claude-sessions/2026-03*.md", `${gamma.docid},`]);
+    assert.deepEqual(backend.calls.filter((c) => c.method === "multiGet").map((c) => c.args[0]), ["qmd://claude-sessions/2026-03-05_beta.md,", `${gamma.docid},`]);
 
     // A file selected by both comes back once.
     const overlap = await multiGet({ pattern: "claude-sessions/2026-*.md", ids: [alpha.docid, "claude-sessions/2026-02-11_alpha.md"] });

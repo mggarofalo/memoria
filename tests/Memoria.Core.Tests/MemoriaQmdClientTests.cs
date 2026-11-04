@@ -102,6 +102,14 @@ public sealed class MemoriaQmdClientTests
 		Assert.Null(document.Metadata!.Branch);
 	}
 
+	[Fact]
+	public void DocumentPath_RepeatsCollections_Encoded()
+	{
+		string path = MemoriaQmdClient.DocumentPath("a.md", new SidecarDocumentQuery(Body: false, Collections: ["x y", "z/&"]));
+
+		Assert.Equal("docs/a.md?body=false&collections=x%20y&collections=z%2F%26", path);
+	}
+
 	[Theory]
 	[InlineData("../status")]
 	[InlineData("./status")]

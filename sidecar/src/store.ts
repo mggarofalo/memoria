@@ -67,6 +67,13 @@ export type MultiGetEntry =
   | { doc: DocumentInfo; skipped: false }
   | { doc: Pick<DocumentInfo, "filepath" | "displayPath">; skipped: true; skipReason: string };
 
+/** An active document's identity, with nothing read from its content. */
+export interface DocumentRef {
+  collection: string;
+  path: string;
+  hash: string;
+}
+
 export interface CollectionRow {
   name: string;
   pwd: string;
@@ -137,6 +144,8 @@ export interface QmdBackend extends MetadataSource {
   get(reference: string): Promise<DocumentInfo | DocumentLookupError>;
   getDocumentBody(filepath: string, options: { fromLine?: number; maxLines?: number }): Promise<string | null>;
   multiGet(pattern: string, options: { includeBody: boolean; maxBytes: number }): Promise<{ docs: MultiGetEntry[]; errors: string[] }>;
+  /** Active documents, of these collections only when given. Touches no other collection's rows. */
+  listDocumentRefs(collections?: readonly string[]): Promise<DocumentRef[]>;
   listCollections(): Promise<CollectionRow[]>;
   /** The collection's operator-configured ignore patterns, which QMD's scan applies. */
   ignorePatterns(collection: string): string[];
@@ -422,79 +431,83 @@ export async function openBackend(options: OpenBackendOptions): Promise<OpenedBa
   };
 
   const llmHealth = (): LlmHealth => (remote ? remoteHealth(remote, setAside()) : { mode: "local", degraded: false, unavailable: [], workersUp: 0, workersTotal: 0, embedDisagreement: [], documentsSetAside: 0 });
+  const refsInCollection = db.prepare(`SELECT collection, path, hash FROM documents WHERE collection = ? AND active = 1 ORDER BY path`);
+  const allRefs = db.prepare(`SELECT collection, path, hash FROM documents WHERE active = 1 ORDER BY collection, path`);
 
   return {
-    dbPath: store.dbPath,
-    search: async (o) => (await searchDetailed(o)).hits,
-    searchDetailed,
-    llmHealth,
-    workers: () => remote?.pool.workers() ?? [],
-    poolLoad: () => remote?.pool.load() ?? null,
-    get: (reference) => store.get(reference, { includeBody: false }),
-    getDocumentBody: (filepath, o) => store.getDocumentBody(filepath, o),
-    multiGet: (pattern, o) => store.multiGet(pattern, o),
-    listCollections: () => store.listCollections(),
-    ignorePatterns: (collection) => {
-      const row = ignoreStatement.get(collection) as { patterns: string | null } | undefined;
-      return row?.patterns ? (JSON.parse(row.patterns) as string[]) : [];
+  dbPath: store.dbPath,
+  search: async (o) => (await searchDetailed(o)).hits,
+  searchDetailed,
+  llmHealth,
+  workers: () => remote?.pool.workers() ?? [],
+  poolLoad: () => remote?.pool.load() ?? null,
+  get: (reference) => store.get(reference, { includeBody: false }),
+  getDocumentBody: (filepath, o) => store.getDocumentBody(filepath, o),
+  multiGet: (pattern, o) => store.multiGet(pattern, o),
+  listDocumentRefs: async (collections) =>
+    (collections ? collections.flatMap((c) => refsInCollection.all(c)) : allRefs.all()) as DocumentRef[],
+  listCollections: () => store.listCollections(),
+  ignorePatterns: (collection) => {
+    const row = ignoreStatement.get(collection) as { patterns: string | null } | undefined;
+    return row?.patterns ? (JSON.parse(row.patterns) as string[]) : [];
+  },
+  listContexts: () => store.listContexts(),
+  getDefaultCollectionNames: () => store.getDefaultCollectionNames(),
+  update: async (o) => {
+    const r = await store.update(o.collections ? { collections: o.collections } : {});
+    return {
+      collections: r.collections,
+      indexed: r.indexed,
+      updated: r.updated,
+      unchanged: r.unchanged,
+      removed: r.removed,
+      skipped: r.skipped,
+      needsEmbedding: Math.max(0, r.needsEmbedding - setAside()),
+    };
+  },
+  purgeCache: () => withShortBusyTimeout(db as never, () => Number(db.prepare("DELETE FROM llm_cache").run().changes)),
+  deadLetters: () => wired?.deadLetters() ?? [],
+  clearDeadLetters: () => wired?.clearDeadLetters() ?? 0,
+  embed: async (o) => {
+    if (wired) return wired.embed(o);
+    const r = await store.embed({ force: o.force, ...(o.collection !== undefined ? { collection: o.collection } : {}) });
+    return { docsProcessed: r.docsProcessed, chunksEmbedded: r.chunksEmbedded, errors: r.errors, durationMs: r.durationMs };
+  },
+  getStatus: async () => {
+    const status = await store.getStatus();
+    const documentsSetAside = setAside();
+    return { ...status, needsEmbedding: Math.max(0, status.needsEmbedding - documentsSetAside), documentsSetAside };
+  },
+  readDocumentHeads: (maxBytes: number): DocumentHead[] => {
+    const rows = headsStatement.all(maxBytes) as HeadRow[];
+    return rows.map((r) => ({ collection: r.collection, path: r.path, head: r.head ?? "" }));
+  },
+  snippet: (body, query, maxLen, chunkPos, chunkLen, intent) => {
+    const s = qmd.extractSnippet(body, query, maxLen, chunkPos, chunkLen, intent);
+    return { line: s.line, snippet: s.snippet };
+  },
+  addLineNumbers: (text, startLine) => qmd.addLineNumbers(text, startLine),
+  models: () => (remote ? remoteModelStatus(remote, llm as unknown as LlmSurface) : modelStatus(llm)),
+  close: async () => {
+    wired?.close();
+    // store.close() disposes the SDK's own instance, which is also the fallback.
+    await store.close();
+  },
+  llm: {
+    mode: llmOptions.mode,
+    rerankTransport: remote ? remote.transportName : "in-process",
+    embedBatch: (texts) => active.embedBatch(texts),
+    rerank: (query, documents) => active.rerank(query, documents),
+    expandQuery: (query) => active.expandQuery(query),
+    clearCache: () => {
+      db.exec("DELETE FROM llm_cache");
     },
-    listContexts: () => store.listContexts(),
-    getDefaultCollectionNames: () => store.getDefaultCollectionNames(),
-    update: async (o) => {
-      const r = await store.update(o.collections ? { collections: o.collections } : {});
-      return {
-        collections: r.collections,
-        indexed: r.indexed,
-        updated: r.updated,
-        unchanged: r.unchanged,
-        removed: r.removed,
-        skipped: r.skipped,
-        needsEmbedding: Math.max(0, r.needsEmbedding - setAside()),
-      };
+    cacheEntries: () => (db.prepare("SELECT COUNT(*) AS n FROM llm_cache").get() as { n: number }).n,
+    refreshWorkers: async () => {
+      await remote?.refreshStatus();
     },
-    purgeCache: () => withShortBusyTimeout(db as never, () => Number(db.prepare("DELETE FROM llm_cache").run().changes)),
-    deadLetters: () => wired?.deadLetters() ?? [],
-    clearDeadLetters: () => wired?.clearDeadLetters() ?? 0,
-    embed: async (o) => {
-      if (wired) return wired.embed(o);
-      const r = await store.embed({ force: o.force, ...(o.collection !== undefined ? { collection: o.collection } : {}) });
-      return { docsProcessed: r.docsProcessed, chunksEmbedded: r.chunksEmbedded, errors: r.errors, durationMs: r.durationMs };
-    },
-    getStatus: async () => {
-      const status = await store.getStatus();
-      const documentsSetAside = setAside();
-      return { ...status, needsEmbedding: Math.max(0, status.needsEmbedding - documentsSetAside), documentsSetAside };
-    },
-    readDocumentHeads: (maxBytes: number): DocumentHead[] => {
-      const rows = headsStatement.all(maxBytes) as HeadRow[];
-      return rows.map((r) => ({ collection: r.collection, path: r.path, head: r.head ?? "" }));
-    },
-    snippet: (body, query, maxLen, chunkPos, chunkLen, intent) => {
-      const s = qmd.extractSnippet(body, query, maxLen, chunkPos, chunkLen, intent);
-      return { line: s.line, snippet: s.snippet };
-    },
-    addLineNumbers: (text, startLine) => qmd.addLineNumbers(text, startLine),
-    models: () => (remote ? remoteModelStatus(remote, llm as unknown as LlmSurface) : modelStatus(llm)),
-    close: async () => {
-      wired?.close();
-      // store.close() disposes the SDK's own instance, which is also the fallback.
-      await store.close();
-    },
-    llm: {
-      mode: llmOptions.mode,
-      rerankTransport: remote ? remote.transportName : "in-process",
-      embedBatch: (texts) => active.embedBatch(texts),
-      rerank: (query, documents) => active.rerank(query, documents),
-      expandQuery: (query) => active.expandQuery(query),
-      clearCache: () => {
-        db.exec("DELETE FROM llm_cache");
-      },
-      cacheEntries: () => (db.prepare("SELECT COUNT(*) AS n FROM llm_cache").get() as { n: number }).n,
-      refreshWorkers: async () => {
-        await remote?.refreshStatus();
-      },
-    },
-  };
+  },
+};
 }
 
 

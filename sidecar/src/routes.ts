@@ -6,7 +6,7 @@ import { HttpError } from "./errors.ts";
 import { removeDocument, resolveDeleteTarget, resolveTarget, writeDocument } from "./ingest.ts";
 import { parseLineRange } from "./line-range.ts";
 import { hasFilters, matchesFilters, parseBound, type DocumentMetadata, type SearchFilters } from "./metadata.ts";
-import { resolveMultiGet } from "./multi-get.ts";
+import { MAX_BYTES_CEILING, MAX_REFERENCE_LENGTH, resolveMultiGet, resolveReference } from "./multi-get.ts";
 import { errorResponses, metadataOrNull } from "./schemas.ts";
 import type { DocumentInfo, DocumentLookupError, QmdBackend, SearchHit, SearchQuery } from "./store.ts";
 
@@ -159,11 +159,13 @@ interface DocsQuery {
   maxLines?: number;
   lineNumbers: boolean;
   body: boolean;
+  collections?: string[];
 }
 
 interface MultiGetBody {
   pattern?: string;
   ids?: string[];
+  collections?: string[];
   maxBytes: number;
   maxLines?: number;
   lineNumbers: boolean;
@@ -540,6 +542,12 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
             maxLines: { type: "integer", minimum: 1 },
             lineNumbers: { type: "boolean", default: false, description: "Prefix each body line with `N: `." },
             body: { type: "boolean", default: true, description: "false returns metadata only." },
+            collections: {
+              type: "array",
+              items: { type: "string", minLength: 1 },
+              maxItems: 50,
+              description: "Resolve the reference only inside these collections. Anything else is a plain miss, with no similar-files scan and no read.",
+            },
           },
         },
         response: { 200: { $ref: "Document#" }, ...errorResponses },
@@ -551,8 +559,18 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       if (parsed.lookup.trim() === "") throw new HttpError(400, "validation", "Document reference is required");
       const fromLine = request.query.fromLine ?? parsed.fromLine;
       const maxLines = request.query.maxLines ?? parsed.maxLines;
+      if (parsed.lookup.length > MAX_REFERENCE_LENGTH) throw new HttpError(400, "validation", `A reference may be at most ${MAX_REFERENCE_LENGTH} characters`);
 
-      const found = await backend.get(parsed.lookup);
+      // With an allowlist, a reference that resolves nowhere inside it never reaches
+      // the SDK, whose miss path scans every path in the index.
+      let lookup = parsed.lookup;
+      if (request.query.collections !== undefined) {
+        const [match] = resolveReference(await backend.listDocumentRefs(request.query.collections), lookup);
+        if (!match) return reply.code(404).send(lookupErrorBody({ error: "not_found", query: lookup, similarFiles: [] }));
+        lookup = `qmd://${match.collection}/${match.path}`;
+      }
+
+      const found = await backend.get(lookup);
       if ("error" in found) return reply.code(404).send(lookupErrorBody(found));
 
       const range = definedRange(fromLine, maxLines);
@@ -571,14 +589,21 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
           "Batch fetch by glob (`claude-sessions/2026-05*.md`), by a list of references (paths or docids), or both. " +
           "Each selector resolves on its own and the results merge, one entry per file; a selector that matches nothing " +
           "adds a line to `errors` without failing the others. Documents larger than `maxBytes` are listed under " +
-          "`skipped` rather than returned.",
+          "`skipped` rather than returned. A glob may use only `*`, `?` and whole-segment `**`; braces, brackets and " +
+          "extglobs are refused, because QMD's matcher can be made to run indefinitely.",
         body: {
           type: "object",
           additionalProperties: false,
           properties: {
             pattern: { type: "string", minLength: 1, description: "Glob, comma-separated references, or a comma-separated mix of both." },
             ids: { type: "array", items: { type: "string", minLength: 1 }, minItems: 1, maxItems: 200, description: "Paths or docids." },
-            maxBytes: { type: "integer", minimum: 1, default: 65536 },
+            collections: {
+              type: "array",
+              items: { type: "string", minLength: 1 },
+              maxItems: 50,
+              description: "Match and read only inside these collections. An empty list means nothing, not everything.",
+            },
+            maxBytes: { type: "integer", minimum: 1, maximum: MAX_BYTES_CEILING, default: 65536 },
             maxLines: { type: "integer", minimum: 1, description: "Truncate each body to this many lines." },
             lineNumbers: { type: "boolean", default: false },
             includeBody: { type: "boolean", default: true },
@@ -606,7 +631,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       if (!pattern && (!ids || ids.length === 0)) {
         throw new HttpError(400, "validation", "Provide `pattern`, `ids`, or both");
       }
-      const { docs, errors } = await resolveMultiGet(backend, pattern, ids, { includeBody: request.body.includeBody, maxBytes: request.body.maxBytes });
+      const { docs, errors } = await resolveMultiGet(backend, pattern, ids, { includeBody: request.body.includeBody, maxBytes: request.body.maxBytes }, request.body.collections);
       const out = [];
       const skipped = [];
       for (const entry of docs) {

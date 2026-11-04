@@ -18,6 +18,7 @@ public sealed class AuthApiFactory : MemoriaApiFactory
 		builder.UseSetting("Memoria:Auth:Mode", "ApiKey");
 		builder.UseSetting("Memoria:Auth:DatabasePath", DatabasePath);
 		builder.UseSetting("Memoria:Auth:RateLimit:PermitLimit", "100000");
+		builder.UseSetting("Memoria:Auth:FailedAuth:PermitLimit", "100000");
 	}
 
 	public IApiKeyStore Store => Services.GetRequiredService<IApiKeyStore>();
@@ -57,11 +58,28 @@ public sealed class AuthApiFactory : MemoriaApiFactory
 		return client;
 	}
 
+	/// <summary>
+	/// Waits for rows to appear. MCP streams its response, so a client can hold the
+	/// result before the middleware's audit write has finished.
+	/// </summary>
+	public async Task<List<AuditRow>> WaitForAuditAsync(Func<List<AuditRow>, bool> ready)
+	{
+		DateTime deadline = DateTime.UtcNow.AddSeconds(10);
+		List<AuditRow> rows = await ReadAuditAsync();
+		while (!ready(rows) && DateTime.UtcNow < deadline)
+		{
+			await Task.Delay(10);
+			rows = await ReadAuditAsync();
+		}
+
+		return rows;
+	}
+
 	public async Task<List<AuditRow>> ReadAuditAsync()
 	{
 		await using SqliteConnection connection = await Services.GetRequiredService<ControlDatabase>().OpenAsync();
 		await using SqliteCommand command = connection.CreateCommand();
-		command.CommandText = "SELECT timestamp, key_id, operation, collections, result_count, status, trace_id, query FROM audit_log ORDER BY id;";
+		command.CommandText = "SELECT timestamp, key_id, operation, collections, result_count, status, trace_id, query, audit_id, attempted_collections, target FROM audit_log ORDER BY id;";
 		await using SqliteDataReader reader = await command.ExecuteReaderAsync();
 		List<AuditRow> rows = [];
 		while (await reader.ReadAsync())
@@ -74,7 +92,10 @@ public sealed class AuthApiFactory : MemoriaApiFactory
 				reader.IsDBNull(4) ? null : reader.GetInt32(4),
 				reader.GetInt32(5),
 				reader.GetString(6),
-				reader.IsDBNull(7) ? null : reader.GetString(7)));
+				reader.IsDBNull(7) ? null : reader.GetString(7),
+				reader.GetString(8),
+				reader.IsDBNull(9) ? null : reader.GetString(9),
+				reader.IsDBNull(10) ? null : reader.GetString(10)));
 		}
 
 		return rows;
@@ -91,5 +112,5 @@ public sealed class AuthApiFactory : MemoriaApiFactory
 		}
 	}
 
-	public sealed record AuditRow(string Timestamp, string KeyId, string Operation, string? Collections, int? ResultCount, int Status, string TraceId, string? Query);
+	public sealed record AuditRow(string Timestamp, string KeyId, string Operation, string? Collections, int? ResultCount, int Status, string TraceId, string? Query, string AuditId, string? AttemptedCollections, string? Target);
 }

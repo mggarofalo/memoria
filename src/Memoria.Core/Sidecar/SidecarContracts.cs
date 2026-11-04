@@ -119,7 +119,8 @@ public sealed record SidecarDocumentQuery(
 	int? FromLine = null,
 	int? MaxLines = null,
 	bool? LineNumbers = null,
-	bool? Body = null);
+	bool? Body = null,
+	IReadOnlyList<string>? Collections = null);
 
 public sealed record SidecarDocument(
 	string Docid,
@@ -140,6 +141,10 @@ public sealed record SidecarMultiGetRequest
 {
 	public string? Pattern { get; init; }
 	public IReadOnlyList<string>? Ids { get; init; }
+
+	/// <summary>Match and read only inside these collections. Empty means nothing, not everything.</summary>
+	public IReadOnlyList<string>? Collections { get; init; }
+
 	public int? MaxBytes { get; init; }
 	public int? MaxLines { get; init; }
 	public bool? LineNumbers { get; init; }

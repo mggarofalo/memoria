@@ -70,6 +70,7 @@ public sealed partial class ApiKeyAuthenticationHandler(
 	UrlEncoder encoder,
 	IApiKeyStore store,
 	LastUsedThrottle throttle,
+	FailedAuthLimiter failedAuth,
 	TimeProvider timeProvider)
 	: AuthenticationHandler<AuthenticationSchemeOptions>(options, loggerFactory, encoder)
 {
@@ -87,6 +88,13 @@ public sealed partial class ApiKeyAuthenticationHandler(
 		if (!Request.Headers.TryGetValue(HeaderNames.Authorization, out StringValues values))
 		{
 			return AuthenticateResult.NoResult();
+		}
+
+		// Spent budget means no lookup and no log line, so a flood costs almost nothing.
+		if (failedAuth.IsBlocked(ClientKey, timeProvider.GetUtcNow(), out TimeSpan retryAfter))
+		{
+			Context.Features.Set(new FailedAuthThrottled(retryAfter));
+			return AuthenticateResult.Fail("throttled");
 		}
 
 		string? header = values.Count == 1 ? values[0] : null;
@@ -125,6 +133,13 @@ public sealed partial class ApiKeyAuthenticationHandler(
 
 	protected override async Task HandleChallengeAsync(AuthenticationProperties properties)
 	{
+		if (Context.Features.Get<FailedAuthThrottled>() is { } throttled)
+		{
+			Response.Headers.RetryAfter = Math.Max(1, (int)Math.Ceiling(throttled.RetryAfter.TotalSeconds)).ToString(System.Globalization.CultureInfo.InvariantCulture);
+			await WriteProblemAsync(StatusCodes.Status429TooManyRequests, "Too many failed authentication attempts", "This address exceeded its failed-authentication limit; retry after the interval in Retry-After.", "auth_rate_limited");
+			return;
+		}
+
 		Response.Headers.WWWAuthenticate = "Bearer realm=\"memoria\"";
 		await WriteProblemAsync(StatusCodes.Status401Unauthorized, "Unauthorized", "A valid API key is required: Authorization: Bearer <key>.", "unauthorized");
 	}
@@ -173,8 +188,15 @@ public sealed partial class ApiKeyAuthenticationHandler(
 	private AuthenticateResult Reject(string reason, string? keyId)
 	{
 		LogRejected(_log, reason, keyId);
+		if (failedAuth.RecordFailure(ClientKey, timeProvider.GetUtcNow()))
+		{
+			LogAddressThrottled(_log, ClientKey);
+		}
+
 		return AuthenticateResult.Fail(reason);
 	}
+
+	private string ClientKey => FailedAuthLimiter.KeyFor(Context.Connection.RemoteIpAddress);
 
 	private async Task WriteProblemAsync(int status, string title, string detail, string code)
 	{
@@ -195,6 +217,9 @@ public sealed partial class ApiKeyAuthenticationHandler(
 
 	[LoggerMessage(EventId = 3000, Level = LogLevel.Information, Message = "API key rejected: {Reason} (key {KeyId})")]
 	private static partial void LogRejected(ILogger logger, string reason, string? keyId);
+
+	[LoggerMessage(EventId = 3002, Level = LogLevel.Warning, Message = "Address {ClientAddress} exceeded the failed-authentication limit and is refused until its window ends. If this is the reverse proxy's address, Memoria:Auth:TrustedProxies is not set and every client is sharing one budget.")]
+	private static partial void LogAddressThrottled(ILogger logger, string clientAddress);
 
 	[LoggerMessage(EventId = 3001, Level = LogLevel.Warning, Message = "Could not update last_used_at for key {KeyId}")]
 	private static partial void LogTouchFailed(ILogger logger, Exception exception, string keyId);

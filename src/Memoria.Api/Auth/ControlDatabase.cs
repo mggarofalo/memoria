@@ -27,13 +27,16 @@ public sealed class ControlDatabase(string? path)
 		);
 		CREATE TABLE audit_log (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			audit_id TEXT NOT NULL UNIQUE,
 			timestamp TEXT NOT NULL,
 			key_id TEXT NOT NULL,
 			operation TEXT NOT NULL,
 			collections TEXT NULL,
+			attempted_collections TEXT NULL,
 			result_count INTEGER NULL,
 			status INTEGER NOT NULL,
 			trace_id TEXT NOT NULL,
+			target TEXT NULL,
 			query TEXT NULL
 		);
 		CREATE INDEX audit_log_timestamp ON audit_log (timestamp);

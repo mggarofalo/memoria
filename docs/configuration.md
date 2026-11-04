@@ -56,13 +56,19 @@ claude mcp add --transport http memoria http://<api-host>:8080/mcp \
 
 | Key | Default | Purpose |
 |---|---|---|
-| `Mode` | `ApiKey` | `ApiKey` requires a key on every `/v1` and MCP route. `Disabled` turns authentication off for development on a trusted LAN; it must be set explicitly and logs a loud warning at startup. Any other value stops the host. |
+| `Mode` | `ApiKey` | `ApiKey` requires a key on every `/v1` and MCP route. `Disabled` turns authentication off for development on a trusted LAN; it must be set explicitly and logs a loud warning at startup. The value must be exactly one of those two, case-sensitive. Anything else stops the host, including `1`, `disabled`, ` Disabled `, `ApiKey,Disabled`, and a key that is set but empty. |
 | `DatabasePath` | unset | The SQLite control database holding keys and audit records. **Required in `ApiKey` mode**: without it the host refuses to start. It is durable state, separate from QMD's index, and belongs on a local volume (SQLite's WAL mode does not work over a network share). Not needed in `Disabled` mode. |
 | `RateLimit:Enabled` | `true` | Enforce per-key limits. |
-| `RateLimit:PermitLimit` | `120` | Requests one key may make per window. Over the limit: `429` with `Retry-After`. |
+| `RateLimit:PermitLimit` | `120` | Requests one key may make per window, counting ones that end in `403`. Over the limit: `429` with `Retry-After`. |
 | `RateLimit:Window` | `00:01:00` | Length of the fixed window. |
+| `TrustedProxies` | empty | Proxies whose `X-Forwarded-For` is believed, as IPs or CIDR ranges. Empty means the socket address is the client and the header is ignored, and loopback is not trusted implicitly. A `/0` range or an unparseable entry stops the host. See [the reverse proxy section](deployment.md#reverse-proxy-and-tls): behind a proxy this must be set. |
+| `FailedAuth:Enabled` | `true` | Limit failed authentication per client address. |
+| `FailedAuth:PermitLimit` | `20` | Failed attempts one address may make per window. After that its requests with a credential get `429` and `Retry-After` with no database lookup, even with a valid key, until the window ends. Requests that authenticate spend nothing. An IPv6 client is counted by its /64. |
+| `FailedAuth:Window` | `00:01:00` | Length of the fixed window. |
+| `FailedAuth:MaxTrackedAddresses` | `10000` | Addresses held in memory. A flood of distinct addresses can make the limiter forget an address early, never grow past this. |
 | `Audit:IncludeQueries` | `false` | Also record search queries and document references in the audit log. Queries can be as sensitive as the corpus, so this is off unless you opt in. Document content is never recorded. |
 | `Audit:RetentionDays` | `90` | Days to keep audit records in the database. Zero or less keeps them forever. |
+| `Audit:MaxRowsPerKey` | `100000` | Records kept per key, newest first and within 10% or 1000 rows of the cap, whichever is less, so a burst from one key cannot grow the table without bound or evict another key's history. The evicted rows remain in the log stream. |
 
 ### Keys
 
@@ -120,15 +126,33 @@ For a collection-scoped key:
   does not apply. Naming a collection outside the list is `403`, whether or not it
   exists. Every hit is checked again on the way out.
 - **`GET /v1/docs/{id}`** answers `404` for a reference that resolves outside the
-  list, with the same body as a real miss.
-- **`POST /v1/docs:multiGet`** filters `docs` and `skipped` per result. `errors` is
-  always empty, because QMD's errors quote "did you mean" paths from any
-  collection, and their presence would reveal whether a reference matched
-  something out of scope. A reference with no readable match is simply absent.
+  list, with the same body as a real miss. The list goes to the sidecar, which
+  resolves the reference only inside it: nothing outside is matched, scanned or read.
+  A docid shared with a duplicate document elsewhere finds the key's own copy.
+  Resolution is narrower than for an all-collections key: docid, `qmd://` URI,
+  `collection/path`, bare path, or path-boundary suffix, but not an arbitrary fragment.
+- **`POST /v1/docs:multiGet`** matches and reads only inside the list, and filters
+  `docs` and `skipped` per result again on the way out. `errors` is always empty, so
+  a reference with no readable match is simply absent.
 - **`/v1/collections` and `/v1/status`** cover only the key's collections.
   `totalDocuments` is their sum, and `needsEmbedding` is `null`, because QMD reports
   that backlog only for the whole index.
 - **Sidecar errors** carry no sidecar detail about documents.
+
+### Batch selector limits
+
+`POST /v1/docs:multiGet` and the MCP `get_documents` tool refuse these with `400`,
+for every key. The sidecar enforces the same rules. QMD's own glob matcher can be
+made to run indefinitely by one crafted pattern, so globs are matched by Memoria in
+bounded time and never reach QMD.
+
+| Limit | Value |
+|---|---|
+| Glob syntax | `*`, `?` and whole-segment `**` over letters, digits, space, `.`, `_`, `-`, `/` and `:`. Braces are refused because expansion can be exponential, brackets because nothing needs them, and extglobs and parentheses because they are the attack. |
+| Wildcards | At most 12 per glob, at most 2 `**`, and `*` may not touch `?`. `??` is allowed: it is fixed-width. |
+| Glob length and count | 256 characters, 10 globs per request. An entry in `ids` holding a wildcard counts as a glob. |
+| References | 200 per request, 1024 characters each, and no commas inside an `ids` entry. |
+| `maxBytes` | At most 1048576 (1 MiB) per document. Read longer documents a range at a time with `GET /v1/docs/{id}`. |
 
 ### Anonymous routes
 
@@ -141,11 +165,16 @@ For a collection-scoped key:
 ### Audit and logs
 
 Each request a key makes to a scoped route, including ones ending in `403` or
-`429`, is written to the `audit_log` table and to the log stream: key id,
-operation (the REST route's name, or `mcp.<tool>`), collections touched, result
-count, status, timestamp, and trace id. Requests with no valid key are logged but
-not audited: they have no key to attribute, and recording them would let anyone
-grow the table.
+`429`, is written to the `audit_log` table and to the log stream: a server-generated
+audit id, key id, operation (the REST route's name, or `mcp.<tool>`), collections
+touched, collections attempted when a request was denied, result count, status,
+timestamp, and trace id. For key management it also records the target key's id,
+scopes and collections, never its secret. Status is how the operation ended: an MCP
+tool call denied for scope is recorded as `403` even though its HTTP status is `200`.
+The trace id comes from the caller's `traceparent` when they send one, so it is for
+correlation only; the audit id is what identifies a record. Requests with no valid
+key are logged but not audited: they have no key to attribute, and recording them
+would let anyone grow the table.
 
 The request log line carries the route template and the key id. Logs never carry
 the query string, request headers, or a key's secret. The JSON console format's
@@ -153,8 +182,9 @@ scopes do include ASP.NET Core's raw `RequestPath`, so a document path requested
 through `GET /v1/docs/{id}` can appear in log output even with
 `Audit:IncludeQueries` off. Rate limits and the audit trail
 key on the API key, not the client address, so they work the same behind the
-reverse proxy, where every caller shares one address. The `RemoteIp` in the log
-line is the proxy's.
+reverse proxy. The `RemoteIp` in the log line and the failed-authentication limit
+use the client address: the socket peer, or the forwarded client when the peer is a
+configured `TrustedProxies` entry.
 
 ## Host settings outside `Memoria`
 

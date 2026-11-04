@@ -55,10 +55,13 @@ public sealed class HttpCallerScope(IHttpContextAccessor accessor) : ICallerScop
 }
 
 /// <summary>Thrown when a caller names a collection outside their scope. Mapped to 403 by <see cref="MemoriaExceptionHandler"/>.</summary>
-public sealed class CollectionForbiddenException(string collection)
+public sealed class CollectionForbiddenException(string collection, IReadOnlyList<string> requested)
 	: Exception($"Collection '{collection}' is outside this caller's scope.")
 {
 	public string Collection { get; } = collection;
+
+	/// <summary>Everything the caller asked for, for the audit record.</summary>
+	public IReadOnlyList<string> Requested { get; } = requested;
 }
 
 public static class CallerScopeExtensions
@@ -81,17 +84,24 @@ public static class CallerScopeExtensions
 
 	/// <summary>
 	/// True when the caller may see a display path, <c>collection/path.md</c>.
-	/// Used where the sidecar names a document without saying its collection.
+	/// Used where the sidecar names a document without saying its collection. A
+	/// path with a dot or empty segment or a backslash is refused for every
+	/// caller: its first segment is not reliably the collection it ends up in.
 	/// </summary>
 	public static bool AllowsFile(this ICallerScope scope, string? file)
 	{
-		if (scope.Collections is null)
+		if (string.IsNullOrEmpty(file) || file.Contains('\\', StringComparison.Ordinal))
 		{
-			return true;
+			return false;
 		}
 
-		int separator = file?.IndexOf('/', StringComparison.Ordinal) ?? -1;
-		return separator > 0 && scope.Allows(file![..separator]);
+		string[] segments = file.Split('/');
+		if (segments.Length < 2 || segments.Any(static s => s is "" or "." or ".."))
+		{
+			return false;
+		}
+
+		return scope.Allows(segments[0]);
 	}
 
 	/// <summary>
@@ -114,7 +124,7 @@ public static class CallerScopeExtensions
 		{
 			if (!scope.Allows(collection))
 			{
-				throw new CollectionForbiddenException(collection);
+				throw new CollectionForbiddenException(collection, requested);
 			}
 		}
 

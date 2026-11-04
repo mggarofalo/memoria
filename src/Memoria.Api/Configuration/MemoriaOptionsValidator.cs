@@ -45,9 +45,41 @@ public sealed class MemoriaOptionsValidator : IValidateOptions<MemoriaOptions>
 			failures.Add("Memoria:Mcp:Path must start with '/' and must not sit under /v1.");
 		}
 
-		if (options.Auth.Mode == AuthMode.ApiKey && string.IsNullOrWhiteSpace(options.Auth.DatabasePath))
+		if (options.Auth.Mode is not (AuthModes.ApiKey or AuthModes.Disabled))
+		{
+			failures.Add("Memoria:Auth:Mode must be exactly ApiKey or Disabled, case-sensitive; numbers, lists, surrounding whitespace and empty values are refused.");
+		}
+		else if (!options.Auth.IsDisabled && string.IsNullOrWhiteSpace(options.Auth.DatabasePath))
 		{
 			failures.Add("Memoria:Auth:DatabasePath is required when Memoria:Auth:Mode is ApiKey (the default). For anonymous development on a trusted LAN, set Memoria:Auth:Mode to Disabled explicitly.");
+		}
+
+		foreach (string entry in (options.Auth.TrustedProxies ?? []).Where(static e => !string.IsNullOrWhiteSpace(e)))
+		{
+			if (!Auth.TrustedProxies.TryParse(entry.Trim(), out _, out _))
+			{
+				failures.Add($"Memoria:Auth:TrustedProxies has an invalid entry '{entry}'. Use an IP address or a CIDR range; a /0 range is refused because it would believe every caller's X-Forwarded-For.");
+			}
+		}
+
+		if (options.Auth.FailedAuth.PermitLimit < 1)
+		{
+			failures.Add("Memoria:Auth:FailedAuth:PermitLimit must be at least 1.");
+		}
+
+		if (options.Auth.FailedAuth.Window <= TimeSpan.Zero)
+		{
+			failures.Add("Memoria:Auth:FailedAuth:Window must be positive.");
+		}
+
+		if (options.Auth.FailedAuth.MaxTrackedAddresses < 2)
+		{
+			failures.Add("Memoria:Auth:FailedAuth:MaxTrackedAddresses must be at least 2.");
+		}
+
+		if (options.Auth.Audit.MaxRowsPerKey < 1)
+		{
+			failures.Add("Memoria:Auth:Audit:MaxRowsPerKey must be at least 1.");
 		}
 
 		if (options.Auth.RateLimit.PermitLimit < 1)

@@ -153,6 +153,11 @@ public sealed class MemoriaQmdClient(HttpClient http) : IMemoriaQmdClient
 			Add("body", body ? "true" : "false");
 		}
 
+		foreach (string collection in query.Collections ?? [])
+		{
+			Add("collections", Uri.EscapeDataString(collection));
+		}
+
 		return url.ToString();
 	}
 

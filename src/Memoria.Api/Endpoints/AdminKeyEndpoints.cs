@@ -66,7 +66,7 @@ public static partial class AdminKeyEndpoints
 	private static async ValueTask<object?> RequireApiKeyModeAsync(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
 	{
 		IOptions<MemoriaOptions> options = context.HttpContext.RequestServices.GetRequiredService<IOptions<MemoriaOptions>>();
-		if (options.Value.Auth.Mode != AuthMode.ApiKey)
+		if (options.Value.Auth.IsDisabled)
 		{
 			return TypedResults.Problem(
 				statusCode: StatusCodes.Status404NotFound,
@@ -84,6 +84,7 @@ public static partial class AdminKeyEndpoints
 		TimeProvider timeProvider,
 		HttpContext context,
 		ILoggerFactory loggerFactory,
+		IRequestAudit audit,
 		CancellationToken cancellationToken)
 	{
 		DateTimeOffset now = timeProvider.GetUtcNow();
@@ -98,6 +99,7 @@ public static partial class AdminKeyEndpoints
 		(ApiKeyRecord record, string token) = ApiKeyRecord.Issue(request.Label!.Trim(), scopes, collections, request.AllCollections == true, request.ExpiresAt, now);
 		await store.InsertAsync(record, cancellationToken);
 
+		audit.SetTarget(ToAuditTarget(record));
 		LogIssued(loggerFactory.CreateLogger(typeof(AdminKeyEndpoints).FullName!), record.Id, Actor(context));
 		context.Response.Headers[HeaderNames.CacheControl] = "no-store";
 		return TypedResults.Created($"/v1/admin/keys/{record.Id}", new IssuedApiKey(token, ToInfo(record)));
@@ -115,11 +117,17 @@ public static partial class AdminKeyEndpoints
 		TimeProvider timeProvider,
 		HttpContext context,
 		ILoggerFactory loggerFactory,
+		IRequestAudit audit,
 		CancellationToken cancellationToken)
 	{
 		if (!await store.RevokeAsync(id, timeProvider.GetUtcNow(), cancellationToken))
 		{
 			return UnknownKey();
+		}
+
+		if (await store.FindAsync(id, cancellationToken) is { } revoked)
+		{
+			audit.SetTarget(ToAuditTarget(revoked));
 		}
 
 		LogRevoked(loggerFactory.CreateLogger(typeof(AdminKeyEndpoints).FullName!), id, Actor(context));
@@ -132,6 +140,7 @@ public static partial class AdminKeyEndpoints
 		TimeProvider timeProvider,
 		HttpContext context,
 		ILoggerFactory loggerFactory,
+		IRequestAudit audit,
 		CancellationToken cancellationToken)
 	{
 		ApiKeyRecord? record = await store.FindAsync(id, cancellationToken);
@@ -152,6 +161,7 @@ public static partial class AdminKeyEndpoints
 			return InactiveKey();
 		}
 
+		audit.SetTarget(ToAuditTarget(record));
 		LogRotated(loggerFactory.CreateLogger(typeof(AdminKeyEndpoints).FullName!), id, Actor(context));
 		context.Response.Headers[HeaderNames.CacheControl] = "no-store";
 		return TypedResults.Ok(new IssuedApiKey(token, ToInfo(record with { Sha256Hash = hash })));
@@ -230,6 +240,11 @@ public static partial class AdminKeyEndpoints
 			record.ExpiresAt,
 			record.RevokedAt,
 			record.LastUsedAt);
+	}
+
+	private static AuditTarget ToAuditTarget(ApiKeyRecord record)
+	{
+		return new AuditTarget(record.Id, record.Scopes, record.Collections, record.AllCollections);
 	}
 
 	private static string? Actor(HttpContext context)

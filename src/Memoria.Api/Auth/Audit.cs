@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text.Json;
 using Memoria.Api.Configuration;
 using Memoria.Api.Http;
@@ -9,18 +10,28 @@ using Microsoft.Extensions.Options;
 
 namespace Memoria.Api.Auth;
 
+/// <summary>The key an admin operation acted on. Identity and permissions only, never the secret.</summary>
+public sealed record AuditTarget(string KeyId, IReadOnlyList<string> Scopes, IReadOnlyList<string> Collections, bool AllCollections);
+
 /// <summary>
-/// One audited request. <see cref="Query"/> is null unless
+/// One audited request. <see cref="AuditId"/> is generated here and is the row's
+/// identity. <see cref="TraceId"/> correlates with logs but comes from the
+/// caller's <c>traceparent</c> when they send one, so it proves nothing.
+/// <see cref="Status"/> is how the operation ended, which for an MCP tool call is
+/// not the HTTP status. <see cref="Query"/> is null unless
 /// <c>Memoria:Auth:Audit:IncludeQueries</c> is on. Document content is never recorded.
 /// </summary>
 public sealed record AuditRecord(
+	string AuditId,
 	DateTimeOffset Timestamp,
 	string KeyId,
 	string Operation,
 	IReadOnlyList<string>? Collections,
+	IReadOnlyList<string>? AttemptedCollections,
 	int? ResultCount,
 	int Status,
 	string TraceId,
+	AuditTarget? Target,
 	string? Query);
 
 public interface IAuditLog
@@ -49,37 +60,69 @@ public sealed partial class SqliteAuditLog(
 
 	private readonly int _retentionDays = options.Value.Auth.Audit.RetentionDays;
 
+	private readonly int _maxRowsPerKey = options.Value.Auth.Audit.MaxRowsPerKey;
+
+	private readonly ConcurrentDictionary<string, int> _writesSinceTrim = new(StringComparer.Ordinal);
+
 	private long _lastPruneTicks;
+
+	/// <summary>Writes between per-key trims, so a key's rows stay within the cap plus this many.</summary>
+	private int TrimEvery => Math.Clamp(_maxRowsPerKey / 10, 1, 1000);
 
 	public async Task WriteAsync(AuditRecord record)
 	{
 		ArgumentNullException.ThrowIfNull(record);
 		string? collections = record.Collections is null ? null : JsonSerializer.Serialize(record.Collections);
-		LogAudit(logger, record.KeyId, record.Operation, collections, record.ResultCount, record.Status, record.TraceId);
+		string? attempted = record.AttemptedCollections is null ? null : JsonSerializer.Serialize(record.AttemptedCollections);
+		string? target = record.Target is null ? null : JsonSerializer.Serialize(record.Target);
+		LogAudit(logger, record.AuditId, record.KeyId, record.Operation, collections, attempted, record.ResultCount, record.Status, record.TraceId, target);
 
 		try
 		{
 			await using SqliteConnection connection = await database.OpenAsync();
 			await using SqliteCommand command = connection.CreateCommand();
 			command.CommandText = """
-				INSERT INTO audit_log (timestamp, key_id, operation, collections, result_count, status, trace_id, query)
-				VALUES ($timestamp, $key, $operation, $collections, $count, $status, $trace, $query);
+				INSERT INTO audit_log (audit_id, timestamp, key_id, operation, collections, attempted_collections, result_count, status, trace_id, target, query)
+				VALUES ($audit, $timestamp, $key, $operation, $collections, $attempted, $count, $status, $trace, $target, $query);
 				""";
+			command.Parameters.AddWithValue("$audit", record.AuditId);
 			command.Parameters.AddWithValue("$timestamp", ControlDatabase.FormatTimestamp(record.Timestamp));
 			command.Parameters.AddWithValue("$key", record.KeyId);
 			command.Parameters.AddWithValue("$operation", record.Operation);
 			command.Parameters.AddWithValue("$collections", (object?)collections ?? DBNull.Value);
+			command.Parameters.AddWithValue("$attempted", (object?)attempted ?? DBNull.Value);
 			command.Parameters.AddWithValue("$count", (object?)record.ResultCount ?? DBNull.Value);
 			command.Parameters.AddWithValue("$status", record.Status);
 			command.Parameters.AddWithValue("$trace", record.TraceId);
+			command.Parameters.AddWithValue("$target", (object?)target ?? DBNull.Value);
 			command.Parameters.AddWithValue("$query", (object?)record.Query ?? DBNull.Value);
 			await command.ExecuteNonQueryAsync();
+			await TrimKeyIfDueAsync(connection, record.KeyId);
 			await PruneIfDueAsync(connection);
 		}
 		catch (Exception ex) when (ex is SqliteException or IOException or InvalidOperationException)
 		{
-			LogWriteFailed(logger, ex, record.TraceId);
+			LogWriteFailed(logger, ex, record.AuditId);
 		}
+	}
+
+	private async Task TrimKeyIfDueAsync(SqliteConnection connection, string keyId)
+	{
+		if (_writesSinceTrim.AddOrUpdate(keyId, 1, static (_, count) => count + 1) < TrimEvery)
+		{
+			return;
+		}
+
+		_writesSinceTrim[keyId] = 0;
+		await using SqliteCommand trim = connection.CreateCommand();
+		trim.CommandText = """
+			DELETE FROM audit_log WHERE key_id = $key AND id <= (
+				SELECT id FROM audit_log WHERE key_id = $key ORDER BY id DESC LIMIT 1 OFFSET $cap
+			);
+			""";
+		trim.Parameters.AddWithValue("$key", keyId);
+		trim.Parameters.AddWithValue("$cap", _maxRowsPerKey);
+		await trim.ExecuteNonQueryAsync();
 	}
 
 	private async Task PruneIfDueAsync(SqliteConnection connection)
@@ -97,11 +140,11 @@ public sealed partial class SqliteAuditLog(
 		await prune.ExecuteNonQueryAsync();
 	}
 
-	[LoggerMessage(EventId = 3100, Level = LogLevel.Information, Message = "Audit: key {KeyId} {Operation} collections {Collections} results {ResultCount} status {Status} (trace {TraceId})")]
-	private static partial void LogAudit(ILogger logger, string keyId, string operation, string? collections, int? resultCount, int status, string traceId);
+	[LoggerMessage(EventId = 3100, Level = LogLevel.Information, Message = "Audit {AuditId}: key {KeyId} {Operation} collections {Collections} attempted {AttemptedCollections} results {ResultCount} status {Status} (trace {TraceId}) target {Target}")]
+	private static partial void LogAudit(ILogger logger, string auditId, string keyId, string operation, string? collections, string? attemptedCollections, int? resultCount, int status, string traceId, string? target);
 
-	[LoggerMessage(EventId = 3101, Level = LogLevel.Error, Message = "Could not store the audit record for trace {TraceId}")]
-	private static partial void LogWriteFailed(ILogger logger, Exception exception, string traceId);
+	[LoggerMessage(EventId = 3101, Level = LogLevel.Error, Message = "Could not store audit record {AuditId}")]
+	private static partial void LogWriteFailed(ILogger logger, Exception exception, string auditId);
 }
 
 /// <summary>What the current request's handler reports for its audit record.</summary>
@@ -114,6 +157,12 @@ public interface IRequestAudit
 	void SetQuery(string? query);
 
 	void SetResult(IEnumerable<string> collections, int resultCount);
+
+	/// <summary>How the operation ended, when the HTTP status does not say, and which collections a denied caller asked for.</summary>
+	void SetOutcome(int status, IEnumerable<string>? attemptedCollections = null);
+
+	/// <summary>The key an admin operation acted on.</summary>
+	void SetTarget(AuditTarget target);
 }
 
 /// <summary>Reaches the entry through the request itself, so it works from any DI scope serving that request.</summary>
@@ -138,6 +187,20 @@ public sealed class HttpRequestAudit(IHttpContextAccessor accessor) : IRequestAu
 		}
 	}
 
+	public void SetOutcome(int status, IEnumerable<string>? attemptedCollections = null)
+	{
+		if (Entry is { } entry)
+		{
+			entry.Status = status;
+			entry.AttemptedCollections = attemptedCollections?.Distinct(StringComparer.Ordinal).ToArray();
+		}
+	}
+
+	public void SetTarget(AuditTarget target)
+	{
+		Entry?.Target = target;
+	}
+
 	private AuditEntry? Entry => accessor.HttpContext?.Features.Get<AuditEntry>();
 }
 
@@ -150,7 +213,13 @@ public sealed class AuditEntry
 
 	public IReadOnlyList<string>? Collections { get; set; }
 
+	public IReadOnlyList<string>? AttemptedCollections { get; set; }
+
 	public int? ResultCount { get; set; }
+
+	public int? Status { get; set; }
+
+	public AuditTarget? Target { get; set; }
 }
 
 /// <summary>
@@ -174,31 +243,38 @@ public sealed class AuditMiddleware(RequestDelegate next, IAuditLog auditLog, IO
 
 		AuditEntry entry = new();
 		context.Features.Set(entry);
-		int? failureStatus = null;
 		try
 		{
 			await next(context);
 		}
 		catch (Exception ex)
 		{
-			failureStatus = ex switch
+			entry.Status ??= ex switch
 			{
 				SidecarException sidecar => MemoriaExceptionHandler.Map(sidecar).Status,
 				CollectionForbiddenException => StatusCodes.Status403Forbidden,
 				_ => StatusCodes.Status500InternalServerError,
 			};
+			if (ex is CollectionForbiddenException forbidden)
+			{
+				entry.AttemptedCollections ??= forbidden.Requested;
+			}
+
 			throw;
 		}
 		finally
 		{
 			await auditLog.WriteAsync(new AuditRecord(
+				Guid.CreateVersion7().ToString("N"),
 				timeProvider.GetUtcNow(),
 				keyId,
 				entry.Operation ?? OperationName(endpoint),
 				entry.Collections,
+				entry.AttemptedCollections,
 				entry.ResultCount,
-				failureStatus ?? context.Response.StatusCode,
+				entry.Status ?? context.Response.StatusCode,
 				RequestLoggingMiddleware.CurrentTraceId(context),
+				entry.Target,
 				_includeQueries ? entry.Query : null));
 		}
 	}

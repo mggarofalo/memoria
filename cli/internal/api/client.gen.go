@@ -452,7 +452,7 @@ type ClientInterface interface {
 
 	// GetDocumentsWithBody Get several documents
 	//
-	// Batch fetch by a list of references (paths or docids), by a glob such as `claude-sessions/2026-05*.md`, or both. Bodies are capped at `maxBytes` each (default 64 KiB); documents over the cap are listed under `skipped`. For a collection-scoped key every list is filtered per result and `errors` is always empty: a reference that matched nothing the key may read is simply absent. Requires the `read` scope.
+	// Batch fetch by a list of references (paths or docids), by a glob such as `claude-sessions/2026-05*.md`, or both. A glob may use only `*`, `?` and whole-segment `**`; braces, brackets and extglobs are refused with 400. Bodies are capped at `maxBytes` each (default 64 KiB, at most 1 MiB); documents over the cap are listed under `skipped`. For a collection-scoped key every list is filtered per result and `errors` is always empty: a reference that matched nothing the key may read is simply absent. Requires the `read` scope.
 	//
 	// Takes any type of body and a specified content type.
 	//
@@ -461,7 +461,7 @@ type ClientInterface interface {
 
 	// GetDocuments Get several documents
 	//
-	// Batch fetch by a list of references (paths or docids), by a glob such as `claude-sessions/2026-05*.md`, or both. Bodies are capped at `maxBytes` each (default 64 KiB); documents over the cap are listed under `skipped`. For a collection-scoped key every list is filtered per result and `errors` is always empty: a reference that matched nothing the key may read is simply absent. Requires the `read` scope.
+	// Batch fetch by a list of references (paths or docids), by a glob such as `claude-sessions/2026-05*.md`, or both. A glob may use only `*`, `?` and whole-segment `**`; braces, brackets and extglobs are refused with 400. Bodies are capped at `maxBytes` each (default 64 KiB, at most 1 MiB); documents over the cap are listed under `skipped`. For a collection-scoped key every list is filtered per result and `errors` is always empty: a reference that matched nothing the key may read is simply absent. Requires the `read` scope.
 	//
 	// Takes a body of the `application/json` content type.
 	//
@@ -642,7 +642,7 @@ func (c *Client) GetDocument(ctx context.Context, id string, params *GetDocument
 
 // GetDocumentsWithBody Get several documents
 //
-// Batch fetch by a list of references (paths or docids), by a glob such as `claude-sessions/2026-05*.md`, or both. Bodies are capped at `maxBytes` each (default 64 KiB); documents over the cap are listed under `skipped`. For a collection-scoped key every list is filtered per result and `errors` is always empty: a reference that matched nothing the key may read is simply absent. Requires the `read` scope.
+// Batch fetch by a list of references (paths or docids), by a glob such as `claude-sessions/2026-05*.md`, or both. A glob may use only `*`, `?` and whole-segment `**`; braces, brackets and extglobs are refused with 400. Bodies are capped at `maxBytes` each (default 64 KiB, at most 1 MiB); documents over the cap are listed under `skipped`. For a collection-scoped key every list is filtered per result and `errors` is always empty: a reference that matched nothing the key may read is simply absent. Requires the `read` scope.
 //
 // Takes any type of body and a specified content type.
 //
@@ -661,7 +661,7 @@ func (c *Client) GetDocumentsWithBody(ctx context.Context, contentType string, b
 
 // GetDocuments Get several documents
 //
-// Batch fetch by a list of references (paths or docids), by a glob such as `claude-sessions/2026-05*.md`, or both. Bodies are capped at `maxBytes` each (default 64 KiB); documents over the cap are listed under `skipped`. For a collection-scoped key every list is filtered per result and `errors` is always empty: a reference that matched nothing the key may read is simply absent. Requires the `read` scope.
+// Batch fetch by a list of references (paths or docids), by a glob such as `claude-sessions/2026-05*.md`, or both. A glob may use only `*`, `?` and whole-segment `**`; braces, brackets and extglobs are refused with 400. Bodies are capped at `maxBytes` each (default 64 KiB, at most 1 MiB); documents over the cap are listed under `skipped`. For a collection-scoped key every list is filtered per result and `errors` is always empty: a reference that matched nothing the key may read is simply absent. Requires the `read` scope.
 //
 // Takes a body of the `application/json` content type.
 //
@@ -1405,7 +1405,7 @@ type ClientWithResponsesInterface interface {
 
 	// GetDocumentsWithBodyWithResponse Get several documents
 	//
-	// Batch fetch by a list of references (paths or docids), by a glob such as `claude-sessions/2026-05*.md`, or both. Bodies are capped at `maxBytes` each (default 64 KiB); documents over the cap are listed under `skipped`. For a collection-scoped key every list is filtered per result and `errors` is always empty: a reference that matched nothing the key may read is simply absent. Requires the `read` scope.
+	// Batch fetch by a list of references (paths or docids), by a glob such as `claude-sessions/2026-05*.md`, or both. A glob may use only `*`, `?` and whole-segment `**`; braces, brackets and extglobs are refused with 400. Bodies are capped at `maxBytes` each (default 64 KiB, at most 1 MiB); documents over the cap are listed under `skipped`. For a collection-scoped key every list is filtered per result and `errors` is always empty: a reference that matched nothing the key may read is simply absent. Requires the `read` scope.
 	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -1414,7 +1414,7 @@ type ClientWithResponsesInterface interface {
 
 	// GetDocumentsWithResponse Get several documents
 	//
-	// Batch fetch by a list of references (paths or docids), by a glob such as `claude-sessions/2026-05*.md`, or both. Bodies are capped at `maxBytes` each (default 64 KiB); documents over the cap are listed under `skipped`. For a collection-scoped key every list is filtered per result and `errors` is always empty: a reference that matched nothing the key may read is simply absent. Requires the `read` scope.
+	// Batch fetch by a list of references (paths or docids), by a glob such as `claude-sessions/2026-05*.md`, or both. A glob may use only `*`, `?` and whole-segment `**`; braces, brackets and extglobs are refused with 400. Bodies are capped at `maxBytes` each (default 64 KiB, at most 1 MiB); documents over the cap are listed under `skipped`. For a collection-scoped key every list is filtered per result and `errors` is always empty: a reference that matched nothing the key may read is simply absent. Requires the `read` scope.
 	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -2371,7 +2371,7 @@ func (c *ClientWithResponses) GetDocumentWithResponse(ctx context.Context, id st
 
 // GetDocumentsWithBodyWithResponse Get several documents
 //
-// Batch fetch by a list of references (paths or docids), by a glob such as `claude-sessions/2026-05*.md`, or both. Bodies are capped at `maxBytes` each (default 64 KiB); documents over the cap are listed under `skipped`. For a collection-scoped key every list is filtered per result and `errors` is always empty: a reference that matched nothing the key may read is simply absent. Requires the `read` scope.
+// Batch fetch by a list of references (paths or docids), by a glob such as `claude-sessions/2026-05*.md`, or both. A glob may use only `*`, `?` and whole-segment `**`; braces, brackets and extglobs are refused with 400. Bodies are capped at `maxBytes` each (default 64 KiB, at most 1 MiB); documents over the cap are listed under `skipped`. For a collection-scoped key every list is filtered per result and `errors` is always empty: a reference that matched nothing the key may read is simply absent. Requires the `read` scope.
 //
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 //
@@ -2386,7 +2386,7 @@ func (c *ClientWithResponses) GetDocumentsWithBodyWithResponse(ctx context.Conte
 
 // GetDocumentsWithResponse Get several documents
 //
-// Batch fetch by a list of references (paths or docids), by a glob such as `claude-sessions/2026-05*.md`, or both. Bodies are capped at `maxBytes` each (default 64 KiB); documents over the cap are listed under `skipped`. For a collection-scoped key every list is filtered per result and `errors` is always empty: a reference that matched nothing the key may read is simply absent. Requires the `read` scope.
+// Batch fetch by a list of references (paths or docids), by a glob such as `claude-sessions/2026-05*.md`, or both. A glob may use only `*`, `?` and whole-segment `**`; braces, brackets and extglobs are refused with 400. Bodies are capped at `maxBytes` each (default 64 KiB, at most 1 MiB); documents over the cap are listed under `skipped`. For a collection-scoped key every list is filtered per result and `errors` is always empty: a reference that matched nothing the key may read is simply absent. Requires the `read` scope.
 //
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 //

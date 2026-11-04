@@ -321,7 +321,7 @@ public sealed class CollectionScopeTests(AuthApiFactory factory) : IClassFixture
 
 		MultiGetResult result = (await response.Content.ReadFromJsonAsync<MultiGetResult>(Json))!;
 		Assert.Equal(2, result.Docs.Count);
-		Assert.Equal(3, result.Skipped.Count);
+		Assert.Equal(["claude-sessions/huge.md", "codex-sessions/huge-secret.md"], result.Skipped.Select(s => s.File).ToArray());
 		Assert.Equal(3, result.Errors.Count);
 	}
 

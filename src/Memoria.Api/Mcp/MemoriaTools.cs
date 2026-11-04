@@ -48,7 +48,7 @@ public sealed class MemoriaTools(ScopedCorpus corpus, ICallerScope scope, IReque
 			SidecarSearchRequest? request = SearchRequestFactory.TryBuild(input, options.Value.Search, scope, out Dictionary<string, string[]> errors);
 			if (request is null)
 			{
-				throw new McpException(string.Join(" ", errors.Select(e => $"{e.Key}: {string.Join(" ", e.Value)}")));
+				throw Rejected(StatusCodes.Status400BadRequest, string.Join(" ", errors.Select(e => $"{e.Key}: {string.Join(" ", e.Value)}")));
 			}
 
 			return await corpus.SearchAsync(request, cancellationToken);
@@ -71,13 +71,13 @@ public sealed class MemoriaTools(ScopedCorpus corpus, ICallerScope scope, IReque
 		audit.SetOperation("mcp.get_document");
 		if (string.IsNullOrWhiteSpace(reference))
 		{
-			throw new McpException("reference is required.");
+			throw Rejected(StatusCodes.Status400BadRequest, "reference is required.");
 		}
 
 		return Guarded(async () =>
 		{
 			Document? document = await corpus.GetDocumentAsync(reference, new SidecarDocumentQuery(fromLine, maxLines, lineNumbers, includeBody), cancellationToken);
-			return document ?? throw new McpException($"not_found: {SidecarDisclosure.NotFoundMessage}");
+			return document ?? throw Rejected(StatusCodes.Status404NotFound, $"not_found: {SidecarDisclosure.NotFoundMessage}");
 		});
 	}
 
@@ -94,18 +94,14 @@ public sealed class MemoriaTools(ScopedCorpus corpus, ICallerScope scope, IReque
 		CancellationToken cancellationToken = default)
 	{
 		audit.SetOperation("mcp.get_documents");
+		Dictionary<string, string[]> errors = MultiGetPolicy.Validate(ids, pattern, maxBytes, maxLines);
+		if (errors.Count > 0)
+		{
+			throw Rejected(StatusCodes.Status400BadRequest, string.Join(" ", errors.Select(e => $"{e.Key}: {string.Join(" ", e.Value)}")));
+		}
+
 		bool hasIds = ids is { Length: > 0 };
 		bool hasPattern = !string.IsNullOrWhiteSpace(pattern);
-		if (!hasIds && !hasPattern)
-		{
-			throw new McpException("Provide ids, pattern, or both.");
-		}
-
-		if (ids is { Length: > 200 })
-		{
-			throw new McpException("At most 200 ids per call.");
-		}
-
 		return Guarded(() => corpus.MultiGetAsync(new SidecarMultiGetRequest
 		{
 			Ids = hasIds ? ids : null,
@@ -133,6 +129,16 @@ public sealed class MemoriaTools(ScopedCorpus corpus, ICallerScope scope, IReque
 	}
 
 	/// <summary>
+	/// A tool failure travels as HTTP 200 with <c>isError</c>, so the audit record
+	/// has to be told how the call really ended.
+	/// </summary>
+	private McpException Rejected(int status, string message)
+	{
+		audit.SetOutcome(status);
+		return new McpException(message);
+	}
+
+	/// <summary>
 	/// The SDK hides the message of any exception that is not an <see cref="McpException"/>;
 	/// surface the sidecar's code and whatever <see cref="SidecarDisclosure"/> lets
 	/// this caller see, so the model can act on "not_found" or "sidecar_unreachable"
@@ -146,12 +152,19 @@ public sealed class MemoriaTools(ScopedCorpus corpus, ICallerScope scope, IReque
 		}
 		catch (SidecarException ex)
 		{
+			audit.SetOutcome(MemoriaExceptionHandler.Map(ex).Status);
 			SidecarFailureView view = SidecarDisclosure.For(ex, scope);
 			throw new McpException($"{view.Code}: {view.Message}", ex);
 		}
 		catch (CollectionForbiddenException ex)
 		{
+			audit.SetOutcome(StatusCodes.Status403Forbidden, ex.Requested);
 			throw new McpException(ex.Message, ex);
+		}
+		catch (Exception ex) when (ex is not McpException and not OperationCanceledException)
+		{
+			audit.SetOutcome(StatusCodes.Status500InternalServerError);
+			throw;
 		}
 	}
 }

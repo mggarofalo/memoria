@@ -1446,6 +1446,20 @@
           },
           {
             "schema": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "maxItems": 50
+            },
+            "in": "query",
+            "name": "collections",
+            "required": false,
+            "description": "Resolve the reference only inside these collections. Anything else is a plain miss, with no similar-files scan and no read."
+          },
+          {
+            "schema": {
               "type": "string"
             },
             "in": "path",
@@ -1524,7 +1538,7 @@
         "tags": [
           "documents"
         ],
-        "description": "Batch fetch by glob (`claude-sessions/2026-05*.md`), by a list of references (paths or docids), or both. Each selector resolves on its own and the results merge, one entry per file; a selector that matches nothing adds a line to `errors` without failing the others. Documents larger than `maxBytes` are listed under `skipped` rather than returned.",
+        "description": "Batch fetch by glob (`claude-sessions/2026-05*.md`), by a list of references (paths or docids), or both. Each selector resolves on its own and the results merge, one entry per file; a selector that matches nothing adds a line to `errors` without failing the others. Documents larger than `maxBytes` are listed under `skipped` rather than returned. A glob may use only `*`, `?` and whole-segment `**`; braces, brackets and extglobs are refused, because QMD's matcher can be made to run indefinitely.",
         "requestBody": {
           "required": true,
           "content": {
@@ -1548,9 +1562,19 @@
                     "maxItems": 200,
                     "description": "Paths or docids."
                   },
+                  "collections": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "maxItems": 50,
+                    "description": "Match and read only inside these collections. An empty list means nothing, not everything."
+                  },
                   "maxBytes": {
                     "type": "integer",
                     "minimum": 1,
+                    "maximum": 1048576,
                     "default": 65536
                   },
                   "maxLines": {

@@ -26,12 +26,13 @@ public static partial class AuthHosting
 		services.AddSingleton(new ControlDatabase(auth.DatabasePath));
 		services.AddSingleton<IApiKeyStore, SqliteApiKeyStore>();
 		services.AddSingleton<LastUsedThrottle>();
+		services.AddSingleton<FailedAuthLimiter>();
 		services.AddScoped<ICallerScope, HttpCallerScope>();
 		services.AddScoped<IRequestAudit, HttpRequestAudit>();
 		services.AddSingleton<IAuthorizationHandler, MemoriaScopeHandler>();
 
 		AuthenticationBuilder authentication = services.AddAuthentication(ApiKeyAuthenticationHandler.SchemeName);
-		if (auth.Mode == AuthMode.Disabled)
+		if (auth.IsDisabled)
 		{
 			authentication.AddScheme<AuthenticationSchemeOptions, DisabledAuthenticationHandler>(ApiKeyAuthenticationHandler.SchemeName, null);
 			services.AddSingleton<IAuditLog, NullAuditLog>();
@@ -55,13 +56,17 @@ public static partial class AuthHosting
 		return services;
 	}
 
-	/// <summary>Order matters: the audit middleware must see what authorization and the limiter decide.</summary>
+	/// <summary>
+	/// Order matters. Audit wraps the rest so it sees what they decide. The limiter
+	/// runs before authorization so a key hammering routes it may not use spends
+	/// its own permits, instead of getting unlimited 403s and audit rows.
+	/// </summary>
 	public static IApplicationBuilder UseMemoriaAuth(this IApplicationBuilder app)
 	{
 		app.UseAuthentication();
 		app.UseMiddleware<AuditMiddleware>();
-		app.UseAuthorization();
 		app.UseRateLimiter();
+		app.UseAuthorization();
 		return app;
 	}
 
@@ -69,7 +74,7 @@ public static partial class AuthHosting
 	public static async Task InitializeMemoriaAuthAsync(this WebApplication app)
 	{
 		AuthOptions auth = app.Services.GetRequiredService<IOptions<MemoriaOptions>>().Value.Auth;
-		if (auth.Mode == AuthMode.Disabled)
+		if (auth.IsDisabled)
 		{
 			LogAuthDisabled(app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Memoria.Api.Auth"));
 			return;

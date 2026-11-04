@@ -1,9 +1,14 @@
 using System.Net;
+using System.Net.Http.Json;
+using System.Text.Json;
 using Memoria.Api.Auth;
+using Memoria.Api.Configuration;
 using Memoria.Api.Http;
+using Memoria.Core.Contracts;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 using ModelContextProtocol.Client;
 
 namespace Memoria.Api.Tests;
@@ -89,6 +94,24 @@ public sealed class RateLimitTests(AuthApiFactory factory) : IClassFixture<AuthA
 		HttpResponseMessage response = await client.PostAsync("/mcp", new StringContent("{}", System.Text.Encoding.UTF8, "application/json"));
 
 		Assert.Equal(HttpStatusCode.TooManyRequests, response.StatusCode);
+	}
+
+	[Fact]
+	public async Task Hammering_AForbiddenRoute_SpendsPermits_AndStopsWritingAuditRows()
+	{
+		(ApiKeyRecord record, string token) = await factory.IssueAsync([MemoriaScopes.Read], ["claude-sessions"]);
+		using WebApplicationFactory<Program> limited = Limited("5");
+		HttpClient client = AuthApiFactory.Authorized(limited.CreateClient(), token);
+		List<HttpStatusCode> statuses = [];
+
+		for (int i = 0; i < 20; i++)
+		{
+			statuses.Add((await client.GetAsync("/v1/admin/keys")).StatusCode);
+		}
+
+		Assert.Equal(5, statuses.Count(s => s == HttpStatusCode.Forbidden));
+		Assert.Equal(15, statuses.Count(s => s == HttpStatusCode.TooManyRequests));
+		Assert.Equal(20, (await factory.ReadAuditAsync()).Count(r => r.KeyId == record.Id));
 	}
 
 	[Fact]
@@ -269,7 +292,8 @@ public sealed class AuditTests(AuthApiFactory factory) : IClassFixture<AuthApiFa
 			await client.CallToolAsync("list_collections", new Dictionary<string, object?>());
 		}
 
-		AuthApiFactory.AuditRow row = Assert.Single(await factory.ReadAuditAsync(), r => r.KeyId == record.Id && r.Operation == "mcp.list_collections");
+		List<AuthApiFactory.AuditRow> all = await factory.WaitForAuditAsync(rows => rows.Any(r => r.KeyId == record.Id && r.Operation == "mcp.list_collections"));
+		AuthApiFactory.AuditRow row = Assert.Single(all, r => r.KeyId == record.Id && r.Operation == "mcp.list_collections");
 		Assert.Equal("[\"claude-sessions\"]", row.Collections);
 		Assert.Equal(1, row.ResultCount);
 		Assert.Equal(200, row.Status);
@@ -307,7 +331,7 @@ public sealed class AuditTests(AuthApiFactory factory) : IClassFixture<AuthApiFa
 			HttpResponseMessage response = await client.GetAsync("/v1/collections");
 
 			Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-			Assert.Contains(factory.Logs, l => l.Message.Contains("Could not store the audit record", StringComparison.Ordinal));
+			Assert.Contains(factory.Logs, l => l.Message.Contains("Could not store audit record", StringComparison.Ordinal));
 		}
 		finally
 		{
@@ -319,13 +343,137 @@ public sealed class AuditTests(AuthApiFactory factory) : IClassFixture<AuthApiFa
 	}
 
 	[Fact]
+	public async Task McpDenial_IsAuditedAs403_WithTheCollectionsAttempted()
+	{
+		(ApiKeyRecord record, string token) = await factory.IssueAsync([MemoriaScopes.Read], ["claude-sessions"]);
+		await using (McpClient client = await ConnectAsync(token))
+		{
+			await client.CallToolAsync("search", new Dictionary<string, object?> { ["query"] = "x", ["collections"] = new[] { "claude-sessions", "codex-sessions" } });
+		}
+
+		List<AuthApiFactory.AuditRow> all = await factory.WaitForAuditAsync(rows => rows.Any(r => r.KeyId == record.Id && r.Operation == "mcp.search"));
+		AuthApiFactory.AuditRow row = Assert.Single(all, r => r.KeyId == record.Id && r.Operation == "mcp.search");
+		Assert.Equal(403, row.Status);
+		Assert.Equal("[\"claude-sessions\",\"codex-sessions\"]", row.AttemptedCollections);
+	}
+
+	[Fact]
+	public async Task McpFailures_AreAuditedWithTheirRealOutcome()
+	{
+		factory.Sidecar.On("GET", "/docs/nope.md", HttpStatusCode.NotFound, """{"error":"not_found","message":"Document not found: nope.md"}""");
+		factory.Sidecar.On("GET", "/status", HttpStatusCode.InternalServerError, """{"error":"internal","message":"boom"}""");
+		(ApiKeyRecord record, string token) = await factory.IssueAsync([MemoriaScopes.Read], ["claude-sessions"]);
+		await using (McpClient client = await ConnectAsync(token))
+		{
+			await client.CallToolAsync("get_document", new Dictionary<string, object?> { ["reference"] = "nope.md" });
+			await client.CallToolAsync("status", new Dictionary<string, object?>());
+			await client.CallToolAsync("get_documents", new Dictionary<string, object?> { ["pattern"] = "+(*)Z" });
+		}
+
+		string[] operations = ["mcp.get_document", "mcp.status", "mcp.get_documents"];
+		List<AuthApiFactory.AuditRow> all = await factory.WaitForAuditAsync(found => operations.All(op => found.Any(r => r.KeyId == record.Id && r.Operation == op)));
+		List<AuthApiFactory.AuditRow> rows = all.Where(r => r.KeyId == record.Id).ToList();
+		Assert.Equal(404, Assert.Single(rows, r => r.Operation == "mcp.get_document").Status);
+		Assert.Equal(502, Assert.Single(rows, r => r.Operation == "mcp.status").Status);
+		Assert.Equal(400, Assert.Single(rows, r => r.Operation == "mcp.get_documents").Status);
+	}
+
+	[Fact]
+	public async Task RestDenial_RecordsEveryCollectionAttempted()
+	{
+		(_, string token) = await factory.IssueAsync([MemoriaScopes.Read], ["claude-sessions"]);
+		HttpClient client = AuthApiFactory.Authorized(factory.CreateClient(), token);
+
+		HttpResponseMessage response = await client.GetAsync("/v1/search?query=x&collection=claude-sessions&collection=codex-sessions");
+
+		Assert.Equal("[\"claude-sessions\",\"codex-sessions\"]", (await RowForAsync(response)).AttemptedCollections);
+	}
+
+	[Fact]
+	public async Task AuditId_IsServerGenerated_EvenWhenTheCallerRepeatsATraceId()
+	{
+		factory.Sidecar.On("GET", "/collections", HttpStatusCode.OK, SidecarFixtures.Collections);
+		(ApiKeyRecord record, string token) = await factory.IssueAsync([MemoriaScopes.Read], ["claude-sessions"]);
+		HttpClient client = AuthApiFactory.Authorized(factory.CreateClient(), token);
+		const string forged = "4bf92f3577b34da6a3ce929d0e0e4736";
+		client.DefaultRequestHeaders.Add("traceparent", $"00-{forged}-00f067aa0ba902b7-01");
+
+		await client.GetAsync("/v1/collections");
+		await client.GetAsync("/v1/collections");
+
+		List<AuthApiFactory.AuditRow> rows = (await factory.ReadAuditAsync()).Where(r => r.KeyId == record.Id).ToList();
+		Assert.Equal(2, rows.Count);
+		Assert.All(rows, r => Assert.Equal(forged, r.TraceId));
+		Assert.NotEqual(rows[0].AuditId, rows[1].AuditId);
+		Assert.All(rows, r => Assert.DoesNotContain(forged, r.AuditId));
+	}
+
+	[Fact]
+	public async Task AdminKeyOperations_RecordTheTargetKey_NeverItsSecret()
+	{
+		(ApiKeyRecord admin, string adminToken) = await factory.IssueAsync([MemoriaScopes.Admin]);
+		HttpClient client = AuthApiFactory.Authorized(factory.CreateClient(), adminToken);
+
+		HttpResponseMessage created = await client.PostAsJsonAsync("/v1/admin/keys", new CreateApiKeyRequest("target", [MemoriaScopes.Read], ["claude-sessions"], null, null));
+		IssuedApiKey issued = (await created.Content.ReadFromJsonAsync<IssuedApiKey>(new JsonSerializerOptions(JsonSerializerDefaults.Web)))!;
+		HttpResponseMessage rotated = await client.PostAsync($"/v1/admin/keys/{issued.Info.Id}:rotate", null);
+		string rotatedKey = (await rotated.Content.ReadFromJsonAsync<IssuedApiKey>(new JsonSerializerOptions(JsonSerializerDefaults.Web)))!.Key;
+		await client.DeleteAsync($"/v1/admin/keys/{issued.Info.Id}");
+
+		List<AuthApiFactory.AuditRow> rows = (await factory.ReadAuditAsync()).Where(r => r.KeyId == admin.Id).ToList();
+		foreach (string operation in new[] { "createApiKey", "rotateApiKey", "revokeApiKey" })
+		{
+			AuthApiFactory.AuditRow row = Assert.Single(rows, r => r.Operation == operation);
+			Assert.NotNull(row.Target);
+			using JsonDocument target = JsonDocument.Parse(row.Target);
+			Assert.Equal(issued.Info.Id, target.RootElement.GetProperty("KeyId").GetString());
+			Assert.Equal("read", target.RootElement.GetProperty("Scopes")[0].GetString());
+			Assert.Equal("claude-sessions", target.RootElement.GetProperty("Collections")[0].GetString());
+			Assert.False(target.RootElement.GetProperty("AllCollections").GetBoolean());
+			Assert.DoesNotContain(issued.Key.Split('_')[2], row.ToString());
+			Assert.DoesNotContain(rotatedKey.Split('_')[2], row.ToString());
+		}
+	}
+
+	[Fact]
+	public async Task BurstFromOneKey_IsBoundedPerKey_AndLeavesOtherKeysHistoryAlone()
+	{
+		SqliteAuditLog log = ActivatorUtilities.CreateInstance<SqliteAuditLog>(factory.Services, Options.Create(new MemoriaOptions { Auth = new AuthOptions { Audit = new AuditOptions { MaxRowsPerKey = 5, RetentionDays = 0 } } }));
+		string noisy = ApiKeyToken.NewId();
+		string quiet = ApiKeyToken.NewId();
+		await log.WriteAsync(new AuditRecord(Guid.NewGuid().ToString("N"), DateTimeOffset.UtcNow, quiet, "kept", null, null, null, 200, "t", null, null));
+
+		for (int i = 0; i < 40; i++)
+		{
+			await log.WriteAsync(new AuditRecord(Guid.NewGuid().ToString("N"), DateTimeOffset.UtcNow, noisy, $"op{i}", null, null, null, 403, "t", null, null));
+		}
+
+		List<AuthApiFactory.AuditRow> all = await factory.ReadAuditAsync();
+		List<AuthApiFactory.AuditRow> rows = all.Where(r => r.KeyId == noisy).ToList();
+		Assert.Equal(5, rows.Count);
+		Assert.Equal("op39", rows[^1].Operation);
+		Assert.Contains(all, r => r.KeyId == quiet && r.Operation == "kept");
+	}
+
+	private async Task<McpClient> ConnectAsync(string token)
+	{
+		HttpClient http = AuthApiFactory.Authorized(factory.CreateClient(), token);
+		return await McpClient.CreateAsync(new HttpClientTransport(new HttpClientTransportOptions
+		{
+			Endpoint = new Uri(http.BaseAddress!, "/mcp"),
+			TransportMode = HttpTransportMode.StreamableHttp,
+			Name = "memoria-tests",
+		}, http));
+	}
+
+	[Fact]
 	public async Task Retention_PrunesOldRecords_OnWrite()
 	{
 		SqliteAuditLog log = ActivatorUtilities.CreateInstance<SqliteAuditLog>(factory.Services);
 		string key = ApiKeyToken.NewId();
 
-		await log.WriteAsync(new AuditRecord(DateTimeOffset.UtcNow.AddDays(-400), key, "old", null, null, 200, "t-old", null));
-		await log.WriteAsync(new AuditRecord(DateTimeOffset.UtcNow, key, "new", null, null, 200, "t-new", null));
+		await log.WriteAsync(new AuditRecord(Guid.NewGuid().ToString("N"), DateTimeOffset.UtcNow.AddDays(-400), key, "old", null, null, null, 200, "t-old", null, null));
+		await log.WriteAsync(new AuditRecord(Guid.NewGuid().ToString("N"), DateTimeOffset.UtcNow, key, "new", null, null, null, 200, "t-new", null, null));
 
 		List<AuthApiFactory.AuditRow> rows = (await factory.ReadAuditAsync()).Where(r => r.KeyId == key).ToList();
 		Assert.DoesNotContain(rows, r => r.Operation == "old");
