@@ -71,7 +71,9 @@ test("an unsupported ignore pattern breaks POST for the collection and never DEL
 test("names these rules would refuse today stay deletable", async () => {
   const t = await makeApp();
   try {
-    const anywhere = ["notes~1.md", "OBSIDI~1/x.md", "a\u202eb.md", "a\u200bb.md", " lead.md", "re\u0301sume\u0301.md", "conference.md", `${"語".repeat(100)}.md`];
+    const anywhere = ["notes~1.md", "OBSIDI~1/x.md", "a\u202eb.md", "a\u200bb.md", " lead.md", "re\u0301sume\u0301.md", "conference.md"];
+    // 306 bytes of UTF-8, which NTFS counts as 103 characters and ext4 refuses to create.
+    const windowsOnly = [`${"語".repeat(100)}.md`];
     const posixOnly = ["a:b.md", "a<b>.md", 'a"b.md', "a|b.md", "a?b.md", "a*b.md", "trail.md ", "dot.md.", "dir./x.md", "CON.md", "NUL/x.md", "com1.tar.md", "a\x01b.md", "tab\there.md"];
     for (const p of process.platform === "win32" ? [...anywhere, ...windowsOnly] : [...anywhere, ...posixOnly]) await assertDeletes(t, p);
   } finally {
