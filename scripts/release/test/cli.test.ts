@@ -386,7 +386,7 @@ test("tag-image points every tag at the digest and confirms each one resolves to
 
   assert.equal(run(["tag-image", "r@sha256:abc", "r:1.2.3", "r:latest"], tools, assert.fail), 0);
 
-  assert.deepEqual(calls[0], ["buildx", "imagetools", "create", "-t", "r:1.2.3", "-t", "r:latest", "r@sha256:abc"]);
+  assert.deepEqual(calls[0], ["buildx", "imagetools", "create", "--prefer-index=false", "-t", "r:1.2.3", "-t", "r:latest", "r@sha256:abc"]);
   assert.deepEqual(lines, ["r:1.2.3 -> sha256:abc", "r:latest -> sha256:abc"]);
 });
 

@@ -168,7 +168,8 @@ function verifyImageCommand(tools: Tools, image: string | undefined, version: st
 function tagImageCommand(tools: Tools, image: string | undefined, tags: readonly string[]): void {
   const digest = image?.split("@")[1];
   if (image === undefined || digest === undefined || tags.length === 0) fail("tag-image needs an image@digest and at least one tag");
-  tools.docker(["buildx", "imagetools", "create", ...tags.flatMap((tag) => ["-t", tag]), image]);
+  // By default this wraps a single image in a new index, which has a different digest; the check below would catch it.
+  tools.docker(["buildx", "imagetools", "create", "--prefer-index=false", ...tags.flatMap((tag) => ["-t", tag]), image]);
   for (const tag of tags) {
     const manifest = JSON.parse(tools.docker(["buildx", "imagetools", "inspect", tag, "--format", "{{json .Manifest}}"])) as { digest?: string };
     if (manifest.digest !== digest) fail(`${tag} resolves to ${manifest.digest ?? "nothing"}, not the verified ${digest}`);
