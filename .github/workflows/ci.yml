@@ -63,11 +63,7 @@ jobs:
               - dotnet-tools.json
               - scripts/coverage-dotnet.sh
             cli:
-              - .github/workflows/ci.yml
-              - cli/**
-              - src/Memoria.Api/openapi.json
-              - .gitattributes
-              - scripts/coverage-go.sh
+              - nonexistent-probe/**
             sidecar:
               - .github/workflows/ci.yml
               - sidecar/**
