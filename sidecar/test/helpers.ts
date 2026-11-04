@@ -1,3 +1,4 @@
+import { rmSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -106,8 +107,23 @@ export function sampleDocs(): FakeDoc[] {
   ];
 }
 
+const created: string[] = [];
+
+/** Each test file is its own process, so its directories all go when it ends. */
+process.once("exit", () => {
+  for (const dir of created) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // Something still has a file open. A leftover in the temporary directory fails nothing.
+    }
+  }
+});
+
 export async function tempDir(prefix = "memoria-qmd-"): Promise<string> {
-  return mkdtemp(path.join(tmpdir(), prefix));
+  const dir = await mkdtemp(path.join(tmpdir(), prefix));
+  created.push(dir);
+  return dir;
 }
 
 export interface TestApp {

@@ -167,7 +167,7 @@ test("parity holds on awkward documents: no heading, unicode, frontmatter, dupli
     },
   };
   const build = async () => {
-    const root = await tempDir("memoria-parity-");
+    const root = await tempDir("memoria-farm-parity-");
     const collections: Record<string, { path: string; pattern: string }> = {};
     for (const [name, docs] of Object.entries(awkward)) {
       const dir = path.join(root, name);

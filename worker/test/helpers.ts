@@ -60,7 +60,7 @@ export interface RunningWorker {
 export const quietMachine: MachineState = { loadPerCore: 0.1, cpuSpeedLimit: null, vram: { freeMb: 8000, totalMb: 12000, source: "nvidia-smi" } };
 
 /** The whole worker in this process, over fake llama-servers. */
-export async function startWorker(options: { token?: string | undefined; env?: NodeJS.ProcessEnv; machine?: () => Promise<MachineState>; maxQueue?: number; bodyLimitBytes?: number; roles?: Role[] } = {}): Promise<RunningWorker> {
+export async function startWorker(options: { token?: string | undefined; env?: NodeJS.ProcessEnv; machine?: () => Promise<MachineState>; maxQueue?: number; bodyLimitBytes?: number; maxBufferedBytes?: number; roles?: Role[] } = {}): Promise<RunningWorker> {
   const token = "token" in options ? options.token : TOKEN;
   const logs: string[] = [];
   const log = createLogger(undefined, (line) => logs.push(line));
@@ -72,6 +72,7 @@ export async function startWorker(options: { token?: string | undefined; env?: N
   const { server, gates } = createWorkerServer({
     token,
     bodyLimitBytes: options.bodyLimitBytes ?? 1024 * 1024,
+    ...(options.maxBufferedBytes !== undefined ? { maxBufferedBytes: options.maxBufferedBytes } : {}),
     maxQueue: options.maxQueue ?? 16,
     concurrency,
     inference: new Inference(new LlamaServers(supervisor, { timeoutMs: 5_000 })),

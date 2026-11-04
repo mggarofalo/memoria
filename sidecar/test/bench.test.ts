@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { cosine, expansionKey, jaccard, meanPairwiseJaccard, scoreDelta, spearman, summarize, topKOverlap } from "../bench/metrics.ts";
 import { rerankQueryFor, runParity, validateQuerySet, type BenchQuery, type ParitySide } from "../bench/run.ts";
+import { createWorkspace, sweepDeadWorkspaces, WORKSPACE_PREFIX } from "../bench/workspace.ts";
+import { tempDir } from "./helpers.ts";
 
 const close = (a: number | null, b: number) => assert.ok(a !== null && Math.abs(a - b) < 1e-9, `${a} is not ${b}`);
 
@@ -187,4 +191,53 @@ test("with a worker URL it insists on a named index and has no default to fall b
   const missing = runEntry(env, "--db", "/definitely/not/an/index.sqlite");
   assert.equal(missing.status, 2);
   assert.match(missing.stderr, /No index/);
+});
+
+test("the next run clears what a dead run left, and nothing else", async () => {
+  const root = await tempDir("memoria-sweep-");
+  const mine = await createWorkspace(root);
+  const dead = await createWorkspace(root);
+  writeFileSync(path.join(dead, ".memoria-parity-owner"), "99999999", "utf8");
+  writeFileSync(path.join(dead, "local.sqlite"), "copy", "utf8");
+  const unmarked = path.join(root, `${WORKSPACE_PREFIX}notours`);
+  mkdirSync(unmarked);
+  const otherName = path.join(root, "unrelated");
+  mkdirSync(otherName);
+  writeFileSync(path.join(otherName, ".memoria-parity-owner"), "99999999", "utf8");
+  assert.deepEqual(sweepDeadWorkspaces(root), [dead]);
+  assert.equal(existsSync(dead), false);
+  assert.equal(existsSync(mine), true, "a live run keeps its copies");
+  assert.equal(existsSync(unmarked), true, "no marker, not ours to delete");
+  assert.equal(existsSync(otherName), true);
+});
+
+test("Ctrl-C closes what it can and removes the workspace", async () => {
+  const root = await tempDir("memoria-sigint-");
+  const module = new URL("../bench/workspace.ts", import.meta.url).href;
+  const script = `
+    import { createWorkspace, onInterrupt, removeWorkspace } from ${JSON.stringify(module)};
+    const dir = await createWorkspace(${JSON.stringify(root)});
+    console.log(dir);
+    onInterrupt(async () => removeWorkspace(dir));
+    process.emit("SIGINT", "SIGINT");
+    setTimeout(() => process.exit(9), 5000);
+  `;
+  const run = spawnSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", timeout: 20_000 });
+  assert.equal(run.status, 130);
+  assert.equal(existsSync(run.stdout.trim()), false);
+});
+
+test("each query is reported as it finishes, so a crash keeps the earlier ones", async () => {
+  const side: ParitySide = {
+    candidates: async () => [{ file: "a", text: "a" }],
+    rerank: async () => ({ results: [{ file: "a", score: 0.5, index: 0 }], model: "m" }),
+    embed: async () => [1, 0],
+    search: async () => ({ files: ["a"], scores: [0.5] }),
+    expand: async () => [{ type: "lex", text: "x" }],
+    clearCache: () => {},
+  };
+  const q = (id: string): BenchQuery => ({ id, collection: "c", query: "q", intent: "i", searches: [{ type: "lex", query: "q" }] });
+  const counts: number[] = [];
+  await runParity([q("one"), q("two")], side, side, { candidateLimit: 1, expansionRuns: 2, onQuery: (reports) => counts.push(reports.length) });
+  assert.deepEqual(counts, [1, 2]);
 });

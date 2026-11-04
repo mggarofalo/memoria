@@ -5,20 +5,21 @@
  *     npm run bench:parity -- --db /path/to/index.sqlite --out parity.json
  *
  * Needs the GGUF models on this host for the in-process side. Takes a copy of the
- * index and works only on copies, deleted afterward; the index named by --db is
- * only read. Exits 0 without doing anything when no worker URL is set, so it can
+ * index and works only on copies, deleted on any exit but a crash, and swept by
+ * the next run after one; the index named by --db is only read. `--out` is updated
+ * after every query, marked `partial` until the run ends. Exits 0 without doing anything when no worker URL is set, so it can
  * sit in CI without ever being required.
  *
  * It reports numbers and makes no decision. See docs/workers.md for reading them.
  */
-import { copyFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { copyFile, readFile, rename, writeFile } from "node:fs/promises";
+import { existsSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { loadConfig } from "../src/config.ts";
 import { openBackend, type OpenedBackend } from "../src/store.ts";
 import { runParity, validateQuerySet, type BenchQuery, type ParitySide } from "./run.ts";
+import { createWorkspace, onInterrupt, removeWorkspace, sweepDeadWorkspaces } from "./workspace.ts";
 
 function side(backend: OpenedBackend): ParitySide {
   return {
@@ -82,9 +83,17 @@ async function main(): Promise<number> {
   const queryFile = values.queries ?? new URL("./queries.json", import.meta.url);
   const queries = validateQuerySet(JSON.parse(await readFile(queryFile, "utf8")));
 
-  const workspace = await mkdtemp(path.join(tmpdir(), "memoria-parity-"));
+  const swept = sweepDeadWorkspaces();
+  if (swept.length > 0) console.error(`Removed ${swept.length} index copies left by runs that crashed.`);
+  const workspace = await createWorkspace();
   let local: OpenedBackend | undefined;
   let remote: OpenedBackend | undefined;
+  const cleanup = async (): Promise<void> => {
+    await remote?.close();
+    await local?.close();
+    removeWorkspace(workspace);
+  };
+  const removeHandlers = onInterrupt(cleanup);
   try {
     // Opened local first: remote mode replaces the SDK's process-wide default,
     // which the local side's document path would otherwise share. These runs
@@ -106,17 +115,24 @@ async function main(): Promise<number> {
       candidateLimit,
       expansionRuns,
       onProgress: (done, total, id) => console.error(`[${done}/${total}] ${id}`),
+      onQuery: (reports) => {
+        if (!values.out) return;
+        writeFileSync(`${values.out}.tmp`, `${JSON.stringify({ partial: true, candidateLimit, expansionRuns, queries: reports }, null, 2)}\n`, "utf8");
+        renameSync(`${values.out}.tmp`, values.out);
+      },
     });
     const output = JSON.stringify({ transport: remote.llm.rerankTransport, candidateLimit, expansionRuns, ...report }, null, 2);
-    if (values.out) await writeFile(values.out, `${output}\n`, "utf8");
+    if (values.out) {
+      await writeFile(`${values.out}.tmp`, `${output}\n`, "utf8");
+      await rename(`${values.out}.tmp`, values.out);
+    }
     console.log(JSON.stringify({ transport: remote.llm.rerankTransport, summary: report.summary }, null, 2));
     const failed = report.queries.filter((q) => q.errors.length > 0).length;
     if (failed > 0) console.error(`${failed} of ${report.queries.length} queries recorded errors; see their entries in the report.`);
     return 0;
   } finally {
-    await remote?.close();
-    await local?.close();
-    await rm(workspace, { recursive: true, force: true, maxRetries: 3 });
+    removeHandlers();
+    await cleanup();
   }
 }
 

@@ -1,3 +1,4 @@
+import { isIPv4, isIPv6 } from "node:net";
 import { homedir } from "node:os";
 import path from "node:path";
 import { resolveSecret } from "./secret-file.ts";
@@ -35,6 +36,8 @@ export interface RoleConfig {
   modelPath: string | undefined;
   /** An already-running llama-server to use instead of launching one. */
   externalUrl: string | undefined;
+  /** The key for that server, if it has one. */
+  externalApiKey?: string | undefined;
   port: number;
   parallel: number;
 }
@@ -54,6 +57,8 @@ export interface WorkerConfig {
   /** Requests allowed to wait, per role, before new ones get a 503. */
   maxQueue: number;
   bodyLimitBytes: number;
+  /** Request bodies held in memory at once, across every request. */
+  maxBufferedBytes: number;
   requestTimeoutMs: number;
   /** Report `busy` above this one-minute load per core. 0 disables. */
   busyLoadPerCore: number;
@@ -63,12 +68,22 @@ export interface WorkerConfig {
   busyOnThermal: boolean;
 }
 
-const LOOPBACK = /^(127\.\d{1,3}\.\d{1,3}\.\d{1,3}|::1|localhost)$/i;
-const PRIVATE_V4 = /^(10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|169\.254\.\d{1,3}\.\d{1,3})$/;
 const PRIVATE_V6 = /^(f[cd][0-9a-f]{2}|fe[89ab][0-9a-f]):/i;
 
+function octets(host: string): number[] | null {
+  return isIPv4(host) ? host.split(".").map(Number) : null;
+}
+
 export function isLoopback(host: string): boolean {
-  return LOOPBACK.test(host.trim());
+  const h = host.trim().toLowerCase();
+  return h === "localhost" || h === "::1" || octets(h)?.[0] === 127;
+}
+
+function isPrivateV4(host: string): boolean {
+  const o = octets(host);
+  if (!o) return false;
+  const [a, b] = o as [number, number];
+  return a === 10 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31) || (a === 169 && b === 254);
 }
 
 /**
@@ -78,7 +93,24 @@ export function isLoopback(host: string): boolean {
  */
 export function isLanAddress(host: string): boolean {
   const h = host.trim();
-  return isLoopback(h) || PRIVATE_V4.test(h) || PRIVATE_V6.test(h);
+  return isLoopback(h) || isPrivateV4(h) || (isIPv6(h) && PRIVATE_V6.test(h));
+}
+
+/**
+ * Transcript text goes to this address, so the rules match the worker's own bind:
+ * a literal loopback or private address, with no credentials in the URL.
+ */
+function checkedExternalUrl(value: string, name: string): string {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`${name} is not a URL`);
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error(`${name} must be http or https`);
+  if (url.username !== "" || url.password !== "") throw new Error(`${name} must not contain credentials`);
+  if (!isLanAddress(url.hostname.replace(/^\[|\]$/g, ""))) throw new Error(`${name} must point at a loopback or private LAN address`);
+  return value;
 }
 
 function readBool(value: string | undefined, fallback: boolean, name: string): boolean {
@@ -163,12 +195,14 @@ const DEFAULT_PARALLEL: Readonly<Record<Role, number>> = { embed: 4, rerank: 2, 
 function readRole(env: NodeJS.ProcessEnv, role: Role, port: number): RoleConfig {
   const prefix = `MEMORIA_WORKER_${role.toUpperCase()}`;
   const modelPath = env[`${prefix}_MODEL`]?.trim() || undefined;
-  const externalUrl = env[`${prefix}_URL`]?.trim() || undefined;
+  const rawUrl = env[`${prefix}_URL`]?.trim();
+  const externalUrl = rawUrl ? checkedExternalUrl(rawUrl, `${prefix}_URL`) : undefined;
   return {
     role,
     modelFile: modelPath ? path.basename(modelPath) : DEFAULT_MODEL_FILES[role],
     modelPath,
     externalUrl,
+    externalApiKey: env[`${prefix}_API_KEY`]?.trim() || undefined,
     port,
     parallel: readNumber(env[`${prefix}_PARALLEL`], DEFAULT_PARALLEL[role], `${prefix}_PARALLEL`, 1, 64),
   };
@@ -203,6 +237,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
     warmup: readBool(env.MEMORIA_WORKER_WARMUP, true, "MEMORIA_WORKER_WARMUP"),
     maxQueue: readNumber(env.MEMORIA_WORKER_MAX_QUEUE, 256, "MEMORIA_WORKER_MAX_QUEUE", 0, 100000),
     bodyLimitBytes: readNumber(env.MEMORIA_WORKER_BODY_LIMIT_BYTES, 32 * 1024 * 1024, "MEMORIA_WORKER_BODY_LIMIT_BYTES", 1024, 1024 * 1024 * 1024),
+    maxBufferedBytes: readNumber(env.MEMORIA_WORKER_MAX_BUFFERED_BYTES, 256 * 1024 * 1024, "MEMORIA_WORKER_MAX_BUFFERED_BYTES", 1024, 64 * 1024 * 1024 * 1024),
     requestTimeoutMs: readNumber(env.MEMORIA_WORKER_REQUEST_TIMEOUT_MS, 120_000, "MEMORIA_WORKER_REQUEST_TIMEOUT_MS", 100, 3_600_000),
     busyLoadPerCore: readNumber(env.MEMORIA_WORKER_BUSY_LOAD_PER_CORE, 0.9, "MEMORIA_WORKER_BUSY_LOAD_PER_CORE", 0, 1000, false),
     busyVramFreeMb: readNumber(env.MEMORIA_WORKER_BUSY_VRAM_FREE_MB, 0, "MEMORIA_WORKER_BUSY_VRAM_FREE_MB", 0, 10_000_000),

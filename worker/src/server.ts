@@ -20,12 +20,19 @@ export const WORKER_VERSION = resolveVersion();
 const MAX_EMBED_TEXTS = 256;
 const MAX_RERANK_DOCUMENTS = 1000;
 const MAX_DETOKENIZE_TOKENS = 1_000_000;
+/**
+ * llama-server turns a recursive grammar away at once, but compiling a half-megabyte
+ * one held its only generate slot for over 45 seconds. QMD's is about 100 bytes.
+ */
+const MAX_GRAMMAR_BYTES = 16 * 1024;
 
 export interface WorkerServerOptions {
   token: string | undefined;
   /** DNS names a request may arrive under. An IP address is always fine. */
   allowedHosts?: ReadonlySet<string>;
   bodyLimitBytes: number;
+  /** Bodies held in memory at once, across every request. Beyond it, requests get a 503. */
+  maxBufferedBytes?: number;
   maxQueue: number;
   /** Concurrent requests per role; set to llama-server's slot count. */
   concurrency: Partial<Record<Role, number>>;
@@ -66,6 +73,11 @@ export class Gate {
     return this.#waiting.length;
   }
 
+  /** Refuses before a request's body is read, so a full queue costs no memory. */
+  admit(): void {
+    if (this.#active >= this.#limit && this.#waiting.length >= this.#maxQueue) throw new HttpFailure(503, "overloaded", "The queue for this operation is full");
+  }
+
   async run<T>(work: () => Promise<T>): Promise<T> {
     if (this.#active >= this.#limit) {
       if (this.#waiting.length >= this.#maxQueue) throw new HttpFailure(503, "overloaded", "The queue for this operation is full");
@@ -84,7 +96,7 @@ export class Gate {
   }
 }
 
-async function readJson(request: IncomingMessage, limit: number): Promise<Record<string, unknown>> {
+async function readJson(request: IncomingMessage, limit: number, reserve: (bytes: number) => void): Promise<Record<string, unknown>> {
   // A browser can send text/plain to any address with no preflight. It cannot send this.
   if (!/^application\/json\s*(;|$)/i.test(request.headers["content-type"] ?? "")) throw new HttpFailure(415, "unsupported_media_type", "The request body must be application/json");
   const chunks: Buffer[] = [];
@@ -92,6 +104,7 @@ async function readJson(request: IncomingMessage, limit: number): Promise<Record
   for await (const chunk of request) {
     total += (chunk as Buffer).length;
     if (total > limit) throw new HttpFailure(413, "payload_too_large", "The request body is too large");
+    reserve((chunk as Buffer).length);
     chunks.push(chunk as Buffer);
   }
   let parsed: unknown;
@@ -128,7 +141,10 @@ function parseComplete(body: Record<string, unknown>): CompleteRequest {
   if (typeof body.prompt !== "string" || body.prompt === "") throw new HttpFailure(400, "invalid_body", "prompt must be a non-empty string");
   const request: CompleteRequest = { prompt: body.prompt };
   const grammar = optionalString(body, "grammar");
-  if (grammar !== undefined) request.grammar = grammar;
+  if (grammar !== undefined) {
+    if (Buffer.byteLength(grammar) > MAX_GRAMMAR_BYTES) throw new HttpFailure(400, "grammar_too_large", "grammar is too large");
+    request.grammar = grammar;
+  }
   const system = optionalString(body, "system");
   if (system !== undefined) request.system = system;
   const numbers: Array<[keyof CompleteRequest & string, number, number]> = [
@@ -164,6 +180,7 @@ export function createWorkerServer(options: WorkerServerOptions): { server: Serv
     const gate = gates.get(role);
     if (!gate) throw new HttpFailure(501, "not_served", `This worker does not serve ${role}`);
     if (!options.servers().find((s) => s.role === role)?.loaded) throw new HttpFailure(503, "model_not_ready", `The ${role} model is not ready`);
+    gate.admit();
     return gate;
   };
 
@@ -203,7 +220,15 @@ export function createWorkerServer(options: WorkerServerOptions): { server: Serv
     };
   };
 
-  const read = (request: IncomingMessage) => readJson(request, options.bodyLimitBytes);
+  let buffered = 0;
+  const heldBy = new WeakMap<IncomingMessage, number>();
+  const maxBuffered = options.maxBufferedBytes ?? 256 * 1024 * 1024;
+  const read = (request: IncomingMessage) =>
+    readJson(request, options.bodyLimitBytes, (bytes) => {
+      if (buffered + bytes > maxBuffered) throw new HttpFailure(503, "overloaded", "Too much request data is waiting");
+      buffered += bytes;
+      heldBy.set(request, (heldBy.get(request) ?? 0) + bytes);
+    });
 
   const operations: Record<string, (request: IncomingMessage) => Promise<unknown>> = {
     "/v1/embed": async (request) => {
@@ -265,7 +290,17 @@ export function createWorkerServer(options: WorkerServerOptions): { server: Serv
   const server = createServer((request, response) => {
     const started = Date.now();
     const path = (request.url ?? "/").split("?")[0];
+    // Held until the answer has gone, which covers the whole wait in the queue.
+    response.once("close", () => {
+      buffered -= heldBy.get(request) ?? 0;
+      heldBy.delete(request);
+    });
     const finish = (status: number, body: unknown, errorCode?: string): void => {
+      if (!request.complete) {
+        // Turned away before the body was read: discard the rest and end the connection.
+        response.setHeader("connection", "close");
+        request.resume();
+      }
       send(response, status, body);
       log.info({ method: request.method, path, status, durationMs: Date.now() - started, ...(errorCode ? { errorCode } : {}) }, "request");
     };

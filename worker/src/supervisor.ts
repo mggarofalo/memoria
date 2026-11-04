@@ -1,4 +1,6 @@
 import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
+import { randomBytes } from "node:crypto";
+import { readBounded } from "./bounded-read.ts";
 import { CONTEXT_SIZE, type Role, type RoleConfig } from "./config.ts";
 import type { Logger } from "./log.ts";
 
@@ -93,16 +95,48 @@ export function llamaServerArgs(role: RoleConfig, modelPath: string, gpuLayers: 
   return args;
 }
 
-/** Copy of the environment without the worker's own settings, the token above all. */
+/**
+ * Copy of the environment without the worker's own settings, the token above all,
+ * or settings meant for llama-server, which could undo its flags. Names are
+ * compared without case because Windows variables keep whatever case they were
+ * set in.
+ */
 export function childEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const out: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(env)) {
-    if (!key.startsWith("MEMORIA_")) out[key] = value;
+    const name = key.toUpperCase();
+    if (!name.startsWith("MEMORIA_") && !name.startsWith("LLAMA_")) out[key] = value;
   }
   return out;
 }
 
-const STDERR_TAIL_CHARS = 2000;
+/**
+ * What a launched server gets at start, in its environment, since a command line
+ * is visible to other local users. The key authenticates every call. The nonce
+ * comes back as the model alias in `/props`, and only the child can know it, so
+ * something else listening on the port is never marked ready or sent text.
+ */
+export interface ChildSecrets {
+  apiKey: string;
+  nonce: string;
+}
+
+const STDERR_SCAN_CHARS = 2000;
+
+/**
+ * llama-server's output can hold prompt text, so it never reaches a log. A fixed
+ * code is all that is kept of it.
+ */
+const STDERR_CODES: ReadonlyArray<readonly [RegExp, string]> = [
+  [/couldn't bind|address already in use|failed to listen/i, "port_in_use"],
+  [/failed to load model|error loading model|unable to load model/i, "model_load_failed"],
+  [/out of memory|failed to allocate|unable to allocate|bad_alloc/i, "out_of_memory"],
+  [/invalid argument|unknown argument|error: invalid/i, "bad_arguments"],
+];
+
+export function stderrCode(text: string): string | null {
+  return STDERR_CODES.find(([pattern]) => pattern.test(text))?.[1] ?? null;
+}
 
 class ManagedServer {
   readonly config: RoleConfig;
@@ -118,6 +152,7 @@ class ManagedServer {
   #generation = 0;
   #timer: NodeJS.Timeout | undefined;
   #stderrTail = "";
+  secrets: ChildSecrets | undefined;
 
   constructor(config: RoleConfig, owner: Supervisor) {
     this.config = config;
@@ -134,11 +169,12 @@ class ManagedServer {
       return;
     }
     this.#stderrTail = "";
-    const { command, args, env, spawn } = this.#owner.launch(this.config);
+    this.secrets = { apiKey: randomBytes(32).toString("base64url"), nonce: randomBytes(24).toString("base64url") };
+    const { command, args, env, spawn } = this.#owner.launch(this.config, this.secrets);
     const child = spawn(command, args, { env, stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
     this.child = child;
     child.stderr?.on("data", (chunk: Buffer) => {
-      this.#stderrTail = (this.#stderrTail + chunk.toString("utf8")).slice(-STDERR_TAIL_CHARS);
+      this.#stderrTail = (this.#stderrTail + chunk.toString("utf8")).slice(-STDERR_SCAN_CHARS);
     });
     child.once("error", (err: NodeJS.ErrnoException) => {
       this.#owner.log.error({ role: this.config.role, code: err.code ?? "unknown" }, "llama-server failed to start");
@@ -164,7 +200,7 @@ class ManagedServer {
     this.#attempt++;
     this.restarts++;
     this.state = "backoff";
-    this.#owner.log.warn({ role: this.config.role, exitCode: code, restartInMs: delay, restarts: this.restarts, stderrTail: this.#stderrTail }, "llama-server exited");
+    this.#owner.log.warn({ role: this.config.role, exitCode: code, restartInMs: delay, restarts: this.restarts, reason: stderrCode(this.#stderrTail) }, "llama-server exited");
     this.#timer = setTimeout(() => this.start(), delay);
     this.#timer.unref();
   }
@@ -185,9 +221,7 @@ class ManagedServer {
     const generation = this.#generation;
     let healthy = false;
     try {
-      const response = await this.#owner.fetchFn(new URL("health", this.#owner.baseUrl(this.config)), { signal: AbortSignal.timeout(t.healthTimeoutMs) });
-      await response.body?.cancel().catch(() => {});
-      healthy = response.ok;
+      healthy = await this.#answering(t.healthTimeoutMs);
     } catch {
       healthy = false;
     }
@@ -219,6 +253,25 @@ class ManagedServer {
       return;
     }
     this.#schedule(t.pollMs);
+  }
+
+  /** A launched server has to prove it is ours. An external one can only say it is up. */
+  async #answering(timeoutMs: number): Promise<boolean> {
+    const base = this.#owner.baseUrl(this.config);
+    const signal = AbortSignal.timeout(timeoutMs);
+    if (this.config.externalUrl || !this.secrets) {
+      const response = await this.#owner.fetchFn(new URL("health", base), { signal, redirect: "error" });
+      await response.body?.cancel().catch(() => {});
+      return response.ok;
+    }
+    const headers = { authorization: `Bearer ${this.secrets.apiKey}` };
+    const response = await this.#owner.fetchFn(new URL("props", base), { signal, redirect: "error", headers });
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => {});
+      return false;
+    }
+    const props = JSON.parse(await readBounded(response, 1024 * 1024)) as { model_alias?: unknown };
+    return props.model_alias === this.secrets.nonce;
   }
 
   async stop(): Promise<void> {
@@ -257,13 +310,13 @@ export class Supervisor {
     this.#servers = options.roles.map((role) => new ManagedServer(role, this));
   }
 
-  launch(role: RoleConfig): { command: string; args: string[]; env: NodeJS.ProcessEnv; spawn: SpawnFn } {
+  launch(role: RoleConfig, secrets: ChildSecrets): { command: string; args: string[]; env: NodeJS.ProcessEnv; spawn: SpawnFn } {
     const modelPath = this.#options.modelPaths[role.role];
     if (modelPath === undefined) throw new Error(`No model path resolved for ${role.role}`);
     return {
       command: this.#options.command,
       args: [...(this.#options.prefixArgs ?? []), ...llamaServerArgs(role, modelPath, this.#options.gpuLayers)],
-      env: childEnvironment(this.#options.env ?? process.env),
+      env: { ...childEnvironment(this.#options.env ?? process.env), LLAMA_API_KEY: secrets.apiKey, LLAMA_ARG_ALIAS: secrets.nonce },
       spawn: this.#options.spawn ?? (nodeSpawn as unknown as SpawnFn),
     };
   }
@@ -272,6 +325,12 @@ export class Supervisor {
   baseUrl(role: RoleConfig): string {
     const base = role.externalUrl ?? `http://127.0.0.1:${role.port}`;
     return base.endsWith("/") ? base : `${base}/`;
+  }
+
+  /** The current start's key for a launched server, or the configured one for an external server. */
+  apiKeyFor(role: Role): string | undefined {
+    const server = this.#servers.find((s) => s.config.role === role);
+    return server?.config.externalUrl ? server.config.externalApiKey : server?.secrets?.apiKey;
   }
 
   baseUrlFor(role: Role): string | undefined {

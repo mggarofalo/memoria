@@ -135,3 +135,14 @@ test("MetadataIndex builds from document heads and supports point updates", () =
   index.set("c/b.md", "stripped");
   assert.equal(index.get("c/b.md"), undefined);
 });
+
+test("a YAML warning does not put frontmatter text on stderr", async () => {
+  const warnings: string[] = [];
+  const onWarning = (warning: Error): void => void warnings.push(warning.message);
+  process.on("warning", onWarning);
+  parseFrontmatter("---\nkey: !unknowntag PRIVATE-FRONTMATTER\n---\nbody\n");
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  process.off("warning", onWarning);
+  assert.deepEqual(warnings, []);
+});
