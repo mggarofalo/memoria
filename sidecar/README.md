@@ -45,6 +45,7 @@ Everything is an environment variable. See [`.env.example`](.env.example) for th
 | `MEMORIA_QMD_REINDEX_DEBOUNCE_MS` | `60000` | Quiet period after a document write before its index update runs. `0` turns the debounce off. |
 | `MEMORIA_QMD_REINDEX_MAX_WAIT_MS` | `300000` | Longest an update can wait from its first write, so steady ingest cannot starve the index. |
 | `MEMORIA_QMD_SHUTDOWN_DRAIN_MS` | `10000` | How long shutdown waits for queued jobs. Keep it under the service manager's stop timeout (15 s in `install-service.ps1`). |
+| `MEMORIA_QMD_LLM` | `local` | `remote` sends model work to a worker. See [`docs/workers.md`](../docs/workers.md), which has the other worker settings and what is still unproven. |
 
 ### As a Windows service
 
@@ -137,6 +138,8 @@ npm run typecheck         # tsc --noEmit
 npm test                  # unit tests on an in-memory fake backend (no SDK load)
 npm run openapi:check     # committed openapi.json matches the routes
 MEMORIA_QMD_INTEGRATION=1 npm run test:integration   # real SDK on a temp fixture index, no models
+MEMORIA_QMD_WORKER_URL=... npm run test:live         # sanity checks against a real worker
+MEMORIA_QMD_WORKER_URL=... npm run bench:parity -- --db <index>   # in-process versus worker
 npm run dev               # node src/main.ts against the local index
 ```
 
@@ -154,7 +157,10 @@ Layout:
 | `src/jobs.ts` | Single-worker reindex queue with an injectable debounce clock. |
 | `src/ingest.ts` | Path validation, file writes and deletes for `/documents`. |
 | `src/multi-get.ts` | Splits a multi-get into the separate calls QMD can read, and merges the results. |
+| `src/llm/` | Remote mode: `RemoteLlm`, the worker client, response validation and the rerank transport. Loaded only when `MEMORIA_QMD_LLM=remote`. |
+| `bench/` | The parity benchmark and its query set. |
 | `test/fake-backend.ts` | In-memory backend used by unit tests and OpenAPI generation. |
+| `test/mock-worker.ts` | Scripted worker over real HTTP. |
 
 ## Security notes
 
