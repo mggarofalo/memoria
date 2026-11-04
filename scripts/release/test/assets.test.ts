@@ -4,7 +4,7 @@ import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { test } from "node:test";
 import { gunzipSync, inflateRawSync } from "node:zlib";
-import { archive, assetName, binaryName, buildAssets, checksums, goBuildArgs, serviceAssetName, serviceEntries, SERVICES, tarGz, TARGETS, zip, type Service, type Target } from "../assets.ts";
+import { archive, assetName, binaryName, buildAssets, checksums, goBuildArgs, serviceAssetName, serviceEntries, SERVICES, SHARED_FILES, tarGz, TARGETS, zip, type Service, type Target } from "../assets.ts";
 import { tempDir } from "./helpers.ts";
 
 const EPOCH = 1_750_000_000; // 2025-06-15T15:06:40Z
@@ -101,6 +101,10 @@ function fakeServiceTree(root: string): void {
     }
   }
   writeFileSync(path.join(root, "worker", "scripts", "install-launchd.sh"), "#!/bin/sh\n");
+  for (const name of SHARED_FILES) {
+    mkdirSync(path.dirname(path.join(root, name)), { recursive: true });
+    writeFileSync(path.join(root, name), "shared");
+  }
 }
 
 function tarNames(data: Buffer): Map<string, { mode: number; text: string }> {
@@ -115,25 +119,37 @@ function tarNames(data: Buffer): Map<string, { mode: number; text: string }> {
   return entries;
 }
 
-test("a service package holds the VERSION stamp at its root, its allowlist, and nothing else", (t) => {
+test("a service package holds the VERSION stamp beside its code, its allowlist, the shared files, and nothing else", (t) => {
   const root = tempDir(t);
   fakeServiceTree(root);
   writeFileSync(path.join(root, "worker", "not-shipped.txt"), "x");
   const sidecar = SERVICES[0] as Service;
   const worker = SERVICES[1] as Service;
 
-  const sidecarNames = serviceEntries(sidecar, path.join(root, "sidecar"), "1.2.3");
-  const workerEntries = tarNames(tarGz(serviceEntries(worker, path.join(root, "worker"), "1.2.3"), EPOCH));
+  const sidecarEntries = tarNames(tarGz(serviceEntries(sidecar, root, "1.2.3"), EPOCH));
+  const workerEntries = tarNames(tarGz(serviceEntries(worker, root, "1.2.3"), EPOCH));
 
-  assert.equal(sidecarNames[0]?.name, "VERSION");
-  assert.equal(sidecarNames[0]?.data.toString(), "1.2.3\n");
-  assert.ok(sidecarNames.some((entry) => entry.name === "dist/nested/memoria-sidecar.js"));
-  assert.ok(sidecarNames.some((entry) => entry.name === "package-lock.json"));
+  assert.equal(sidecarEntries.get("dist/VERSION")?.text, "1.2.3\n");
+  assert.ok(sidecarEntries.has("dist/nested/memoria-sidecar.js"));
+  assert.ok(sidecarEntries.has("package-lock.json"));
+  assert.equal(workerEntries.get("src/VERSION")?.text, "1.2.3\n");
+  assert.equal(workerEntries.get("src/VERSION")?.mode, 0o644);
   assert.ok(workerEntries.has("src/nested/memoria-worker.js"));
-  assert.equal(workerEntries.get("VERSION")?.text, "1.2.3\n");
-  assert.equal(workerEntries.get("VERSION")?.mode, 0o644);
   assert.equal(workerEntries.get("scripts/install-launchd.sh")?.mode, 0o755);
   assert.ok(!workerEntries.has("not-shipped.txt"));
+  for (const entries of [sidecarEntries, workerEntries]) {
+    assert.equal(entries.get("deploy/windows/MemoriaService.psm1")?.text, "shared");
+    assert.ok(!entries.has("VERSION"), "one stamp only");
+  }
+});
+
+test("the stamp sits in a directory the service installers copy to their install location", () => {
+  const copyItems = (file: string): string[] => {
+    const match = /CopyItems = @\(([^)]*)\)/.exec(readFileSync(new URL(`../../../${file}`, import.meta.url), "utf8"));
+    return [...(match?.[1] ?? "").matchAll(/"([^"]+)"/g)].map((item) => item[1] as string);
+  };
+  assert.ok(copyItems("sidecar/scripts/install-service.ps1").includes((SERVICES[0] as Service).stampDir));
+  assert.ok(copyItems("worker/scripts/install-service.ps1").includes((SERVICES[1] as Service).stampDir));
 });
 
 test("a file missing from the allowlist fails the build", (t) => {

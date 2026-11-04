@@ -137,7 +137,7 @@ gh release download <tag> --dir <temp-dir>
 
 From inside that directory, run `sha256sum -c checksums.txt`. Then, for the archive matching this machine, extract it and run the binary with `--version`. It must print `memoria version <version>`.
 
-Check that each service package holds the stamp. `tar -xzOf memoria-sidecar_<version>.tar.gz VERSION` must print `<version>`, and the same for the worker.
+Check that each service package holds the stamp. `tar -xzOf memoria-sidecar_<version>.tar.gz dist/VERSION` and `tar -xzOf memoria-worker_<version>.tar.gz src/VERSION` must each print `<version>`.
 
 Verify provenance on a CLI archive, on a service package, and on the image:
 

@@ -5,7 +5,7 @@ import path from "node:path";
 import { test, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
-import { SERVICES } from "../assets.ts";
+import { SERVICES, SHARED_FILES } from "../assets.ts";
 import { assertPublishable, commitsSince, previousTag, run, type Tools } from "../cli.ts";
 import { fakeTools, tempDir, tempRepo, type TempRepo } from "./helpers.ts";
 
@@ -236,7 +236,11 @@ function repoWithServices(t: TestContext): { repo: TempRepo; exec: Tools["exec"]
       writeFileSync(file, `committed ${service.dir}/${item}\n`);
     }
   }
-  repo.git("add", "sidecar", "worker");
+  for (const name of SHARED_FILES) {
+    mkdirSync(path.dirname(path.join(repo.dir, name)), { recursive: true });
+    writeFileSync(path.join(repo.dir, name), "shared\n");
+  }
+  repo.git("add", "sidecar", "worker", "deploy");
   repo.commit("feat: a");
   const calls: string[] = [];
   const exec: Tools["exec"] = (command, args, cwd) => {
@@ -279,10 +283,11 @@ test("service packages hold what was committed, not the working tree, stamped wi
   assert.equal(run(["build", "1.2.3", "--out", out], fakeTools(repo, undefined, go, { exec }).tools, assert.fail), 0);
 
   const tar = (args: string[]): string => execFileSync("tar", args, { cwd: out, encoding: "utf8" });
-  assert.equal(tar(["-xzOf", "memoria-worker_1.2.3.tar.gz", "VERSION"]), "1.2.3\n");
+  assert.equal(tar(["-xzOf", "memoria-worker_1.2.3.tar.gz", "src/VERSION"]), "1.2.3\n");
   assert.equal(tar(["-xzOf", "memoria-worker_1.2.3.tar.gz", "README.md"]), "committed worker/README.md\n");
-  assert.equal(tar(["-xzOf", "memoria-sidecar_1.2.3.tar.gz", "VERSION"]), "1.2.3\n");
+  assert.equal(tar(["-xzOf", "memoria-sidecar_1.2.3.tar.gz", "dist/VERSION"]), "1.2.3\n");
   assert.equal(tar(["-xzOf", "memoria-sidecar_1.2.3.tar.gz", "dist/main.js"]), "compiled\n");
+  assert.equal(tar(["-xzOf", "memoria-sidecar_1.2.3.tar.gz", "deploy/windows/MemoriaService.psm1"]), "shared\n");
 });
 
 test("a real failure during a build is not swallowed", (t) => {

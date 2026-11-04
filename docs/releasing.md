@@ -32,10 +32,10 @@ Nothing about the first tag is special beyond the rules above. Run the skill on 
 | `Memoria.Api` | `dotnet publish -p:Version=X.Y.Z`, reported by `/health` and the MCP server | `0.0.0-dev+<commit>` from a plain `dotnet build` |
 | Docker image | build argument `MEMORIA_VERSION`, from `release.ts describe` | see below |
 | `memoria` CLI | `-ldflags -X .../cmd.Version=X.Y.Z`, reported by `memoria --version` | `dev` from a plain `go build` |
-| `memoria-qmd` | the `VERSION` file at the root of its release package | see below |
-| `memoria-worker` | the `VERSION` file at the root of its release package | see below |
+| `memoria-qmd` | `dist/VERSION` in its release package | see below |
+| `memoria-worker` | `src/VERSION` in its release package | see below |
 
-The sidecar and worker read a `VERSION` file first and need no git once installed. `git describe` is only the fallback for a development checkout. In a checkout, `npm run build` also writes `sidecar/dist/VERSION`, so a local build keeps the version it was built from.
+The sidecar and worker read a `VERSION` file beside their code first and need no git once installed. `git describe` is only the fallback for a development checkout. The file sits in the code directory because the service installers copy that directory to a location with no `.git`. For an install from a checkout rather than a package, `npm run build` writes `sidecar/dist/VERSION`, and `worker/scripts/install-service.ps1` stamps the copy.
 
 `release.ts describe` and a development checkout of the sidecar or worker all map `git describe` the same way:
 
@@ -82,19 +82,19 @@ Other tools depend on these names. Changing them is a breaking change.
 |---|---|
 | `memoria_<version>_{linux,darwin}_{amd64,arm64}.tar.gz` | `memoria` |
 | `memoria_<version>_windows_{amd64,arm64}.zip` | `memoria.exe` |
-| `memoria-sidecar_<version>.tar.gz` | `VERSION`, `dist/`, `package.json`, `package-lock.json`, `.env.example`, `README.md`, and the service scripts in `scripts/` |
-| `memoria-worker_<version>.tar.gz` | `VERSION`, `src/`, `scripts/`, `package.json`, `package-lock.json`, `README.md` |
+| `memoria-sidecar_<version>.tar.gz` | `dist/` including `dist/VERSION`, `package.json`, `package-lock.json`, `.env.example`, `README.md`, the service scripts in `scripts/`, `deploy/windows/MemoriaService.psm1` |
+| `memoria-worker_<version>.tar.gz` | `src/` including `src/VERSION`, `scripts/`, `package.json`, `package-lock.json`, `README.md`, `deploy/windows/MemoriaService.psm1` |
 | `checksums.txt` | SHA-256 of each archive above, in `sha256sum` format |
 
 `<version>` has no leading `v`. Files sit at the archive's root, with no enclosing directory. The CLI's self-updater looks for `memoria_<version>_<os>_<arch>`; the service packages start `memoria-`, so they can never match it. `scripts/release/test/assets.test.ts` pins that.
 
 ## Installing the sidecar and worker
 
-Extract a package into an empty directory, on a host with Node 22.18 or newer. Neither needs git or a checkout, and neither writes to its install directory while running.
+Extract a package into an empty directory, on a host with Node 22.18 or newer. Neither needs git or a checkout once installed.
 
 The **worker** has no runtime dependencies, so it is ready as soon as it is extracted: `node src/main.ts`.
 
-The **sidecar's** native dependencies (`better-sqlite3`, `node-llama-cpp`, and others) are built for one platform and Node version, so the package does not contain them. Install them from the lockfile on the host, as part of installing, while the directory is still writable:
+The **sidecar's** native dependencies (`better-sqlite3`, `node-llama-cpp`, and others) are built for one platform and Node version, so the package does not contain them. They are installed from the lockfile on the host, as part of installing, while the directory is still writable. This needs network access and may compile native code, and it must be repeated after upgrading Node.
 
 ```bash
 cd <install-dir>
@@ -102,7 +102,14 @@ npm ci --omit=dev
 node dist/main.js
 ```
 
-This needs network access and may compile native code. Rerun it after upgrading Node. The deployment checklist's `npm audit` applies to these directories too.
+**As a Windows service,** run the packaged installer, which copies the service to its read-only location and runs `npm ci --omit=dev` there. The sidecar's installer needs `-NoBuild`, because a package is already built and holds no compiler configuration:
+
+```powershell
+.\scripts\install-service.ps1 -NoBuild ...   # sidecar
+.\scripts\install-service.ps1 ...            # worker
+```
+
+[deployment.md](deployment.md) covers the other parameters and the service account. Its `npm audit` checklist applies to these directories too.
 
 ## Reproducible builds
 

@@ -1,7 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { buildAssets } from "./assets.ts";
+import { buildAssets, SHARED_FILES } from "./assets.ts";
 import { requiredChecks, trackerReferences, unmetChecks, type CheckRun } from "./gates.ts";
 import { classifyCommit, compareVersions, highestBump, latestTag, nextVersion, parseTag, tagProblem, type Bump, type Semver } from "./version.ts";
 import { describedVersion } from "../../worker/src/version.ts";
@@ -210,7 +210,7 @@ function buildCommand(tools: Tools, version: string | undefined, out: string | u
  */
 function prepareServiceTree(tools: Tools, tree: string): void {
   // The eol attributes cover almost everything; this keeps a Windows setting from changing the rest.
-  tools.git(["-c", "core.autocrlf=false", "archive", "--format=tar", "-o", path.join(tree, "source.tar"), "HEAD", "sidecar", "worker"]);
+  tools.git(["-c", "core.autocrlf=false", "archive", "--format=tar", "-o", path.join(tree, "source.tar"), "HEAD", "sidecar", "worker", ...SHARED_FILES]);
   tools.exec("tar", ["-xf", "source.tar"], tree);
   const sidecar = path.join(tree, "sidecar");
   tools.exec("npm", ["ci", "--ignore-scripts", "--no-audit", "--no-fund"], sidecar);

@@ -14,13 +14,14 @@ import { fileURLToPath } from "node:url";
  *   uncommitted changes      any dev form, with .dirty; a tagged commit becomes 1.2.4-dev.0
  *   no git and no stamp      0.0.0-dev+unknown
  *
- * A released package carries a VERSION file at its root and never needs git.
- * git describe is only the fallback for a development checkout.
+ * A released package carries a VERSION file beside its code, which installers copy
+ * with the code, so it never needs git. git describe is only the fallback for a
+ * development checkout.
  */
 
 export const UNKNOWN_VERSION = "0.0.0-dev+unknown";
 
-/** At a released package's root, or beside the output of a local sidecar build. */
+/** Beside the code: `dist/` for the sidecar, `src/` for the worker. */
 export const STAMP_FILE = "VERSION";
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -64,15 +65,13 @@ export function describedVersion(dir: string = MODULE_DIR): string {
   }
 }
 
-function readStamp(dir: string): string | undefined {
-  try {
-    return readFileSync(path.join(dir, STAMP_FILE), "utf8").trim();
-  } catch {
-    return undefined;
-  }
-}
-
-/** A stamp wins, beside the code or one level up at a package root; without one this is a development checkout. */
+/** A stamp wins: installed or built code keeps its version. Without one, this is a development checkout. */
 export function resolveVersion(dir: string = MODULE_DIR): string {
-  return readStamp(dir) || readStamp(path.dirname(dir)) || describedVersion(dir);
+  try {
+    const stamped = readFileSync(path.join(dir, STAMP_FILE), "utf8").trim();
+    if (stamped) return stamped;
+  } catch {
+    // No stamp.
+  }
+  return describedVersion(dir);
 }

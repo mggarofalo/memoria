@@ -44,7 +44,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 $worker = Split-Path -Parent $PSScriptRoot
-Import-Module (Join-Path (Split-Path -Parent $worker) "deploy/windows/MemoriaService.psm1") -Force
+# Inside a release package, or beside this directory in a checkout.
+$module = Join-Path $worker "deploy/windows/MemoriaService.psm1"
+if (-not (Test-Path -LiteralPath $module)) { $module = Join-Path (Split-Path -Parent $worker) "deploy/windows/MemoriaService.psm1" }
+Import-Module $module -Force
 
 $dryRun = [bool]$WhatIfPreference
 if (-not $dryRun) {
@@ -113,7 +116,8 @@ $plan = New-MemoriaInstallPlan -Spec @{
     KillProcessTree = $true
     Exists = $exists
     BuildSteps = @()
-    PostCopySteps = @()
+    # The install has no .git, so this is the only way it can report a version.
+    PostCopySteps = @(New-MemoriaExeStep -Exe "node" -Arguments @((Join-Path $worker "scripts/write-version.ts"), (Join-Path $InstallDir "src")))
 }
 
 if ($dryRun) {

@@ -30,6 +30,8 @@ export interface Service {
   name: string;
   /** Its directory in the repository. */
   dir: string;
+  /** The directory holding its code in the package, where VERSION goes. */
+  stampDir: string;
   /** Files and directories to ship, relative to `dir`. */
   include: readonly string[];
 }
@@ -38,11 +40,18 @@ export const TARGETS: readonly Target[] = (["windows", "linux", "darwin"] as con
   (["amd64", "arm64"] as const).map((arch) => ({ os, arch })),
 );
 
-/** The files each service needs at runtime; a missing one fails the build. */
+/**
+ * The files each service needs to run and to install; a missing one fails the
+ * build. The stamp goes in the code directory because the service installers copy
+ * that directory: it has to reach an install location that holds no `.git`.
+ */
 export const SERVICES: readonly Service[] = [
-  { name: "memoria-sidecar", dir: "sidecar", include: ["dist", "scripts/install-service.ps1", "scripts/uninstall-service.ps1", ".env.example", "README.md", "package.json", "package-lock.json"] },
-  { name: "memoria-worker", dir: "worker", include: ["src", "scripts", "README.md", "package.json", "package-lock.json"] },
+  { name: "memoria-sidecar", dir: "sidecar", stampDir: "dist", include: ["dist", "scripts/install-service.ps1", "scripts/uninstall-service.ps1", ".env.example", "README.md", "package.json", "package-lock.json"] },
+  { name: "memoria-worker", dir: "worker", stampDir: "src", include: ["src", "scripts", "README.md", "package.json", "package-lock.json"] },
 ];
+
+/** In every service package, at the same relative path as in the repository. */
+export const SHARED_FILES: readonly string[] = ["deploy/windows/MemoriaService.psm1"];
 
 const VERSION_VARIABLE = "github.com/mggarofalo/memoria/cli/cmd.Version";
 const SAFE_VERSION = /^[0-9A-Za-z][0-9A-Za-z.+-]*$/;
@@ -150,12 +159,14 @@ function listFiles(root: string, relative: string): string[] {
     .flatMap((name) => listFiles(root, `${relative}/${name}`));
 }
 
-/** Everything in a service package: its allowlisted files from `dir`, plus the VERSION stamp at the root. */
-export function serviceEntries(service: Service, dir: string, version: string): TarEntry[] {
-  const files = service.include.flatMap((item) => listFiles(dir, item));
+/** Everything in a service package: its allowlisted files, the shared ones, and the VERSION stamp beside the code. */
+export function serviceEntries(service: Service, tree: string, version: string): TarEntry[] {
+  const dir = path.join(tree, service.dir);
+  const entry = (root: string, name: string): TarEntry => ({ name, data: readFileSync(path.join(root, name)), mode: name.endsWith(".sh") ? 0o755 : 0o644 });
   return [
-    { name: "VERSION", data: Buffer.from(`${version}\n`, "ascii"), mode: 0o644 },
-    ...files.map((name) => ({ name, data: readFileSync(path.join(dir, name)), mode: name.endsWith(".sh") ? 0o755 : 0o644 })),
+    { name: `${service.stampDir}/VERSION`, data: Buffer.from(`${version}\n`, "ascii"), mode: 0o644 },
+    ...service.include.flatMap((item) => listFiles(dir, item)).map((name) => entry(dir, name)),
+    ...SHARED_FILES.map((name) => entry(tree, name)),
   ];
 }
 
@@ -174,7 +185,7 @@ export interface BuildOptions {
   epoch: number;
   /** Runs `go` in the CLI module with the extra environment. */
   go: (args: string[], env: Record<string, string>) => void;
-  /** A tree with `sidecar/` and `worker/` from the commit, the sidecar compiled. */
+  /** A tree holding the services and shared files from the commit, the sidecar compiled. */
   serviceTree: string;
 }
 
@@ -194,7 +205,7 @@ export function buildAssets(options: BuildOptions): string[] {
   });
   const services = SERVICES.map((service): Asset => ({
     name: serviceAssetName(version, service),
-    data: tarGz(serviceEntries(service, path.join(serviceTree, service.dir), version), epoch),
+    data: tarGz(serviceEntries(service, serviceTree, version), epoch),
   }));
 
   const assets = [...cli, ...services];

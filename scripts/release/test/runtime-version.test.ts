@@ -72,26 +72,10 @@ for (const [name, version] of [["sidecar", sidecarVersion], ["worker", workerVer
     assert.equal(version.resolveVersion(repo.dir), "1.2.3");
   });
 
-  test(`${name}: a stamp at the package root is read from a code directory, with no git anywhere`, (t) => {
-    const root = tempDir(t);
-    const code = path.join(root, "src");
-    mkdirSync(code);
-    writeFileSync(path.join(root, version.STAMP_FILE), "4.5.6\n");
-    assert.equal(version.resolveVersion(code), "4.5.6");
-
-    // A stamp beside the code is closer than one at the root.
-    writeFileSync(path.join(code, version.STAMP_FILE), "4.5.7\n");
-    assert.equal(version.resolveVersion(code), "4.5.7");
-  });
-
-  test(`${name}: a stamp beats a checkout's tag at the package root too`, (t) => {
-    const repo = tempRepo(t);
-    repo.commit("feat: a");
-    repo.tag("v1.2.3");
-    mkdirSync(path.join(repo.dir, "src"));
-    assert.equal(version.resolveVersion(path.join(repo.dir, "src")), "1.2.3");
-    writeFileSync(path.join(repo.dir, version.STAMP_FILE), "7.7.7\n");
-    assert.equal(version.resolveVersion(path.join(repo.dir, "src")), "7.7.7");
+  test(`${name}: a stamp is enough, with no git anywhere`, (t) => {
+    const dir = tempDir(t);
+    writeFileSync(path.join(dir, version.STAMP_FILE), "4.5.6\n");
+    assert.equal(version.resolveVersion(dir), "4.5.6");
   });
 
   test(`${name}: the module defaults to the checkout it lives in`, () => {
@@ -99,6 +83,16 @@ for (const [name, version] of [["sidecar", sidecarVersion], ["worker", workerVer
     assert.notEqual(version.resolveVersion(), "");
   });
 }
+
+test("the worker's installer stamp reaches a copy that has no git", (t) => {
+  const copy = tempDir(t);
+  const script = path.join(REPO_ROOT, "worker", "scripts", "write-version.ts");
+  execFileSync(process.execPath, [script, copy], { stdio: "pipe" });
+
+  assert.equal(readFileSync(path.join(copy, workerVersion.STAMP_FILE), "utf8"), `${workerVersion.resolveVersion()}\n`);
+  assert.equal(workerVersion.resolveVersion(copy), workerVersion.resolveVersion());
+  assert.throws(() => execFileSync(process.execPath, [script], { stdio: "pipe" }));
+});
 
 test("a module copied into a tagged checkout reports that tag when it is imported", async (t) => {
   const repo = tempRepo(t);
