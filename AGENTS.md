@@ -111,7 +111,7 @@ Hooks need `sh` and work wherever Git for Windows or a Unix shell is present. `-
 
 ### Mutation testing
 
-`.github/workflows/mutation.yml` is not a required check. On a pull request it mutates only what changed: `--since` for Stryker.NET, `--diff` for Gremlins, and `--mutate` with the changed files for StrykerJS. Nightly it mutates everything and uploads the reports as artifacts. Authentication, scoping, and redaction code has its own stricter config (`stryker/security.json`, `sidecar/stryker.security.json`). Run one by hand with `sh scripts/mutation-js.sh sidecar`, `sh scripts/mutation-dotnet.sh`, or `sh scripts/mutation-go.sh`.
+`.github/workflows/mutation.yml` is not a required check. On a pull request it mutates only what changed: `--since` for Stryker.NET, and the changed files for StrykerJS and Gremlins. Nightly it mutates everything and uploads the reports as artifacts. Authentication, scoping, and redaction code has its own stricter config (`stryker/security.json`, `sidecar/stryker.security.json`). Run one by hand with `sh scripts/mutation-js.sh sidecar`, `sh scripts/mutation-dotnet.sh`, or `sh scripts/mutation-go.sh`. Two local caveats: `--since` reads the main checkout's HEAD when run from a git worktree, and Gremlins misreads coverage on Windows, so use CI for those.
 
 ### Other CI
 
