@@ -1,4 +1,5 @@
 using Memoria.Api.Configuration;
+using Memoria.Api.Http;
 using Memoria.Api.Sidecar;
 using Memoria.Core.Contracts;
 using Memoria.Core.Sidecar;
@@ -17,16 +18,20 @@ public static class HealthEndpoints
 		app.MapGet("/health", () => TypedResults.Ok(new HealthReport("ok", SidecarServiceCollectionExtensions.ApiVersion)))
 			.WithName("health")
 			.WithSummary("Liveness")
-			.WithDescription("The API process is up. Does not contact the search backend; use `/ready` for that.")
-			.WithTags("Health");
+			.WithDescription("The API process is up. Anonymous. Does not contact the search backend; use `/ready` for that.")
+			.WithTags("Health")
+			.AllowAnonymous();
 
 		app.MapGet("/ready", ReadyAsync)
 			.WithName("ready")
 			.WithSummary("Readiness")
 			.WithDescription(
 				"Probes the memoria-qmd sidecar. 200 when its index is open and, by default, its models are resident; "
-				+ "503 with the same body shape while it warms up or when it cannot be reached.")
+				+ "503 with the same body shape while it warms up or when it cannot be reached. "
+				+ "Anonymous for orchestrators: without an admin key the body says only `ready` or `not_ready`, "
+				+ "with `reason` and `sidecar` null. An admin key gets the full report.")
 			.WithTags("Health")
+			.AllowAnonymous()
 			.Produces<ReadinessReport>(StatusCodes.Status503ServiceUnavailable);
 
 		return app;
@@ -34,6 +39,7 @@ public static class HealthEndpoints
 
 	private static async Task<Results<Ok<ReadinessReport>, JsonHttpResult<ReadinessReport>>> ReadyAsync(
 		IMemoriaQmdClient sidecar,
+		ICallerScope scope,
 		IOptions<MemoriaOptions> options,
 		HttpContext context)
 	{
@@ -62,6 +68,11 @@ public static class HealthEndpoints
 				false,
 				$"{SidecarException.Timeout}: the sidecar at {settings.BaseUrl} did not answer the readiness probe within {settings.ReadinessTimeout.TotalSeconds:0.#} s.",
 				null);
+		}
+
+		if (!scope.SeesBackendDetails)
+		{
+			report = new ReadinessReport(report.Ready ? ReadinessStatus.Ready : ReadinessStatus.NotReady, report.Ready, null, null);
 		}
 
 		return report.Ready

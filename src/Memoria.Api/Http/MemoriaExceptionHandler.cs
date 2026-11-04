@@ -10,6 +10,8 @@ namespace Memoria.Api.Http;
 /// The sidecar's stable error code travels in the <c>code</c> extension and
 /// its HTTP status in <c>upstreamStatus</c>, so a client can tell "you asked
 /// for a document that does not exist" from "Memoria cannot reach its index".
+/// <see cref="SidecarDisclosure"/> decides how much of that this caller may see;
+/// the full error always goes to the log.
 /// </summary>
 public sealed partial class MemoriaExceptionHandler(IProblemDetailsService problemDetails, ILogger<MemoriaExceptionHandler> logger) : IExceptionHandler
 {
@@ -17,7 +19,7 @@ public sealed partial class MemoriaExceptionHandler(IProblemDetailsService probl
 	{
 		ProblemDetails? problem = exception switch
 		{
-			SidecarException sidecar => FromSidecar(sidecar),
+			SidecarException sidecar => FromSidecar(sidecar, httpContext.RequestServices.GetRequiredService<ICallerScope>()),
 			CollectionForbiddenException forbidden => new ProblemDetails
 			{
 				Status = StatusCodes.Status403Forbidden,
@@ -42,7 +44,7 @@ public sealed partial class MemoriaExceptionHandler(IProblemDetailsService probl
 		});
 	}
 
-	private ProblemDetails FromSidecar(SidecarException exception)
+	private ProblemDetails FromSidecar(SidecarException exception, ICallerScope scope)
 	{
 		(int status, string title) = Map(exception);
 
@@ -55,20 +57,21 @@ public sealed partial class MemoriaExceptionHandler(IProblemDetailsService probl
 			LogSidecarRejection(logger, exception.Code, (int)exception.StatusCode!.Value, exception.Message);
 		}
 
+		SidecarFailureView view = SidecarDisclosure.For(exception, scope);
 		ProblemDetails problem = new()
 		{
 			Status = status,
 			Title = title,
-			Detail = exception.Message,
-			Extensions = { ["code"] = exception.Code },
+			Detail = view.Message,
+			Extensions = { ["code"] = view.Code },
 		};
 
-		if (exception.StatusCode is HttpStatusCode upstream)
+		if (view.UpstreamStatus is int upstream)
 		{
-			problem.Extensions["upstreamStatus"] = (int)upstream;
+			problem.Extensions["upstreamStatus"] = upstream;
 		}
 
-		if (exception.Details is { } details)
+		if (view.Details is { } details)
 		{
 			problem.Extensions["details"] = details;
 		}

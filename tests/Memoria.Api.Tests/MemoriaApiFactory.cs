@@ -9,9 +9,11 @@ namespace Memoria.Api.Tests;
 
 /// <summary>
 /// Boots the API against a <see cref="FakeSidecar"/> and captures its log
-/// entries. One factory per test class; tests reset the sidecar's routes.
+/// entries. One factory per test class; tests reset the sidecar's routes. This
+/// factory opts in to disabled authentication, so tests of everything else need
+/// no key; <see cref="AuthApiFactory"/> runs with keys enforced.
 /// </summary>
-public sealed class MemoriaApiFactory : WebApplicationFactory<Program>
+public class MemoriaApiFactory : WebApplicationFactory<Program>
 {
 	public FakeSidecar Sidecar { get; } = new();
 
@@ -30,6 +32,7 @@ public sealed class MemoriaApiFactory : WebApplicationFactory<Program>
 		builder.UseSetting("Memoria:Search:MaxLimit", "50");
 		builder.UseSetting("Memoria:Search:DefaultLimit", "10");
 		builder.UseSetting("Logging:LogLevel:Default", "Debug");
+		ConfigureAuth(builder);
 
 		builder.ConfigureLogging(logging =>
 		{
@@ -41,6 +44,11 @@ public sealed class MemoriaApiFactory : WebApplicationFactory<Program>
 		{
 			services.ConfigureHttpClientDefaults(http => http.ConfigurePrimaryHttpMessageHandler(() => Sidecar));
 		});
+	}
+
+	protected virtual void ConfigureAuth(IWebHostBuilder builder)
+	{
+		builder.UseSetting("Memoria:Auth:Mode", "Disabled");
 	}
 
 	public sealed record CapturedLog(string Category, LogLevel Level, EventId EventId, string Message, IReadOnlyDictionary<string, object?> State);

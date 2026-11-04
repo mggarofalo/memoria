@@ -6,7 +6,7 @@ import { HttpError } from "./errors.ts";
 import { removeDocument, resolveDeleteTarget, resolveTarget, writeDocument } from "./ingest.ts";
 import { parseLineRange } from "./line-range.ts";
 import { hasFilters, matchesFilters, parseBound, type DocumentMetadata, type SearchFilters } from "./metadata.ts";
-import { resolveMultiGet } from "./multi-get.ts";
+import { DEFAULT_MAX_TOTAL_BYTES, MAX_BYTES_CEILING, MAX_REFERENCE_LENGTH, MAX_TOTAL_BYTES_CEILING, resolveLookup, resolveMultiGet } from "./multi-get.ts";
 import { errorResponses, metadataOrNull } from "./schemas.ts";
 import type { DocumentInfo, DocumentLookupError, QmdBackend, SearchHit, SearchQuery } from "./store.ts";
 
@@ -45,6 +45,20 @@ function lookupErrorBody(err: DocumentLookupError) {
     };
   }
   return { error: "not_found", message: `Document not found: ${err.query}`, details: { similarFiles: err.similarFiles } };
+}
+
+interface LineRange {
+  fromLine?: number;
+  maxLines?: number;
+}
+
+function parseDocumentRequest(raw: string | undefined, query: DocsQuery): { reference: string; range: LineRange } {
+  const parsed = parseLineRange(raw ?? "");
+  if (parsed.lookup.trim() === "") throw new HttpError(400, "validation", "Document reference is required");
+  if (parsed.lookup.length > MAX_REFERENCE_LENGTH) throw new HttpError(400, "validation", `A reference may be at most ${MAX_REFERENCE_LENGTH} characters`);
+  const fromLine = query.fromLine ?? parsed.fromLine;
+  const maxLines = query.maxLines ?? parsed.maxLines;
+  return { reference: parsed.lookup, range: definedRange(fromLine, maxLines) };
 }
 
 async function resolveCollections(backend: QmdBackend, requested: string[] | undefined): Promise<string[]> {
@@ -159,11 +173,16 @@ interface DocsQuery {
   maxLines?: number;
   lineNumbers: boolean;
   body: boolean;
+  collections?: string[];
+  similarFiles: boolean;
 }
 
 interface MultiGetBody {
   pattern?: string;
   ids?: string[];
+  collections?: string[];
+  similarFiles: boolean;
+  maxTotalBytes: number;
   maxBytes: number;
   maxLines?: number;
   lineNumbers: boolean;
@@ -540,22 +559,27 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
             maxLines: { type: "integer", minimum: 1 },
             lineNumbers: { type: "boolean", default: false, description: "Prefix each body line with `N: `." },
             body: { type: "boolean", default: true, description: "false returns metadata only." },
+            collections: {
+              type: "array",
+              items: { type: "string", minLength: 1 },
+              maxItems: 50,
+              description: "Resolve the reference only inside these collections. Anything else is a plain miss, with no similar-files scan and no read.",
+            },
+            similarFiles: { type: "boolean", default: true, description: "false resolves the reference without QMD's scan of every path on a miss, and returns no suggestions. Memoria.Api always sends false." },
           },
         },
         response: { 200: { $ref: "Document#" }, ...errorResponses },
       },
     },
     async (request, reply) => {
-      const raw = request.params["*"] ?? "";
-      const parsed = parseLineRange(raw);
-      if (parsed.lookup.trim() === "") throw new HttpError(400, "validation", "Document reference is required");
-      const fromLine = request.query.fromLine ?? parsed.fromLine;
-      const maxLines = request.query.maxLines ?? parsed.maxLines;
+      const { reference, range } = parseDocumentRequest(request.params["*"], request.query);
 
-      const found = await backend.get(parsed.lookup);
+      const lookup = await resolveLookup(backend, reference, request.query.collections, request.query.similarFiles);
+      if (lookup === null) return reply.code(404).send(lookupErrorBody({ error: "not_found", query: reference, similarFiles: [] }));
+
+      const found = await backend.get(lookup);
       if ("error" in found) return reply.code(404).send(lookupErrorBody(found));
 
-      const range = definedRange(fromLine, maxLines);
       const body = request.query.body ? await readBody(backend, found.filepath, range, request.query.lineNumbers) : null;
       return documentView(found, ctx, { ...range, body });
     },
@@ -571,14 +595,23 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
           "Batch fetch by glob (`claude-sessions/2026-05*.md`), by a list of references (paths or docids), or both. " +
           "Each selector resolves on its own and the results merge, one entry per file; a selector that matches nothing " +
           "adds a line to `errors` without failing the others. Documents larger than `maxBytes` are listed under " +
-          "`skipped` rather than returned.",
+          "`skipped` rather than returned. A glob may use only `*`, `?` and whole-segment `**`; braces, brackets and " +
+          "extglobs are refused, because QMD's matcher can be made to run indefinitely.",
         body: {
           type: "object",
           additionalProperties: false,
           properties: {
             pattern: { type: "string", minLength: 1, description: "Glob, comma-separated references, or a comma-separated mix of both." },
             ids: { type: "array", items: { type: "string", minLength: 1 }, minItems: 1, maxItems: 200, description: "Paths or docids." },
-            maxBytes: { type: "integer", minimum: 1, default: 65536 },
+            collections: {
+              type: "array",
+              items: { type: "string", minLength: 1 },
+              maxItems: 50,
+              description: "Match and read only inside these collections. An empty list means nothing, not everything.",
+            },
+            maxBytes: { type: "integer", minimum: 1, maximum: MAX_BYTES_CEILING, default: 65536 },
+            maxTotalBytes: { type: "integer", minimum: 1, maximum: MAX_TOTAL_BYTES_CEILING, default: DEFAULT_MAX_TOTAL_BYTES, description: "Budget for all bodies in this response. Documents that would pass it are listed under `skipped` and are not read." },
+            similarFiles: { type: "boolean", default: true, description: "false resolves the reference without QMD's scan of every path on a miss, and returns no suggestions. Memoria.Api always sends false." },
             maxLines: { type: "integer", minimum: 1, description: "Truncate each body to this many lines." },
             lineNumbers: { type: "boolean", default: false },
             includeBody: { type: "boolean", default: true },
@@ -587,7 +620,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         response: {
           200: {
             type: "object",
-            required: ["docs", "skipped", "errors"],
+            required: ["docs", "skipped", "errors", "truncated"],
             properties: {
               docs: { type: "array", items: { $ref: "Document#" } },
               skipped: {
@@ -595,6 +628,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
                 items: { type: "object", required: ["file", "reason"], properties: { file: { type: "string" }, reason: { type: "string" } } },
               },
               errors: { type: "array", items: { type: "string" } },
+              truncated: { type: "boolean", description: "Globs matched more documents than one request may select; the rest were not looked at." },
             },
           },
           ...errorResponses,
@@ -606,14 +640,15 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       if (!pattern && (!ids || ids.length === 0)) {
         throw new HttpError(400, "validation", "Provide `pattern`, `ids`, or both");
       }
-      const { docs, errors } = await resolveMultiGet(backend, pattern, ids, { includeBody: request.body.includeBody, maxBytes: request.body.maxBytes });
+      const { includeBody, maxBytes, maxTotalBytes, similarFiles, collections } = request.body;
+      const { docs, errors, truncated } = await resolveMultiGet(backend, pattern, ids, { includeBody, maxBytes, maxTotalBytes, similarFiles, collections });
       const out = [];
       const skipped = [];
       for (const entry of docs) {
         if (entry.skipped) skipped.push({ file: entry.doc.displayPath, reason: entry.skipReason });
         else out.push(multiGetView(entry.doc, request.body, backend, ctx));
       }
-      return { docs: out, skipped, errors };
+      return { docs: out, skipped, errors, truncated };
     },
   );
 

@@ -22,7 +22,7 @@ Container images publish to `ghcr.io/mggarofalo/memoria`.
 
 ## Status
 
-`Memoria.Api` serves REST (`/v1/search`, `/v1/docs/{id}`, `/v1/docs:multiGet`, `/v1/collections`, `/v1/status`), an MCP server at `/mcp`, and `/openapi/v1.json` over the `memoria-qmd` sidecar; see [docs/configuration.md](docs/configuration.md). The `memoria` CLI covers login, search, documents, the MCP stdio bridge and self-update; see [docs/cli.md](docs/cli.md). API keys and ingest are in progress. Work is tracked in Plane project `MEMORIA` — see [docs/plane.md](docs/plane.md).
+`Memoria.Api` serves REST (`/v1/search`, `/v1/docs/{id}`, `/v1/docs:multiGet`, `/v1/collections`, `/v1/status`), an MCP server at `/mcp`, and `/openapi/v1.json` over the `memoria-qmd` sidecar; see [docs/configuration.md](docs/configuration.md). Every `/v1` and MCP route requires an API key scoped to named collections, with per-key rate limits and an audit log. The `memoria` CLI covers login, search, documents, the MCP stdio bridge and self-update; see [docs/cli.md](docs/cli.md). Ingest is in progress. Work is tracked in Plane project `MEMORIA` — see [docs/plane.md](docs/plane.md).
 
 ## Development
 

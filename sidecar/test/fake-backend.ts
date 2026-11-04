@@ -12,6 +12,7 @@ import type {
   ContextRow,
   DocumentInfo,
   DocumentLookupError,
+  DocumentRef,
   IndexStatusInfo,
   ModelStatus,
   MultiGetEntry,
@@ -203,6 +204,13 @@ export class FakeBackend implements QmdBackend {
       out.push({ doc: options.includeBody ? { ...info, body: d.body } : info, skipped: false });
     }
     return { docs: out, errors };
+  }
+
+  async listDocumentRefs(collections?: readonly string[]): Promise<DocumentRef[]> {
+    this.#record("listDocumentRefs", collections);
+    return this.docs
+      .filter((d) => !collections || collections.includes(d.collection))
+      .map((d) => ({ collection: d.collection, path: d.path, hash: this.#info(d).hash }));
   }
 
   ignorePatterns(collection: string): string[] {

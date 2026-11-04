@@ -1446,6 +1446,30 @@
           },
           {
             "schema": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "maxItems": 50
+            },
+            "in": "query",
+            "name": "collections",
+            "required": false,
+            "description": "Resolve the reference only inside these collections. Anything else is a plain miss, with no similar-files scan and no read."
+          },
+          {
+            "schema": {
+              "type": "boolean",
+              "default": true
+            },
+            "in": "query",
+            "name": "similarFiles",
+            "required": false,
+            "description": "false resolves the reference without QMD's scan of every path on a miss, and returns no suggestions. Memoria.Api always sends false."
+          },
+          {
+            "schema": {
               "type": "string"
             },
             "in": "path",
@@ -1524,7 +1548,7 @@
         "tags": [
           "documents"
         ],
-        "description": "Batch fetch by glob (`claude-sessions/2026-05*.md`), by a list of references (paths or docids), or both. Each selector resolves on its own and the results merge, one entry per file; a selector that matches nothing adds a line to `errors` without failing the others. Documents larger than `maxBytes` are listed under `skipped` rather than returned.",
+        "description": "Batch fetch by glob (`claude-sessions/2026-05*.md`), by a list of references (paths or docids), or both. Each selector resolves on its own and the results merge, one entry per file; a selector that matches nothing adds a line to `errors` without failing the others. Documents larger than `maxBytes` are listed under `skipped` rather than returned. A glob may use only `*`, `?` and whole-segment `**`; braces, brackets and extglobs are refused, because QMD's matcher can be made to run indefinitely.",
         "requestBody": {
           "required": true,
           "content": {
@@ -1548,10 +1572,32 @@
                     "maxItems": 200,
                     "description": "Paths or docids."
                   },
+                  "collections": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "maxItems": 50,
+                    "description": "Match and read only inside these collections. An empty list means nothing, not everything."
+                  },
                   "maxBytes": {
                     "type": "integer",
                     "minimum": 1,
+                    "maximum": 1048576,
                     "default": 65536
+                  },
+                  "maxTotalBytes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 268435456,
+                    "default": 16777216,
+                    "description": "Budget for all bodies in this response. Documents that would pass it are listed under `skipped` and are not read."
+                  },
+                  "similarFiles": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "false resolves the reference without QMD's scan of every path on a miss, and returns no suggestions. Memoria.Api always sends false."
                   },
                   "maxLines": {
                     "type": "integer",
@@ -1581,7 +1627,8 @@
                   "required": [
                     "docs",
                     "skipped",
-                    "errors"
+                    "errors",
+                    "truncated"
                   ],
                   "properties": {
                     "docs": {
@@ -1613,6 +1660,10 @@
                       "items": {
                         "type": "string"
                       }
+                    },
+                    "truncated": {
+                      "type": "boolean",
+                      "description": "Globs matched more documents than one request may select; the rest were not looked at."
                     }
                   }
                 }

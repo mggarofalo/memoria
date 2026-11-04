@@ -174,8 +174,12 @@ docker build -t memoria-api:local .
 docker run --rm -p 8080:8080 \
   -e Memoria__Sidecar__BaseUrl=http://host.docker.internal:8282 \
   -e Memoria__Sidecar__Secret="$MEMORIA_QMD_SECRET" \
+  -v memoria-data:/data \
   memoria-api:local
 ```
+
+The image sets `Memoria__Auth__DatabasePath=/data/control.db`. Without a volume on
+`/data` the database dies with the container, and every key with it.
 
 ## Compose on the homelab
 
@@ -198,6 +202,34 @@ exist yet.
 Containers reach the sidecar on the desktop over the LAN with no special
 Docker networking: bridge networks NAT outbound traffic.
 
+### The control database volume
+
+API keys and the audit log live in a SQLite file at `/data/control.db`, on the
+`memoria-data` named volume the compose file declares. **The volume is required.**
+Unlike QMD's index, this is durable state that cannot be rebuilt: losing it revokes
+every key and loses the audit trail. Keep it on a local disk, because SQLite's WAL
+mode does not work over a network share, and include the volume in backups.
+
+### The first admin key
+
+Nothing can call the API until a key exists. Create the first one with a one-off
+container on the same volume. It prints the key once on stdout, and exits without
+starting a host:
+
+```bash
+docker compose -f deploy/compose.yaml run --rm --no-deps memoria-api \
+  --bootstrap-admin-key homelab-admin
+```
+
+The key is never stored in plaintext and cannot be shown again, so copy it into
+your password manager now. The command refuses while an active admin key exists;
+pass `--allow-additional-admin` after the label to add another deliberately. If you
+lose the only admin key, run the command with that flag, then revoke the lost key
+with the new one.
+
+This key has only the `admin` scope and cannot read the corpus. Issue clients their
+own scoped keys with it; see [configuration.md](configuration.md#memoriaauth--api-keys-rate-limits-audit).
+
 ### Required environment
 
 | Variable | Purpose |
@@ -205,6 +237,7 @@ Docker networking: bridge networks NAT outbound traffic.
 | `MEMORIA_VERSION` | Compose only: the image tag to run, e.g. `0.1.0`. |
 | `Memoria__Sidecar__BaseUrl` | Where the sidecar listens, e.g. `http://192.168.1.20:8282`. |
 | `Memoria__Sidecar__Secret` | The sidecar's `MEMORIA_QMD_SECRET`. The API refuses to start without it when the sidecar is not on loopback. |
+| `Memoria__Auth__DatabasePath` | Where the control database lives. The image sets it to `/data/control.db`. The API refuses to start without it unless `Memoria__Auth__Mode` is explicitly `Disabled`. |
 
 Everything else has a default. Pass secrets through the environment or a
 Docker secret; never bake them into the image or commit them.
@@ -226,19 +259,81 @@ needs one proxy host entry:
 `X-Trace-Id` on every response, and `traceId` in every problem-details body,
 are the ids to grep for in the API's and the sidecar's logs.
 
+Rate limits and the audit trail key on the API key, so they need nothing from the
+proxy. The proxy must terminate TLS: a key on plain HTTP is readable by anyone on
+the path. Do not log the `Authorization` header in the proxy's access log.
+
+### Tell the API who its proxy is
+
+**This is required once the proxy host exists.** Failed authentication is limited
+per client address. With `Memoria:Auth:TrustedProxies` empty the API treats the
+socket peer as the client, and behind a proxy that peer is the proxy, so every caller
+shares one budget: 20 bad tokens from anyone would refuse every credential the API
+does not already know, for the rest of the minute. Keys it knows keep working, but a
+new client's first request can be refused. Two warnings point at this: one at most
+hourly when a private address sends `X-Forwarded-For` it is not trusted to send, and
+one naming the address when a budget runs out. Neither trusts the header.
+
+1. Find the address the API sees. Give nginx-proxy-manager a fixed address on a
+   user-defined Docker network and use that, or use the network's whole subnet if
+   nothing untrusted shares it (`docker network inspect <network>`). If the API is
+   reached through a published port instead of that network, the peer is usually the
+   Docker gateway, not the proxy container. Confirm with `RemoteIp` in the API's log.
+2. Set it:
+
+   ```bash
+   MEMORIA_TRUSTED_PROXY=172.20.0.2 docker compose -f deploy/compose.yaml up -d
+   ```
+
+   More than one entry: `Memoria__Auth__TrustedProxies__0`, `__1`, and so on.
+3. The proxy must send this header, and a custom config must not replace it. Check
+   that your nginx-proxy-manager version does, in `conf.d/include/proxy.conf`:
+
+   ```nginx
+   proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+   ```
+
+   That appends the peer nginx sees to whatever the client sent. The API reads the
+   chain from the right and stops at the first address that is not a trusted proxy,
+   so anything a client writes on the left is ignored.
+4. If Cloudflare or another proxy sits in front of nginx-proxy-manager, what nginx
+   appends depends on its `real_ip` settings. Either nginx resolves the real client,
+   or you add the outer proxy's ranges to `TrustedProxies`. Otherwise every client
+   looks like that proxy.
+5. Check it: send a bad token through the proxy, and confirm the `RemoteIp` in the
+   API's request log is your address, not the proxy's. Then send it again with
+   `X-Forwarded-For: 192.0.2.1` and confirm `RemoteIp` does not change. This check is
+   what counts; the steps above only explain it.
+
+Never trust a range that an untrusted client can connect from, and make sure the API's
+port cannot be reached except through the proxy. A `/0` range is refused at startup.
+
+This limit protects the API from one address at a time. A flood from many addresses
+stays within each one's budget, so limit connections at the proxy as well, for example
+with `limit_req` in the proxy host's custom config.
+
+`/ready` stays anonymous so an orchestrator can probe it, and tells anonymous
+callers only `ready` or `not_ready`. See
+[configuration.md](configuration.md#anonymous-routes).
+
+## Upgrade order
+
+Upgrade the sidecar before the API. The API sends a collection-scoped key's allowlist
+with each document read, and the sidecar's strict body schema makes an older sidecar
+refuse scoped batch reads with `400`. An older sidecar also ignores the allowlist on
+single-document reads and has no glob grammar of its own, so scoped callers would be
+back to QMD's global lookup for as long as the two are mismatched.
+
 ## Exposure is gated
 
 Nothing in this repository exposes Memoria to the internet, and nothing
-should until two things land:
+should until **homelab hardening** (patching, firewall review) lands: the host
+epic's "patch homelab before public exposure" issue. API keys with collection
+scopes are enforced by default, but a key is only as private as the transport,
+so TLS through the proxy is part of that gate. `Memoria:Auth:Mode = Disabled` is
+for a trusted LAN and must never be set on an exposed host.
 
-1. **Homelab hardening** (patching, firewall review) — the host epic's
-   "patch homelab before public exposure" issue.
-2. **API keys with collection scopes** — the auth epic. Until then every
-   caller is unrestricted, which is acceptable on a trusted LAN and nowhere
-   else. `MemoriaScopeAttribute` and `ICallerScope` are already on every
-   endpoint so enforcing keys touches no endpoint code.
-
-Until both are done: keep the compose port on `127.0.0.1` or the LAN address,
+Until hardening is done: keep the compose port on `127.0.0.1` or the LAN address,
 do not create the proxy host entry, and do not forward a router port.
 
 ## Deployment checklist
@@ -277,7 +372,7 @@ has been bypassed entirely. When auditing the deployment, check that:
 
 - the sidecar port (8282) is reachable from the API host and from nowhere
   outside the LAN;
-- the API host's firewall allows 8080 only from the proxy (or the LAN during
-  the pre-auth phase);
+- the API host's firewall allows 8080 only from the proxy (or the LAN until the
+  proxy entry exists);
 - the sidecar's `MEMORIA_QMD_HOST` is the LAN address, never `0.0.0.0` on a
   machine with a public interface.

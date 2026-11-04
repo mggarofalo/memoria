@@ -24,10 +24,15 @@ public sealed record MultiGetRequest(
 	bool? LineNumbers,
 	bool? IncludeBody);
 
-/// <summary>Result of the batch endpoint. Skipped entries name documents that were matched but not returned (size cap, inactive).</summary>
+/// <summary>
+/// Result of the batch endpoint. Skipped entries name documents that were matched but not
+/// returned (per-document cap, response budget). <see cref="Truncated"/> means globs matched
+/// more documents than one request may select, and the rest were not looked at.
+/// </summary>
 public sealed record MultiGetResult(
 	IReadOnlyList<Document> Docs,
 	IReadOnlyList<SkippedDocument> Skipped,
-	IReadOnlyList<string> Errors);
+	IReadOnlyList<string> Errors,
+	bool Truncated);
 
 public sealed record SkippedDocument(string File, string Reason);

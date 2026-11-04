@@ -27,7 +27,7 @@ public sealed class DocumentEndpointTests(MemoriaApiFactory factory) : IClassFix
 
 		FakeSidecar.RecordedRequest sent = factory.Sidecar.Single();
 		Assert.Equal("/docs/claude-sessions/2026-02-11_2e39c784.md", sent.Uri.AbsolutePath);
-		Assert.Equal("?fromLine=40&maxLines=5&lineNumbers=true", sent.Uri.Query);
+		Assert.Equal("?fromLine=40&maxLines=5&lineNumbers=true&similarFiles=false", sent.Uri.Query);
 	}
 
 	[Fact]
@@ -40,7 +40,7 @@ public sealed class DocumentEndpointTests(MemoriaApiFactory factory) : IClassFix
 		HttpResponseMessage response = await client.GetAsync("/v1/docs/f6feba?body=false");
 
 		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-		Assert.Equal("?body=false", factory.Sidecar.Single().Uri.Query);
+		Assert.Equal("?body=false&similarFiles=false", factory.Sidecar.Single().Uri.Query);
 	}
 
 	[Fact]

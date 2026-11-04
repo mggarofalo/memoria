@@ -6,13 +6,16 @@ public static class V1Endpoints
 {
 	/// <summary>
 	/// The public read surface. Every route here needs the <see cref="MemoriaScopes.Read"/>
-	/// scope once API keys are enforced, and every route can fail with the
-	/// gateway statuses the sidecar mapping produces.
+	/// scope, and every route can fail with the auth statuses, the rate limit, and
+	/// the gateway statuses the sidecar mapping produces.
 	/// </summary>
 	public static IEndpointRouteBuilder MapV1(this IEndpointRouteBuilder app)
 	{
 		RouteGroupBuilder v1 = app.MapGroup("/v1")
 			.WithMemoriaScope(MemoriaScopes.Read)
+			.ProducesProblem(StatusCodes.Status401Unauthorized)
+			.ProducesProblem(StatusCodes.Status403Forbidden)
+			.ProducesProblem(StatusCodes.Status429TooManyRequests)
 			.ProducesProblem(StatusCodes.Status502BadGateway)
 			.ProducesProblem(StatusCodes.Status503ServiceUnavailable)
 			.ProducesProblem(StatusCodes.Status504GatewayTimeout);
