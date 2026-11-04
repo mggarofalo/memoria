@@ -1,0 +1,116 @@
+[
+  {
+    "name": "claude-basic",
+    "format": "claude-code",
+    "session_id": "abcdef12-3456-7890-abcd-ef1234567890",
+    "project_dir": null,
+    "fallback_unix": 1700000000,
+    "malformed_lines": 1,
+    "documents": [
+      "2026-10-01_abcdef12.md"
+    ]
+  },
+  {
+    "name": "claude-parts",
+    "format": "claude-code",
+    "session_id": "abcdef12-3456-7890-abcd-ef1234567890",
+    "project_dir": null,
+    "fallback_unix": 1700000000,
+    "malformed_lines": 0,
+    "documents": [
+      "2026-10-01_abcdef12.md",
+      "2026-10-01_abcdef12_part-002.md",
+      "2026-10-01_abcdef12_part-003.md",
+      "2026-10-01_abcdef12_part-004.md"
+    ]
+  },
+  {
+    "name": "claude-no-cwd",
+    "format": "claude-code",
+    "session_id": "abcdef12-3456-7890-abcd-ef1234567890",
+    "project_dir": "-Users-synth-Source-derived-name--claude-worktrees-agent-1",
+    "fallback_unix": 1700000000,
+    "malformed_lines": 0,
+    "documents": [
+      "2023-11-14_abcdef12.md"
+    ]
+  },
+  {
+    "name": "claude-home",
+    "format": "claude-code",
+    "session_id": "abcdef12-3456-7890-abcd-ef1234567890",
+    "project_dir": null,
+    "fallback_unix": 1700000000,
+    "malformed_lines": 0,
+    "documents": [
+      "2026-10-03_abcdef12.md"
+    ]
+  },
+  {
+    "name": "claude-hostile-values",
+    "format": "claude-code",
+    "session_id": "abcdef12-3456-7890-abcd-ef1234567890",
+    "project_dir": null,
+    "fallback_unix": 1700000000,
+    "malformed_lines": 0,
+    "documents": [
+      "2026-10-01_abcdef12.md"
+    ]
+  },
+  {
+    "name": "codex-basic",
+    "format": "codex",
+    "session_id": "rollout-2026-09-09T10-00-00-11111111-2222-4333-8444-555555555555",
+    "project_dir": null,
+    "fallback_unix": 0,
+    "malformed_lines": null,
+    "documents": [
+      "2026-09-09_codex_11111111-2222-4333-8444-555555555555_chunk-00001.md"
+    ]
+  },
+  {
+    "name": "codex-subagent",
+    "format": "codex",
+    "session_id": "rollout-2026-09-09T10-00-00-11111111-2222-4333-8444-555555555555",
+    "project_dir": null,
+    "fallback_unix": 0,
+    "malformed_lines": null,
+    "documents": [
+      "2026-09-09_codex_11111111-2222-4333-8444-555555555555_chunk-00001.md"
+    ]
+  },
+  {
+    "name": "codex-no-meta",
+    "format": "codex",
+    "session_id": "rollout-2026-09-09T10-00-00-11111111-2222-4333-8444-555555555555",
+    "project_dir": null,
+    "fallback_unix": 0,
+    "malformed_lines": null,
+    "documents": [
+      "1970-01-01_codex_11111111-2222-4333-8444-555555555555_chunk-00001.md"
+    ]
+  },
+  {
+    "name": "codex-titles",
+    "format": "codex",
+    "session_id": "11111111-2222-4333-8444-555555555555",
+    "project_dir": null,
+    "fallback_unix": 0,
+    "malformed_lines": null,
+    "documents": [
+      "2026-09-09_codex_11111111-2222-4333-8444-555555555555_chunk-00001.md"
+    ]
+  },
+  {
+    "name": "codex-parts",
+    "format": "codex",
+    "session_id": "11111111-2222-4333-8444-555555555555",
+    "project_dir": null,
+    "fallback_unix": 0,
+    "malformed_lines": null,
+    "documents": [
+      "2026-09-09_codex_11111111-2222-4333-8444-555555555555_chunk-00001.md",
+      "2026-09-09_codex_11111111-2222-4333-8444-555555555555_chunk-00002.md"
+    ]
+  }
+]

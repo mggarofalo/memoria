@@ -1,0 +1,2 @@
+{"type": "user", "cwd": "/Users/synth", "timestamp": "2026-10-02T23:30:00-05:00", "message": {"role": "user", "content": "from the home directory"}}
+{"type": "assistant", "timestamp": "2026-10-03T01:00:00.5+02:00", "message": {"role": "assistant", "content": "offsets are kept"}}

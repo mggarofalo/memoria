@@ -1,0 +1,3 @@
+{"timestamp": "2026-09-09T14:00:00.125Z", "type": "session_meta", "payload": {"id": "11111111-2222-4333-8444-555555555555", "session_id": "root-thread-0001", "parent_thread_id": "parent-thread-0002", "forked_from_id": "fork-0003", "agent_path": "researcher/one", "agent_role": "researcher", "cwd": "/srv/work/outside-home", "source": {"subagent": {"thread_spawn": {"depth": 1}}}}}
+{"timestamp": "2026-09-09T14:00:01.125Z", "type": "session_meta", "payload": {"id": "later-meta-is-ignored", "cwd": "/ignored"}}
+{"timestamp": "2026-09-09T14:00:02.125Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "An assistant message with no turn and no user title."}]}}
