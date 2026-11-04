@@ -1,7 +1,12 @@
 import { homedir } from "node:os";
 import path from "node:path";
+import { resolveSecret } from "./secret-file.ts";
 
-/** Everything comes from the environment, so one code path serves NSSM, launchd and a shell. */
+/**
+ * Everything comes from the environment, so one code path serves NSSM, launchd
+ * and a shell. The token may instead come from a file named by
+ * `MEMORIA_WORKER_TOKEN_FILE`, which is what the installed services use.
+ */
 
 export type Role = "embed" | "rerank" | "generate";
 export const ROLES: readonly Role[] = ["embed", "rerank", "generate"];
@@ -96,7 +101,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
   if (!isLanAddress(host)) {
     throw new Error(`MEMORIA_WORKER_HOST must be a loopback or private LAN address, got "${host}". Wildcards and public addresses are refused.`);
   }
-  const token = env.MEMORIA_WORKER_TOKEN?.trim() || undefined;
+  const token = resolveSecret(env, "MEMORIA_WORKER_TOKEN");
   if (token === undefined && !isLoopback(host)) throw new Error("MEMORIA_WORKER_TOKEN is required when binding a LAN address");
   if (token !== undefined && token.length < 16) throw new Error("MEMORIA_WORKER_TOKEN must be at least 16 characters");
 

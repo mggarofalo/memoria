@@ -30,16 +30,19 @@ From the sidecar, `MEMORIA_QMD_WORKER_URL=... npm run test:live` runs further sa
 
 ### As a service
 
-The scripts are provided but have not been run yet.
+The scripts are provided but have not been run on a real install yet.
 
-**Windows desktop (NSSM).** From an elevated PowerShell. The service restarts on failure and takes its `llama-server` children down with it.
+**Windows desktop (NSSM).** The service restarts on failure and takes its `llama-server` children down with it. `-WhatIf` prints the plan, needs no elevation and changes nothing. The real run needs an elevated PowerShell.
 
 ```powershell
-.\scripts\install-service.ps1 -BindHost 192.168.1.20 -LlamaServer C:\llama\llama-server.exe -Token $env:MEMORIA_WORKER_TOKEN
+.\scripts\install-service.ps1 -BindHost 192.168.1.20 -LlamaServer "C:\Program Files\llama\llama-server.exe" -TokenFile .\token.txt -WhatIf
+.\scripts\install-service.ps1 -BindHost 192.168.1.20 -LlamaServer "C:\Program Files\llama\llama-server.exe" -TokenFile .\token.txt
 .\scripts\uninstall-service.ps1
 ```
 
-**Mac (launchd).** Installs a user agent, which runs while you are logged in. The token is stored in the agent's plist, readable only by you.
+It installs to `%ProgramFiles%\Memoria\memoria-worker` and runs as `NT SERVICE\memoria-worker`, with the token in a file only that account and Administrators can read. Logs land in `%ProgramData%\memoria-worker\logs` and rotate at 10 MiB. The script refuses a `llama-server` that anyone but administrators can change, because the service runs it. **GPU access under this account has not been confirmed.** [`docs/deployment.md`](../docs/deployment.md#running-as-a-service) has the details.
+
+**Mac (launchd).** Installs a user agent, which runs while you are logged in. The token goes to a mode 600 file in `~/Library/Application Support/memoria-worker`, and the plist holds only its path. launchd does not rotate logs, so prune `~/Library/Logs/memoria-worker` yourself. The script has not been run on a Mac; its files and modes are checked by tests with `--dry-run`, which loads nothing.
 
 ```bash
 MEMORIA_WORKER_TOKEN=... ./scripts/install-launchd.sh --host 192.168.1.30 --llama-server /opt/homebrew/bin/llama-server
@@ -52,7 +55,8 @@ MEMORIA_WORKER_TOKEN=... ./scripts/install-launchd.sh --host 192.168.1.30 --llam
 |---|---|---|
 | `MEMORIA_WORKER_HOST` | `127.0.0.1` | Must be a literal loopback or private address. Wildcards, public addresses and host names are refused. |
 | `MEMORIA_WORKER_PORT` | `8383` | Port. |
-| `MEMORIA_WORKER_TOKEN` | unset | Bearer token. Required off loopback. At least 16 characters. |
+| `MEMORIA_WORKER_TOKEN` | unset | Bearer token. Required off loopback. At least 16 characters. For development: services use the file below. |
+| `MEMORIA_WORKER_TOKEN_FILE` | unset | Read the token from this file at startup: one line of UTF-8, with surrounding whitespace ignored. Setting both is an error. On POSIX the worker refuses to start if group or others have any access to the file (`chmod 600`). |
 | `MEMORIA_WORKER_LLAMA_SERVER` | `llama-server` | The binary. |
 | `MEMORIA_WORKER_MODEL_DIR` | `~/.cache/qmd/models` | Where to find models. Honors `XDG_CACHE_HOME`. |
 | `MEMORIA_WORKER_ROLES` | `embed,rerank,generate` | Which models this machine serves. |
@@ -99,6 +103,7 @@ Tests launch `test/fixtures/fake-llama-server.ts` as a real child process in pla
 |---|---|
 | `src/main.ts` | Process entry: resolve models, supervise, listen, warm up, stop. |
 | `src/config.ts` | Environment variables. |
+| `src/secret-file.ts` | Reads a secret from `<NAME>_FILE`. Kept identical to the sidecar's copy by a test. |
 | `src/supervisor.ts` | Launches and restarts `llama-server`, with its flags. |
 | `src/inference.ts` | The operations, against `llama-server`'s API. `RerankBackend` is the rerank seam. |
 | `src/server.ts` | HTTP routes, auth, validation, concurrency limits. |
