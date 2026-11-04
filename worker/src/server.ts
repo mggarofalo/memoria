@@ -246,7 +246,7 @@ export function createWorkerServer(options: WorkerServerOptions): { server: Serv
     if (method === "GET" && path === "/health") return health();
     if (method === "GET" && path === "/capabilities") return capabilities();
     const operation = method === "POST" ? operationsByPath.get(path ?? "") : undefined;
-    if (!operation) throw new HttpFailure(404, "no_route", "No such route");
+    if (typeof operation !== "function") throw new HttpFailure(404, "no_route", "No such route");
     return operation(request);
   };
 

@@ -750,7 +750,7 @@ const listed = (tokenEnv: string, extra: NodeJS.ProcessEnv = {}) => () => loadCo
 
 test("a worker's token cannot be the sidecar's secret, by any route: values are compared, not names", async () => {
   const secretFile = await tempFile("secret");
-  await writeFile(secretFile, SECRET);
+  await writeFile(secretFile, SECRET, { mode: 0o600 });
   const reuse = /is the sidecar's own secret/;
   assert.throws(listed("MEMORIA_QMD_SECRET"), reuse);
   assert.throws(listed("memoria_qmd_secret", { memoria_qmd_secret: SECRET }), reuse, "lower case, as Windows allows");
