@@ -510,3 +510,10 @@ test("the entry point runs against this repository", () => {
   assert.match(version, /^\d+\.\d+\.\d+/);
   assert.throws(() => execFileSync(process.execPath, [entry, "nope"], { stdio: "pipe" }));
 });
+
+test("the test helpers keep git's hook variables away from every git command here", () => {
+  const helpers = new URL("./helpers.ts", import.meta.url).href;
+  const script = `await import(${JSON.stringify(helpers)}); console.log(Object.keys(process.env).filter((k) => k.toUpperCase().startsWith("GIT_")).length);`;
+  const out = execFileSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", env: { ...process.env, GIT_DIR: "/somewhere/real", GIT_INDEX_FILE: "/somewhere/real/index", GIT_WORK_TREE: "/somewhere" } });
+  assert.equal(out.trim(), "0");
+});
