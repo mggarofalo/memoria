@@ -73,7 +73,7 @@ test("names these rules would refuse today stay deletable", async () => {
   try {
     const anywhere = ["notes~1.md", "OBSIDI~1/x.md", "a\u202eb.md", "a\u200bb.md", " lead.md", "re\u0301sume\u0301.md", "conference.md", `${"語".repeat(100)}.md`];
     const posixOnly = ["a:b.md", "a<b>.md", 'a"b.md', "a|b.md", "a?b.md", "a*b.md", "trail.md ", "dot.md.", "dir./x.md", "CON.md", "NUL/x.md", "com1.tar.md", "a\x01b.md", "tab\there.md"];
-    for (const p of process.platform === "win32" ? anywhere : [...anywhere, ...posixOnly]) await assertDeletes(t, p);
+    for (const p of process.platform === "win32" ? [...anywhere, ...windowsOnly] : [...anywhere, ...posixOnly]) await assertDeletes(t, p);
   } finally {
     await t.app.close();
   }
