@@ -580,8 +580,19 @@ internal static class SecretHeuristics
 		}
 
 		ReadOnlySpan<char> word = input.AsSpan(start, wordEnd + 1 - start);
-		bool atStart = start == 0 || input[start - 1] is '\n' or '\r' or ' ' or '\t';
-		return atStart && (word.SequenceEqual("export") || word.SequenceEqual("set"));
+		return IsBlankBack(input, start) && (word.SequenceEqual("export") || word.SequenceEqual("set"));
+	}
+
+	/// <summary>True when only indentation stands between the position and the start of its line.</summary>
+	private static bool IsBlankBack(string input, int position)
+	{
+		int i = position - 1;
+		while (i >= 0 && input[i] is ' ' or '\t')
+		{
+			i--;
+		}
+
+		return i < 0 || input[i] is '\n' or '\r';
 	}
 
 	private static bool IsLineBlankFrom(string input, int position)

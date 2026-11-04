@@ -19,6 +19,9 @@ internal static class PemSeparators
 		"&#13;", "&#xD;", "&#xd;", "\\x0d", "\\x0D", "\\015", "\\u000d", "\\u000D", "`r", "%0D", "%0d",
 	];
 
+	/// <summary>What <see cref="Length"/> reports for a carriage return: half of a CRLF, so it does not count as a second line feed.</summary>
+	private const int ReturnOnly = 2;
+
 	private static readonly string[] s_blanks = ["%20", "%22", "`t", "\\x09", "\\011"];
 
 	private static readonly char[] s_prefixMarkers = ['-', '*', '•', ';', '#', '>'];
@@ -27,6 +30,7 @@ internal static class PemSeparators
 	public static int Skip(string input, ref int position)
 	{
 		int lineFeeds = 0;
+		bool sawReturn = false;
 		bool crossedMessage = false;
 		while (position < input.Length)
 		{
@@ -37,12 +41,14 @@ internal static class PemSeparators
 			}
 
 			crossedMessage |= input[position] == Redactor.MessageBoundary;
-			lineFeeds += feeds;
+			sawReturn |= feeds == ReturnOnly;
+			lineFeeds += feeds == 1 ? 1 : 0;
 			position += length;
 		}
 
 		// The newlines around a message boundary are the separator's own, not a blank line.
-		return crossedMessage ? 1 : lineFeeds;
+		// A carriage return with no line feed beside it is a line break all the same.
+		return crossedMessage || (lineFeeds == 0 && sawReturn) ? 1 : lineFeeds;
 	}
 
 	public static int SkipBackslashes(string input, int position)
@@ -161,7 +167,10 @@ internal static class PemSeparators
 			case '\n':
 				lineFeeds = 1;
 				return 1;
-			case '\r' or ' ' or '\t' or '"' or '\'' or ',' or '>' or '|' or '#' or Redactor.MessageBoundary:
+			case '\r':
+				lineFeeds = ReturnOnly;
+				return 1;
+			case ' ' or '\t' or '"' or '\'' or ',' or '>' or '|' or '#' or Redactor.MessageBoundary:
 				return 1;
 			case '+':
 				return IsConcatenationPlus(input, position) ? 1 : 0;
@@ -183,8 +192,14 @@ internal static class PemSeparators
 			return feed;
 		}
 
-		int other = MatchAny(input, position, s_carriageReturns);
-		return other > 0 ? other : MatchAny(input, position, s_blanks);
+		int carriageReturn = MatchAny(input, position, s_carriageReturns);
+		if (carriageReturn > 0)
+		{
+			lineFeeds = ReturnOnly;
+			return carriageReturn;
+		}
+
+		return MatchAny(input, position, s_blanks);
 	}
 
 	private static int MatchAny(string input, int position, string[] spellings)
@@ -215,8 +230,13 @@ internal static class PemSeparators
 			return next - position;
 		}
 
-		lineFeeds = input[next] is 'n' or '\n' ? 1 : 0;
-		return lineFeeds == 1 || input[next] is 'r' or '\r' or 't' or '"' or '\'' ? next + 1 - position : 0;
+		lineFeeds = input[next] switch
+		{
+			'n' or '\n' => 1,
+			'r' or '\r' => ReturnOnly,
+			_ => 0,
+		};
+		return lineFeeds > 0 || input[next] is 't' or '"' or '\'' ? next + 1 - position : 0;
 	}
 
 	private static int SkipBlanks(string input, int position)
