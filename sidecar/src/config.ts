@@ -24,6 +24,12 @@ export interface SidecarConfig {
   filterMaxFetch: number;
   /** Request body limit in bytes. `/documents` carries whole transcripts. */
   bodyLimitBytes: number;
+  /** Quiet period after a document write before its index update runs. 0 disables the debounce. */
+  reindexDebounceMs: number;
+  /** Longest a debounced update can wait from its first write, so steady ingest cannot starve it. */
+  reindexMaxWaitMs: number;
+  /** How long shutdown waits for queued reindex jobs to finish. */
+  shutdownDrainMs: number;
 }
 
 const LOOPBACK_HOSTS = new Set(["localhost", "::1", "0:0:0:0:0:0:0:1"]);
@@ -64,6 +70,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): SidecarConfig 
   if (secret !== undefined && secret.length < 16) {
     throw new Error("MEMORIA_QMD_SECRET must be at least 16 characters");
   }
+  const reindexDebounceMs = readInt(env.MEMORIA_QMD_REINDEX_DEBOUNCE_MS, 60_000, "MEMORIA_QMD_REINDEX_DEBOUNCE_MS", 0, 3_600_000);
+  const reindexMaxWaitMs = readInt(env.MEMORIA_QMD_REINDEX_MAX_WAIT_MS, 300_000, "MEMORIA_QMD_REINDEX_MAX_WAIT_MS", 0, 86_400_000);
+  if (reindexMaxWaitMs < reindexDebounceMs) {
+    throw new Error("MEMORIA_QMD_REINDEX_MAX_WAIT_MS must not be shorter than MEMORIA_QMD_REINDEX_DEBOUNCE_MS");
+  }
   return {
     host,
     port: readInt(env.MEMORIA_QMD_PORT, 8282, "MEMORIA_QMD_PORT", 1, 65535),
@@ -76,5 +87,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): SidecarConfig 
     filterOverfetch: readInt(env.MEMORIA_QMD_FILTER_OVERFETCH, 4, "MEMORIA_QMD_FILTER_OVERFETCH", 1, 20),
     filterMaxFetch: readInt(env.MEMORIA_QMD_FILTER_MAX_FETCH, 200, "MEMORIA_QMD_FILTER_MAX_FETCH", 1, 1000),
     bodyLimitBytes: readInt(env.MEMORIA_QMD_BODY_LIMIT_BYTES, 16 * 1024 * 1024, "MEMORIA_QMD_BODY_LIMIT_BYTES", 1024, 256 * 1024 * 1024),
+    reindexDebounceMs,
+    reindexMaxWaitMs,
+    shutdownDrainMs: readInt(env.MEMORIA_QMD_SHUTDOWN_DRAIN_MS, 10_000, "MEMORIA_QMD_SHUTDOWN_DRAIN_MS", 0, 600_000),
   };
 }

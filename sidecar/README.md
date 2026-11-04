@@ -42,6 +42,9 @@ Everything is an environment variable. See [`.env.example`](.env.example) for th
 | `MEMORIA_QMD_KEEP_WARM` | `1` | Disable the SDK's 5-minute idle model unload. |
 | `MEMORIA_QMD_WARMUP` | `1` | Load models at startup. |
 | `MEMORIA_QMD_LOG_LEVEL` | `info` | pino level. |
+| `MEMORIA_QMD_REINDEX_DEBOUNCE_MS` | `60000` | Quiet period after a document write before its index update runs. `0` turns the debounce off. |
+| `MEMORIA_QMD_REINDEX_MAX_WAIT_MS` | `300000` | Longest an update can wait from its first write, so steady ingest cannot starve the index. |
+| `MEMORIA_QMD_SHUTDOWN_DRAIN_MS` | `10000` | How long shutdown waits for queued jobs. Keep it under the service manager's stop timeout (15 s in `install-service.ps1`). |
 
 ### As a Windows service
 
@@ -66,10 +69,11 @@ Every route except `/health` and `/openapi.json` requires `Authorization: Bearer
 | `GET /status` | QMD's index status. |
 | `POST /search` | Hybrid search. Either `query` (auto-expanded) or `searches` (typed `lex`/`vec`/`hyde` sub-queries), plus `intent`, `collections`, `limit`, `minScore`, `candidateLimit`, `rerank`, and frontmatter `filters`. |
 | `GET /docs/{reference}` | One document by `collection/path`, `qmd://` URI or docid, with `:from` / `:from:count` line-range suffixes. |
-| `POST /docs:multiGet` | Several documents by glob and/or a list of references. |
+| `POST /docs:multiGet` | Several documents by glob and/or a list of references. Each selector resolves separately; results merge, one entry per file. |
 | `GET /collections` | Name, root, pattern, document counts, root context. |
-| `POST /documents` | Ingest by value: writes markdown into the collection directory and queues an update (and embed) job. Returns 202. |
-| `POST /reindex` | Queue `update` (+ `embed`) for some or all collections. One worker drains the queue in order. |
+| `POST /documents` | Ingest by value: writes markdown into the collection directory and queues a debounced update (and embed) job. Returns 202. |
+| `DELETE /documents?collection=&path=` | Delete by value: removes the file and queues a debounced update. Idempotent; returns 202 with `deleted: false` when no file existed. |
+| `POST /reindex` | Queue `update` (+ `embed`) for some or all collections, without waiting on the debounce. One worker runs one job at a time. |
 | `GET /reindex/jobs`, `GET /reindex/jobs/{id}` | Job history for this process. |
 
 ### Search example
@@ -115,6 +119,17 @@ POST /search
 
 QMD has no notion of frontmatter, so the sidecar keeps a small in-memory index of each document's YAML header (`project`, `git_branch`, `date`, `start_time`, `end_time`, `tags`, `session_id`, `source`), built from the SQLite index at startup and refreshed after every reindex job. Filters are applied **after** retrieval: a filtered search asks QMD for `limit × MEMORIA_QMD_FILTER_OVERFETCH` candidates (default 4×, capped at 200), drops the ones that fail, and returns up to `limit`. A filtered result set can therefore be shorter than `limit` even when more matches exist deeper in the ranking. Documents with no frontmatter never match an active filter.
 
+### Reindex scheduling
+
+One worker runs one job at a time. Document writes do not start a scan each: the file lands on disk at once and the update waits until writes for that collection have been quiet for `MEMORIA_QMD_REINDEX_DEBOUNCE_MS`, so N documents cost one scan. The wait never exceeds `MEMORIA_QMD_REINDEX_MAX_WAIT_MS` from the first write.
+
+- A waiting job's state is `queued`. Every write in the burst gets the same job back, and its `reason` counts them: `POST /documents claude-sessions/a.md (+24 more)`.
+- A write that arrives while a job is running gets one follow-up job, because the running scan may already have passed the new file.
+- If any write in a burst asks for embedding, the shared job embeds. An embed run sweeps every unembedded document in the collection, so a separate job would not have spared the others.
+- `POST /reindex` does not wait. An identical job that is already waiting is returned and released to run.
+- So a new document is not searchable, and a deleted one is not gone from search, until the job finishes. Call `POST /reindex` for the collection when that delay matters.
+- On SIGINT or SIGTERM the sidecar releases held jobs and waits up to `MEMORIA_QMD_SHUTDOWN_DRAIN_MS` for them. Jobs are not persisted: after a crash the files are safe on disk but stay unindexed until the next scan of that collection.
+
 ## Develop
 
 ```bash
@@ -136,12 +151,13 @@ Layout:
 | `src/routes.ts` | Every route and its JSON schema. |
 | `src/store.ts` | The `QmdBackend` interface and the only import of `@tobilu/qmd`. |
 | `src/metadata.ts` | Frontmatter parsing, filter matching, the in-memory metadata index. |
-| `src/jobs.ts` | Single-worker reindex queue. |
-| `src/ingest.ts` | Path validation and file writes for `POST /documents`. |
+| `src/jobs.ts` | Single-worker reindex queue with an injectable debounce clock. |
+| `src/ingest.ts` | Path validation, file writes and deletes for `/documents`. |
+| `src/multi-get.ts` | Splits a multi-get into the separate calls QMD can read, and merges the results. |
 | `test/fake-backend.ts` | In-memory backend used by unit tests and OpenAPI generation. |
 
 ## Security notes
 
 - QMD has no authentication and the corpus contains credentials. The sidecar refuses to start on a non-loopback address without a secret, and compares bearer tokens in constant time.
-- `POST /documents` writes files. Paths are normalised, must stay inside the collection root, and must match the collection's glob. Redaction is the caller's job and must happen before the call.
+- `POST /documents` and `DELETE /documents` change files. Paths are normalised, must stay inside the collection root, and must match the collection's glob. Symlinks and junctions cannot be followed out of the root, and segments that Windows would silently rewrite (trailing dots and spaces, colons) are refused on every platform. Redaction is the caller's job and must happen before the call.
 - The sidecar is not a public surface. `Memoria.Api` is the only intended caller; expose nothing beyond the LAN.

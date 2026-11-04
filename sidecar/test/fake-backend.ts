@@ -1,5 +1,6 @@
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
+import picomatch from "picomatch";
 import type { EmbedSummary, UpdateSummary } from "../src/jobs.ts";
 import type { DocumentHead } from "../src/metadata.ts";
 import type {
@@ -64,7 +65,11 @@ export class FakeBackend implements QmdBackend {
   /** When set, search() throws this to exercise the 500 path. */
   searchError: Error | null = null;
   updateDelayMs = 0;
+  /** When set, update() waits on it, so a test can act while a job is mid-run. */
+  updateGate: Promise<void> | null = null;
   closed = false;
+  /** Docs a scan found on disk. Only these can vanish; seeded docs have no file. */
+  readonly #scanned = new Set<FakeDoc>();
 
   constructor(options: FakeBackendOptions) {
     this.collections = options.collections;
@@ -155,33 +160,36 @@ export class FakeBackend implements QmdBackend {
     return lines.slice(start, end).join("\n");
   }
 
+  /**
+   * Mirrors the SDK's findDocuments, quirks included: the string is a reference
+   * list only when it has a comma and no `*`, `?` or `{`, or is a lone docid.
+   * Anything else is one glob, commas and all, and the SDK does not de-duplicate.
+   */
   async multiGet(pattern: string, options: { includeBody: boolean; maxBytes: number }): Promise<{ docs: MultiGetEntry[]; errors: string[] }> {
     this.#record("multiGet", pattern, options);
-    const parts = pattern.split(",").map((p) => p.trim()).filter(Boolean);
-    const out: MultiGetEntry[] = [];
+    const isList = pattern.includes(",") && !/[*?{]/.test(pattern);
+    const isDocid = /^#?[a-f0-9]{6,}$/i.test(pattern.trim());
     const errors: string[] = [];
-    const seen = new Set<string>();
-    for (const part of parts) {
-      let matched: FakeDoc[];
-      if (part.includes("*")) {
-        const re = new RegExp("^" + part.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*\*/g, ".*").replace(/\*/g, "[^/]*") + "$");
-        matched = this.docs.filter((d) => re.test(`${d.collection}/${d.path}`));
-        if (matched.length === 0) errors.push(`No files match pattern: ${part}`);
-      } else {
-        const one = this.#find(part);
-        matched = one ? [one] : [];
-        if (!one) errors.push(`Document not found: ${part}`);
+    const matched: FakeDoc[] = [];
+    if (isList || isDocid) {
+      for (const name of pattern.split(",").map((p) => p.trim()).filter(Boolean)) {
+        const one = this.#find(name);
+        if (one) matched.push(one);
+        else errors.push(`File not found: ${name}`);
       }
-      for (const d of matched) {
-        const info = this.#info(d);
-        if (seen.has(info.displayPath)) continue;
-        seen.add(info.displayPath);
-        if (info.bodyLength > options.maxBytes) {
-          out.push({ doc: { filepath: info.filepath, displayPath: info.displayPath }, skipped: true, skipReason: `File too large (${info.bodyLength} bytes > ${options.maxBytes})` });
-          continue;
-        }
-        out.push({ doc: options.includeBody ? { ...info, body: d.body } : info, skipped: false });
+    } else {
+      const isMatch = picomatch(pattern);
+      matched.push(...this.docs.filter((d) => isMatch(`qmd://${d.collection}/${d.path}`) || isMatch(d.path) || isMatch(`${d.collection}/${d.path}`)));
+      if (matched.length === 0) return { docs: [], errors: [`No files matched pattern: ${pattern}`] };
+    }
+    const out: MultiGetEntry[] = [];
+    for (const d of matched) {
+      const info = this.#info(d);
+      if (info.bodyLength > options.maxBytes) {
+        out.push({ doc: { filepath: info.filepath, displayPath: info.displayPath }, skipped: true, skipReason: `File too large (${info.bodyLength} bytes > ${options.maxBytes})` });
+        continue;
       }
+      out.push({ doc: options.includeBody ? { ...info, body: d.body } : info, skipped: false });
     }
     return { docs: out, errors };
   }
@@ -214,15 +222,18 @@ export class FakeBackend implements QmdBackend {
   /**
    * Like `qmd update`: scan each collection root for files matching the
    * pattern and fold them into the in-memory docs, so ingest-by-value
-   * round-trips through the filesystem the way it does in production.
+   * round-trips through the filesystem the way it does in production. A doc
+   * whose file is gone is dropped, as the SDK deactivates it.
    */
   async update(options: { collections?: string[] }): Promise<UpdateSummary> {
     this.#record("update", options);
     if (this.updateDelayMs > 0) await new Promise((r) => setTimeout(r, this.updateDelayMs));
+    if (this.updateGate) await this.updateGate;
     const names = options.collections ?? this.collections.map((c) => c.name);
     let indexed = 0;
     let updated = 0;
     let unchanged = 0;
+    let removed = 0;
     for (const name of names) {
       const col = this.collections.find((c) => c.name === name);
       if (!col) continue;
@@ -232,21 +243,34 @@ export class FakeBackend implements QmdBackend {
       } catch {
         files = [];
       }
-      for (const rel of files.map((f) => f.replace(/\\/g, "/")).filter((f) => f.endsWith(".md"))) {
+      const onDisk = files.map((f) => f.replace(/\\/g, "/")).filter((f) => f.endsWith(".md"));
+      for (const rel of onDisk) {
         const body = await readFile(path.join(col.root, rel), "utf8");
         const existing = this.docs.find((d) => d.collection === name && d.path === rel);
         if (!existing) {
-          this.docs.push({ collection: name, path: rel, body });
+          const doc: FakeDoc = { collection: name, path: rel, body };
+          this.docs.push(doc);
+          this.#scanned.add(doc);
           indexed++;
-        } else if (existing.body !== body) {
-          existing.body = body;
-          updated++;
         } else {
-          unchanged++;
+          this.#scanned.add(existing);
+          if (existing.body !== body) {
+            existing.body = body;
+            updated++;
+          } else {
+            unchanged++;
+          }
+        }
+      }
+      for (const doc of [...this.#scanned]) {
+        if (doc.collection === name && !onDisk.includes(doc.path)) {
+          this.#scanned.delete(doc);
+          this.docs.splice(this.docs.indexOf(doc), 1);
+          removed++;
         }
       }
     }
-    return { collections: names.length, indexed, updated, unchanged, removed: 0, skipped: 0, needsEmbedding: indexed + updated };
+    return { collections: names.length, indexed, updated, unchanged, removed, skipped: 0, needsEmbedding: indexed + updated };
   }
 
   async embed(options: { force: boolean; collection?: string }): Promise<EmbedSummary> {

@@ -119,6 +119,38 @@ test("sidecar serves a real QMD index end to end", { skip: enabled ? false : "se
 
     const status = (await app.inject({ method: "GET", url: "/status", headers: authHeaders })).json();
     assert.equal(status.totalDocuments, 3);
+
+    // A glob and a docid together, which the SDK cannot read as one string.
+    const both = await app.inject({ method: "POST", url: "/docs:multiGet", headers: authHeaders, payload: { pattern: "sessions/2026-03*.md", ids: [doc.docid] } });
+    assert.equal(both.statusCode, 200, both.body);
+    assert.deepEqual(both.json().docs.map((d: { path: string }) => d.path).sort(), ["2026-02-11_alpha.md", "2026-03-05_beta.md"]);
+    assert.deepEqual(both.json().errors, []);
+    const oneString = await app.inject({ method: "POST", url: "/docs:multiGet", headers: authHeaders, payload: { pattern: `sessions/2026-03*.md,${doc.docid}` } });
+    assert.equal(oneString.json().docs.length, 2);
+    const overlap = await app.inject({ method: "POST", url: "/docs:multiGet", headers: authHeaders, payload: { pattern: "sessions/2026-*.md", ids: ["sessions/2026-02-11_alpha.md", doc.docid] } });
+    assert.equal(overlap.json().docs.length, 3);
+    const oneId = await app.inject({ method: "POST", url: "/docs:multiGet", headers: authHeaders, payload: { ids: ["sessions/2026-02-11_alpha.md"] } });
+    assert.deepEqual(oneId.json().docs.map((d: { path: string }) => d.path), ["2026-02-11_alpha.md"]);
+    const halfMiss = await app.inject({ method: "POST", url: "/docs:multiGet", headers: authHeaders, payload: { pattern: "nowhere/*.md", ids: ["sessions/2026-02-11_alpha.md", "sessions/gone.md"] } });
+    assert.equal(halfMiss.json().docs.length, 1);
+    assert.equal(halfMiss.json().errors.length, 2);
+
+    // Delete by value: the SDK's own scan deactivates the row.
+    const del = await app.inject({ method: "DELETE", url: "/documents?collection=sessions&path=2026-10-31_gamma.md", headers: authHeaders });
+    assert.equal(del.statusCode, 202, del.body);
+    assert.equal(del.json().deleted, true);
+    await app.ctx.jobs.idle();
+    const delJob = (await app.inject({ method: "GET", url: `/reindex/jobs/${del.json().job.id}`, headers: authHeaders })).json().job;
+    assert.equal(delJob.state, "succeeded", JSON.stringify(delJob));
+    assert.equal(delJob.result.update.removed, 1);
+    const gone = await app.inject({ method: "POST", url: "/search", headers: authHeaders, payload: { searches: [{ type: "lex", query: "ingests transcripts" }], rerank: false } });
+    assert.equal(gone.json().total, 0);
+    assert.equal((await app.inject({ method: "GET", url: "/docs/sessions/2026-10-31_gamma.md", headers: authHeaders })).statusCode, 404);
+    assert.equal((await app.inject({ method: "GET", url: "/status", headers: authHeaders })).json().totalDocuments, 2);
+
+    const escape = await app.inject({ method: "DELETE", url: `/documents?collection=sessions&path=${encodeURIComponent("../index.sqlite")}`, headers: authHeaders });
+    assert.equal(escape.statusCode, 400);
+    assert.equal((await app.inject({ method: "GET", url: "/status", headers: authHeaders })).statusCode, 200);
   } finally {
     await app.close();
     await backend.close();

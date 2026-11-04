@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
-import { authHeaders, makeApp, sampleDocs, TEST_SECRET, testConfig } from "./helpers.ts";
+import { authHeaders, makeApp, ManualScheduler, sampleDocs, TEST_SECRET, testConfig } from "./helpers.ts";
 import { FRONTMATTER_DOC } from "./fake-backend.ts";
 import { buildApp } from "../src/app.ts";
 import { FakeBackend } from "./fake-backend.ts";
@@ -22,6 +22,8 @@ test("every route except /health and /openapi.json requires the bearer secret", 
       const r = await app.inject({ method: "POST", url, payload: {} });
       assert.equal(r.statusCode, 401, url);
     }
+    const unauthDelete = await app.inject({ method: "DELETE", url: "/documents?collection=claude-sessions&path=x.md" });
+    assert.equal(unauthDelete.statusCode, 401);
     const wrong = await app.inject({ method: "GET", url: "/status", headers: { authorization: `Bearer ${TEST_SECRET}x` } });
     assert.equal(wrong.statusCode, 401);
     const health = await app.inject({ method: "GET", url: "/health" });
@@ -311,7 +313,7 @@ test("POST /docs:multiGet fetches by glob and by ids, skipping oversized files",
     assert.equal(ib.docs.length, 1);
     assert.equal(ib.docs[0].body, "1: ---\n2: session_id: \"gamma\"");
     assert.equal(ib.docs[0].maxLines, 2);
-    assert.deepEqual(ib.errors, ["Document not found: claude-sessions/missing.md"]);
+    assert.deepEqual(ib.errors, ["File not found: claude-sessions/missing.md"]);
 
     const small = await app.inject({ method: "POST", url: "/docs:multiGet", headers: authHeaders, payload: { pattern: "claude-sessions/*.md", maxBytes: 100 } });
     const sb = small.json();
@@ -323,6 +325,51 @@ test("POST /docs:multiGet fetches by glob and by ids, skipping oversized files",
 
     const bad = await app.inject({ method: "POST", url: "/docs:multiGet", headers: authHeaders, payload: {} });
     assert.equal(bad.statusCode, 400);
+  } finally {
+    await app.close();
+  }
+});
+
+test("POST /docs:multiGet resolves ids and pattern separately and merges them by file", async () => {
+  const { app, backend } = await makeApp();
+  const paths = (body: { docs: { path: string }[] }) => body.docs.map((d) => d.path).sort();
+  const multiGet = (payload: object) => app.inject({ method: "POST", url: "/docs:multiGet", headers: authHeaders, payload });
+  try {
+    const gamma = (await app.inject({ method: "GET", url: "/docs/codex-sessions/2026-08-31_gamma.md", headers: authHeaders })).json();
+    const alpha = (await app.inject({ method: "GET", url: "/docs/claude-sessions/2026-02-11_alpha.md", headers: authHeaders })).json();
+
+    // ids only, one of them: a lone docid and a lone path both resolve.
+    assert.deepEqual(paths((await multiGet({ ids: [gamma.docid] })).json()), ["2026-08-31_gamma.md"]);
+    assert.deepEqual(paths((await multiGet({ ids: ["claude-sessions/2026-02-11_alpha.md"] })).json()), ["2026-02-11_alpha.md"]);
+
+    // pattern only.
+    assert.deepEqual(paths((await multiGet({ pattern: "claude-sessions/2026-03*.md" })).json()), ["2026-03-05_beta.md"]);
+
+    // Both: this is the combination that used to report no documents at all.
+    backend.calls.length = 0;
+    const both = await multiGet({ pattern: "claude-sessions/2026-03*.md", ids: [gamma.docid] });
+    assert.equal(both.statusCode, 200, both.body);
+    assert.deepEqual(paths(both.json()), ["2026-03-05_beta.md", "2026-08-31_gamma.md"]);
+    assert.deepEqual(both.json().errors, []);
+    assert.deepEqual(backend.calls.filter((c) => c.method === "multiGet").map((c) => c.args[0]), ["claude-sessions/2026-03*.md", `${gamma.docid},`]);
+
+    // A file selected by both comes back once.
+    const overlap = await multiGet({ pattern: "claude-sessions/2026-*.md", ids: [alpha.docid, "claude-sessions/2026-02-11_alpha.md"] });
+    assert.deepEqual(paths(overlap.json()), ["2026-02-11_alpha.md", "2026-03-05_beta.md"]);
+
+    // The same mix written as one string resolves the same way.
+    const mixed = await multiGet({ pattern: `claude-sessions/2026-03*.md,${gamma.docid}` });
+    assert.deepEqual(paths(mixed.json()), ["2026-03-05_beta.md", "2026-08-31_gamma.md"]);
+
+    // A half that matches nothing is reported without losing the other half.
+    const halfMiss = (await multiGet({ pattern: "nowhere/*.md", ids: [gamma.docid, "claude-sessions/gone.md"] })).json();
+    assert.deepEqual(paths(halfMiss), ["2026-08-31_gamma.md"]);
+    assert.deepEqual(halfMiss.errors, ["No files matched pattern: nowhere/*.md", "File not found: claude-sessions/gone.md"]);
+
+    // Oversized files stay under `skipped`, also once each.
+    const skipped = (await multiGet({ pattern: "claude-sessions/2026-02*.md", ids: [alpha.docid], maxBytes: 10 })).json();
+    assert.equal(skipped.docs.length, 0);
+    assert.deepEqual(skipped.skipped.map((s: { file: string }) => s.file), ["claude-sessions/2026-02-11_alpha.md"]);
   } finally {
     await app.close();
   }
@@ -406,6 +453,252 @@ test("POST /documents rejects unknown collections and unsafe paths", async () =>
     assert.equal(missing.json().error, "validation");
     const { readdir } = await import("node:fs/promises");
     assert.deepEqual(await readdir(roots.claude), [], "nothing was written for rejected requests");
+  } finally {
+    await app.close();
+  }
+});
+
+// --- debounced reindex ---------------------------------------------------------
+
+test("a burst of POST /documents shares one job and one update, with the contract intact", async () => {
+  const scheduler = new ManualScheduler();
+  const { app, backend, roots } = await makeApp({ scheduler, config: { reindexDebounceMs: 60_000 } });
+  try {
+    const ids = new Set<string>();
+    for (let i = 0; i < 25; i++) {
+      const r = await app.inject({ method: "POST", url: "/documents", headers: authHeaders, payload: { collection: "claude-sessions", path: `burst-${i}.md`, content: `# Burst ${i}\n\nflurrymarker\n` } });
+      assert.equal(r.statusCode, 202, r.body);
+      assert.equal(r.json().job.state, "queued");
+      ids.add(r.json().job.id);
+      await scheduler.advance(1_000);
+    }
+    assert.equal(ids.size, 1);
+    assert.equal(backend.calls.filter((c) => c.method === "update").length, 0);
+    // Every file is durable before any index work happens.
+    assert.equal(await readFile(path.join(roots.claude, "burst-24.md"), "utf8"), "# Burst 24\n\nflurrymarker\n");
+
+    const [id] = ids;
+    const held = (await app.inject({ method: "GET", url: `/reindex/jobs/${id}`, headers: authHeaders })).json().job;
+    assert.equal(held.state, "queued");
+    assert.deepEqual(held.request, { collections: ["claude-sessions"], embed: true, force: false, reason: "POST /documents claude-sessions/burst-0.md (+24 more)" });
+    const ready = (await app.inject({ method: "GET", url: "/ready", headers: authHeaders })).json();
+    assert.equal(ready.jobs.pending, 1);
+
+    await scheduler.advance(60_000);
+    await app.ctx.jobs.idle();
+    assert.equal(backend.calls.filter((c) => c.method === "update").length, 1);
+    assert.equal(backend.calls.filter((c) => c.method === "embed").length, 1);
+    const done = (await app.inject({ method: "GET", url: `/reindex/jobs/${id}`, headers: authHeaders })).json().job;
+    assert.equal(done.state, "succeeded");
+    assert.equal(done.result.update.indexed, 25);
+    const found = await app.inject({ method: "POST", url: "/search", headers: authHeaders, payload: { query: "flurrymarker", limit: 100 } });
+    assert.equal(found.json().total, 25);
+  } finally {
+    await app.close();
+  }
+});
+
+test("a document arriving mid-run triggers exactly one follow-up", async () => {
+  const scheduler = new ManualScheduler();
+  const { app, backend } = await makeApp({ scheduler, config: { reindexDebounceMs: 60_000 } });
+  const ingest = (name: string) => app.inject({ method: "POST", url: "/documents", headers: authHeaders, payload: { collection: "claude-sessions", path: name, content: `# ${name}\n` } });
+  try {
+    let open = () => {};
+    backend.updateGate = new Promise((resolve) => (open = resolve));
+    const first = (await ingest("a.md")).json().job;
+    await scheduler.advance(60_000);
+    const running = (await app.inject({ method: "GET", url: `/reindex/jobs/${first.id}`, headers: authHeaders })).json().job;
+    assert.equal(running.state, "running");
+
+    const second = (await ingest("b.md")).json().job;
+    const third = (await ingest("c.md")).json().job;
+    assert.notEqual(second.id, first.id);
+    assert.equal(third.id, second.id);
+
+    await scheduler.advance(60_000);
+    backend.updateGate = null;
+    open();
+    await app.ctx.jobs.idle();
+    assert.equal(backend.calls.filter((c) => c.method === "update").length, 2);
+    const jobs = (await app.inject({ method: "GET", url: "/reindex/jobs", headers: authHeaders })).json().jobs;
+    assert.deepEqual(jobs.map((j: { id: string; state: string }) => [j.id, j.state]), [[second.id, "succeeded"], [first.id, "succeeded"]]);
+  } finally {
+    await app.close();
+  }
+});
+
+test("POST /reindex does not wait on the debounce and starts an identical held job", async () => {
+  const scheduler = new ManualScheduler();
+  const { app, backend } = await makeApp({ scheduler, config: { reindexDebounceMs: 60_000 } });
+  try {
+    const now = (await app.inject({ method: "POST", url: "/reindex", headers: authHeaders, payload: { collections: ["codex-sessions"] } })).json().job;
+    await app.ctx.jobs.idle();
+    assert.equal(backend.calls.filter((c) => c.method === "update").length, 1);
+    assert.equal(now.request.reason, "POST /reindex");
+
+    const held = (await app.inject({ method: "POST", url: "/documents", headers: authHeaders, payload: { collection: "claude-sessions", path: "x.md", content: "# x\n" } })).json().job;
+    const flushed = (await app.inject({ method: "POST", url: "/reindex", headers: authHeaders, payload: { collections: ["claude-sessions"] } })).json().job;
+    assert.equal(flushed.id, held.id);
+    await app.ctx.jobs.idle();
+    assert.equal(backend.calls.filter((c) => c.method === "update").length, 2);
+    assert.equal(scheduler.pendingTimers, 0);
+  } finally {
+    await app.close();
+  }
+});
+
+// --- delete --------------------------------------------------------------------
+
+const deleteUrl = (collection: string, p: string) => `/documents?collection=${encodeURIComponent(collection)}&path=${encodeURIComponent(p)}`;
+
+test("DELETE /documents removes the file, queues an update, and the document stops being searchable", async () => {
+  const { app, backend, roots } = await makeApp();
+  try {
+    const content = FRONTMATTER_DOC({ project: "Memoria", date: "2026-11-01" }, "# Tombstone\n\nzebrafinchmarker\n");
+    await app.inject({ method: "POST", url: "/documents", headers: authHeaders, payload: { collection: "claude-sessions", path: "sub/doomed.md", content } });
+    await app.ctx.jobs.idle();
+    const search = () => app.inject({ method: "POST", url: "/search", headers: authHeaders, payload: { query: "zebrafinchmarker" } });
+    assert.equal((await search()).json().total, 1);
+    assert.equal(app.ctx.metadata.get("claude-sessions/sub/doomed.md")?.project, "Memoria");
+
+    const r = await app.inject({ method: "DELETE", url: deleteUrl("claude-sessions", "sub/doomed.md"), headers: authHeaders });
+    assert.equal(r.statusCode, 202, r.body);
+    const body = r.json();
+    assert.equal(body.collection, "claude-sessions");
+    assert.equal(body.path, "sub/doomed.md");
+    assert.equal(body.file, "claude-sessions/sub/doomed.md");
+    assert.equal(body.deleted, true);
+    assert.deepEqual(body.job.request, { collections: ["claude-sessions"], embed: false, force: false, reason: "DELETE /documents claude-sessions/sub/doomed.md" });
+    await assert.rejects(readFile(path.join(roots.claude, "sub", "doomed.md")), /ENOENT/);
+    assert.equal(app.ctx.metadata.get("claude-sessions/sub/doomed.md"), undefined);
+
+    await app.ctx.jobs.idle();
+    const job = (await app.inject({ method: "GET", url: `/reindex/jobs/${body.job.id}`, headers: authHeaders })).json().job;
+    assert.equal(job.state, "succeeded");
+    assert.equal(job.result.update.removed, 1);
+    assert.equal(job.result.embed, null);
+    assert.equal((await search()).json().total, 0);
+    const gone = await app.inject({ method: "GET", url: "/docs/claude-sessions/sub/doomed.md", headers: authHeaders });
+    assert.equal(gone.statusCode, 404);
+    assert.equal(backend.calls.filter((c) => c.method === "embed").length, 1, "only the ingest embedded");
+  } finally {
+    await app.close();
+  }
+});
+
+test("DELETE /documents is idempotent on a missing file and still queues the update", async () => {
+  const { app } = await makeApp();
+  try {
+    const r = await app.inject({ method: "DELETE", url: deleteUrl("claude-sessions", "never-there.md"), headers: authHeaders });
+    assert.equal(r.statusCode, 202, r.body);
+    assert.equal(r.json().deleted, false);
+    assert.ok(r.json().job.id);
+    await app.ctx.jobs.idle();
+    const again = await app.inject({ method: "DELETE", url: deleteUrl("claude-sessions", "never-there.md"), headers: authHeaders });
+    assert.equal(again.statusCode, 202);
+    assert.equal(again.json().deleted, false);
+  } finally {
+    await app.close();
+  }
+});
+
+test("DELETE /documents joins the debounce with ingest", async () => {
+  const scheduler = new ManualScheduler();
+  const { app, backend } = await makeApp({ scheduler, config: { reindexDebounceMs: 60_000 } });
+  try {
+    const put = (await app.inject({ method: "POST", url: "/documents", headers: authHeaders, payload: { collection: "claude-sessions", path: "x.md", content: "# x\n" } })).json().job;
+    const del = (await app.inject({ method: "DELETE", url: deleteUrl("claude-sessions", "y.md"), headers: authHeaders })).json().job;
+    assert.equal(del.id, put.id);
+    assert.equal(del.request.embed, true, "the ingest's embed survives the merge");
+    await scheduler.advance(60_000);
+    await app.ctx.jobs.idle();
+    assert.equal(backend.calls.filter((c) => c.method === "update").length, 1);
+  } finally {
+    await app.close();
+  }
+});
+
+test("DELETE /documents cannot reach outside the collection root", async () => {
+  const { app, roots } = await makeApp();
+  try {
+    // A real file one level above the root, plus the sibling collection's root:
+    // what a successful traversal would destroy.
+    const outside = path.join(path.dirname(roots.claude), `${path.basename(roots.claude)}-outside.md`);
+    await writeFile(outside, "keep");
+    const sibling = path.join(roots.codex, "sibling.md");
+    await writeFile(sibling, "keep");
+    const name = path.basename(outside);
+    const codexName = path.basename(roots.codex);
+
+    const invalid = [
+      `../${name}`,
+      `..\\${name}`,
+      `sub/../../${name}`,
+      `./../${name}`,
+      `.. /${name}`,
+      `sub/.. /.. /${name}`,
+      `../${codexName}/sibling.md`,
+      `..\\${codexName}\\sibling.md`,
+      outside,
+      outside.replace(/\\/g, "/"),
+      "/etc/hosts.md",
+      "C:/Windows/win.md",
+      "C:\\Windows\\win.md",
+      "\\\\server\\share\\x.md",
+      "//server/share/x.md",
+      "x.md:stream",
+      "sub//x.md",
+      "with\0nul.md",
+    ];
+    for (const p of invalid) {
+      const r = await app.inject({ method: "DELETE", url: deleteUrl("claude-sessions", p), headers: authHeaders });
+      assert.equal(r.statusCode, 400, p);
+      assert.equal(r.json().error, "invalid_path", p);
+    }
+
+    // Outside the glob: never indexed, so not this route's to remove.
+    for (const p of ["notes.txt", ".git/config.md", ".hidden.md"]) {
+      const r = await app.inject({ method: "DELETE", url: deleteUrl("claude-sessions", p), headers: authHeaders });
+      assert.equal(r.statusCode, 400, p);
+      assert.equal(r.json().error, "pattern_mismatch", p);
+    }
+    assert.deepEqual(app.ctx.jobs.list(), [], "rejected deletes queued nothing");
+
+    // One decode only: a doubly encoded traversal stays a literal, harmless name.
+    const encoded = await app.inject({ method: "DELETE", url: `/documents?collection=claude-sessions&path=${encodeURIComponent(`%2e%2e%2f${name}`)}`, headers: authHeaders });
+    assert.equal(encoded.statusCode, 202, encoded.body);
+    assert.equal(encoded.json().deleted, false);
+
+    // Single-encoded traversal is decoded by the router and rejected above.
+    const single = await app.inject({ method: "DELETE", url: `/documents?collection=claude-sessions&path=%2e%2e%2f${name}`, headers: authHeaders });
+    assert.equal(single.statusCode, 400);
+
+    assert.equal(await readFile(outside, "utf8"), "keep");
+    assert.equal(await readFile(sibling, "utf8"), "keep");
+  } finally {
+    await app.close();
+  }
+});
+
+test("DELETE /documents validates collection and query", async () => {
+  const { app, roots } = await makeApp();
+  try {
+    const ghost = await app.inject({ method: "DELETE", url: deleteUrl("ghost", "x.md"), headers: authHeaders });
+    assert.equal(ghost.statusCode, 404);
+    assert.equal(ghost.json().error, "unknown_collection");
+
+    for (const url of ["/documents", "/documents?collection=claude-sessions", "/documents?path=x.md", "/documents?collection=claude-sessions&path="]) {
+      const r = await app.inject({ method: "DELETE", url, headers: authHeaders });
+      assert.equal(r.statusCode, 400, url);
+      assert.equal(r.json().error, "validation", url);
+    }
+    const twice = await app.inject({ method: "DELETE", url: "/documents?collection=claude-sessions&path=a.md&path=b.md", headers: authHeaders });
+    assert.equal(twice.statusCode, 400);
+
+    await mkdir(path.join(roots.claude, "folder.md"));
+    const dir = await app.inject({ method: "DELETE", url: deleteUrl("claude-sessions", "folder.md"), headers: authHeaders });
+    assert.equal(dir.statusCode, 409);
+    assert.equal(dir.json().error, "is_directory");
   } finally {
     await app.close();
   }

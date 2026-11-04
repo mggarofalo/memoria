@@ -3,7 +3,7 @@ import swagger from "@fastify/swagger";
 import { bearerMatches } from "./auth.ts";
 import type { SidecarConfig } from "./config.ts";
 import { HttpError } from "./errors.ts";
-import { JobQueue, type EmbedSummary, type JobResult, type ReindexRequest } from "./jobs.ts";
+import { JobQueue, type EmbedSummary, type JobResult, type JobScheduler, type ReindexRequest } from "./jobs.ts";
 import { MetadataIndex } from "./metadata.ts";
 import { registerRoutes } from "./routes.ts";
 import { documentSchema, errorSchema, jobSchema, metadataSchema } from "./schemas.ts";
@@ -34,6 +34,8 @@ export interface BuildAppOptions {
   backend: QmdBackend;
   config: SidecarConfig;
   logger?: FastifyServerOptions["logger"];
+  /** Clock and timers for the reindex debounce. Defaults to real ones. */
+  scheduler?: JobScheduler;
 }
 
 export type App = FastifyInstance & { ctx: AppContext };
@@ -76,7 +78,11 @@ export async function buildApp(options: BuildAppOptions): Promise<App> {
     backend,
     config,
     metadata,
-    jobs: new JobQueue(runJob),
+    jobs: new JobQueue(runJob, {
+      debounceMs: config.reindexDebounceMs,
+      maxWaitMs: config.reindexMaxWaitMs,
+      ...(options.scheduler ? { scheduler: options.scheduler } : {}),
+    }),
     startedAt: Date.now(),
     warmup: { requested: config.warmup, done: false, error: null, durationMs: null },
   };
@@ -117,9 +123,9 @@ export async function buildApp(options: BuildAppOptions): Promise<App> {
       tags: [
         { name: "system", description: "Liveness, readiness, index status." },
         { name: "search", description: "Hybrid retrieval with optional frontmatter filters." },
-        { name: "documents", description: "Read documents and ingest new ones by value." },
+        { name: "documents", description: "Read documents, and ingest or delete them by value." },
         { name: "collections", description: "QMD collections and their contexts." },
-        { name: "index", description: "Serialized reindex jobs." },
+        { name: "index", description: "Serialized, coalesced reindex jobs." },
       ],
     },
     refResolver: { buildLocalReference: (json) => String(json.$id) },
