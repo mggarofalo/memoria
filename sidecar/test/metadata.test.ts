@@ -53,6 +53,20 @@ test("CRLF and BOM frontmatter still parse; unquoted dates survive", () => {
   assert.deepEqual(meta.tags, ["solo"]);
 });
 
+test("redacted frontmatter stays parseable: the redactor's quoting is what keeps metadata", () => {
+  // What the redactor writes when a value starts with a placeholder. Without the quotes, YAML reads a flow sequence.
+  const quoted = parseFrontmatter("---\ntitle: '[REDACTED:github-token] rotated, it''s done'\nproject: demo\ntags:\n  - '[REDACTED:github-token]'\n---\n");
+  assert.deepEqual(quoted, { title: "[REDACTED:github-token] rotated, it's done", project: "demo", tags: ["[REDACTED:github-token]"] });
+  assert.equal(parseFrontmatter("---\ntitle: [REDACTED:github-token] rotated\nproject: demo\n---\n"), null);
+
+  // What the session renderer writes: every value double-quoted, so a placeholder is ordinary text.
+  const rendered = metadataFromText("---\nsession_id: \"[REDACTED:github-token]\"\ndate: \"2026-10-01\"\nproject: \"[REDACTED:github-token]\"\ngit_branch: \"fix/[REDACTED:github-token]\"\ntags:\n  - \"project/[REDACTED:github-token]\"\n---\n");
+  assert.equal(rendered?.project, "[REDACTED:github-token]");
+  assert.equal(rendered?.branch, "fix/[REDACTED:github-token]");
+  assert.equal(rendered?.date, "2026-10-01");
+  assert.deepEqual(rendered?.tags, ["project/[REDACTED:github-token]"]);
+});
+
 test("branch falls back to `branch` when `git_branch` is absent", () => {
   const meta = metadataFromText("---\nbranch: feature/x\n---\n");
   assert.equal(meta?.branch, "feature/x");

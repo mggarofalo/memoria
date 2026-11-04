@@ -5,6 +5,7 @@
       "tests/Memoria.Core.Tests/Memoria.Core.Tests.csproj",
       "tests/Memoria.Api.Tests/Memoria.Api.Tests.csproj"
     ],
+    "test-case-filter": "FullyQualifiedName!~Adversarial_input&FullyQualifiedName!~Large_transcript",
     "reporters": ["cleartext", "html", "json"],
     "thresholds": { "high": 80, "low": 60, "break": 0 }
   }

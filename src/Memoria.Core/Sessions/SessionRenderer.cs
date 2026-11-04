@@ -211,6 +211,19 @@ internal abstract class SessionTranscript(SessionSource source, SessionRenderOpt
 		return parts;
 	}
 
+	/// <summary>A refused part refuses the whole session, because a session with a part missing would look complete. The caller is told which part and which rule.</summary>
+	internal static RedactedMarkdown Seal(string document, int part)
+	{
+		try
+		{
+			return Redactor.Shared.Seal(document);
+		}
+		catch (RedactionException exception)
+		{
+			throw new RedactionException(exception.RuleName, exception.Failure, part);
+		}
+	}
+
 	protected List<RedactedSessionDocument> BuildDocuments(
 		List<ArraySegment<SessionMessage>> segments,
 		Func<SessionPart, string> render,
@@ -227,7 +240,7 @@ internal abstract class SessionTranscript(SessionSource source, SessionRenderOpt
 				part.Number,
 				messageStart,
 				segments[i].Count,
-				Redactor.Shared.Seal(render(part))));
+				Seal(render(part), part.Number)));
 			messageStart += segments[i].Count;
 		}
 		return documents;
