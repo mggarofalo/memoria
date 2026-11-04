@@ -122,8 +122,9 @@ These need a real install, and none has been done:
 
 `ghcr.io/mggarofalo/memoria` is published by `.github/workflows/docker.yml`:
 every pull request builds it, every push to `main` publishes `latest` and
-`sha-<short>`, and a `v*` tag publishes `<major>.<minor>.<patch>` and
-`<major>.<minor>`.
+`sha-<short>`, and a release tag publishes `<major>.<minor>.<patch>` and
+`<major>.<minor>`. `/health` reports the version the image was stamped with;
+see [releasing.md](releasing.md).
 
 | Property | Value |
 |---|---|

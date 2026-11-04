@@ -68,13 +68,17 @@ MEMORIA_QMD_WORKER_URL=... npm run test:live              # opt-in, against a re
 MEMORIA_QMD_WORKER_URL=... npm run bench:parity -- --db <index>   # opt-in, in-process versus worker
 ```
 
-The sidecar's `npm test` and `npm run typecheck` also cover `worker/`, which is how CI reaches it.
+The sidecar's `npm test` and `npm run typecheck` also cover `worker/` and `scripts/release/`, which is how CI reaches them.
 
 ```bash
 docker build -t memoria-api:local .                       # the image CI publishes to ghcr.io/mggarofalo/memoria
 ```
 
-Four gates are required status checks on `main`: `Build & Test`, `Code Formatting`, `CLI Build & Test`, `CLI Lint`. A fifth job, `Sidecar Build & Test`, runs the sidecar commands above, and `Docker Image` (`.github/workflows/docker.yml`) builds the image on every pull request and publishes it on pushes to `main` and `v*` tags; neither is in the ruleset's required list yet.
+Four gates are required status checks on `main`: `Build & Test`, `Code Formatting`, `CLI Build & Test`, `CLI Lint`. A fifth job, `Sidecar Build & Test`, runs the sidecar commands above, and `Docker Image` (`.github/workflows/docker.yml`) builds the image on every pull request and publishes it on pushes to `main` and release tags; neither is in the ruleset's required list yet.
+
+### Releases
+
+The only version in this repository is a `vX.Y.Z` tag, computed from Conventional Commits by `node scripts/release/release.ts next`. Never write a version number into a csproj, `package.json`, or Go file. Use the `release` skill (`.claude/skills/release/SKILL.md`) to cut one. **[docs/releasing.md](docs/releasing.md)** has the rules, what each component stamps, and the CLI asset contract.
 
 ## Architecture
 
@@ -104,9 +108,10 @@ clients (Claude Code / CLI / scripts)
 | `sidecar/` | `memoria-qmd`: TypeScript REST service over the QMD SDK; `openapi.json` is its contract |
 | `worker/` | `memoria-worker`: supervises `llama-server` for QMD's models on a GPU host and serves them to the sidecar. No runtime npm dependencies; runs from source. See `docs/workers.md` |
 | `cli/` | Go module `github.com/mggarofalo/memoria/cli`, binary `memoria`; `internal/api` is the client oapi-codegen generates from `src/Memoria.Api/openapi.json` |
+| `scripts/release/` | Version computation, CLI asset builds, and release gates; no dependencies, runs on Node. See `docs/releasing.md` |
 | `deploy/` | `compose.yaml` for the always-on host |
 | `Dockerfile` | `Memoria.Api` only; the sidecar runs as its own service beside the models (docs/deployment.md) |
-| `docs/` | Plane workflow (`plane.md`), API configuration (`configuration.md`), deployment (`deployment.md`), inference workers (`workers.md`) |
+| `docs/` | Plane workflow (`plane.md`), API configuration (`configuration.md`), deployment (`deployment.md`), inference workers (`workers.md`), releases (`releasing.md`) |
 
 **Inside `Memoria.Api`:** `Configuration/` (the `Memoria` options root and its validator), `Sidecar/` (typed-client registration and trace propagation), `Http/` (request logging, problem-details mapping, the `MemoriaScope` and `ICallerScope` seams for API-key auth), `Endpoints/` (`/health`, `/ready`, `/v1/*`), `Mcp/` (the outward MCP server; tools translate to the sidecar client through the same `Search/SearchRequestFactory` the REST endpoints use), `OpenApi/` (document and schema transformers that keep the committed spec generator-friendly), `Hosting/` (the container health-check switch). The sidecar client itself (`IMemoriaQmdClient`, its wire records) lives in `Memoria.Core/Sidecar/`; the public v1 contracts in `Memoria.Core/Contracts/`. When the sidecar contract changes, update the records in `Memoria.Core/Sidecar/SidecarContracts.cs` — `SidecarContractTests` fails until they match the committed `openapi.json`.
 

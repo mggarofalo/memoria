@@ -5,6 +5,7 @@ import { InvalidRequest, UpstreamError, type CompleteRequest, type Inference } f
 import type { Logger } from "./log.ts";
 import { busyReasons, type BusyThresholds, type MachineState } from "./probes.ts";
 import type { ServerStatus } from "./supervisor.ts";
+import { resolveVersion } from "./version.ts";
 
 /**
  * The worker's HTTP surface. Every route requires the bearer token when one is
@@ -12,7 +13,7 @@ import type { ServerStatus } from "./supervisor.ts";
  * and upstream output never appear in them, or in the logs.
  */
 
-export const WORKER_VERSION = "0.1.0";
+export const WORKER_VERSION = resolveVersion();
 
 /** Hard limits on one request, so a bad caller cannot queue unbounded model work. */
 const MAX_EMBED_TEXTS = 256;
