@@ -170,6 +170,28 @@ public sealed class ReviewRoundThreeTests
 		Assert.Equal($"use [REDACTED:{rule}] now", Redactor.Redact($"use {token} now").Text);
 	}
 
+	[Theory]
+	[InlineData(11, false)]
+	[InlineData(12, true)]
+	[InlineData(20, true)]
+	[InlineData(21, false)]
+	public void Alibaba_key_length_is_bounded_on_both_sides(int body, bool redacted)
+	{
+		string key = "LT" + "AI" + Synthetic.Body(body, 1400);
+
+		Assert.Equal(redacted ? "[REDACTED:alibaba-key]" : key, Redactor.Redact(key).Text);
+	}
+
+	[Theory]
+	[InlineData(23, false)]
+	[InlineData(24, true)]
+	public void Google_access_token_needs_its_minimum_length(int total, bool redacted)
+	{
+		string token = "ya" + "29." + Synthetic.Body(total - 5, 1401);
+
+		Assert.Equal(redacted ? "[REDACTED:google-oauth-token]" : token, Redactor.Redact(token).Text);
+	}
+
 	[Fact]
 	public void Hubspot_and_teams_shapes_are_redacted()
 	{

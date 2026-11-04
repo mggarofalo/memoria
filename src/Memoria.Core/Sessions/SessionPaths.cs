@@ -39,6 +39,24 @@ public static partial class SessionPaths
 		return SafeOnly().IsMatch(sessionId) ? sessionId[..Math.Min(sessionId.Length, 8)] : Digest(sessionId);
 	}
 
+	/// <summary>
+	/// Tells apart two copies of one session. Resuming a session from another directory copies its transcript into that
+	/// directory's project folder under the same id, so both copies would render to one path and one would silently overwrite
+	/// the other. A folder's name encodes the directory it belongs to, so a copy can tell by itself that its first cwd does not match
+	/// its folder, and only that copy takes a digest of its folder. The result depends on nothing but the session, so it is stable on
+	/// re-ingest, the original keeps the exporter's path, and at most one copy can match, so no two collide.
+	/// </summary>
+	internal static string RelocatedCopySuffix(string firstCwd, string? projectDirectory)
+	{
+		if (firstCwd.Length == 0 || string.IsNullOrEmpty(projectDirectory))
+		{
+			return "";
+		}
+
+		string encoded = NonAlphanumeric().Replace(firstCwd, "-");
+		return string.Equals(encoded, projectDirectory, StringComparison.OrdinalIgnoreCase) ? "" : "-" + Digest(projectDirectory);
+	}
+
 	internal static string ClaudePart(string date, string shortId, int part)
 	{
 		return part == 1 ? $"{date}_{shortId}.md" : $"{date}_{shortId}_part-{part:D3}.md";
@@ -81,6 +99,9 @@ public static partial class SessionPaths
 
 	[GeneratedRegex(@"^[A-Za-z0-9._-]+\z", RegexOptions.CultureInvariant)]
 	private static partial Regex SafeOnly();
+
+	[GeneratedRegex("[^A-Za-z0-9]", RegexOptions.CultureInvariant)]
+	private static partial Regex NonAlphanumeric();
 
 	[GeneratedRegex("[^A-Za-z0-9._-]+", RegexOptions.CultureInvariant)]
 	private static partial Regex UnsafeRun();

@@ -15,6 +15,7 @@ internal sealed class ClaudeTranscript(SessionSource source, SessionRenderOption
 
 	private readonly Dictionary<string, int> _files = new(StringComparer.Ordinal);
 	private string _cwd = "";
+	private string _rawCwd = "";
 	private string _slug = "";
 	private string _gitBranch = "";
 
@@ -22,7 +23,7 @@ internal sealed class ClaudeTranscript(SessionSource source, SessionRenderOption
 	{
 		_gitBranch = FirstNonEmpty(_gitBranch, record, "gitBranch");
 		_slug = FirstNonEmpty(_slug, record, "slug");
-		_cwd = FirstNonEmpty(_cwd, record, "cwd");
+		NoteCwd(record);
 
 		switch (JsonValues.String(record, "type", Report))
 		{
@@ -44,7 +45,7 @@ internal sealed class ClaudeTranscript(SessionSource source, SessionRenderOption
 	public override RedactedSession Render()
 	{
 		RedactMessages();
-		string shortId = SessionPaths.ClaudeShortId(PathId(Source.SessionId));
+		string shortId = SessionPaths.ClaudeShortId(PathId(Source.SessionId)) + SessionPaths.RelocatedCopySuffix(_rawCwd, Source.ProjectDirectory);
 		string sessionId = Clip(Source.SessionId);
 		string project = Clip(_cwd.Length > 0
 			? SessionProject.FromClaudeCwd(_cwd, Source.HomeDirectory)
@@ -63,6 +64,22 @@ internal sealed class ClaudeTranscript(SessionSource source, SessionRenderOption
 			CountsByRule,
 			Refusals,
 			path => SessionPaths.IsClaudeFamily(path, shortId));
+	}
+
+	/// <summary>Keeps the raw first cwd too, only to compare with the project folder. It is never written out.</summary>
+	private void NoteCwd(JsonElement record)
+	{
+		if (_cwd.Length > 0)
+		{
+			return;
+		}
+
+		string? value = JsonValues.String(record, "cwd", Report);
+		if (!string.IsNullOrEmpty(value))
+		{
+			_rawCwd = value;
+			_cwd = Clip(value);
+		}
 	}
 
 	private string FirstNonEmpty(string current, JsonElement record, string name)
