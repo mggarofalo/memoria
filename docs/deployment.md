@@ -312,8 +312,9 @@ This limit protects the API from one address at a time. A flood from many addres
 stays within each one's budget, so limit connections at the proxy as well, for example
 with `limit_req` in the proxy host's custom config.
 
-`/ready` stays anonymous so an orchestrator can probe it, and tells anonymous
-callers only `ready` or `not_ready`. See
+`/ready` stays anonymous so an orchestrator can probe it. It answers 200 while the
+sidecar answers, even with no GPU worker up, and tells anonymous callers only the
+status word. Point a health check that should fail on degradation at `/ready?strict=true`. See
 [configuration.md](configuration.md#anonymous-routes).
 
 ## Upgrade order

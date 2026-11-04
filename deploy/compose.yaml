@@ -20,7 +20,6 @@ services:
     environment:
       Memoria__Sidecar__BaseUrl: ${MEMORIA_SIDECAR_URL:?set MEMORIA_SIDECAR_URL to the sidecar, e.g. http://192.168.1.20:8282}
       Memoria__Sidecar__Secret: ${MEMORIA_SIDECAR_SECRET:?set MEMORIA_SIDECAR_SECRET to the sidecar's MEMORIA_QMD_SECRET}
-      Memoria__Sidecar__ReadyRequiresModels: "true"
       Memoria__Search__RerankByDefault: "true"
       Memoria__Auth__DatabasePath: /data/control.db
       # The reverse proxy's address as this container sees it. Required once the

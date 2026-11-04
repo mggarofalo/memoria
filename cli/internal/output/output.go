@@ -123,12 +123,35 @@ func SearchTable(w io.Writer, result *api.SearchResult) error {
 	for _, hit := range result.Results {
 		rows = append(rows, row(fmt.Sprintf("%.2f", hit.Score), hit.Docid, hit.File, hit.Line, hit.Title))
 	}
-	return table(w, "SCORE\tDOCID\tFILE\tLINE\tTITLE", rows)
+	var buf bytes.Buffer
+	if result.Degraded {
+		fmt.Fprintf(&buf, "%s\n\n", degradedNotice(result, termsafe.Line))
+	}
+	_ = table(&buf, "SCORE\tDOCID\tFILE\tLINE\tTITLE", rows) // Writing to a bytes.Buffer cannot fail.
+	_, err := w.Write(buf.Bytes())
+	return err
+}
+
+// degradedNotice says a search ran without something a full search uses. Each
+// reason goes through clean, which makes server text safe for where it lands.
+func degradedNotice(result *api.SearchResult, clean func(string) string) string {
+	const notice = "Degraded search: results are valid but may rank worse."
+	if len(result.DegradedReasons) == 0 {
+		return clean(notice)
+	}
+	reasons := make([]string, len(result.DegradedReasons))
+	for i, reason := range result.DegradedReasons {
+		reasons[i] = clean(reason)
+	}
+	return clean(notice) + " Missing: " + strings.Join(reasons, ", ") + "."
 }
 
 // SearchMarkdown renders search hits with their snippets.
 func SearchMarkdown(w io.Writer, result *api.SearchResult) error {
 	var b strings.Builder
+	if result.Degraded {
+		fmt.Fprintf(&b, "> %s\n\n", degradedNotice(result, inlineText))
+	}
 	for i, hit := range result.Results {
 		fmt.Fprintf(&b, "## %d. %s\n\n", i+1, inlineText(hit.Title))
 		location := fmt.Sprintf("%s:%d", termsafe.Line(hit.File), hit.Line)

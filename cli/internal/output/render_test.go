@@ -117,6 +117,53 @@ func TestUntrustedTextCannotBecomeMarkdown(t *testing.T) {
 	}
 }
 
+func TestDegradedNoticeNamesReasons_AndCleansThem(t *testing.T) {
+	hostile := "no_rerank\x1b[31m\n> ![x](http://evil/x)"
+	result := &api.SearchResult{Degraded: true, DegradedReasons: []string{hostile, "no_expansion"}}
+
+	var tableOut, markdownOut bytes.Buffer
+	if err := SearchTable(&tableOut, result); err != nil {
+		t.Fatal(err)
+	}
+	if err := SearchMarkdown(&markdownOut, result); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, out := range map[string]string{"table": tableOut.String(), "markdown": markdownOut.String()} {
+		if !strings.Contains(out, "Degraded search") || !strings.Contains(out, "no") || !strings.Contains(out, "expansion") {
+			t.Fatalf("%s = %q", name, out)
+		}
+		if strings.ContainsRune(out, 0x1b) {
+			t.Fatalf("%s kept an escape: %q", name, out)
+		}
+	}
+	if strings.Contains(markdownOut.String(), "![x]") {
+		t.Fatalf("markdown kept live markup: %q", markdownOut.String())
+	}
+	if !strings.HasPrefix(tableOut.String(), "Degraded search") {
+		t.Fatalf("table = %q", tableOut.String())
+	}
+	if !strings.HasPrefix(markdownOut.String(), "> ") {
+		t.Fatalf("markdown = %q", markdownOut.String())
+	}
+}
+
+func TestDegradedNoticeWithoutReasons(t *testing.T) {
+	var out bytes.Buffer
+	if err := SearchTable(&out, &api.SearchResult{Degraded: true}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "Degraded search") || strings.Contains(out.String(), "Missing") {
+		t.Fatalf("out = %q", out.String())
+	}
+}
+
+func TestSearchTableReportsAFailedWrite(t *testing.T) {
+	if err := SearchTable(failing{}, &api.SearchResult{Degraded: true}); err == nil {
+		t.Fatal("want an error")
+	}
+}
+
 func TestStatusTableReportsAFailedTableWrite(t *testing.T) {
 	limited := &failAfterFirst{}
 	if err := StatusTable(limited, &api.IndexStatus{}); err == nil {

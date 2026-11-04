@@ -19,7 +19,6 @@ never starts half-configured.
 | `Secret` | unset | The sidecar's `MEMORIA_QMD_SECRET`, sent as `Authorization: Bearer`. **Required when `BaseUrl` is not loopback.** Set it through the environment or `appsettings.local.json`; never commit it. |
 | `Timeout` | `00:02:00` | Per-request ceiling. A reranked search on a cold sidecar can take 15 s or more; leave headroom. |
 | `ReadinessTimeout` | `00:00:05` | Ceiling for the `/ready` probe only. Probes must fail fast so an orchestrator notices. |
-| `ReadyRequiresModels` | `true` | `/ready` reports 503 until the sidecar's GGUF models are resident. Set `false` on a host that deliberately runs unreranked. |
 
 ## `Memoria:Search` — defaults for `GET /v1/search`
 
@@ -178,7 +177,7 @@ which blocks the sidecar.
 | Route | Why |
 |---|---|
 | `/health` | Liveness; contacts nothing and reveals only the version. |
-| `/ready` | Orchestrators need it without a credential. Anonymous and non-admin callers get `status` of `ready` or `not_ready`, with `reason` and `sidecar` null: no index paths, counts or sidecar details. An admin key gets the full report. |
+| `/ready` | Orchestrators need it without a credential. It answers 200 with `status` of `ready`, `warming` or `degraded` whenever the sidecar answers, because losing GPU workers makes search rank worse and must not take the API out of rotation. It answers 503 only when the sidecar cannot be reached (`status` of `not_ready` to these callers), or with `?strict=true` for anything but `ready`. Anonymous and non-admin callers get the status word alone, with `reason` and `sidecar` null: no index paths, counts or sidecar details. An admin key gets the full report, including `jobs.stuck` and `llm.documentsSetAside`. |
 | `/openapi/v1.json` | The spec is public and carries no data. |
 
 ### Audit and logs

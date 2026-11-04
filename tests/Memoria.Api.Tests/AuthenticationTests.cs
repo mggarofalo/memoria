@@ -257,24 +257,26 @@ public sealed class AuthenticationTests(AuthApiFactory factory) : IClassFixture<
 		AssertBareReadiness(await response.Content.ReadAsStringAsync(), ReadinessStatus.Ready);
 	}
 
-	[Theory]
-	[InlineData(false)]
-	[InlineData(true)]
-	public async Task Ready_Anonymous_NotReady_HidesWhy(bool sidecarAnswers)
+	[Fact]
+	public async Task Ready_Anonymous_SidecarUnreachable_HidesWhy()
 	{
-		if (sidecarAnswers)
-		{
-			factory.Sidecar.On("GET", "/ready", HttpStatusCode.ServiceUnavailable, SidecarFixtures.Readiness("warming", resident: false, needsEmbedding: 7, warmupError: "CUDA out of memory"));
-		}
-		else
-		{
-			factory.Sidecar.Unreachable();
-		}
+		factory.Sidecar.Unreachable();
 
 		HttpResponseMessage response = await factory.CreateClient().GetAsync("/ready");
 
 		Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
-		AssertBareReadiness(await response.Content.ReadAsStringAsync(), ReadinessStatus.NotReady);
+		AssertBareReadiness(await response.Content.ReadAsStringAsync(), ReadinessStatus.NotReady, ready: false);
+	}
+
+	[Fact]
+	public async Task Ready_Anonymous_Warming_IsTheStatusWordAlone()
+	{
+		factory.Sidecar.On("GET", "/ready", HttpStatusCode.OK, SidecarFixtures.Readiness("warming", resident: false, needsEmbedding: 7, warmupError: "CUDA out of memory"));
+
+		HttpResponseMessage response = await factory.CreateClient().GetAsync("/ready");
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		AssertBareReadiness(await response.Content.ReadAsStringAsync(), ReadinessStatus.Warming);
 	}
 
 	[Fact]
@@ -343,15 +345,15 @@ public sealed class AuthenticationTests(AuthApiFactory factory) : IClassFixture<
 		Assert.Equal(record.Id, line.State["KeyId"]);
 	}
 
-	private static void AssertBareReadiness(string body, string status)
+	private static void AssertBareReadiness(string body, string status, bool ready = true)
 	{
 		using JsonDocument parsed = JsonDocument.Parse(body);
 		Assert.Equal(status, parsed.RootElement.GetProperty("status").GetString());
-		Assert.Equal(status == ReadinessStatus.Ready, parsed.RootElement.GetProperty("ready").GetBoolean());
+		Assert.Equal(ready, parsed.RootElement.GetProperty("ready").GetBoolean());
 		Assert.Equal(JsonValueKind.Null, parsed.RootElement.GetProperty("reason").ValueKind);
 		Assert.Equal(JsonValueKind.Null, parsed.RootElement.GetProperty("sidecar").ValueKind);
 
-		foreach (string secret in new[] { "index.sqlite", "1502", "sidecar.test", "CUDA", "gguf", "warming", "unavailable" })
+		foreach (string secret in new[] { "index.sqlite", "1502", "sidecar.test", "CUDA", "gguf", "unavailable" })
 		{
 			Assert.DoesNotContain(secret, body);
 		}

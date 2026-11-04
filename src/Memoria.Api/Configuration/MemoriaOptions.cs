@@ -124,8 +124,6 @@ public sealed class SidecarOptions
 	/// <summary>Timeout for the <c>/ready</c> probe only; probes must fail fast.</summary>
 	public TimeSpan ReadinessTimeout { get; set; } = TimeSpan.FromSeconds(5);
 
-	/// <summary>When true, <c>/ready</c> reports not-ready until the sidecar's models are resident.</summary>
-	public bool ReadyRequiresModels { get; set; } = true;
 }
 
 /// <summary>Defaults and ceilings for <c>GET /v1/search</c>.</summary>

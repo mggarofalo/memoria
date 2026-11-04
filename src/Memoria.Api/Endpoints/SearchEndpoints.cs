@@ -22,7 +22,8 @@ public static class SearchEndpoints
 				+ "then reranked by a cross-encoder unless `rerank=false`. Reranked queries take a few seconds; "
 				+ "`rerank=false` returns fused results in well under a second. Frontmatter filters "
 				+ "(`project`, `branch`, `since`, `until`, `tag`) are applied after retrieval, so a filtered "
-				+ "result set can be shorter than `limit` even when more matches exist.")
+				+ "result set can be shorter than `limit` even when more matches exist. `degraded` means the search ran without "
+				+ "something a full search uses, such as the reranker: results are valid but may rank worse, and `degradedReasons` says what.")
 			.WithTags("Search")
 			.ProducesValidationProblem();
 		return group;

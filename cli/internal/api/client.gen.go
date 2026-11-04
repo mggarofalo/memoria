@@ -111,10 +111,11 @@ type IndexCollectionStatus struct {
 
 // IndexStatus defines model for IndexStatus.
 type IndexStatus struct {
-	Collections    []IndexCollectionStatus `json:"collections"`
-	HasVectorIndex bool                    `json:"hasVectorIndex"`
-	NeedsEmbedding *int32                  `json:"needsEmbedding"`
-	TotalDocuments int32                   `json:"totalDocuments"`
+	Collections       []IndexCollectionStatus `json:"collections"`
+	DocumentsSetAside *int32                  `json:"documentsSetAside"`
+	HasVectorIndex    bool                    `json:"hasVectorIndex"`
+	NeedsEmbedding    *int32                  `json:"needsEmbedding"`
+	TotalDocuments    int32                   `json:"totalDocuments"`
 }
 
 // IssuedApiKey defines model for IssuedApiKey.
@@ -183,10 +184,12 @@ type SearchQueryInfo struct {
 
 // SearchResult defines model for SearchResult.
 type SearchResult struct {
-	Query   SearchQueryInfo `json:"query"`
-	Results []SearchHit     `json:"results"`
-	TookMs  int32           `json:"tookMs"`
-	Total   int32           `json:"total"`
+	Degraded        bool            `json:"degraded"`
+	DegradedReasons []string        `json:"degradedReasons"`
+	Query           SearchQueryInfo `json:"query"`
+	Results         []SearchHit     `json:"results"`
+	TookMs          int32           `json:"tookMs"`
+	Total           int32           `json:"total"`
 }
 
 // SidecarIndexInfo defines model for SidecarIndexInfo.
@@ -199,7 +202,20 @@ type SidecarIndexInfo struct {
 
 // SidecarJobsInfo defines model for SidecarJobsInfo.
 type SidecarJobsInfo struct {
-	Pending int32 `json:"pending"`
+	Pending    int32            `json:"pending"`
+	Persistent *bool            `json:"persistent,omitempty"`
+	Stuck      *SidecarStuckJob `json:"stuck,omitempty"`
+}
+
+// SidecarLlmInfo defines model for SidecarLlmInfo.
+type SidecarLlmInfo struct {
+	Degraded          bool      `json:"degraded"`
+	DocumentsSetAside *int32    `json:"documentsSetAside,omitempty"`
+	EmbedDisagreement *[]string `json:"embedDisagreement,omitempty"`
+	Mode              string    `json:"mode"`
+	Unavailable       []string  `json:"unavailable"`
+	WorkersTotal      int32     `json:"workersTotal"`
+	WorkersUp         int32     `json:"workersUp"`
 }
 
 // SidecarMetadataIndexInfo defines model for SidecarMetadataIndexInfo.
@@ -228,12 +244,19 @@ type SidecarModelsLoaded struct {
 type SidecarReadiness struct {
 	Index         SidecarIndexInfo         `json:"index"`
 	Jobs          SidecarJobsInfo          `json:"jobs"`
+	Llm           *SidecarLlmInfo          `json:"llm,omitempty"`
 	Metadata      SidecarMetadataIndexInfo `json:"metadata"`
 	Models        SidecarModelsInfo        `json:"models"`
 	Status        string                   `json:"status"`
 	UptimeSeconds int32                    `json:"uptimeSeconds"`
 	Version       string                   `json:"version"`
 	Warmup        SidecarWarmupInfo        `json:"warmup"`
+}
+
+// SidecarStuckJob defines model for SidecarStuckJob.
+type SidecarStuckJob struct {
+	Attempts int32  `json:"attempts"`
+	Reason   string `json:"reason"`
 }
 
 // SidecarWarmupInfo defines model for SidecarWarmupInfo.
@@ -248,6 +271,12 @@ type SidecarWarmupInfo struct {
 type SkippedDocument struct {
 	File   string `json:"file"`
 	Reason string `json:"reason"`
+}
+
+// ReadyParams defines parameters for Ready.
+type ReadyParams struct {
+	// Strict Answer 503 unless the sidecar is fully ready, with no degradation.
+	Strict *bool `form:"strict,omitempty" json:"strict,omitempty"`
 }
 
 // GetDocumentParams defines parameters for GetDocument.
@@ -393,10 +422,10 @@ type ClientInterface interface {
 
 	// Ready Readiness
 	//
-	// Probes the memoria-qmd sidecar. 200 when its index is open and, by default, its models are resident; 503 with the same body shape while it warms up or when it cannot be reached. Anonymous for orchestrators: without an admin key the body says only `ready` or `not_ready`, with `reason` and `sidecar` null. An admin key gets the full report.
+	// Probes the memoria-qmd sidecar. 200 whenever it answers, with `status` of `ready`, `warming` or `degraded`: losing GPU workers makes search rank worse, and must not take the API out of rotation. 503 only when the sidecar cannot be reached, unless `strict=true`, which also answers 503 for anything but `ready`. Anonymous for orchestrators: without an admin key the body carries only the status word, and `not_ready` for an unreachable sidecar, with `reason` and `sidecar` null. An admin key gets the full report, including stuck jobs and documents set aside.
 	//
 	// Corresponds with GET /ready (the `Ready` operationId).
-	Ready(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+	Ready(ctx context.Context, params *ReadyParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ListApiKeys List API keys
 	//
@@ -471,7 +500,7 @@ type ClientInterface interface {
 
 	// Search Search the corpus
 	//
-	// Hybrid search over the indexed documents: BM25 and vector retrieval fused by reciprocal rank, then reranked by a cross-encoder unless `rerank=false`. Reranked queries take a few seconds; `rerank=false` returns fused results in well under a second. Frontmatter filters (`project`, `branch`, `since`, `until`, `tag`) are applied after retrieval, so a filtered result set can be shorter than `limit` even when more matches exist. Requires the `read` scope.
+	// Hybrid search over the indexed documents: BM25 and vector retrieval fused by reciprocal rank, then reranked by a cross-encoder unless `rerank=false`. Reranked queries take a few seconds; `rerank=false` returns fused results in well under a second. Frontmatter filters (`project`, `branch`, `since`, `until`, `tag`) are applied after retrieval, so a filtered result set can be shorter than `limit` even when more matches exist. `degraded` means the search ran without something a full search uses, such as the reranker: results are valid but may rank worse, and `degradedReasons` says what. Requires the `read` scope.
 	//
 	// Corresponds with GET /v1/search (the `Search` operationId).
 	Search(ctx context.Context, params *SearchParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -503,11 +532,11 @@ func (c *Client) Health(ctx context.Context, reqEditors ...RequestEditorFn) (*ht
 
 // Ready Readiness
 //
-// Probes the memoria-qmd sidecar. 200 when its index is open and, by default, its models are resident; 503 with the same body shape while it warms up or when it cannot be reached. Anonymous for orchestrators: without an admin key the body says only `ready` or `not_ready`, with `reason` and `sidecar` null. An admin key gets the full report.
+// Probes the memoria-qmd sidecar. 200 whenever it answers, with `status` of `ready`, `warming` or `degraded`: losing GPU workers makes search rank worse, and must not take the API out of rotation. 503 only when the sidecar cannot be reached, unless `strict=true`, which also answers 503 for anything but `ready`. Anonymous for orchestrators: without an admin key the body carries only the status word, and `not_ready` for an unreachable sidecar, with `reason` and `sidecar` null. An admin key gets the full report, including stuck jobs and documents set aside.
 //
 // Corresponds with GET /ready (the `Ready` operationId).
-func (c *Client) Ready(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewReadyRequest(c.Server)
+func (c *Client) Ready(ctx context.Context, params *ReadyParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewReadyRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -681,7 +710,7 @@ func (c *Client) GetDocuments(ctx context.Context, body GetDocumentsJSONRequestB
 
 // Search Search the corpus
 //
-// Hybrid search over the indexed documents: BM25 and vector retrieval fused by reciprocal rank, then reranked by a cross-encoder unless `rerank=false`. Reranked queries take a few seconds; `rerank=false` returns fused results in well under a second. Frontmatter filters (`project`, `branch`, `since`, `until`, `tag`) are applied after retrieval, so a filtered result set can be shorter than `limit` even when more matches exist. Requires the `read` scope.
+// Hybrid search over the indexed documents: BM25 and vector retrieval fused by reciprocal rank, then reranked by a cross-encoder unless `rerank=false`. Reranked queries take a few seconds; `rerank=false` returns fused results in well under a second. Frontmatter filters (`project`, `branch`, `since`, `until`, `tag`) are applied after retrieval, so a filtered result set can be shorter than `limit` even when more matches exist. `degraded` means the search ran without something a full search uses, such as the reranker: results are valid but may rank worse, and `degradedReasons` says what. Requires the `read` scope.
 //
 // Corresponds with GET /v1/search (the `Search` operationId).
 func (c *Client) Search(ctx context.Context, params *SearchParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
@@ -741,7 +770,7 @@ func NewHealthRequest(server string) (*http.Request, error) {
 }
 
 // NewReadyRequest constructs an http.Request for the Ready method
-func NewReadyRequest(server string) (*http.Request, error) {
+func NewReadyRequest(server string, params *ReadyParams) (*http.Request, error) {
 	var err error
 
 	serverURL, err := url.Parse(server)
@@ -757,6 +786,33 @@ func NewReadyRequest(server string) (*http.Request, error) {
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+		// queryValues collects non-styled parameters (passthrough, JSON)
+		// that are safe to round-trip through url.Values.Encode().
+		queryValues := queryURL.Query()
+		// rawQueryFragments collects pre-encoded query fragments from
+		// styled parameters, preserving literal commas as delimiters
+		// per the OpenAPI spec (e.g. "color=blue,black,brown").
+		var rawQueryFragments []string
+
+		if params.Strict != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "strict", *params.Strict, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if encoded := queryValues.Encode(); encoded != "" {
+			rawQueryFragments = append(rawQueryFragments, encoded)
+		}
+		queryURL.RawQuery = strings.Join(rawQueryFragments, "&")
 	}
 
 	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
@@ -1334,12 +1390,12 @@ type ClientWithResponsesInterface interface {
 
 	// ReadyWithResponse Readiness
 	//
-	// Probes the memoria-qmd sidecar. 200 when its index is open and, by default, its models are resident; 503 with the same body shape while it warms up or when it cannot be reached. Anonymous for orchestrators: without an admin key the body says only `ready` or `not_ready`, with `reason` and `sidecar` null. An admin key gets the full report.
+	// Probes the memoria-qmd sidecar. 200 whenever it answers, with `status` of `ready`, `warming` or `degraded`: losing GPU workers makes search rank worse, and must not take the API out of rotation. 503 only when the sidecar cannot be reached, unless `strict=true`, which also answers 503 for anything but `ready`. Anonymous for orchestrators: without an admin key the body carries only the status word, and `not_ready` for an unreachable sidecar, with `reason` and `sidecar` null. An admin key gets the full report, including stuck jobs and documents set aside.
 	//
 	// Returns a wrapper object for the known response body format(s).
 	//
 	// Corresponds with GET /ready (the `Ready` operationId).
-	ReadyWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ReadyResponse, error)
+	ReadyWithResponse(ctx context.Context, params *ReadyParams, reqEditors ...RequestEditorFn) (*ReadyResponse, error)
 
 	// ListApiKeysWithResponse List API keys
 	//
@@ -1424,7 +1480,7 @@ type ClientWithResponsesInterface interface {
 
 	// SearchWithResponse Search the corpus
 	//
-	// Hybrid search over the indexed documents: BM25 and vector retrieval fused by reciprocal rank, then reranked by a cross-encoder unless `rerank=false`. Reranked queries take a few seconds; `rerank=false` returns fused results in well under a second. Frontmatter filters (`project`, `branch`, `since`, `until`, `tag`) are applied after retrieval, so a filtered result set can be shorter than `limit` even when more matches exist. Requires the `read` scope.
+	// Hybrid search over the indexed documents: BM25 and vector retrieval fused by reciprocal rank, then reranked by a cross-encoder unless `rerank=false`. Reranked queries take a few seconds; `rerank=false` returns fused results in well under a second. Frontmatter filters (`project`, `branch`, `since`, `until`, `tag`) are applied after retrieval, so a filtered result set can be shorter than `limit` even when more matches exist. `degraded` means the search ran without something a full search uses, such as the reranker: results are valid but may rank worse, and `degradedReasons` says what. Requires the `read` scope.
 	//
 	// Returns a wrapper object for the known response body format(s).
 	//
@@ -2252,13 +2308,13 @@ func (c *ClientWithResponses) HealthWithResponse(ctx context.Context, reqEditors
 
 // ReadyWithResponse Readiness
 //
-// Probes the memoria-qmd sidecar. 200 when its index is open and, by default, its models are resident; 503 with the same body shape while it warms up or when it cannot be reached. Anonymous for orchestrators: without an admin key the body says only `ready` or `not_ready`, with `reason` and `sidecar` null. An admin key gets the full report.
+// Probes the memoria-qmd sidecar. 200 whenever it answers, with `status` of `ready`, `warming` or `degraded`: losing GPU workers makes search rank worse, and must not take the API out of rotation. 503 only when the sidecar cannot be reached, unless `strict=true`, which also answers 503 for anything but `ready`. Anonymous for orchestrators: without an admin key the body carries only the status word, and `not_ready` for an unreachable sidecar, with `reason` and `sidecar` null. An admin key gets the full report, including stuck jobs and documents set aside.
 //
 // Returns a wrapper object for the known response body format(s).
 //
 // Corresponds with GET /ready (the `Ready` operationId).
-func (c *ClientWithResponses) ReadyWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ReadyResponse, error) {
-	rsp, err := c.Ready(ctx, reqEditors...)
+func (c *ClientWithResponses) ReadyWithResponse(ctx context.Context, params *ReadyParams, reqEditors ...RequestEditorFn) (*ReadyResponse, error) {
+	rsp, err := c.Ready(ctx, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -2402,7 +2458,7 @@ func (c *ClientWithResponses) GetDocumentsWithResponse(ctx context.Context, body
 
 // SearchWithResponse Search the corpus
 //
-// Hybrid search over the indexed documents: BM25 and vector retrieval fused by reciprocal rank, then reranked by a cross-encoder unless `rerank=false`. Reranked queries take a few seconds; `rerank=false` returns fused results in well under a second. Frontmatter filters (`project`, `branch`, `since`, `until`, `tag`) are applied after retrieval, so a filtered result set can be shorter than `limit` even when more matches exist. Requires the `read` scope.
+// Hybrid search over the indexed documents: BM25 and vector retrieval fused by reciprocal rank, then reranked by a cross-encoder unless `rerank=false`. Reranked queries take a few seconds; `rerank=false` returns fused results in well under a second. Frontmatter filters (`project`, `branch`, `since`, `until`, `tag`) are applied after retrieval, so a filtered result set can be shorter than `limit` even when more matches exist. `degraded` means the search ran without something a full search uses, such as the reranker: results are valid but may rank worse, and `degradedReasons` says what. Requires the `read` scope.
 //
 // Returns a wrapper object for the known response body format(s).
 //

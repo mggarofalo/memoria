@@ -1,9 +1,11 @@
+using System.ComponentModel;
 using Memoria.Api.Configuration;
 using Memoria.Api.Http;
 using Memoria.Api.Sidecar;
 using Memoria.Core.Contracts;
 using Memoria.Core.Sidecar;
 using Microsoft.AspNetCore.Http.HttpResults;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
 
 namespace Memoria.Api.Endpoints;
@@ -26,10 +28,12 @@ public static class HealthEndpoints
 			.WithName("ready")
 			.WithSummary("Readiness")
 			.WithDescription(
-				"Probes the memoria-qmd sidecar. 200 when its index is open and, by default, its models are resident; "
-				+ "503 with the same body shape while it warms up or when it cannot be reached. "
-				+ "Anonymous for orchestrators: without an admin key the body says only `ready` or `not_ready`, "
-				+ "with `reason` and `sidecar` null. An admin key gets the full report.")
+				"Probes the memoria-qmd sidecar. 200 whenever it answers, with `status` of `ready`, `warming` or `degraded`: "
+				+ "losing GPU workers makes search rank worse, and must not take the API out of rotation. "
+				+ "503 only when the sidecar cannot be reached, unless `strict=true`, which also answers 503 for anything but `ready`. "
+				+ "Anonymous for orchestrators: without an admin key the body carries only the status word, and `not_ready` for an "
+				+ "unreachable sidecar, with `reason` and `sidecar` null. An admin key gets the full report, including stuck jobs "
+				+ "and documents set aside.")
 			.WithTags("Health")
 			.AllowAnonymous()
 			.Produces<ReadinessReport>(StatusCodes.Status503ServiceUnavailable);
@@ -38,6 +42,7 @@ public static class HealthEndpoints
 	}
 
 	private static async Task<Results<Ok<ReadinessReport>, JsonHttpResult<ReadinessReport>>> ReadyAsync(
+		[FromQuery(Name = "strict")][Description("Answer 503 unless the sidecar is fully ready, with no degradation.")] bool? strict,
 		IMemoriaQmdClient sidecar,
 		ICallerScope scope,
 		IOptions<MemoriaOptions> options,
@@ -50,12 +55,8 @@ public static class HealthEndpoints
 		ReadinessReport report;
 		try
 		{
-			SidecarReadinessResult result = await sidecar.GetReadinessAsync(settings.ReadyRequiresModels, timeout.Token);
-			report = new ReadinessReport(
-				result.Ready ? ReadinessStatus.Ready : ReadinessStatus.Warming,
-				result.Ready,
-				result.Ready ? null : DescribeWarming(result.Details),
-				result.Details);
+			SidecarReadinessResult result = await sidecar.GetReadinessAsync(requireModels: false, timeout.Token);
+			report = Answered(result.Details, strict == true);
 		}
 		catch (SidecarException ex)
 		{
@@ -72,7 +73,7 @@ public static class HealthEndpoints
 
 		if (!scope.SeesBackendDetails)
 		{
-			report = new ReadinessReport(report.Ready ? ReadinessStatus.Ready : ReadinessStatus.NotReady, report.Ready, null, null);
+			report = new ReadinessReport(report.Status == ReadinessStatus.Unavailable ? ReadinessStatus.NotReady : report.Status, report.Ready, null, null);
 		}
 
 		return report.Ready
@@ -80,8 +81,26 @@ public static class HealthEndpoints
 			: TypedResults.Json(report, statusCode: StatusCodes.Status503ServiceUnavailable);
 	}
 
-	private static string DescribeWarming(SidecarReadiness details)
+	/// <summary>The sidecar answered, so the API stays in rotation unless the caller asked to be strict.</summary>
+	private static ReadinessReport Answered(SidecarReadiness details, bool strict)
 	{
+		string status = details.Status switch
+		{
+			ReadinessStatus.Ready => ReadinessStatus.Ready,
+			ReadinessStatus.Degraded => ReadinessStatus.Degraded,
+			_ => ReadinessStatus.Warming,
+		};
+		bool fullyReady = status == ReadinessStatus.Ready;
+		return new ReadinessReport(status, fullyReady || !strict, fullyReady ? null : DescribeNotReady(details), details);
+	}
+
+	private static string DescribeNotReady(SidecarReadiness details)
+	{
+		if (details.Jobs.Stuck is { } stuck)
+		{
+			return $"a job is waiting to retry after {stuck.Attempts} attempts: {stuck.Reason}";
+		}
+
 		if (details.Warmup.Error is { Length: > 0 } error)
 		{
 			return $"warmup failed: {error}";

@@ -26,7 +26,8 @@ public sealed class MemoriaTools(ScopedCorpus corpus, ICallerScope scope, IReque
 		"Search the accumulated record (agent transcripts, issues, notes) with hybrid BM25 + vector retrieval and LLM reranking. "
 		+ "Use a natural-language query; add `intent` to say what you are trying to accomplish so reranking and snippets favour it. "
 		+ "Reranked searches take a few seconds; pass rerank=false for a sub-second fused result when breadth matters more than precision. "
-		+ "Each hit carries a `line`: pass it to get_document as fromLine to read the matching passage.")]
+		+ "Each hit carries a `line`: pass it to get_document as fromLine to read the matching passage. "
+		+ "`degraded` means the search ran without something a full search uses: results are valid but may rank worse, and `degradedReasons` says what.")]
 	public Task<SearchResult> SearchAsync(
 		[Description("Natural-language query.")] string query,
 		[Description("Background context: what you are trying to do or decide. Steers reranking and snippet selection.")] string? intent = null,
