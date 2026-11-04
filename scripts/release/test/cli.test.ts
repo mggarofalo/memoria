@@ -5,7 +5,8 @@ import path from "node:path";
 import { test, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
-import { assertPublishable, commitsSince, previousTag, run } from "../cli.ts";
+import { SERVICES } from "../assets.ts";
+import { assertPublishable, commitsSince, previousTag, run, type Tools } from "../cli.ts";
 import { fakeTools, tempDir, tempRepo, type TempRepo } from "./helpers.ts";
 
 const reference = (number: number): string => ["MEMORIA", String(number)].join("-");
@@ -225,23 +226,185 @@ test("validate fails closed when main requires no checks", (t) => {
   assert.match(errors[0] as string, /no required status checks/);
 });
 
-test("build stamps from the commit timestamp, into the default or a given directory", (t) => {
+/** A repository with what a service package ships, committed, and tools that stand in for npm and tsc. */
+function repoWithServices(t: TestContext): { repo: TempRepo; exec: Tools["exec"]; calls: string[] } {
   const repo = tempRepo(t);
+  for (const service of SERVICES) {
+    for (const item of service.include.filter((name) => name !== "dist")) {
+      const file = path.join(repo.dir, service.dir, item === "src" || item === "scripts" ? `${item}/file.ts` : item);
+      mkdirSync(path.dirname(file), { recursive: true });
+      writeFileSync(file, `committed ${service.dir}/${item}\n`);
+    }
+  }
+  repo.git("add", "sidecar", "worker");
   repo.commit("feat: a");
+  const calls: string[] = [];
+  const exec: Tools["exec"] = (command, args, cwd) => {
+    calls.push(`${path.basename(command)} ${args[0]}`);
+    if (command === "tar") {
+      execFileSync(command, args, { cwd, stdio: "pipe" });
+    } else if (args[0]?.endsWith("tsc")) {
+      mkdirSync(path.join(cwd, "dist"));
+      writeFileSync(path.join(cwd, "dist", "main.js"), "compiled\n");
+    }
+  };
+  return { repo, exec, calls };
+}
+
+test("build stamps from the commit timestamp, into the default or a given directory", (t) => {
+  const { repo, exec, calls } = repoWithServices(t);
   const epoch = Number(repo.git("log", "-1", "--format=%ct").trim());
   const go = (args: string[]): void => writeFileSync(args[args.indexOf("-o") + 1] as string, "binary");
-  const { tools, lines } = fakeTools(repo, undefined, go);
+  const { tools, lines } = fakeTools(repo, undefined, go, { exec });
 
   assert.equal(run(["build", "1.2.3"], tools, assert.fail), 0);
   assert.equal(run(["build", "1.2.3", "--out", "elsewhere"], tools, assert.fail), 0);
 
-  assert.equal(lines.length, 14);
-  assert.ok(lines[6]?.endsWith(path.join("cli", "dist", "checksums.txt")));
-  assert.ok(lines[13]?.endsWith(path.join("elsewhere", "checksums.txt")));
+  assert.equal(lines.length, 18);
+  assert.ok(lines[8]?.endsWith(path.join("cli", "dist", "checksums.txt")));
+  assert.ok(lines[17]?.endsWith(path.join("elsewhere", "checksums.txt")));
+  assert.deepEqual(calls.slice(0, 3).map((call) => call.split(" ")[0]), ["tar", "npm", path.basename(process.execPath)]);
   const defaultSums = readFileSync(path.join(repo.dir, "cli", "dist", "checksums.txt"), "utf8");
   assert.equal(defaultSums, readFileSync(path.join(repo.dir, "elsewhere", "checksums.txt"), "utf8"), "the output directory does not change the bytes");
   const tar = gunzipSync(readFileSync(path.join(repo.dir, "cli", "dist", "memoria_1.2.3_linux_amd64.tar.gz")));
   assert.equal(parseInt(tar.toString("ascii", 136, 147), 8), epoch);
+});
+
+test("service packages hold what was committed, not the working tree, stamped with the version", (t) => {
+  const { repo, exec } = repoWithServices(t);
+  writeFileSync(path.join(repo.dir, "worker", "README.md"), "uncommitted edit\n");
+  const go = (args: string[]): void => writeFileSync(args[args.indexOf("-o") + 1] as string, "binary");
+  const out = tempDir(t);
+
+  assert.equal(run(["build", "1.2.3", "--out", out], fakeTools(repo, undefined, go, { exec }).tools, assert.fail), 0);
+
+  const tar = (args: string[]): string => execFileSync("tar", args, { cwd: out, encoding: "utf8" });
+  assert.equal(tar(["-xzOf", "memoria-worker_1.2.3.tar.gz", "VERSION"]), "1.2.3\n");
+  assert.equal(tar(["-xzOf", "memoria-worker_1.2.3.tar.gz", "README.md"]), "committed worker/README.md\n");
+  assert.equal(tar(["-xzOf", "memoria-sidecar_1.2.3.tar.gz", "VERSION"]), "1.2.3\n");
+  assert.equal(tar(["-xzOf", "memoria-sidecar_1.2.3.tar.gz", "dist/main.js"]), "compiled\n");
+});
+
+test("a real failure during a build is not swallowed", (t) => {
+  const { repo } = repoWithServices(t);
+  const boom: Tools["exec"] = () => {
+    throw new TypeError("tar exploded");
+  };
+  assert.throws(() => run(["build", "1.2.3"], fakeTools(repo, undefined, undefined, { exec: boom }).tools, assert.fail), /tar exploded/);
+});
+
+test("validate fails closed, with a clear message, when the token cannot read the checks", (t) => {
+  const repo = withOrigin(t);
+  repo.commit("feat: a");
+  pushMain(repo);
+  repo.tag("v0.1.0");
+  const denied = (): string => {
+    throw new Error("gh: Resource not accessible by integration (HTTP 403)");
+  };
+  const errors: string[] = [];
+  const garbled: string[] = [];
+
+  assert.equal(run(["validate", "v0.1.0"], fakeTools(repo, denied).tools, (e) => errors.push(e)), 1);
+  assert.equal(run(["validate", "v0.1.0"], fakeTools(repo, () => "<html>").tools, (e) => garbled.push(e)), 1);
+
+  assert.match(errors[0] as string, /could not read the required checks .* with this token, so the tag is refused: gh: Resource not accessible/);
+  assert.match(garbled[0] as string, /could not read the required checks/);
+});
+
+test("read-checks proves a token can read without judging what it finds", (t) => {
+  const repo = tempRepo(t);
+  repo.commit("feat: a");
+  const failing = (args: string[]): string => (args.some((arg) => arg.includes("/rules/")) ? GREEN_RULES : `${JSON.stringify({ name: "Other", status: "completed", conclusion: "success" })}\n`);
+  const met = fakeTools(repo, greenGh);
+  const unmet = fakeTools(repo, failing);
+  const errors: string[] = [];
+
+  assert.equal(run(["read-checks", "abc"], met.tools, assert.fail), 0);
+  assert.equal(run(["read-checks", "abc"], unmet.tools, assert.fail), 0);
+  assert.equal(run(["read-checks", "abc"], fakeTools(repo, () => "[]").tools, (e) => errors.push(e)), 1);
+  assert.equal(run(["read-checks"], met.tools, (e) => errors.push(e)), 1);
+
+  assert.deepEqual(met.lines, ["read 1 required checks and 1 runs on abc", "  Build: met"]);
+  assert.equal(unmet.lines[1], "  Build: not met");
+  assert.match(errors[0] as string, /no required status checks/);
+  assert.match(errors[1] as string, /needs a commit/);
+});
+
+function fakeDocker(calls: string[][], manifests: Record<string, string> = {}): Tools["docker"] {
+  return (args) => {
+    calls.push(args);
+    const tag = args[3] as string;
+    return args[2] === "inspect" ? JSON.stringify({ digest: manifests[tag] }) : "";
+  };
+}
+
+test("verify-image waits for the container, compares the version, and always removes it", (t) => {
+  const repo = tempRepo(t);
+  repo.commit("feat: a");
+  const calls: string[][] = [];
+  let polls = 0;
+  const httpGet = (): string | undefined => (++polls < 3 ? undefined : JSON.stringify({ status: "ok", version: "1.2.3" }));
+  const { tools, lines } = fakeTools(repo, undefined, undefined, { docker: fakeDocker(calls), httpGet });
+
+  assert.equal(run(["verify-image", "repo@sha256:abc", "1.2.3"], tools, assert.fail), 0);
+
+  assert.equal(polls, 3);
+  assert.ok(calls[0]?.includes("repo@sha256:abc"));
+  assert.deepEqual(calls.at(-1), ["rm", "-f", "memoria-verify"]);
+  assert.match(lines[0] as string, /reports 1\.2\.3/);
+});
+
+test("verify-image refuses a wrong version or a silent container, and still removes it", (t) => {
+  const repo = tempRepo(t);
+  repo.commit("feat: a");
+  const errors: string[] = [];
+  const calls: string[][] = [];
+
+  const wrong = fakeTools(repo, undefined, undefined, { docker: fakeDocker(calls), httpGet: () => JSON.stringify({ version: "9.9.9" }) });
+  assert.equal(run(["verify-image", "img", "1.2.3"], wrong.tools, (e) => errors.push(e)), 1);
+  assert.match(errors[0] as string, /img reports version 9\.9\.9, expected 1\.2\.3/);
+  assert.deepEqual(calls.at(-1), ["rm", "-f", "memoria-verify"]);
+
+  let sleeps = 0;
+  const silent = fakeTools(repo, undefined, undefined, { docker: fakeDocker(calls), sleep: () => sleeps++ });
+  assert.equal(run(["verify-image", "img", "1.2.3"], silent.tools, (e) => errors.push(e)), 1);
+  assert.match(errors[1] as string, /no answer/);
+  assert.equal(sleeps, 30);
+
+  const noVersion = fakeTools(repo, undefined, undefined, { docker: fakeDocker(calls), httpGet: () => "{}" });
+  assert.equal(run(["verify-image", "img", "1.2.3"], noVersion.tools, (e) => errors.push(e)), 1);
+  assert.equal(run(["verify-image", "img"], noVersion.tools, (e) => errors.push(e)), 1);
+  assert.match(errors[3] as string, /needs an image and a version/);
+});
+
+test("tag-image points every tag at the digest and confirms each one resolves to it", (t) => {
+  const repo = tempRepo(t);
+  repo.commit("feat: a");
+  const calls: string[][] = [];
+  const manifests = { "r:1.2.3": "sha256:abc", "r:latest": "sha256:abc" };
+  const { tools, lines } = fakeTools(repo, undefined, undefined, { docker: fakeDocker(calls, manifests) });
+
+  assert.equal(run(["tag-image", "r@sha256:abc", "r:1.2.3", "r:latest"], tools, assert.fail), 0);
+
+  assert.deepEqual(calls[0], ["buildx", "imagetools", "create", "-t", "r:1.2.3", "-t", "r:latest", "r@sha256:abc"]);
+  assert.deepEqual(lines, ["r:1.2.3 -> sha256:abc", "r:latest -> sha256:abc"]);
+});
+
+test("tag-image refuses a tag that resolves elsewhere, or arguments without a digest or tags", (t) => {
+  const repo = tempRepo(t);
+  repo.commit("feat: a");
+  const errors: string[] = [];
+  const drifted = { docker: fakeDocker([], { "r:1.2.3": "sha256:other" }) };
+
+  assert.equal(run(["tag-image", "r@sha256:abc", "r:1.2.3"], fakeTools(repo, undefined, undefined, drifted).tools, (e) => errors.push(e)), 1);
+  assert.equal(run(["tag-image", "r@sha256:abc", "r:gone"], fakeTools(repo, undefined, undefined, { docker: fakeDocker([]) }).tools, (e) => errors.push(e)), 1);
+  assert.equal(run(["tag-image", "r:no-digest", "r:1.2.3"], fakeTools(repo).tools, (e) => errors.push(e)), 1);
+  assert.equal(run(["tag-image", "r@sha256:abc"], fakeTools(repo).tools, (e) => errors.push(e)), 1);
+  assert.equal(run(["tag-image"], fakeTools(repo).tools, (e) => errors.push(e)), 1);
+
+  assert.match(errors[0] as string, /resolves to sha256:other, not the verified sha256:abc/);
+  assert.match(errors[1] as string, /resolves to nothing/);
+  assert.ok(errors.slice(2).every((e) => /needs an image@digest/.test(e)));
 });
 
 test("build needs a version", (t) => {

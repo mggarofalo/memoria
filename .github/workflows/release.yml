@@ -11,6 +11,8 @@ on:
       - ".github/workflows/release.yml"
       - "scripts/release/**"
       - "cli/**"
+      - "sidecar/**"
+      - "worker/**"
 
 permissions: {}
 
@@ -56,6 +58,8 @@ jobs:
             version="${GITHUB_REF_NAME#v}"
           else
             node scripts/release/release.ts next
+            # Under the same permissions a tag gets: can this token read what validate reads?
+            node scripts/release/release.ts read-checks "$(git rev-parse origin/main)"
             version="0.0.0-dryrun"
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -66,7 +70,7 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: test "$(node scripts/release/release.ts describe)" = "$VERSION"
 
-      - name: Build the CLI assets
+      - name: Build the release assets
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: node scripts/release/release.ts build "$VERSION" --out dist
@@ -87,6 +91,14 @@ jobs:
           (cd dist && sha256sum -c checksums.txt)
           tar -xzf "dist/memoria_${VERSION}_linux_amd64.tar.gz" -C "$RUNNER_TEMP"
           test "$("$RUNNER_TEMP/memoria" --version)" = "memoria version $VERSION"
+
+      - name: Verify the service packages outside a checkout
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          work="$RUNNER_TEMP/services"
+          mkdir "$work"
+          bash scripts/release/verify-services.sh dist "$VERSION" "$work"
 
       - name: Verify the API's reported version
         env:

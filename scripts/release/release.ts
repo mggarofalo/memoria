@@ -21,6 +21,21 @@ const tools: Tools = {
   go: (args, env) => {
     execFileSync("go", args, { cwd: path.join(root, "cli"), env: { ...process.env, ...env }, stdio: "inherit" });
   },
+  exec: (command, args, cwd) => {
+    // npm is a .cmd on Windows, which needs a shell; these arguments are all constants.
+    execFileSync(command, args, { cwd, stdio: "inherit", shell: command === "npm" && process.platform === "win32" });
+  },
+  docker: (args) => capture("docker", args),
+  httpGet: (url) => {
+    try {
+      return capture("curl", ["-fsS", url]);
+    } catch {
+      return undefined;
+    }
+  },
+  sleep: (ms) => {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  },
   print: (line) => console.log(line),
 };
 

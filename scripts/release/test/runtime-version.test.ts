@@ -72,6 +72,28 @@ for (const [name, version] of [["sidecar", sidecarVersion], ["worker", workerVer
     assert.equal(version.resolveVersion(repo.dir), "1.2.3");
   });
 
+  test(`${name}: a stamp at the package root is read from a code directory, with no git anywhere`, (t) => {
+    const root = tempDir(t);
+    const code = path.join(root, "src");
+    mkdirSync(code);
+    writeFileSync(path.join(root, version.STAMP_FILE), "4.5.6\n");
+    assert.equal(version.resolveVersion(code), "4.5.6");
+
+    // A stamp beside the code is closer than one at the root.
+    writeFileSync(path.join(code, version.STAMP_FILE), "4.5.7\n");
+    assert.equal(version.resolveVersion(code), "4.5.7");
+  });
+
+  test(`${name}: a stamp beats a checkout's tag at the package root too`, (t) => {
+    const repo = tempRepo(t);
+    repo.commit("feat: a");
+    repo.tag("v1.2.3");
+    mkdirSync(path.join(repo.dir, "src"));
+    assert.equal(version.resolveVersion(path.join(repo.dir, "src")), "1.2.3");
+    writeFileSync(path.join(repo.dir, version.STAMP_FILE), "7.7.7\n");
+    assert.equal(version.resolveVersion(path.join(repo.dir, "src")), "7.7.7");
+  });
+
   test(`${name}: the module defaults to the checkout it lives in`, () => {
     assert.match(version.describedVersion(), /^\d+\.\d+\.\d+/);
     assert.notEqual(version.resolveVersion(), "");

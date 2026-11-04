@@ -74,7 +74,7 @@ The sidecar's `npm test` and `npm run typecheck` also cover `worker/` and `scrip
 docker build -t memoria-api:local .                       # the image CI publishes to ghcr.io/mggarofalo/memoria
 ```
 
-Four gates are required status checks on `main`: `Build & Test`, `Code Formatting`, `CLI Build & Test`, `CLI Lint`. A fifth job, `Sidecar Build & Test`, runs the sidecar commands above, and `Docker Image` (`.github/workflows/docker.yml`) builds the image on every pull request and publishes it on pushes to `main` and release tags; neither is in the ruleset's required list yet.
+Four gates are required status checks on `main`: `Build & Test`, `Code Formatting`, `CLI Build & Test`, `CLI Lint`. A fifth job, `Sidecar Build & Test`, runs the sidecar commands above, and `Docker Image` (`.github/workflows/docker.yml`) builds and verifies the image on every event, and a separate `Publish Image` job publishes it on pushes to `main` and release tags; neither `Sidecar Build & Test` nor `Docker Image` is in the ruleset's required list yet.
 
 ### Releases
 

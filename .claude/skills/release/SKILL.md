@@ -92,7 +92,7 @@ gh run watch <release-run-id> --exit-status
 gh run watch <docker-run-id> --exit-status
 ```
 
-Two runs start from the tag: `Release` and `Docker`. Wait for both.
+Two runs start from the tag: `Release` and `Docker`. Wait for both. The `Docker` run includes the `Publish Image` and `Attest Image Provenance` jobs, and both must succeed.
 
 ### If a workflow fails
 
@@ -121,9 +121,11 @@ gh release view <tag> --json tagName,name,isDraft,isPrerelease,assets,body
 ```
 
 - The release exists and is not a draft.
-- It has exactly seven assets, where `<version>` is the tag without its `v`:
+- It has exactly nine assets, where `<version>` is the tag without its `v`:
   - `memoria_<version>_{linux,darwin}_{amd64,arm64}.tar.gz`
   - `memoria_<version>_windows_{amd64,arm64}.zip`
+  - `memoria-sidecar_<version>.tar.gz`
+  - `memoria-worker_<version>.tar.gz`
   - `checksums.txt`
 - The notes contain no tracker references.
 
@@ -135,10 +137,21 @@ gh release download <tag> --dir <temp-dir>
 
 From inside that directory, run `sha256sum -c checksums.txt`. Then, for the archive matching this machine, extract it and run the binary with `--version`. It must print `memoria version <version>`.
 
-Verify provenance on one asset:
+Check that each service package holds the stamp. `tar -xzOf memoria-sidecar_<version>.tar.gz VERSION` must print `<version>`, and the same for the worker.
+
+Verify provenance on a CLI archive, on a service package, and on the image:
 
 ```bash
-gh attestation verify <temp-dir>/<asset> --repo mggarofalo/memoria
+gh attestation verify <temp-dir>/<cli-asset> --repo mggarofalo/memoria
+gh attestation verify <temp-dir>/memoria-sidecar_<version>.tar.gz --repo mggarofalo/memoria
+gh attestation verify oci://ghcr.io/mggarofalo/memoria:<version> --repo mggarofalo/memoria
+```
+
+Confirm `latest` and the version tag are the same image:
+
+```bash
+docker buildx imagetools inspect ghcr.io/mggarofalo/memoria:<version> --format "{{json .Manifest.Digest}}"
+docker buildx imagetools inspect ghcr.io/mggarofalo/memoria:latest --format "{{json .Manifest.Digest}}"
 ```
 
 Verify the image reports the same version:
@@ -149,7 +162,7 @@ curl -fsS http://127.0.0.1:18080/health
 docker rm -f memoria-release-check
 ```
 
-`/health` must report `"version":"<version>"`. If Docker is not available here, say so instead of claiming the image was checked, and check the tag's existence with `docker manifest inspect ghcr.io/mggarofalo/memoria:<version>` or the Docker workflow's own "Verify the image's reported version" step.
+`/health` must report `"version":"<version>"`. If Docker is not available here, say so instead of claiming the image was checked, and point to the `Publish Image` job's "Verify the pushed digest" step instead.
 
 ## Step 8: Report
 

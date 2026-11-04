@@ -1,4 +1,5 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { buildAssets } from "./assets.ts";
 import { requiredChecks, trackerReferences, unmetChecks, type CheckRun } from "./gates.ts";
@@ -21,6 +22,13 @@ export interface Tools {
   gh: (args: string[]) => string;
   /** Run go in the CLI module with extra environment. Throws on a non-zero exit. */
   go: (args: string[], env: Record<string, string>) => void;
+  /** Run any command in a directory. Throws on a non-zero exit. */
+  exec: (command: string, args: string[], cwd: string) => void;
+  /** Run docker and return stdout. Throws on a non-zero exit. */
+  docker: (args: string[]) => string;
+  /** The response body, or undefined while nothing answers successfully. */
+  httpGet: (url: string) => string | undefined;
+  sleep: (ms: number) => void;
   print: (line: string) => void;
 }
 
@@ -33,8 +41,11 @@ const USAGE = `usage: release <command>
   next [--json]              compute the next version from commits since the last tag
   describe                   print the version of this checkout, as every component derives it
   validate <tag>             refuse a tag that is not strict, not on main, not the computed version, or not green
-  build <version> [--out d]  build the CLI assets and checksums.txt (default out: cli/dist)
-  notes <tag> --out <file>   write the release notes, refusing any tracker reference`;
+  build <version> [--out d]  build every release asset and checksums.txt (default out: cli/dist)
+  notes <tag> --out <file>   write the release notes, refusing any tracker reference
+  read-checks <sha>          prove this token can read what validate reads, without judging the result
+  verify-image <ref> <ver>   run an image and refuse unless /health reports the version
+  tag-image <ref@digest> <tag...>  point tags at a verified digest and confirm each resolves to it`;
 
 class ReleaseError extends Error {}
 
@@ -97,13 +108,72 @@ function requireOnMain(tools: Tools, sha: string): void {
   }
 }
 
+/** The required checks and this commit's runs. Anything unreadable refuses the tag: not knowing is not green. */
+function readChecks(tools: Tools, sha: string): { required: string[]; runs: CheckRun[] } {
+  let required: string[];
+  let runs: CheckRun[];
+  try {
+    required = requiredChecks(JSON.parse(tools.gh(["api", `repos/${tools.repo}/rules/branches/main`])));
+    const lines = tools.gh(["api", "--paginate", `repos/${tools.repo}/commits/${sha}/check-runs`, "--jq", ".check_runs[] | {name,status,conclusion}"]);
+    runs = lines.split("\n").filter(Boolean).map((line) => JSON.parse(line) as CheckRun);
+  } catch (error) {
+    fail(`could not read the required checks for ${sha} with this token, so the tag is refused: ${(error as Error).message}`);
+  }
+  if (required.length === 0) fail("main reports no required status checks, so nothing proves this commit is green; the token may not be able to see the ruleset");
+  return { required, runs };
+}
+
 function requireGreenChecks(tools: Tools, sha: string): void {
-  const required = requiredChecks(JSON.parse(tools.gh(["api", `repos/${tools.repo}/rules/branches/main`])));
-  if (required.length === 0) fail("main has no required status checks, so nothing proves this commit is green");
-  const lines = tools.gh(["api", "--paginate", `repos/${tools.repo}/commits/${sha}/check-runs`, "--jq", ".check_runs[] | {name,status,conclusion}"]);
-  const runs = lines.split("\n").filter(Boolean).map((line) => JSON.parse(line) as CheckRun);
+  const { required, runs } = readChecks(tools, sha);
   const unmet = unmetChecks(required, runs);
   if (unmet.length > 0) fail(`required checks have not passed on ${sha}:\n  ${unmet.join("\n  ")}`);
+}
+
+/** Prove this token can read what `validate` reads, without judging the result. */
+function readChecksCommand(tools: Tools, sha: string | undefined): void {
+  if (sha === undefined) fail("read-checks needs a commit");
+  const { required, runs } = readChecks(tools, sha);
+  tools.print(`read ${required.length} required checks and ${runs.length} runs on ${sha}`);
+  const unmet = unmetChecks(required, runs);
+  for (const name of required) tools.print(`  ${name}: ${unmet.some((line) => line.startsWith(`${name}:`)) ? "not met" : "met"}`);
+}
+
+const HEALTH_ATTEMPTS = 30;
+const VERIFY_PORT = 18080;
+
+function reportedVersion(tools: Tools): string | undefined {
+  for (let attempt = 0; attempt < HEALTH_ATTEMPTS; attempt++) {
+    const body = tools.httpGet(`http://127.0.0.1:${VERIFY_PORT}/health`);
+    if (body !== undefined) return (JSON.parse(body) as { version?: string }).version;
+    tools.sleep(1000);
+  }
+  return undefined;
+}
+
+/** Run this exact image reference and compare what it reports. The Sidecar URL only satisfies startup validation. */
+function verifyImageCommand(tools: Tools, image: string | undefined, version: string | undefined): void {
+  if (image === undefined || version === undefined) fail("verify-image needs an image and a version");
+  const name = "memoria-verify";
+  tools.docker(["run", "-d", "--name", name, "-p", `127.0.0.1:${VERIFY_PORT}:8080`, "-e", "Memoria__Sidecar__BaseUrl=http://127.0.0.1:8282", image]);
+  try {
+    const reported = reportedVersion(tools);
+    if (reported !== version) fail(`${image} reports version ${reported ?? "(no answer)"}, expected ${version}`);
+    tools.print(`${image} reports ${reported}`);
+  } finally {
+    tools.docker(["rm", "-f", name]);
+  }
+}
+
+/** Point tags at a verified digest without rebuilding, then confirm each tag resolves to exactly that digest. */
+function tagImageCommand(tools: Tools, image: string | undefined, tags: readonly string[]): void {
+  const digest = image?.split("@")[1];
+  if (image === undefined || digest === undefined || tags.length === 0) fail("tag-image needs an image@digest and at least one tag");
+  tools.docker(["buildx", "imagetools", "create", ...tags.flatMap((tag) => ["-t", tag]), image]);
+  for (const tag of tags) {
+    const manifest = JSON.parse(tools.docker(["buildx", "imagetools", "inspect", tag, "--format", "{{json .Manifest}}"])) as { digest?: string };
+    if (manifest.digest !== digest) fail(`${tag} resolves to ${manifest.digest ?? "nothing"}, not the verified ${digest}`);
+    tools.print(`${tag} -> ${digest}`);
+  }
 }
 
 function validateCommand(tools: Tools, tag: string | undefined): void {
@@ -123,7 +193,27 @@ function buildCommand(tools: Tools, version: string | undefined, out: string | u
   if (version === undefined) fail("build needs a version");
   const epoch = Number(tools.git(["log", "-1", "--format=%ct", "HEAD"]).trim());
   const outDir = path.resolve(tools.root, out ?? "cli/dist");
-  for (const name of buildAssets({ version, outDir, epoch, go: tools.go })) tools.print(path.join(outDir, name));
+  const serviceTree = mkdtempSync(path.join(tmpdir(), "memoria-services-"));
+  try {
+    prepareServiceTree(tools, serviceTree);
+    for (const name of buildAssets({ version, outDir, epoch, go: tools.go, serviceTree })) tools.print(path.join(outDir, name));
+  } finally {
+    rmSync(serviceTree, { recursive: true, force: true, maxRetries: 5 });
+  }
+}
+
+/**
+ * Export the services from the commit, not the working tree, and compile the
+ * sidecar there, so a release holds what was committed and a developer's
+ * node_modules survives. Install scripts stay off: the compiler needs no native code.
+ */
+function prepareServiceTree(tools: Tools, tree: string): void {
+  // The eol attributes cover almost everything; this keeps a Windows setting from changing the rest.
+  tools.git(["-c", "core.autocrlf=false", "archive", "--format=tar", "-o", path.join(tree, "source.tar"), "HEAD", "sidecar", "worker"]);
+  tools.exec("tar", ["-xf", "source.tar"], tree);
+  const sidecar = path.join(tree, "sidecar");
+  tools.exec("npm", ["ci", "--ignore-scripts", "--no-audit", "--no-fund"], sidecar);
+  tools.exec(process.execPath, ["node_modules/typescript/bin/tsc", "-p", "tsconfig.build.json"], sidecar);
 }
 
 /** Refuse notes with a tracker reference; called on whatever the notes came from. */
@@ -163,6 +253,12 @@ function dispatch(args: readonly string[], tools: Tools): void {
       return buildCommand(tools, first, out);
     case "notes":
       return notesCommand(tools, first, out);
+    case "read-checks":
+      return readChecksCommand(tools, first);
+    case "verify-image":
+      return verifyImageCommand(tools, first, args[2]);
+    case "tag-image":
+      return tagImageCommand(tools, first, args.slice(2));
     default:
       fail(USAGE);
   }

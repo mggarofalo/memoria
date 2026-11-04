@@ -31,8 +31,9 @@ service on whichever machine owns the models and index:
   not a configuration one.
 
 The sidecar runs under NSSM on Windows (`sidecar/scripts/install-service.ps1`)
-or as a systemd unit on Linux (`npm run build && node dist/main.js`). See
-`sidecar/README.md`.
+or as a systemd unit on Linux (`node dist/main.js`). See `sidecar/README.md`.
+Install it from its release package; see
+[releasing.md](releasing.md#installing-the-sidecar-and-worker).
 
 ## Running as a service
 
@@ -120,11 +121,20 @@ These need a real install, and none has been done:
 
 ## The image
 
-`ghcr.io/mggarofalo/memoria` is published by `.github/workflows/docker.yml`:
-every pull request builds it, every push to `main` publishes `latest` and
-`sha-<short>`, and a release tag publishes `<major>.<minor>.<patch>` and
-`<major>.<minor>`. `/health` reports the version the image was stamped with;
-see [releasing.md](releasing.md).
+`ghcr.io/mggarofalo/memoria` is published by `.github/workflows/docker.yml`.
+Every pull request builds it and publishes nothing. `/health` reports the version
+the image was stamped with; see [releasing.md](releasing.md).
+
+| Tag | Published by | Moves? |
+|---|---|---|
+| `<major>.<minor>.<patch>` | a release tag | no |
+| `<major>.<minor>` | a release tag | to the newest patch of that minor |
+| `latest` | a release tag | to the newest release |
+| `edge` | every push to `main` | to the head of `main`, unreleased |
+| `sha-<short>` | every push to `main` | no |
+
+Deploy a specific release. `latest` is there for looking around, and `edge` is
+for trying unreleased work; neither says what is running.
 
 | Property | Value |
 |---|---|
@@ -149,10 +159,13 @@ docker run --rm -p 8080:8080 \
 [`deploy/compose.yaml`](../deploy/compose.yaml) is the production shape:
 
 ```bash
+MEMORIA_VERSION=0.1.0 \
 MEMORIA_SIDECAR_URL=http://192.168.1.20:8282 \
 MEMORIA_SIDECAR_SECRET=... \
 docker compose -f deploy/compose.yaml up -d
 ```
+
+`MEMORIA_VERSION` has no default, so an upgrade happens only when you change it.
 
 It publishes port 8080 on `127.0.0.1` by default so only the reverse proxy on
 the same host can reach it. Set `MEMORIA_BIND_ADDRESS` to the host's LAN
@@ -166,6 +179,7 @@ Docker networking: bridge networks NAT outbound traffic.
 
 | Variable | Purpose |
 |---|---|
+| `MEMORIA_VERSION` | Compose only: the image tag to run, e.g. `0.1.0`. |
 | `Memoria__Sidecar__BaseUrl` | Where the sidecar listens, e.g. `http://192.168.1.20:8282`. |
 | `Memoria__Sidecar__Secret` | The sidecar's `MEMORIA_QMD_SECRET`. The API refuses to start without it when the sidecar is not on loopback. |
 

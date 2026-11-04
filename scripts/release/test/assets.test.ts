@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { test } from "node:test";
 import { gunzipSync, inflateRawSync } from "node:zlib";
-import { archive, assetName, binaryName, buildAssets, checksums, goBuildArgs, tarGz, TARGETS, zip, type Target } from "../assets.ts";
+import { archive, assetName, binaryName, buildAssets, checksums, goBuildArgs, serviceAssetName, serviceEntries, SERVICES, tarGz, TARGETS, zip, type Service, type Target } from "../assets.ts";
 import { tempDir } from "./helpers.ts";
 
 const EPOCH = 1_750_000_000; // 2025-06-15T15:06:40Z
@@ -37,7 +37,7 @@ test("the go build flags are the reproducible ones and stamp the version", () =>
 });
 
 test("tarGz writes one valid ustar entry carrying only the name, mode, size and epoch", () => {
-  const compressed = tarGz("memoria", PAYLOAD, EPOCH);
+  const compressed = tarGz([{ name: "memoria", data: PAYLOAD, mode: 0o755 }], EPOCH);
   assert.equal(compressed[9], 0xff, "no build-host byte in the gzip header");
   assert.equal(compressed.readUInt32LE(4), 0, "no timestamp in the gzip header");
   const tar = gunzipSync(compressed);
@@ -62,8 +62,83 @@ test("tarGz writes one valid ustar entry carrying only the name, mode, size and 
 });
 
 test("tarGz does not pad an exactly block-sized file", () => {
-  const tar = gunzipSync(tarGz("memoria", Buffer.alloc(512, 1), EPOCH));
+  const tar = gunzipSync(tarGz([{ name: "memoria", data: Buffer.alloc(512, 1), mode: 0o755 }], EPOCH));
   assert.equal(tar.length, 512 + 512 + 1024);
+});
+
+test("tarGz orders entries by name, whatever order they arrive in, and refuses an over-long path", () => {
+  const a = { name: "a.txt", data: Buffer.from("a"), mode: 0o644 };
+  const b = { name: "dist/b.txt", data: Buffer.from("b"), mode: 0o644 };
+  assert.deepEqual(tarGz([b, a], EPOCH), tarGz([a, b], EPOCH));
+  const tar = gunzipSync(tarGz([b, a], EPOCH));
+  assert.equal(tar.toString("ascii", 0, 5), "a.txt");
+  assert.equal(tar.toString("ascii", 1024, 1034), "dist/b.txt");
+  assert.throws(() => tarGz([{ name: "x".repeat(101), data: a.data, mode: 0o644 }], EPOCH), /too long/);
+});
+
+const SELF_UPDATER_NAME = /^memoria_[^_]+_(windows|linux|darwin)_(amd64|arm64)\.(tar\.gz|zip)$/;
+
+test("the service packages can never match the self-updater's name contract", () => {
+  for (const version of ["1.2.3", "0.0.0-dryrun", "1.2.4-dev.5+gabc"]) {
+    assert.deepEqual(SERVICES.map((service) => serviceAssetName(version, service)), [`memoria-sidecar_${version}.tar.gz`, `memoria-worker_${version}.tar.gz`]);
+    for (const service of SERVICES) {
+      const name = serviceAssetName(version, service);
+      assert.doesNotMatch(name, SELF_UPDATER_NAME);
+      assert.ok(!name.startsWith("memoria_"), name);
+    }
+    for (const target of TARGETS) assert.match(assetName(version, target), SELF_UPDATER_NAME);
+  }
+});
+
+/** Lay out what SERVICES ships, as a prepared tree would hold it. */
+function fakeServiceTree(root: string): void {
+  for (const service of SERVICES) {
+    for (const item of service.include) {
+      const directory = !item.includes(".") && !item.startsWith("scripts/");
+      const file = path.join(root, service.dir, directory ? `${item}/nested/${service.name}.js` : item);
+      mkdirSync(path.dirname(file), { recursive: true });
+      writeFileSync(file, `${service.name}:${item}`);
+    }
+  }
+  writeFileSync(path.join(root, "worker", "scripts", "install-launchd.sh"), "#!/bin/sh\n");
+}
+
+function tarNames(data: Buffer): Map<string, { mode: number; text: string }> {
+  const tar = gunzipSync(data);
+  const entries = new Map<string, { mode: number; text: string }>();
+  for (let offset = 0; offset < tar.length && tar[offset] !== 0; ) {
+    const name = tar.toString("ascii", offset, offset + 100).replace(/\0.*$/s, "");
+    const size = octal(tar, offset + 124, 12);
+    entries.set(name, { mode: octal(tar, offset + 100, 8), text: tar.toString("utf8", offset + 512, offset + 512 + size) });
+    offset += 512 + Math.ceil(size / 512) * 512;
+  }
+  return entries;
+}
+
+test("a service package holds the VERSION stamp at its root, its allowlist, and nothing else", (t) => {
+  const root = tempDir(t);
+  fakeServiceTree(root);
+  writeFileSync(path.join(root, "worker", "not-shipped.txt"), "x");
+  const sidecar = SERVICES[0] as Service;
+  const worker = SERVICES[1] as Service;
+
+  const sidecarNames = serviceEntries(sidecar, path.join(root, "sidecar"), "1.2.3");
+  const workerEntries = tarNames(tarGz(serviceEntries(worker, path.join(root, "worker"), "1.2.3"), EPOCH));
+
+  assert.equal(sidecarNames[0]?.name, "VERSION");
+  assert.equal(sidecarNames[0]?.data.toString(), "1.2.3\n");
+  assert.ok(sidecarNames.some((entry) => entry.name === "dist/nested/memoria-sidecar.js"));
+  assert.ok(sidecarNames.some((entry) => entry.name === "package-lock.json"));
+  assert.ok(workerEntries.has("src/nested/memoria-worker.js"));
+  assert.equal(workerEntries.get("VERSION")?.text, "1.2.3\n");
+  assert.equal(workerEntries.get("VERSION")?.mode, 0o644);
+  assert.equal(workerEntries.get("scripts/install-launchd.sh")?.mode, 0o755);
+  assert.ok(!workerEntries.has("not-shipped.txt"));
+});
+
+test("a file missing from the allowlist fails the build", (t) => {
+  const root = tempDir(t);
+  assert.throws(() => serviceEntries(SERVICES[1] as Service, root, "1.2.3"), /ENOENT/);
 });
 
 test("zip writes one valid deflated entry dated in UTC", () => {
@@ -113,8 +188,14 @@ test("buildAssets builds every target with cgo off and writes assets plus checks
     writeFileSync(args[args.indexOf("-o") + 1] as string, `${env["GOOS"]}/${env["GOARCH"]}`);
   };
 
-  const written = buildAssets({ version: "1.2.3", outDir, epoch: EPOCH, go });
+  const serviceTree = tempDir(t);
+  fakeServiceTree(serviceTree);
+  const written = buildAssets({ version: "1.2.3", outDir, epoch: EPOCH, go, serviceTree });
 
+  assert.equal(written.length, 9);
+  assert.ok(written.includes("memoria-sidecar_1.2.3.tar.gz"));
+  assert.ok(written.includes("memoria-worker_1.2.3.tar.gz"));
+  assert.match(readFileSync(path.join(outDir, "checksums.txt"), "utf8"), /memoria-sidecar_1\.2\.3\.tar\.gz/);
   assert.equal(seen.length, 6);
   assert.ok(seen.every((env) => env["CGO_ENABLED"] === "0"));
   assert.deepEqual([...new Set(seen.map((env) => `${env["GOOS"]}/${env["GOARCH"]}`))].length, 6);
@@ -134,12 +215,14 @@ test("buildAssets builds every target with cgo off and writes assets plus checks
 test("buildAssets replaces an earlier build and refuses an unsafe version", (t) => {
   const outDir = path.join(tempDir(t), "dist");
   const go = (args: string[]): void => writeFileSync(args[args.indexOf("-o") + 1] as string, "x");
+  const serviceTree = tempDir(t);
+  fakeServiceTree(serviceTree);
 
-  buildAssets({ version: "1.2.3", outDir, epoch: EPOCH, go });
-  buildAssets({ version: "1.2.4", outDir, epoch: EPOCH, go });
+  buildAssets({ version: "1.2.3", outDir, epoch: EPOCH, go, serviceTree });
+  buildAssets({ version: "1.2.4", outDir, epoch: EPOCH, go, serviceTree });
   assert.ok(readdirSync(outDir).every((name) => !name.includes("1.2.3")));
 
   for (const bad of ["", "../evil", "1.2.3 -X x", "1/2"]) {
-    assert.throws(() => buildAssets({ version: bad, outDir, epoch: EPOCH, go }), /not a usable version/);
+    assert.throws(() => buildAssets({ version: bad, outDir, epoch: EPOCH, go, serviceTree }), /not a usable version/);
   }
 });

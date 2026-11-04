@@ -32,10 +32,12 @@ Nothing about the first tag is special beyond the rules above. Run the skill on 
 | `Memoria.Api` | `dotnet publish -p:Version=X.Y.Z`, reported by `/health` and the MCP server | `0.0.0-dev+<commit>` from a plain `dotnet build` |
 | Docker image | build argument `MEMORIA_VERSION`, from `release.ts describe` | see below |
 | `memoria` CLI | `-ldflags -X .../cmd.Version=X.Y.Z`, reported by `memoria --version` | `dev` from a plain `go build` |
-| `memoria-qmd` | `npm run build` writes `dist/VERSION` from `git describe`; `node src/main.ts` asks git directly | see below |
-| `memoria-worker` | runs from source, so it asks git directly at startup | see below |
+| `memoria-qmd` | the `VERSION` file at the root of its release package | see below |
+| `memoria-worker` | the `VERSION` file at the root of its release package | see below |
 
-`release.ts describe` and the sidecar and worker all map `git describe` the same way:
+The sidecar and worker read a `VERSION` file first and need no git once installed. `git describe` is only the fallback for a development checkout. In a checkout, `npm run build` also writes `sidecar/dist/VERSION`, so a local build keeps the version it was built from.
+
+`release.ts describe` and a development checkout of the sidecar or worker all map `git describe` the same way:
 
 | Checkout | Version |
 |---|---|
@@ -47,8 +49,6 @@ Nothing about the first tag is special beyond the rules above. Run the skill on 
 
 A dev version sorts after the release it follows and before the next one. To stamp a local API or CLI build the same way, pass `release.ts describe`'s output as `-p:Version=` or as the `-X` value.
 
-To run a released sidecar or worker, check out the tag on that host, then build the sidecar. A checkout's sidecar reports the version from when `npm run build` last ran, and a worker reports the checkout's version at startup. A service account needs `git` on its `PATH` for the worker to report anything but `unknown`.
-
 Nothing else holds a version. `package.json` says `0.0.0`, the csproj says `0.0.0-dev`, and the sidecar's `openapi.json` carries the contract version `v1`. `scripts/release/test/policy.test.ts` fails if a real version number comes back.
 
 ## What the tag triggers
@@ -56,30 +56,59 @@ Nothing else holds a version. `package.json` says `0.0.0`, the csproj says `0.0.
 `.github/workflows/release.yml`, on `v*.*.*`:
 
 1. **Validates the tag** (`release.ts validate`). It must be strict `vX.Y.Z`, on `origin/main`, and the computed version, and every status check the `main` ruleset requires must have succeeded on the commit. The list of checks is read from the ruleset, so it follows any change there.
-2. **Builds the CLI** for Windows, Linux, and macOS on amd64 and arm64.
-3. **Proves it reproducible** by building everything again with an empty compiler cache in another directory, then comparing the checksums.
-4. **Checks the stamps:** the checksums, the Linux binary's `--version`, and the API's `/health` when built with the same version.
+2. **Builds the assets:** the CLI for Windows, Linux, and macOS on amd64 and arm64, and the sidecar and worker packages.
+3. **Proves them reproducible** by building everything again with an empty compiler cache in another directory, then comparing the checksums.
+4. **Checks the stamps:** the checksums, the Linux binary's `--version`, the service packages installed outside a checkout (`scripts/release/verify-services.sh`), and the API's `/health` when built with the same version.
 5. **Attests build provenance,** writes the notes, and runs `gh release create --verify-tag`. Only this job can write, and it runs only after the steps above.
 
-`.github/workflows/docker.yml` runs the same validation on the same tag, so a tag the release refuses publishes no image either. It builds the image with the derived version, checks that the running container's `/health` reports it, and pushes `X.Y.Z` and `X.Y`.
+`validate` reads the required checks with the workflow's `GITHUB_TOKEN`, under `contents: read` and `checks: read`. If either read fails, or the ruleset appears to require nothing, the tag is refused. Pull request dry runs call `release.ts read-checks` under the same permissions, so a change in what that token can read shows up before a release does.
 
-A pull request that touches the CLI or the release tooling runs the `release.yml` build job with the version `0.0.0-dryrun`, stopping before anything is published.
+`.github/workflows/docker.yml` runs the same validation on the same tag, so a tag the release refuses publishes no image either. Its jobs hold only what each one needs:
+
+| Job | Runs on | Permissions | Does |
+|---|---|---|---|
+| `Validate Release Tag` | tags | `contents: read`, `checks: read` | the gate above |
+| `Docker Image` | everything | `contents: read` | builds locally and checks `/health`; publishes nothing |
+| `Publish Image` | `main`, tags | `contents: read`, `packages: write` | pushes by digest with no tag, runs that exact digest and checks `/health`, then points the tags at the digest and confirms each one resolves to it |
+| `Attest Image Provenance` | tags | `contents: read`, `id-token: write`, `attestations: write` | attests the verified digest |
+
+A pull request that touches the CLI, the services, or the release tooling runs the `release.yml` build job with the version `0.0.0-dryrun`, stopping before anything is published.
 
 ## Asset contract
 
-The CLI's self-updater depends on these names. Changing them is a breaking change.
+Other tools depend on these names. Changing them is a breaking change.
 
 | Asset | Contents |
 |---|---|
 | `memoria_<version>_{linux,darwin}_{amd64,arm64}.tar.gz` | `memoria` |
 | `memoria_<version>_windows_{amd64,arm64}.zip` | `memoria.exe` |
-| `checksums.txt` | SHA-256 of each archive, in `sha256sum` format |
+| `memoria-sidecar_<version>.tar.gz` | `VERSION`, `dist/`, `package.json`, `package-lock.json`, `.env.example`, `README.md`, and the service scripts in `scripts/` |
+| `memoria-worker_<version>.tar.gz` | `VERSION`, `src/`, `scripts/`, `package.json`, `package-lock.json`, `README.md` |
+| `checksums.txt` | SHA-256 of each archive above, in `sha256sum` format |
 
-`<version>` has no leading `v`.
+`<version>` has no leading `v`. Files sit at the archive's root, with no enclosing directory. The CLI's self-updater looks for `memoria_<version>_<os>_<arch>`; the service packages start `memoria-`, so they can never match it. `scripts/release/test/assets.test.ts` pins that.
+
+## Installing the sidecar and worker
+
+Extract a package into an empty directory, on a host with Node 22.18 or newer. Neither needs git or a checkout, and neither writes to its install directory while running.
+
+The **worker** has no runtime dependencies, so it is ready as soon as it is extracted: `node src/main.ts`.
+
+The **sidecar's** native dependencies (`better-sqlite3`, `node-llama-cpp`, and others) are built for one platform and Node version, so the package does not contain them. Install them from the lockfile on the host, as part of installing, while the directory is still writable:
+
+```bash
+cd <install-dir>
+npm ci --omit=dev
+node dist/main.js
+```
+
+This needs network access and may compile native code. Rerun it after upgrading Node. The deployment checklist's `npm audit` applies to these directories too.
 
 ## Reproducible builds
 
-The CLI is built with `CGO_ENABLED=0 -trimpath -buildvcs=false -ldflags "-s -w -buildid= -X ..."`. `scripts/release/assets.ts` writes the archives itself so they hold only the file name, mode, size, and the commit's timestamp. They carry no build-host user, timezone, or tool version. The same commit built with the same Go version gives the same bytes, and `cli/go.mod` pins the Go version the workflow uses.
+The CLI is built with `CGO_ENABLED=0 -trimpath -buildvcs=false -ldflags "-s -w -buildid= -X ..."`. The service packages are built from `git archive` of the commit, not the working tree, with the sidecar compiled by the TypeScript version in its lockfile. `scripts/release/assets.ts` writes the archives itself so they hold only each file's name, mode, size, and the commit's timestamp. They carry no build-host user, timezone, or tool version.
+
+The same commit gives the same bytes with the same Go version, which `cli/go.mod` pins, and the same Node major version, whose bundled zlib compresses the archives.
 
 To check a release yourself:
 

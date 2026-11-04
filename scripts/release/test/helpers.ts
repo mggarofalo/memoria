@@ -51,7 +51,7 @@ export interface FakeRelease {
 }
 
 /** Tools over a real temporary repository and a scripted gh and go. */
-export function fakeTools(repo: TempRepo, gh: (args: string[]) => string = () => "", go: Tools["go"] = () => {}): FakeRelease {
+export function fakeTools(repo: TempRepo, gh: (args: string[]) => string = () => "", go: Tools["go"] = () => {}, overrides: Partial<Tools> = {}): FakeRelease {
   const lines: string[] = [];
   const errors: string[] = [];
   const ghCalls: string[][] = [];
@@ -68,7 +68,12 @@ export function fakeTools(repo: TempRepo, gh: (args: string[]) => string = () =>
         return gh(args);
       },
       go,
+      exec: () => {},
+      docker: () => "",
+      httpGet: () => undefined,
+      sleep: () => {},
       print: (line) => lines.push(line),
+      ...overrides,
     },
   };
 }

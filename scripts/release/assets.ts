@@ -1,13 +1,13 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { crc32, deflateRawSync, gzipSync } from "node:zlib";
 
 /**
- * Reproducible CLI release assets. Archives are written here rather than by tar
- * and zip so they carry no build-host user, timezone or tool version: the same
- * commit gives the same bytes. The asset names are a contract with the CLI's
- * self-updater (docs/releasing.md).
+ * Reproducible release assets: the CLI for each platform, and the sidecar and
+ * worker packages. Archives are written here rather than by tar and zip so they
+ * carry no build-host user, timezone or tool version: the same commit gives the
+ * same bytes. The asset names are a contract (docs/releasing.md).
  */
 
 export interface Target {
@@ -20,16 +20,42 @@ export interface Asset {
   data: Buffer;
 }
 
+export interface TarEntry {
+  name: string;
+  data: Buffer;
+  mode: number;
+}
+
+export interface Service {
+  name: string;
+  /** Its directory in the repository. */
+  dir: string;
+  /** Files and directories to ship, relative to `dir`. */
+  include: readonly string[];
+}
+
 export const TARGETS: readonly Target[] = (["windows", "linux", "darwin"] as const).flatMap((os) =>
   (["amd64", "arm64"] as const).map((arch) => ({ os, arch })),
 );
 
+/** The files each service needs at runtime; a missing one fails the build. */
+export const SERVICES: readonly Service[] = [
+  { name: "memoria-sidecar", dir: "sidecar", include: ["dist", "scripts/install-service.ps1", "scripts/uninstall-service.ps1", ".env.example", "README.md", "package.json", "package-lock.json"] },
+  { name: "memoria-worker", dir: "worker", include: ["src", "scripts", "README.md", "package.json", "package-lock.json"] },
+];
+
 const VERSION_VARIABLE = "github.com/mggarofalo/memoria/cli/cmd.Version";
 const SAFE_VERSION = /^[0-9A-Za-z][0-9A-Za-z.+-]*$/;
 const TAR_BLOCK = 512;
+const TAR_NAME_LIMIT = 100;
 
 export function assetName(version: string, target: Target): string {
   return `memoria_${version}_${target.os}_${target.arch}.${target.os === "windows" ? "zip" : "tar.gz"}`;
+}
+
+/** The hyphen is deliberate: the self-updater's `memoria_` prefix can never match these. */
+export function serviceAssetName(version: string, service: Service): string {
+  return `${service.name}_${version}.tar.gz`;
 }
 
 export function binaryName(target: Target): string {
@@ -44,11 +70,11 @@ function writeOctal(header: Buffer, value: number, offset: number, width: number
   header.write(value.toString(8).padStart(width - 1, "0"), offset, "ascii");
 }
 
-/** A gzipped ustar archive of one executable, owned by nobody, dated `epoch`. */
-export function tarGz(name: string, data: Buffer, epoch: number): Buffer {
+function tarEntry({ name, data, mode }: TarEntry, epoch: number): Buffer {
+  if (name.length > TAR_NAME_LIMIT) throw new Error(`path too long for a tar header: ${name}`);
   const header = Buffer.alloc(TAR_BLOCK);
   header.write(name, 0, "ascii");
-  writeOctal(header, 0o755, 100, 8);
+  writeOctal(header, mode, 100, 8);
   writeOctal(header, 0, 108, 8);
   writeOctal(header, 0, 116, 8);
   writeOctal(header, data.length, 124, 12);
@@ -58,9 +84,14 @@ export function tarGz(name: string, data: Buffer, epoch: number): Buffer {
   header.write("ustar\u000000", 257, "ascii");
   const sum = header.reduce((total, byte) => total + byte, 0);
   header.write(`${sum.toString(8).padStart(6, "0")}\u0000 `, 148, "ascii");
+  return Buffer.concat([header, data, Buffer.alloc((TAR_BLOCK - (data.length % TAR_BLOCK)) % TAR_BLOCK)]);
+}
 
-  const padding = Buffer.alloc((TAR_BLOCK - (data.length % TAR_BLOCK)) % TAR_BLOCK);
-  const gz = gzipSync(Buffer.concat([header, data, padding, Buffer.alloc(TAR_BLOCK * 2)]), { level: 9 });
+/** A gzipped ustar archive, sorted by name, owned by nobody, every entry dated `epoch`. */
+export function tarGz(entries: readonly TarEntry[], epoch: number): Buffer {
+  const sorted = [...entries].sort((a, b) => (a.name < b.name ? -1 : 1));
+  const blocks = [...sorted.map((entry) => tarEntry(entry, epoch)), Buffer.alloc(TAR_BLOCK * 2)];
+  const gz = gzipSync(Buffer.concat(blocks), { level: 9 });
   gz[9] = 0xff; // gzip's "unknown OS" byte; zlib otherwise records the build host's.
   return gz;
 }
@@ -108,7 +139,24 @@ export function zip(name: string, data: Buffer, epoch: number): Buffer {
 }
 
 export function archive(target: Target, data: Buffer, epoch: number): Buffer {
-  return (target.os === "windows" ? zip : tarGz)(binaryName(target), data, epoch);
+  const name = binaryName(target);
+  return target.os === "windows" ? zip(name, data, epoch) : tarGz([{ name, data, mode: 0o755 }], epoch);
+}
+
+function listFiles(root: string, relative: string): string[] {
+  if (!statSync(path.join(root, relative)).isDirectory()) return [relative];
+  return readdirSync(path.join(root, relative))
+    .sort()
+    .flatMap((name) => listFiles(root, `${relative}/${name}`));
+}
+
+/** Everything in a service package: its allowlisted files from `dir`, plus the VERSION stamp at the root. */
+export function serviceEntries(service: Service, dir: string, version: string): TarEntry[] {
+  const files = service.include.flatMap((item) => listFiles(dir, item));
+  return [
+    { name: "VERSION", data: Buffer.from(`${version}\n`, "ascii"), mode: 0o644 },
+    ...files.map((name) => ({ name, data: readFileSync(path.join(dir, name)), mode: name.endsWith(".sh") ? 0o755 : 0o644 })),
+  ];
 }
 
 /** sha256sum format, sorted by name so the file's bytes do not depend on build order. */
@@ -126,24 +174,31 @@ export interface BuildOptions {
   epoch: number;
   /** Runs `go` in the CLI module with the extra environment. */
   go: (args: string[], env: Record<string, string>) => void;
+  /** A tree with `sidecar/` and `worker/` from the commit, the sidecar compiled. */
+  serviceTree: string;
 }
 
-/** Build every target into outDir and return what was written, ending with checksums.txt. */
+/** Build every asset into outDir and return what was written, ending with checksums.txt. */
 export function buildAssets(options: BuildOptions): string[] {
-  const { version, outDir, epoch, go } = options;
+  const { version, outDir, epoch, go, serviceTree } = options;
   if (!SAFE_VERSION.test(version)) throw new Error(`not a usable version: ${version}`);
   rmSync(outDir, { recursive: true, force: true });
   mkdirSync(outDir, { recursive: true });
 
-  const assets = TARGETS.map((target): Asset => {
+  const cli = TARGETS.map((target): Asset => {
     const binary = path.join(outDir, binaryName(target));
     go(goBuildArgs(version, binary), { CGO_ENABLED: "0", GOOS: target.os, GOARCH: target.arch, GOFLAGS: "-mod=readonly" });
     const data = readFileSync(binary);
     rmSync(binary);
-    const asset = { name: assetName(version, target), data: archive(target, data, epoch) };
-    writeFileSync(path.join(outDir, asset.name), asset.data);
-    return asset;
+    return { name: assetName(version, target), data: archive(target, data, epoch) };
   });
+  const services = SERVICES.map((service): Asset => ({
+    name: serviceAssetName(version, service),
+    data: tarGz(serviceEntries(service, path.join(serviceTree, service.dir), version), epoch),
+  }));
+
+  const assets = [...cli, ...services];
+  for (const asset of assets) writeFileSync(path.join(outDir, asset.name), asset.data);
   writeFileSync(path.join(outDir, "checksums.txt"), checksums(assets), "utf8");
   return [...assets.map((asset) => asset.name), "checksums.txt"];
 }

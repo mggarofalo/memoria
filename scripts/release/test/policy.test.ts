@@ -31,18 +31,73 @@ test("the Dockerfile stamps the API from a build argument", () => {
   assert.match(dockerfile, /-p:Version=\$MEMORIA_VERSION/);
 });
 
+/** A job's text, from its key to the next job or the end of the file. */
+function job(workflow: string, name: string): string {
+  const start = workflow.indexOf(`\n  ${name}:\n`);
+  assert.notEqual(start, -1, name);
+  const next = workflow.slice(start + 1).search(/\n {2}[a-z-]+:\n/);
+  return next === -1 ? workflow.slice(start) : workflow.slice(start, start + 1 + next);
+}
+
 test("the image workflow stamps the derived version, on the same tag pattern as releases", () => {
   const docker = read(".github/workflows/docker.yml");
   assert.match(docker, /tags: \["v\*\.\*\.\*"\]/);
-  assert.match(docker, /release\.ts validate "\$GITHUB_REF_NAME"/);
+  assert.match(job(docker, "gate"), /release\.ts validate "\$GITHUB_REF_NAME"/);
   assert.match(docker, /release\.ts describe/);
   assert.equal(docker.match(/build-args: MEMORIA_VERSION=\$\{\{ steps\.version\.outputs\.version \}\}/g)?.length, 2);
   assert.match(read(".github/workflows/release.yml"), /tags: \["v\*\.\*\.\*"\]/);
 });
 
-test("the release workflow pins every action to a commit and keeps permissions narrow", () => {
+test("the image workflow's jobs hold only what each needs, and only publish can push", () => {
+  const docker = read(".github/workflows/docker.yml");
+  assert.match(docker, /^permissions: \{\}$/m);
+  const permissions = (name: string): string[] => {
+    const block = /permissions:\n((?: {6}[a-z-]+: [a-z]+\n)+)/.exec(job(docker, name));
+    return (block?.[1] ?? "").trim().split(/\n\s*/);
+  };
+  assert.deepEqual(permissions("gate"), ["contents: read", "checks: read"]);
+  assert.deepEqual(permissions("image"), ["contents: read"]);
+  assert.deepEqual(permissions("publish"), ["contents: read", "packages: write"]);
+  assert.deepEqual(permissions("attest"), ["contents: read", "id-token: write", "attestations: write"]);
+  assert.equal(docker.match(/persist-credentials: false/g)?.length, docker.match(/actions\/checkout@/g)?.length);
+
+  const publish = job(docker, "publish");
+  assert.match(publish, /github\.event_name == 'push'/);
+  assert.match(publish, /needs: \[gate, image\]/);
+  assert.doesNotMatch(job(docker, "image"), /push: true|push=true|login-action/);
+});
+
+test("what is published is the digest that was verified, and tags are applied only after", () => {
+  const publish = job(read(".github/workflows/docker.yml"), "publish");
+  assert.match(publish, /push-by-digest=true/);
+  assert.doesNotMatch(publish, /^\s+tags: \$\{\{/m, "the push itself applies no tag");
+  const push = publish.indexOf("name: Push by digest");
+  const verify = publish.indexOf('verify-image "$IMAGE@$DIGEST"');
+  const tag = publish.indexOf('tag-image "$IMAGE@$DIGEST"');
+  assert.ok(push !== -1 && push < verify && verify < tag);
+
+  const attest = job(read(".github/workflows/docker.yml"), "attest");
+  assert.match(attest, /subject-digest: \$\{\{ needs\.publish\.outputs\.digest \}\}/);
+  assert.match(attest, /github\.ref_type == 'tag'/);
+});
+
+test("latest moves only on release tags, edge only on main, and compose names a version", () => {
+  const docker = read(".github/workflows/docker.yml");
+  assert.match(docker, /flavor: latest=false/);
+  assert.match(docker, /type=raw,value=latest,enable=\$\{\{ github\.ref_type == 'tag' \}\}/);
+  assert.match(docker, /type=raw,value=edge,enable=\$\{\{ github\.ref_type == 'branch' \}\}/);
+  assert.match(docker, /type=sha,enable=\$\{\{ github\.ref_type == 'branch' \}\}/, "a tag build must not overwrite main's sha tag");
+  assert.doesNotMatch(docker, /is_default_branch|type=ref/);
+
+  const compose = read("deploy/compose.yaml");
+  assert.match(compose, /image: ghcr\.io\/mggarofalo\/memoria:\$\{MEMORIA_VERSION:\?/);
+  assert.doesNotMatch(compose, /memoria:latest|memoria:edge/);
+});
+
+test("every action in every workflow we own is pinned to a commit, with narrow defaults", () => {
   const release = read(".github/workflows/release.yml");
-  const uses = [...release.matchAll(/uses: (\S+)/g)].map((match) => match[1] as string);
+  const docker = read(".github/workflows/docker.yml");
+  const uses = [...`${release}\n${docker}`.matchAll(/uses: (\S+)/g)].map((match) => match[1] as string);
   assert.ok(uses.length > 0);
   for (const action of uses) assert.match(action, /@[0-9a-f]{40}$/, action);
 
