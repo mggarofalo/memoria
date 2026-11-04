@@ -1,0 +1,194 @@
+using System.Text;
+using System.Text.Json;
+
+namespace Memoria.Core.Sessions;
+
+/// <summary>
+/// Folds Claude Code JSONL records and renders them. Only user and assistant text is kept;
+/// thinking, tool calls and results, and progress events are not. File-history snapshots
+/// contribute <c>files_touched</c>.
+/// </summary>
+internal sealed class ClaudeTranscript(SessionSource source, SessionRenderOptions options, SessionReadReport report)
+	: SessionTranscript(source, options, report)
+{
+	private const string InterruptedMarker = "[Request interrupted by user for tool use]";
+
+	private readonly Dictionary<string, int> _files = new(StringComparer.Ordinal);
+	private string _cwd = "";
+	private string _slug = "";
+	private string _gitBranch = "";
+
+	public override void Add(JsonElement record)
+	{
+		_gitBranch = FirstNonEmpty(_gitBranch, record, "gitBranch");
+		_slug = FirstNonEmpty(_slug, record, "slug");
+		_cwd = FirstNonEmpty(_cwd, record, "cwd");
+
+		switch (JsonValues.String(record, "type", Report))
+		{
+			case "file-history-snapshot":
+				AddSnapshot(record);
+				break;
+			case SessionMessage.User:
+				AddTurn(record, SessionMessage.User);
+				break;
+			case SessionMessage.Assistant:
+				AddTurn(record, SessionMessage.Assistant);
+				break;
+			default:
+				Report.UnrenderedRecords++;
+				break;
+		}
+	}
+
+	public override UnredactedSession Render()
+	{
+		string shortId = SessionPaths.ClaudeShortId(Source.SessionId);
+		string sessionId = Clip(Source.SessionId);
+		string project = _cwd.Length > 0
+			? SessionProject.FromClaudeCwd(_cwd, Source.HomeDirectory)
+			: SessionProject.FromClaudeDirectory(Source.ProjectDirectory, Source.HomeDirectory);
+		List<ArraySegment<SessionMessage>> segments = SplitIntoParts();
+		List<string>[] filesByPart = BucketFiles(segments);
+		List<UnredactedSessionDocument> documents = BuildDocuments(
+			segments,
+			part => RenderPart(sessionId, project, part, filesByPart[part.Number - 1]),
+			(date, part) => SessionPaths.ClaudePart(date, shortId, part));
+		return new UnredactedSession(
+			SessionFormat.ClaudeCode,
+			sessionId,
+			documents,
+			Report,
+			path => SessionPaths.IsClaudeFamily(path, shortId));
+	}
+
+	private string FirstNonEmpty(string current, JsonElement record, string name)
+	{
+		if (current.Length > 0)
+		{
+			return current;
+		}
+		string? value = JsonValues.String(record, name, Report);
+		return value is null ? current : Clip(value);
+	}
+
+	private void AddSnapshot(JsonElement record)
+	{
+		if (!record.TryGetProperty("snapshot", out JsonElement snapshot) || snapshot.ValueKind != JsonValueKind.Object)
+		{
+			return;
+		}
+		if (snapshot.TryGetProperty("trackedFileBackups", out JsonElement backups) && backups.ValueKind == JsonValueKind.Object)
+		{
+			// Attribute a file to the message it was first seen at, so a closed part never changes.
+			int anchor = Math.Max(Messages.Count - 1, 0);
+			foreach (JsonProperty backup in backups.EnumerateObject())
+			{
+				AddFile(JsonValues.Name(backup, Report), anchor);
+			}
+		}
+		NoteTime(ReadTime(snapshot, "timestamp"));
+	}
+
+	private void AddFile(string? name, int anchor)
+	{
+		if (name is null)
+		{
+			return;
+		}
+		string path = Clip(name).Replace('\\', '/');
+		if (_files.ContainsKey(path))
+		{
+			return;
+		}
+		if (TryRetain(path.Length + (long)EntryOverhead))
+		{
+			_files.Add(path, anchor);
+			return;
+		}
+		Report.FilesOverLimit++;
+	}
+
+	private void AddTurn(JsonElement record, string role)
+	{
+		SessionTimestamp? time = ReadTime(record, "timestamp");
+		NoteTime(time);
+		if (!record.TryGetProperty("message", out JsonElement message) || message.ValueKind != JsonValueKind.Object)
+		{
+			return;
+		}
+		string text = JsonValues.BlockText(message, Report, static type => type == "text");
+		if (text.Length > 0 && text != InterruptedMarker)
+		{
+			AddMessage(role, text, time);
+		}
+	}
+
+	private List<string>[] BucketFiles(List<ArraySegment<SessionMessage>> segments)
+	{
+		List<string>[] buckets = new List<string>[segments.Count];
+		int[] partOfMessage = new int[Messages.Count];
+		int cursor = 0;
+		for (int part = 0; part < segments.Count; part++)
+		{
+			buckets[part] = [];
+			partOfMessage.AsSpan(cursor, segments[part].Count).Fill(part);
+			cursor += segments[part].Count;
+		}
+		// Files seen before any message have an anchor only once a message exists to hold them.
+		if (segments.Count > 0)
+		{
+			foreach (KeyValuePair<string, int> file in _files)
+			{
+				buckets[partOfMessage[file.Value]].Add(file.Key);
+			}
+		}
+		foreach (List<string> bucket in buckets)
+		{
+			bucket.Sort(PythonText.CompareCodePoints);
+		}
+		return buckets;
+	}
+
+	private string RenderPart(string sessionId, string project, SessionPart part, List<string> files)
+	{
+		StringBuilder output = new();
+		output.Append("---\n");
+		SessionFrontmatter.Scalar(output, "session_id", sessionId);
+		SessionFrontmatter.Scalar(output, "slug", _slug);
+		SessionFrontmatter.Scalar(output, "date", part.SessionStart.DateText);
+		SessionFrontmatter.Scalar(output, "start_time", part.FirstTime.ToIsoString());
+		SessionFrontmatter.Scalar(output, "end_time", part.LastTime.ToIsoString());
+		SessionFrontmatter.Scalar(output, "project", project);
+		SessionFrontmatter.Scalar(output, "git_branch", _gitBranch);
+		SessionFrontmatter.Number(output, "chunk_index", part.Number);
+		SessionFrontmatter.Number(output, "message_start", part.MessageStart);
+		SessionFrontmatter.Number(output, "message_count", part.Messages.Count);
+		SessionFrontmatter.Sequence(output, "files_touched", files);
+		SessionFrontmatter.Sequence(output, "tags", Tags(project));
+		output.Append("---\n");
+
+		SessionFrontmatter.Body(output, Title(part.FirstUserMessage), part.Messages);
+		return output.ToString();
+	}
+
+	private List<string> Tags(string project)
+	{
+		List<string> tags = [$"project/{project}"];
+		if (_gitBranch.Length > 0)
+		{
+			tags.Add($"branch/{_gitBranch.Replace('/', '-')}");
+		}
+		return tags;
+	}
+
+	private static string? Title(SessionMessage? firstUser)
+	{
+		if (firstUser is null)
+		{
+			return null;
+		}
+		int newline = firstUser.Text.IndexOf('\n');
+		return PythonText.Prefix(newline < 0 ? firstUser.Text : firstUser.Text[..newline], 100);
+	}
+}

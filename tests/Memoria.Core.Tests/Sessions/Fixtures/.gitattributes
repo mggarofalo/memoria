@@ -1,0 +1,2 @@
+# Fixtures and goldens are compared byte for byte, so git must never translate them.
+* -text

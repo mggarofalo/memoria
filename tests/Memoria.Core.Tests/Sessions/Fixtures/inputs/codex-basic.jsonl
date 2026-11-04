@@ -1,0 +1,16 @@
+{"timestamp": "2026-09-09T14:00:00.125Z", "type": "session_meta", "payload": {"id": "11111111-2222-4333-8444-555555555555", "session_id": "11111111-2222-4333-8444-555555555555", "cwd": "/Users/synth/Source/demo-app/sub/dir", "source": "cli"}}
+{"timestamp": "2026-09-09T14:00:01.125Z", "type": "turn_context", "payload": {"turn_id": "turn-1", "cwd": "ignored"}}
+{"timestamp": "2026-09-09T14:00:02.125Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "### Fix the #1 bug\nmore detail"}]}}
+{"timestamp": "2026-09-09T14:00:03.125Z", "type": "response_item", "payload": {"type": "reasoning", "summary": [], "encrypted_content": "opaque"}}
+{"timestamp": "2026-09-09T14:00:04.125Z", "type": "response_item", "payload": {"type": "custom_tool_call", "name": "apply_patch", "input": "*** Update File: a.py\n"}}
+{"timestamp": "2026-09-09T14:00:04.125Z", "type": "response_item", "payload": {"type": "function_call", "name": "shell", "arguments": "{}"}}
+{"timestamp": "2026-09-09T14:00:05.125Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Patched. 🚀"}]}}
+{not json
+
+{"type": "future_record", "payload": {"x": 1}}
+{"timestamp": "2026-09-09T14:00:06.125Z", "type": "event_msg", "payload": {"type": "agent_message", "turn_id": "ignored", "message": "not exported"}}
+{"timestamp": "2026-09-09T14:00:07.125Z", "type": "event_msg", "payload": {"type": "task_started", "turn_id": "turn-2"}}
+{"timestamp": "2026-09-09T14:00:08.125Z", "type": "compacted", "payload": {"replacement_history": [{"type": "compaction", "encrypted_content": "opaque"}]}}
+{"timestamp": "2026-09-09T14:00:09.125Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "second question"}]}}
+{"timestamp": "2026-09-09T14:00:10.125Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "answered with its own turn"}], "internal_chat_message_metadata_passthrough": {"turn_id": "turn-from-metadata"}}}
+{"timestamp": "2026-09-09T14:00:11.125Z", "type": "response_item", "payload": {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "not exported"}]}}

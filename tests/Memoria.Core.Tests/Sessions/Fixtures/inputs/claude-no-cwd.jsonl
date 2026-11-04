@@ -1,0 +1,2 @@
+{"type": "assistant", "message": {"role": "assistant", "content": "An assistant message first, so a part can have no title."}}
+{"type": "user", "message": {"role": "user", "content": "then a user"}}
