@@ -81,6 +81,7 @@ export const jobSchema = {
             chunksEmbedded: { type: "integer" },
             errors: { type: "integer" },
             durationMs: { type: "number" },
+            docsPending: { type: "integer", description: "Documents this run could not finish. They stay pending, and the job does not report success." },
           },
         },
         metadata: {
@@ -91,6 +92,9 @@ export const jobSchema = {
       },
     },
     error: { type: "string", nullable: true },
+    priority: { type: "string", enum: ["background"], description: "Reindex jobs are background work." },
+    attempts: { type: "integer", description: "How many times this job has started." },
+    worker: { type: "string", nullable: true, description: "Workers that embedded for the latest attempt, comma-separated." },
   },
 } as const;
 

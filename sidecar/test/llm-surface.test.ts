@@ -103,6 +103,57 @@ test("expansion's prompt, grammar and sampling match the SDK's inline values", a
   assert.equal(number("presencePenalty"), EXPANSION_SAMPLING.presencePenalty);
 });
 
+test("the embedding farm's assumptions about the SDK hold", async () => {
+  const [store, llm] = await Promise.all([read("store.js"), read("llm.js")]);
+  for (const name of ["getEmbeddingFingerprint", "chunkDocumentByTokens", "extractTitle", "clearAllEmbeddings", "validateLexQuery", "validateSemanticQuery"]) {
+    assert.match(store, new RegExp(`export (async )?function ${name}\\(`), name);
+  }
+  assert.match(llm, /export function formatDocForEmbedding\(text, title, modelUri\)/);
+  assert.match(store, /ensureVecTable: \(dimensions\) => ensureVecTableInternal\(db, dimensions\),/);
+  assert.match(store, /insertEmbedding: \(hash, seq, pos, embedding, model, embeddedAt, totalChunks, fingerprint\) => insertEmbedding\(/);
+  assert.match(store, /getHashesNeedingEmbedding: \(model\) => getHashesNeedingEmbedding\(/);
+
+  // src/store.ts holds a copy of these two private functions' SQL.
+  const ours = await readFile(new URL("../src/llm/wire.ts", import.meta.url), "utf8");
+  const pending = /function getPendingEmbeddingDocs[\s\S]*?\}\n/.exec(store)![0];
+  const flat = (text: string) => text.replace(/\s+/g, " ");
+  for (const line of [
+    "SELECT d.hash, MIN(d.path) as path, length(CAST(c.doc AS BLOB)) as bytes",
+    "SELECT hash, model, COUNT(*) AS chunk_count, MAX(total_chunks) AS expected_chunks",
+    "WHERE model = ? AND embed_fingerprint = ?",
+    "AND (v.hash IS NULL OR v.chunk_count < v.expected_chunks",
+  ]) {
+    assert.ok(flat(pending).includes(line), `the SDK changed: ${line}`);
+    assert.ok(flat(ours).includes(line), `our copy changed: ${line}`);
+  }
+  // A vector row is keyed as the startup repair and the farm's replacement assume.
+  assert.match(store, /const hashSeq = `\$\{hash\}_\$\{seq\}`;/);
+  assert.match(store, /CREATE VIRTUAL TABLE vectors_vec USING vec0\(hash_seq TEXT PRIMARY KEY/);
+});
+
+test("the SDK's model loader downloads what it cannot find, which is why the fallback is guarded", async () => {
+  const llm = await read("llm.js");
+  assert.match(llm, /resolveModelFile handles HF URIs and downloads to the cache dir/);
+  assert.match(llm, /export const DEFAULT_MODEL_CACHE_DIR = MODEL_CACHE_DIR;/);
+});
+
+test("the SDK writes a vector's two tables with no transaction, which is why startup repairs them", async () => {
+  const store = await read("store.js");
+  const insert = /export function insertEmbedding\([\s\S]*?\n\}\n/.exec(store)![0];
+  assert.ok(!/BEGIN|transaction\(/.test(insert), "if this fails the SDK fixed it: reconsider the repair");
+  assert.ok(insert.indexOf("insertContentVectorStmt.run") < insert.indexOf("insertVecStmt.run"));
+});
+
+test("a failed rerank throws before the SDK's cache write, as degraded search relies on", async () => {
+  const store = await read("store.js");
+  const rerank = /export async function rerank\([\s\S]*?\n\}\n/.exec(store)![0];
+  assert.ok(rerank.indexOf("await llm.rerank(") < rerank.indexOf("setCachedResult("));
+  // And an expansion identical to the query, which is all a failure returns, is not cached.
+  const expand = /export async function expandQuery\([\s\S]*?\n\}\n/.exec(store)![0];
+  assert.match(expand, /\.filter\(r => r\.text !== query\)/);
+  assert.match(expand, /if \(expanded\.length > 0\) \{\s*setCachedResult/);
+});
+
 test("in-process reranking still goes through node-llama-cpp's rank context, as docs/workers.md describes", async () => {
   const llm = await read("llm.js");
   assert.match(llm, /activeContexts\[i\]\.rankAll\(query, chunk\)/);

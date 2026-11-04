@@ -37,11 +37,11 @@ export class MockWorker {
   url = "";
   #server: Server | undefined;
 
-  constructor(dimensions = 8) {
+  constructor(dimensions = 8, embedFile = EMBED_FILE) {
     this.handlers = new Map<string, MockHandler>([
-      ["GET /capabilities", () => ({ body: { operations: ["embed", "rerank", "complete", "tokenize", "detokenize"], models: { embed: EMBED_FILE, rerank: "r.gguf", generate: "g.gguf" }, rerankTransport: "llama-server-rerank" } })],
-      ["GET /health", () => ({ body: { status: "ok", models: { embed: { loaded: true }, rerank: { loaded: true }, generate: { loaded: true } } } })],
-      ["POST /v1/embed", (b) => ({ body: { embeddings: (b.texts as string[]).map((t) => vectorFor(t, dimensions)) } })],
+      ["GET /capabilities", () => ({ body: { operations: ["embed", "rerank", "complete", "tokenize", "detokenize"], models: { embed: embedFile, rerank: "r.gguf", generate: "g.gguf" }, rerankTransport: "llama-server-rerank" } })],
+      ["GET /health", () => ({ body: { status: "ok", queueDepth: 0, models: { embed: { loaded: true }, rerank: { loaded: true }, generate: { loaded: true } } } })],
+      ["POST /v1/embed", (b) => ({ body: { model: embedFile, embeddings: (b.texts as string[]).map((t) => vectorFor(t, dimensions)) } })],
       ["POST /v1/rerank", (b) => ({ body: { results: (b.documents as string[]).map((_, index) => ({ index, score: 1 / (index + 2) })) } })],
       ["POST /v1/complete", (b) => {
         const query = String(b.prompt).replace("/no_think Expand this search query: ", "");

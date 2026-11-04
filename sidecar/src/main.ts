@@ -1,7 +1,8 @@
 import path from "node:path";
 import { homedir } from "node:os";
-import { buildApp, warmup } from "./app.ts";
-import { isLoopbackHost, loadConfig } from "./config.ts";
+import { buildApp, warmup, type App } from "./app.ts";
+import { isLoopbackHost, loadConfig, type SidecarConfig } from "./config.ts";
+import { openJobStore, queueDbPathFor } from "./queue-store.ts";
 import { openBackend, type LlmOptions } from "./store.ts";
 
 /**
@@ -15,44 +16,62 @@ export function defaultDbPath(env: NodeJS.ProcessEnv = process.env): string {
   return path.join(cacheDir, "qmd", "index.sqlite");
 }
 
-async function main(): Promise<void> {
-  const config = loadConfig();
-  const dbPath = config.dbPath ?? defaultDbPath();
-
-  // The logger arrives with the app, after the backend opens.
-  let log: { info: (o: object, m: string) => void; warn: (o: object, m: string) => void } | undefined;
-  const llm: LlmOptions =
-    config.llm.mode === "local"
-      ? { mode: "local" }
-      : {
-          mode: "remote",
-          worker: { url: config.llm.workerUrl, token: config.llm.workerToken, embedDimensions: config.llm.embedDimensions },
-          fallback: config.llm.fallback,
-        };
-  const backend = await openBackend({
-    dbPath,
-    keepWarm: config.keepWarm,
-    llm,
-    onLlmCall: (entry) => log?.info(entry, "llm worker call"),
-    onLlmDegraded: (entry) => log?.warn(entry, "llm worker call degraded"),
-  });
-  const app = await buildApp({
-    backend,
-    config,
-    logger: {
-      level: config.logLevel,
-      redact: { paths: ["req.headers.authorization"], censor: "[redacted]" },
-    },
-  });
-  log = app.log;
-  app.log.info({ llm: config.llm.mode, rerankTransport: backend.llm.rerankTransport }, "llm mode");
-
+function logExposure(app: App, config: SidecarConfig): void {
   if (config.secret === undefined) {
     app.log.warn({ host: config.host }, "MEMORIA_QMD_SECRET is not set; running unauthenticated on loopback only");
   }
   if (!isLoopbackHost(config.host)) {
     app.log.info({ host: config.host }, "binding a routable address; bearer auth is enforced on every route except /health and /openapi.json");
   }
+}
+
+function llmOptionsFrom(config: SidecarConfig): LlmOptions {
+  if (config.llm.mode === "local") return { mode: "local" };
+  return {
+    mode: "remote",
+    workers: config.llm.workers,
+    embedDimensions: config.llm.embedDimensions,
+    fallback: config.llm.fallback,
+    statusPollMs: config.llm.pollMs,
+    embedBatchBytes: config.llm.embedBatchBytes,
+    rerankTimeoutMs: config.llm.rerankTimeoutMs,
+  };
+}
+
+async function main(): Promise<void> {
+  const config = loadConfig();
+  const dbPath = config.dbPath ?? defaultDbPath();
+
+  // The logger arrives with the app, after the backend opens.
+  let log: { info: (o: object, m: string) => void; warn: (o: object, m: string) => void } | undefined;
+  // Beside the index but not in it: rebuilding index.sqlite leaves jobs alone. Only
+  // job records live here, so nothing about this file may stop search from starting.
+  const earlyWarnings: string[] = [];
+  const { store: jobStore } = openJobStore(config.queueDbPath ?? queueDbPathFor(dbPath), (message) => earlyWarnings.push(message));
+  const backend = await openBackend({
+    dbPath,
+    keepWarm: config.keepWarm,
+    llm: llmOptionsFrom(config),
+    ...(jobStore ? { provenance: jobStore } : {}),
+    onLlmCall: (entry) => log?.info(entry, "llm worker call"),
+    onLlmDegraded: (entry) => log?.warn(entry, "llm worker call degraded"),
+    onProvenanceError: (message) => log?.warn({ error: message }, "could not record which worker embedded a document"),
+    onVectorRepair: (rows) => earlyWarnings.push(`Removed ${rows} vector rows left with no vector by an interrupted write. Those documents will embed again.`),
+  });
+  const app = await buildApp({
+    backend,
+    config,
+    ...(jobStore ? { jobStore } : {}),
+    logger: {
+      level: config.logLevel,
+      redact: { paths: ["req.headers.authorization"], censor: "[redacted]" },
+    },
+  });
+  log = app.log;
+  for (const message of earlyWarnings) app.log.warn(message);
+  if (jobStore && jobStore.quarantined > 0) app.log.warn({ rows: jobStore.quarantined }, "set aside unreadable job rows in jobs_quarantine");
+  app.log.info({ llm: config.llm.mode, rerankTransport: backend.llm.rerankTransport }, "llm mode");
+  logExposure(app, config);
 
   let closing = false;
   const shutdown = async (signal: string): Promise<void> => {
@@ -61,12 +80,16 @@ async function main(): Promise<void> {
     app.log.info({ signal, pendingJobs: app.ctx.jobs.pending }, "shutting down");
     try {
       await app.close();
-      // Index what was accepted in the debounce window. A timeout loses nothing
-      // durable: the files are on disk and the next scan picks them up.
+      // Index what was accepted in the debounce window. A timeout loses nothing:
+      // the jobs are persisted and resume at the next start.
       if (!(await app.ctx.jobs.drain(config.shutdownDrainMs))) {
         app.log.warn({ pendingJobs: app.ctx.jobs.pending, timeoutMs: config.shutdownDrainMs }, "reindex jobs still pending at shutdown");
       }
+      // A job still running is about to lose the index under it. That is not its
+      // failure, so it stays queued in the store and resumes at the next start.
+      app.ctx.jobs.suspend();
       await backend.close();
+      jobStore?.close();
       process.exit(0);
     } catch (err) {
       app.log.error({ err }, "shutdown failed");

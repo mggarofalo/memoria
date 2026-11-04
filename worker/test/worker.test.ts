@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { EventEmitter } from "node:events";
 import { runSmoke } from "../scripts/smoke.ts";
+import { Supervisor } from "../src/supervisor.ts";
 import type { MachineState } from "../src/probes.ts";
 import { resolveVersion } from "../src/version.ts";
 import { fakeSupervisor, quietMachine, roleConfigs, startWorker, TOKEN, type RunningWorker } from "./helpers.ts";
@@ -58,6 +60,13 @@ test("every endpoint answers, and the smoke script passes against a running work
     assert.equal(health.inFlight, 0);
     assert.equal(health.queueDepth, 0);
     assert.deepEqual(health.vram, quietMachine.vram);
+  }));
+
+test("an embed response names the model that produced it", () =>
+  withWorker(async (w) => {
+    const body = await json(post(w, "/v1/embed", { texts: ["x"] }));
+    assert.equal(body.model, "embeddinggemma-300M-Q8_0.gguf");
+    assert.equal(body.embeddings.length, 1);
   }));
 
 test("the smoke script reports failures rather than passing a dead worker", async () => {
@@ -219,6 +228,35 @@ test("a crashed llama-server is restarted and service recovers", () =>
     assert.equal(r.status, 200);
     assert.ok(w.logs.some((l) => l.includes("llama-server exited")));
   }));
+
+test("a health check in flight when the server exits cannot cancel its restart", async () => {
+  const roles = await roleConfigs(["embed"]);
+  const children: EventEmitter[] = [];
+  const spawnFake = (() => {
+    const child = Object.assign(new EventEmitter(), { stderr: new EventEmitter(), kill: () => true });
+    children.push(child);
+    return child;
+  }) as never;
+  let answer = (_: Response) => {};
+  const supervisor = new Supervisor({
+    command: "fake",
+    gpuLayers: 0,
+    roles,
+    modelPaths: { embed: "m.gguf" },
+    log: { info: () => {}, warn: () => {}, error: () => {} },
+    spawn: spawnFake,
+    fetch: (() => new Promise((resolve) => (answer = resolve))) as never,
+    timings: { pollMs: 1, backoffBaseMs: 10, backoffMaxMs: 10 },
+  });
+  supervisor.start();
+  await new Promise((r) => setTimeout(r, 20)); // the check is now waiting on the fetch
+  children[0]!.emit("exit", 3);
+  answer(new Response("", { status: 503 })); // and comes back after the exit
+  await new Promise((r) => setTimeout(r, 60));
+  assert.equal(children.length, 2, "it restarted");
+  children[1]!.emit("exit", 0);
+  await supervisor.stop();
+});
 
 test("a hung llama-server is killed and restarted", () =>
   withWorker(async (w) => {

@@ -3,7 +3,7 @@ import swagger from "@fastify/swagger";
 import { bearerMatches } from "./auth.ts";
 import type { SidecarConfig } from "./config.ts";
 import { HttpError } from "./errors.ts";
-import { JobQueue, type EmbedSummary, type JobResult, type JobScheduler, type ReindexRequest } from "./jobs.ts";
+import { JobCancelled, JobPartial, JobQueue, type EmbedSummary, type JobResult, type JobRunContext, type JobScheduler, type JobStore, type ReindexRequest } from "./jobs.ts";
 import { MetadataIndex } from "./metadata.ts";
 import { registerRoutes } from "./routes.ts";
 import { documentSchema, errorSchema, jobSchema, metadataSchema } from "./schemas.ts";
@@ -40,6 +40,8 @@ export interface BuildAppOptions {
   logger?: FastifyServerOptions["logger"];
   /** Clock and timers for the reindex debounce. Defaults to real ones. */
   scheduler?: JobScheduler;
+  /** Where jobs persist. Without one they live in memory. */
+  jobStore?: JobStore;
 }
 
 export type App = FastifyInstance & { ctx: AppContext };
@@ -55,28 +57,39 @@ export async function buildApp(options: BuildAppOptions): Promise<App> {
   const metadata = new MetadataIndex(backend);
   metadata.refresh();
 
-  const runJob = async (request: ReindexRequest): Promise<JobResult> => {
-    const update = await backend.update(request.collections ? { collections: request.collections } : {});
-    let embed: EmbedSummary | null = null;
-    if (request.embed) {
-      if (request.collections === null) {
-        embed = await backend.embed({ force: request.force });
-      } else {
-        // The SDK embeds one collection per call; keep the job scoped to
-        // exactly the collections that were updated.
-        embed = { docsProcessed: 0, chunksEmbedded: 0, errors: 0, durationMs: 0 };
-        for (const collection of request.collections) {
-          const r = await backend.embed({ force: request.force, collection });
-          embed.docsProcessed += r.docsProcessed;
-          embed.chunksEmbedded += r.chunksEmbedded;
-          embed.errors += r.errors;
-          embed.durationMs += r.durationMs;
-        }
-      }
+  const embedRequested = async (request: ReindexRequest, context: JobRunContext): Promise<EmbedSummary> => {
+    const run = { force: request.force, forceSince: context.jobCreatedAt, signal: context.signal, onWorker: context.noteWorker, onProgress: context.noteProgress };
+    if (request.collections === null) return backend.embed(run);
+    // The SDK embeds one collection per call; keep the job scoped to
+    // exactly the collections that were updated.
+    const total: EmbedSummary = { docsProcessed: 0, chunksEmbedded: 0, errors: 0, durationMs: 0 };
+    for (const collection of request.collections) {
+      if (context.signal.aborted) throw new JobCancelled();
+      const r = await backend.embed({ ...run, collection });
+      total.docsProcessed += r.docsProcessed;
+      total.chunksEmbedded += r.chunksEmbedded;
+      total.errors += r.errors;
+      total.durationMs += r.durationMs;
+      if (r.docsPending) total.docsPending = (total.docsPending ?? 0) + r.docsPending;
     }
-    const meta = metadata.refresh();
-    return { update, embed, metadata: meta };
+    return total;
   };
+
+  const runJob = async (request: ReindexRequest, context: JobRunContext): Promise<JobResult> => {
+    const update = await backend.update(request.collections ? { collections: request.collections } : {});
+    // Scanned documents are lexically searchable from here, even if embedding
+    // has to wait for a worker, so refresh before anything can defer the job.
+    if (request.embed) metadata.refresh();
+    if (context.signal.aborted) throw new JobCancelled();
+    const embed = request.embed ? await embedRequested(request, context) : null;
+    const result = { update, embed, metadata: metadata.refresh() };
+    // Documents left behind must not read as success. See JobPartial.
+    if (embed?.docsPending) throw new JobPartial(`${embed.docsPending} of ${embed.docsProcessed} documents could not be embedded and stay pending. Retry the job, or see embed.errors.`, result);
+    return result;
+  };
+
+  // The queue never lets a store failure reach the caller; the logger arrives below.
+  let logStoreError = (_message: string): void => {};
 
   const ctx: AppContext = {
     backend,
@@ -86,6 +99,8 @@ export async function buildApp(options: BuildAppOptions): Promise<App> {
       debounceMs: config.reindexDebounceMs,
       maxWaitMs: config.reindexMaxWaitMs,
       ...(options.scheduler ? { scheduler: options.scheduler } : {}),
+      ...(options.jobStore ? { store: options.jobStore } : {}),
+      onStoreError: (message) => logStoreError(message),
     }),
     startedAt: Date.now(),
     warmup: { requested: config.warmup, done: false, error: null, durationMs: null },
@@ -101,6 +116,7 @@ export async function buildApp(options: BuildAppOptions): Promise<App> {
     ajv: { customOptions: { removeAdditional: false, useDefaults: true, coerceTypes: "array", allErrors: false } },
   });
   const app = Object.assign(fastify, { ctx }) as App;
+  logStoreError = (message) => app.log.warn({ error: message }, "job queue could not write to its database; carrying on in memory");
 
   app.addSchema(errorSchema);
   app.addSchema(metadataSchema);
@@ -129,7 +145,8 @@ export async function buildApp(options: BuildAppOptions): Promise<App> {
         { name: "search", description: "Hybrid retrieval with optional frontmatter filters." },
         { name: "documents", description: "Read documents, and ingest or delete them by value." },
         { name: "collections", description: "QMD collections and their contexts." },
-        { name: "index", description: "Serialized, coalesced reindex jobs." },
+        { name: "index", description: "Serialized, coalesced, persistent reindex jobs." },
+        { name: "workers", description: "The inference worker pool, in remote LLM mode." },
       ],
     },
     refResolver: { buildLocalReference: (json) => String(json.$id) },
@@ -144,6 +161,10 @@ export async function buildApp(options: BuildAppOptions): Promise<App> {
           url: "/docs/{reference}",
         };
       }
+      // The router needs a regex to tell actions apart; clients do not. The double
+      // colon is swagger's escape for a literal one.
+      const action = /^\/(queue\/jobs|workers)\/:(\w+)\(.*\)::([\w-]+)$/.exec(url);
+      if (action) return { schema, url: `/${action[1]}/{${action[2]}}::${action[3]}` };
       return { schema, url };
     },
   });
@@ -200,6 +221,9 @@ export async function buildApp(options: BuildAppOptions): Promise<App> {
  * are resident before the first real request.
  */
 export async function warmup(ctx: AppContext, log: { info: (o: object, m: string) => void; warn: (o: object, m: string) => void }): Promise<void> {
+  // Workers warm themselves. `/ready` reports their state, so nothing here could
+  // make it read healthier than it is.
+  if (ctx.backend.llmHealth().mode === "remote") return;
   const started = Date.now();
   try {
     await ctx.backend.search({

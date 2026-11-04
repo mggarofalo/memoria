@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { WorkerClient, WorkerError } from "../src/llm/client.ts";
 import { EXPANSION_GRAMMAR, EXPANSION_SAMPLING, parseExpansion } from "../src/llm/expansion.ts";
-import { RemoteLlm, WORKER_CACHE_SUFFIX, type RemoteLlmOptions } from "../src/llm/remote.ts";
+import { acceptedEmbedFiles, RemoteLlm, WORKER_CACHE_MARK, type RemoteLlmOptions } from "../src/llm/remote.ts";
 import type { RerankTransport } from "../src/llm/rerank-transport.ts";
 import type { LlmCallLog, LocalFallback } from "../src/llm/types.ts";
 import { EMBED_FILE, MockWorker, WORKER_TOKEN } from "./mock-worker.ts";
@@ -29,6 +29,8 @@ async function harness(options: Partial<RemoteLlmOptions> & { dimensions?: numbe
     fallback: null,
     onCall: (e) => calls.push(e),
     onDegraded: (e) => degraded.push(e),
+    // These tests are about one call at a time. test/pool.test.ts covers the breaker.
+    breaker: { threshold: 1000 },
     ...options,
   });
   return {
@@ -102,9 +104,9 @@ test("rerank returns the SDK's shape, sorted, and scores identical texts once", 
 test("worker-derived cache entries cannot be confused with in-process ones", async () => {
   const h = await harness();
   try {
-    assert.ok(h.llm.rerankModelName.endsWith(WORKER_CACHE_SUFFIX));
-    assert.ok(h.llm.generateModelName.endsWith(WORKER_CACHE_SUFFIX));
-    assert.ok(!h.llm.embedModelName.endsWith(WORKER_CACHE_SUFFIX));
+    assert.ok(h.llm.rerankModelName.includes(WORKER_CACHE_MARK));
+    assert.ok(h.llm.generateModelName.includes(WORKER_CACHE_MARK));
+    assert.ok(!h.llm.embedModelName.includes(WORKER_CACHE_MARK));
   } finally {
     await h.done();
   }
@@ -126,9 +128,9 @@ test("expansion sends QMD's prompt, grammar and sampling, and returns Queryables
 test("parseExpansion behaves as the SDK does on messy output", () => {
   // Off-topic lines and unknown types are dropped.
   assert.deepEqual(parseExpansion("api keys", "lex: api\nvec: bananas\nnope: api\nno colon api\nhyde: keys here\n", true), [{ type: "lex", text: "api" }, { type: "hyde", text: "keys here" }]);
-  // Nothing usable gives the SDK's three-part fallback.
-  assert.deepEqual(parseExpansion("api", "garbage", true), [{ type: "hyde", text: "Information about api" }, { type: "lex", text: "api" }, { type: "vec", text: "api" }]);
-  assert.deepEqual(parseExpansion("api", "garbage", false), [{ type: "hyde", text: "Information about api" }, { type: "vec", text: "api" }]);
+  // Nothing usable gives nothing, unlike the SDK's placeholder, which would be cached.
+  assert.deepEqual(parseExpansion("api", "garbage", true), []);
+  assert.deepEqual(parseExpansion("api", "lex: api\n", false), []);
   // A query of only punctuation has no terms to check against.
   assert.deepEqual(parseExpansion("!!!", "vec: anything", true), [{ type: "vec", text: "anything" }]);
 });
@@ -262,8 +264,11 @@ test("a worker serving a different embedding model is refused before it can mix 
     assert.equal(h.worker.count("/v1/embed"), 0, "nothing was embedded");
     assert.match(h.degraded[0]!.error, /model_mismatch/);
 
-    // QMD's prefixed cache name is the same model; a fixed worker recovers on the next call.
+    // QMD's prefixed cache name is the same model; a fixed worker recovers at the next heartbeat.
     h.worker.on("GET /capabilities", () => ({ body: { operations: ["embed"], models: { embed: `hf_ggml-org_${EMBED_FILE}` }, rerankTransport: null } }));
+    h.worker.on("POST /v1/embed", (b) => ({ body: { model: `hf_ggml-org_${EMBED_FILE}`, embeddings: (b.texts as string[]).map(() => [1, 2, 3, 4, 5, 6, 7, 8]) } }));
+    assert.deepEqual(await h.llm.embedBatch(["a"], { model: "m" }), [null], "still refused until then");
+    await h.llm.refreshStatus();
     assert.equal((await h.llm.embedBatch(["a"], { model: "m" }))[0]!.embedding.length, 8);
     const before = h.worker.count("/capabilities");
     await h.llm.embedBatch(["b"], { model: "m" });
@@ -474,13 +479,13 @@ test("a hostile worker cannot get the token into an error, even by echoing it", 
     await h.llm.tokenize("x").catch((e: Error) => seen.push(e.message, String(e.stack), JSON.stringify(e)));
     await h.llm.embedBatch(["a"], { model: "m" });
     await h.llm.expandQuery("x");
-    await h.llm.refreshStatus();
-    seen.push(JSON.stringify(h.calls), JSON.stringify(h.degraded));
-    assert.ok(seen.length >= 5);
-    for (const text of seen) assert.ok(!text.includes(WORKER_TOKEN), text);
     // An unsafe remote code is dropped entirely; a safe one is kept.
     h.worker.on("POST /v1/rerank", () => ({ status: 502, body: { error: "rerank_score_out_of_range", message: "free text" } }));
     await assert.rejects(h.llm.rerank("q", docs("a")), (err: Error) => /rerank_score_out_of_range/.test(err.message) && !/free text/.test(err.message));
+    await h.llm.refreshStatus();
+    seen.push(JSON.stringify(h.calls), JSON.stringify(h.degraded), JSON.stringify(h.llm.pool.workers()));
+    assert.ok(seen.length >= 5);
+    for (const text of seen) assert.ok(!text.includes(WORKER_TOKEN), text);
   } finally {
     await h.done();
   }

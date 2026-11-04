@@ -85,3 +85,75 @@ export interface WorkerOptions {
   /** Expected length of every embedding; 0 pins it to the first response. */
   embedDimensions: number;
 }
+
+export type Capability = "embed" | "rerank" | "generate";
+
+/** Interactive is search-time work. Background is embedding, which can wait. */
+export type PriorityClass = "interactive" | "background";
+
+/** One entry of the worker pool's configuration. */
+export interface PoolWorkerConfig {
+  name: string;
+  url: string;
+  token: string | undefined;
+  capabilities: Capability[];
+  /** Tiebreak between workers of equal load. Lower is preferred. */
+  priority: number;
+  /** Calls this sidecar sends this worker at once. */
+  maxConcurrent: number;
+}
+
+/** What a search went without. Reported to callers with `degraded: true`. */
+export type DegradedReason = "no_rerank" | "no_expansion" | "cpu_embedding" | "no_vectors";
+
+/** What `GET /workers` returns per worker. Holds no URL path or token. */
+export interface WorkerView {
+  name: string;
+  host: string;
+  state: "unknown" | "up" | "busy" | "starting" | "down" | "circuit_open";
+  /** The worst of `circuits`, over the roles this worker is configured for. */
+  circuit: "closed" | "open" | "half_open";
+  circuits: Record<Capability, "closed" | "open" | "half_open">;
+  capabilities: Capability[];
+  priority: number;
+  maxConcurrent: number;
+  /** Null until checked. False keeps the worker off embedding and tokens. */
+  embedModelCompatible: boolean | null;
+  rerankTransport: string | null;
+  lastHeartbeat: string | null;
+  inFlight: number;
+  queueDepth: number;
+  calls: number;
+  /** Failed share of the last 100 calls. */
+  errorRate: number;
+}
+
+export interface PoolLoad {
+  classes: Record<PriorityClass, { inFlight: number; waiting: number }>;
+  workers: Array<{ name: string; interactive: number; background: number; queueDepth: number }>;
+}
+
+/** A fixed text's embedding, which every worker of one model should roughly reproduce. */
+export interface ProbeReference {
+  worker: string;
+  vector: number[];
+}
+
+/** Which worker embedded which document, kept outside QMD's schema so one worker's work can be undone. */
+export interface ProvenanceStore {
+  recordDocument(hash: string, workers: readonly string[]): void;
+  documentsBy(worker: string): string[];
+  forgetDocuments(hashes: readonly string[]): void;
+  probeReference(): ProbeReference | null;
+  setProbeReference(reference: ProbeReference | null): void;
+}
+
+/** Whether model work is at full strength. Drives `/ready`. */
+export interface LlmHealth {
+  mode: "local" | "remote";
+  degraded: boolean;
+  /** Roles no worker can serve right now. */
+  unavailable: Capability[];
+  workersUp: number;
+  workersTotal: number;
+}

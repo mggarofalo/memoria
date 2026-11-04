@@ -208,6 +208,10 @@
                   },
                   "durationMs": {
                     "type": "number"
+                  },
+                  "docsPending": {
+                    "type": "integer",
+                    "description": "Documents this run could not finish. They stay pending, and the job does not report success."
                   }
                 }
               },
@@ -233,6 +237,24 @@
               "string",
               "null"
             ]
+          },
+          "priority": {
+            "type": "string",
+            "enum": [
+              "background"
+            ],
+            "description": "Reindex jobs are background work."
+          },
+          "attempts": {
+            "type": "integer",
+            "description": "How many times this job has started."
+          },
+          "worker": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Workers that embedded for the latest attempt, comma-separated."
           }
         }
       },
@@ -395,8 +417,50 @@
                       "type": "string",
                       "enum": [
                         "ready",
-                        "warming"
-                      ]
+                        "warming",
+                        "degraded"
+                      ],
+                      "description": "`degraded`: remote LLM mode with some model role no worker can serve."
+                    },
+                    "llm": {
+                      "type": "object",
+                      "required": [
+                        "mode",
+                        "degraded",
+                        "unavailable",
+                        "workersUp",
+                        "workersTotal"
+                      ],
+                      "properties": {
+                        "mode": {
+                          "type": "string",
+                          "enum": [
+                            "local",
+                            "remote"
+                          ]
+                        },
+                        "degraded": {
+                          "type": "boolean"
+                        },
+                        "unavailable": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "enum": [
+                              "embed",
+                              "rerank",
+                              "generate"
+                            ]
+                          },
+                          "description": "Roles no worker can serve right now."
+                        },
+                        "workersUp": {
+                          "type": "integer"
+                        },
+                        "workersTotal": {
+                          "type": "integer"
+                        }
+                      }
                     },
                     "version": {
                       "type": "string"
@@ -526,6 +590,10 @@
                       "properties": {
                         "pending": {
                           "type": "integer"
+                        },
+                        "persistent": {
+                          "type": "boolean",
+                          "description": "False means jobs are in memory only and would not survive a restart."
                         }
                       }
                     }
@@ -605,8 +673,50 @@
                       "type": "string",
                       "enum": [
                         "ready",
-                        "warming"
-                      ]
+                        "warming",
+                        "degraded"
+                      ],
+                      "description": "`degraded`: remote LLM mode with some model role no worker can serve."
+                    },
+                    "llm": {
+                      "type": "object",
+                      "required": [
+                        "mode",
+                        "degraded",
+                        "unavailable",
+                        "workersUp",
+                        "workersTotal"
+                      ],
+                      "properties": {
+                        "mode": {
+                          "type": "string",
+                          "enum": [
+                            "local",
+                            "remote"
+                          ]
+                        },
+                        "degraded": {
+                          "type": "boolean"
+                        },
+                        "unavailable": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "enum": [
+                              "embed",
+                              "rerank",
+                              "generate"
+                            ]
+                          },
+                          "description": "Roles no worker can serve right now."
+                        },
+                        "workersUp": {
+                          "type": "integer"
+                        },
+                        "workersTotal": {
+                          "type": "integer"
+                        }
+                      }
                     },
                     "version": {
                       "type": "string"
@@ -736,6 +846,10 @@
                       "properties": {
                         "pending": {
                           "type": "integer"
+                        },
+                        "persistent": {
+                          "type": "boolean",
+                          "description": "False means jobs are in memory only and would not survive a restart."
                         }
                       }
                     }
@@ -1105,6 +1219,23 @@
                     },
                     "tookMs": {
                       "type": "integer"
+                    },
+                    "degraded": {
+                      "type": "boolean",
+                      "description": "True when this search ran without something a full search uses. Results are valid but may rank worse."
+                    },
+                    "degradedReasons": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "enum": [
+                          "no_rerank",
+                          "no_expansion",
+                          "cpu_embedding",
+                          "no_vectors"
+                        ]
+                      },
+                      "description": "What it went without. With `no_rerank`, scores are rank-derived rather than reranker scores, and `minScore` was not applied."
                     },
                     "query": {
                       "type": "object",
@@ -2147,6 +2278,764 @@
         }
       }
     },
+    "/queue": {
+      "get": {
+        "summary": "Queue depth",
+        "tags": [
+          "index"
+        ],
+        "description": "Reindex jobs by state, model calls by priority class, and calls per worker. Jobs persist across restarts in their own database beside the index. Model call figures are live and are empty in local LLM mode.",
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "jobs",
+                    "classes",
+                    "workers",
+                    "persistence"
+                  ],
+                  "properties": {
+                    "persistence": {
+                      "type": "object",
+                      "required": [
+                        "enabled",
+                        "healthy"
+                      ],
+                      "description": "Whether jobs would survive a restart. `healthy: false` means the queue is carrying on in memory.",
+                      "properties": {
+                        "enabled": {
+                          "type": "boolean"
+                        },
+                        "healthy": {
+                          "type": "boolean"
+                        }
+                      }
+                    },
+                    "jobs": {
+                      "type": "object",
+                      "required": [
+                        "queued",
+                        "held",
+                        "running",
+                        "succeeded",
+                        "failed"
+                      ],
+                      "properties": {
+                        "queued": {
+                          "type": "integer"
+                        },
+                        "held": {
+                          "type": "integer",
+                          "description": "The queued jobs waiting on the debounce or a retry delay."
+                        },
+                        "running": {
+                          "type": "integer"
+                        },
+                        "succeeded": {
+                          "type": "integer"
+                        },
+                        "failed": {
+                          "type": "integer"
+                        }
+                      }
+                    },
+                    "classes": {
+                      "type": "object",
+                      "required": [
+                        "interactive",
+                        "background"
+                      ],
+                      "properties": {
+                        "interactive": {
+                          "type": "object",
+                          "required": [
+                            "inFlight",
+                            "waiting"
+                          ],
+                          "properties": {
+                            "inFlight": {
+                              "type": "integer"
+                            },
+                            "waiting": {
+                              "type": "integer"
+                            }
+                          }
+                        },
+                        "background": {
+                          "type": "object",
+                          "required": [
+                            "inFlight",
+                            "waiting"
+                          ],
+                          "properties": {
+                            "inFlight": {
+                              "type": "integer"
+                            },
+                            "waiting": {
+                              "type": "integer"
+                            }
+                          }
+                        }
+                      }
+                    },
+                    "workers": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "name",
+                          "interactive",
+                          "background",
+                          "queueDepth"
+                        ],
+                        "properties": {
+                          "name": {
+                            "type": "string"
+                          },
+                          "interactive": {
+                            "type": "integer"
+                          },
+                          "background": {
+                            "type": "integer"
+                          },
+                          "queueDepth": {
+                            "type": "number",
+                            "description": "As the worker last reported it."
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/queue/jobs/{id}:retry": {
+      "post": {
+        "summary": "Retry a failed job",
+        "tags": [
+          "index"
+        ],
+        "description": "Queue a failed job again under the same id. Returns 409 unless it has failed.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "id",
+            "required": true
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "job"
+                  ],
+                  "properties": {
+                    "job": {
+                      "$ref": "#/components/schemas/Job"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/queue/jobs/{id}:cancel": {
+      "post": {
+        "summary": "Cancel a job",
+        "tags": [
+          "index"
+        ],
+        "description": "Stop a job that has not finished. A waiting job ends at once. A running one stops at its next safe point, so it may still read `running` in this response. A cancelled job reports `failed` with the error `Cancelled`. Returns 409 if it has already finished.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "id",
+            "required": true
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "job"
+                  ],
+                  "properties": {
+                    "job": {
+                      "$ref": "#/components/schemas/Job"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workers": {
+      "get": {
+        "summary": "The worker pool",
+        "tags": [
+          "workers"
+        ],
+        "description": "Each worker's state, last heartbeat, in-flight calls and error rate. Empty in local LLM mode. Never includes tokens.",
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "mode",
+                    "workers"
+                  ],
+                  "properties": {
+                    "mode": {
+                      "type": "string",
+                      "enum": [
+                        "local",
+                        "remote"
+                      ]
+                    },
+                    "workers": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "name",
+                          "host",
+                          "state",
+                          "circuit",
+                          "circuits",
+                          "capabilities",
+                          "priority",
+                          "maxConcurrent",
+                          "embedModelCompatible",
+                          "rerankTransport",
+                          "lastHeartbeat",
+                          "inFlight",
+                          "queueDepth",
+                          "calls",
+                          "errorRate"
+                        ],
+                        "properties": {
+                          "name": {
+                            "type": "string"
+                          },
+                          "host": {
+                            "type": "string",
+                            "description": "Host and port."
+                          },
+                          "state": {
+                            "type": "string",
+                            "enum": [
+                              "unknown",
+                              "up",
+                              "busy",
+                              "starting",
+                              "down",
+                              "circuit_open"
+                            ]
+                          },
+                          "circuit": {
+                            "type": "string",
+                            "enum": [
+                              "closed",
+                              "open",
+                              "half_open"
+                            ],
+                            "description": "The worst of `circuits`, over the roles this worker is configured for."
+                          },
+                          "circuits": {
+                            "type": "object",
+                            "required": [
+                              "embed",
+                              "rerank",
+                              "generate"
+                            ],
+                            "properties": {
+                              "embed": {
+                                "type": "string",
+                                "enum": [
+                                  "closed",
+                                  "open",
+                                  "half_open"
+                                ]
+                              },
+                              "rerank": {
+                                "type": "string",
+                                "enum": [
+                                  "closed",
+                                  "open",
+                                  "half_open"
+                                ]
+                              },
+                              "generate": {
+                                "type": "string",
+                                "enum": [
+                                  "closed",
+                                  "open",
+                                  "half_open"
+                                ]
+                              }
+                            }
+                          },
+                          "capabilities": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "enum": [
+                                "embed",
+                                "rerank",
+                                "generate"
+                              ]
+                            }
+                          },
+                          "priority": {
+                            "type": "integer"
+                          },
+                          "maxConcurrent": {
+                            "type": "integer"
+                          },
+                          "embedModelCompatible": {
+                            "type": [
+                              "boolean",
+                              "null"
+                            ],
+                            "description": "False keeps this worker off embedding and tokens. Null until checked."
+                          },
+                          "rerankTransport": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "lastHeartbeat": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "inFlight": {
+                            "type": "integer"
+                          },
+                          "queueDepth": {
+                            "type": "number"
+                          },
+                          "calls": {
+                            "type": "integer"
+                          },
+                          "errorRate": {
+                            "type": "number",
+                            "description": "Failed share of the last 100 calls."
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workers/{name}:purge-vectors": {
+      "post": {
+        "summary": "Undo a worker's embeddings",
+        "tags": [
+          "workers"
+        ],
+        "description": "Remove every vector this worker wrote, whole documents at a time, and queue a job to embed them again. Works for a worker no longer in the pool, and for one that lied about its model. Clears the identity probe's reference if this worker set it. The documents stay findable lexically meanwhile.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "name",
+            "required": true
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "documents",
+                    "job"
+                  ],
+                  "properties": {
+                    "documents": {
+                      "type": "integer"
+                    },
+                    "job": {
+                      "$ref": "#/components/schemas/Job"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/cache:purge": {
+      "post": {
+        "summary": "Purge cached model answers",
+        "tags": [
+          "workers"
+        ],
+        "description": "Drop every cached rerank score and query expansion. Replacing a worker already leaves its answers behind when its name, address or model files change, and they expire after a week; this is for a worker that gave bad answers and then came back unchanged.",
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "entries"
+                  ],
+                  "properties": {
+                    "entries": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/openapi.json": {
       "get": {
         "summary": "OpenAPI document",
@@ -2195,7 +3084,11 @@
     },
     {
       "name": "index",
-      "description": "Serialized, coalesced reindex jobs."
+      "description": "Serialized, coalesced, persistent reindex jobs."
+    },
+    {
+      "name": "workers",
+      "description": "The inference worker pool, in remote LLM mode."
     }
   ]
 }

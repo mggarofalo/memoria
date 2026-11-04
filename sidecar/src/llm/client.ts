@@ -15,7 +15,9 @@ export type WorkerErrorCode =
   | "unauthorized"
   | "rejected"
   | "invalid_response"
-  | "model_mismatch";
+  | "model_mismatch"
+  | "no_worker"
+  | "saturated";
 
 export class WorkerError extends Error {
   readonly code: WorkerErrorCode;
@@ -34,14 +36,22 @@ export class WorkerError extends Error {
 }
 
 export interface OperationTimeouts {
+  /** Document chunks, which can wait. */
   embed: number;
+  /** A search's query vectors. */
+  embedQuery: number;
   rerank: number;
   complete: number;
   tokenize: number;
   status: number;
 }
 
-export const DEFAULT_TIMEOUTS: OperationTimeouts = { embed: 120_000, rerank: 120_000, complete: 60_000, tokenize: 15_000, status: 5_000 };
+/**
+ * The search-time figures have to add up to well under `Memoria.Api`'s 2-minute
+ * client timeout, even with one retry each, or a hung worker would turn what
+ * should be a degraded answer into a timeout: (10 + 20 + 10) × 2 = 80 s at worst.
+ */
+export const DEFAULT_TIMEOUTS: OperationTimeouts = { embed: 120_000, embedQuery: 10_000, rerank: 20_000, complete: 10_000, tokenize: 15_000, status: 5_000 };
 
 /** Larger than any legitimate response: 256 embeddings of 4096 numbers, as JSON. */
 export const DEFAULT_MAX_RESPONSE_BYTES = 64 * 1024 * 1024;
@@ -158,8 +168,10 @@ export class WorkerClient {
     }
     const detail = `HTTP ${status}${remote}`;
     if (status === 401 || status === 403) return new WorkerError("unauthorized", operation, this.name, detail, status);
-    if (status >= 500 || status === 408 || status === 429) return new WorkerError("unavailable", operation, this.name, detail, status);
-    return new WorkerError("rejected", operation, this.name, detail, status);
+    // Only these say something about the request. A 404, 410 or similar is about
+    // this worker, so another may well answer.
+    if (status === 400 || status === 413) return new WorkerError("rejected", operation, this.name, detail, status);
+    return new WorkerError("unavailable", operation, this.name, detail, status);
   }
 
   async #readCapped(operation: string, response: Response): Promise<string> {

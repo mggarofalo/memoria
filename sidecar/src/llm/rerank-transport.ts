@@ -1,4 +1,5 @@
-import { WorkerError, type WorkerClient } from "./client.ts";
+import { WorkerError } from "./client.ts";
+import type { WorkerPool } from "./pool.ts";
 import { parseRerankResults, ResponseViolation } from "./validate.ts";
 
 /**
@@ -15,24 +16,27 @@ export interface RerankTransport {
 }
 
 /**
- * Scores through the worker's `POST /v1/rerank`, which forwards to
- * llama-server's `/rerank`. The server applies the model's own rerank template.
+ * Scores through a worker's `POST /v1/rerank`, which forwards to llama-server's
+ * `/rerank`. The server applies the model's own rerank template. A bad answer is
+ * an error inside the dispatch, so it fails over to another worker.
  */
 export class WorkerRerankTransport implements RerankTransport {
   readonly name = "llama-server-rerank";
-  readonly #client: WorkerClient;
+  readonly #pool: WorkerPool;
 
-  constructor(client: WorkerClient) {
-    this.#client = client;
+  constructor(pool: WorkerPool) {
+    this.#pool = pool;
   }
 
-  async scores(query: string, texts: string[]): Promise<number[]> {
-    const raw = await this.#client.post("rerank", "rerank", "/v1/rerank", { query, documents: texts }, texts.length);
-    try {
-      return parseRerankResults(raw, texts.length);
-    } catch (err) {
-      if (err instanceof ResponseViolation) throw new WorkerError("invalid_response", "rerank", this.#client.name, err.message);
-      throw err;
-    }
+  scores(query: string, texts: string[]): Promise<number[]> {
+    return this.#pool.dispatch("rerank", "interactive", "rerank", async ({ client }) => {
+      const raw = await client.post("rerank", "rerank", "/v1/rerank", { query, documents: texts }, texts.length);
+      try {
+        return parseRerankResults(raw, texts.length);
+      } catch (err) {
+        if (err instanceof ResponseViolation) throw new WorkerError("invalid_response", "rerank", client.name, err.message);
+        throw err;
+      }
+    });
   }
 }

@@ -1,7 +1,10 @@
 import { existsSync } from "node:fs";
 import type { DocumentHead, MetadataSource } from "./metadata.ts";
 import type { EmbedSummary, UpdateSummary } from "./jobs.ts";
-import type { EmbeddingResult, LlmCallSink, LlmSurface, Queryable, RerankDocument, RerankResult, WorkerOptions } from "./llm/types.ts";
+import type { BreakerOptions } from "./llm/pool.ts";
+import type { RemoteLlm } from "./llm/remote.ts";
+import type { DegradedReason, EmbeddingResult, LlmCallSink, LlmHealth, LlmSurface, PoolLoad, PoolWorkerConfig, ProvenanceStore, Queryable, RerankDocument, RerankResult, WorkerView } from "./llm/types.ts";
+import type { SdkDb, SdkHandles, WiredRemote } from "./llm/wire.ts";
 
 /**
  * The slice of the QMD SDK the sidecar depends on, expressed as our own
@@ -100,9 +103,33 @@ export interface Snippet {
   snippet: string;
 }
 
+export interface SearchOutcome {
+  hits: SearchHit[];
+  /** What this search went without. Empty at full strength. */
+  degradedReasons: DegradedReason[];
+}
+
+export interface BackendEmbedOptions {
+  force: boolean;
+  collection?: string;
+  /** Stop at the next safe point. Honoured in remote mode. */
+  signal?: AbortSignal;
+  onWorker?: (name: string) => void;
+  /** A document reached the index. */
+  onProgress?: () => void;
+  /** With `force`: when the job was accepted, so a resumed job skips what it already redid. */
+  forceSince?: string;
+}
+
 export interface QmdBackend extends MetadataSource {
   readonly dbPath: string;
   search(options: BackendSearchOptions): Promise<SearchHit[]>;
+  searchDetailed(options: BackendSearchOptions): Promise<SearchOutcome>;
+  llmHealth(): LlmHealth;
+  /** Empty in local mode. */
+  workers(): WorkerView[];
+  /** Null in local mode. */
+  poolLoad(): PoolLoad | null;
   /** Resolve a path, `qmd://` URI, or docid to document metadata (no body). */
   get(reference: string): Promise<DocumentInfo | DocumentLookupError>;
   getDocumentBody(filepath: string, options: { fromLine?: number; maxLines?: number }): Promise<string | null>;
@@ -113,8 +140,12 @@ export interface QmdBackend extends MetadataSource {
   listContexts(): Promise<ContextRow[]>;
   getDefaultCollectionNames(): Promise<string[]>;
   update(options: { collections?: string[] }): Promise<UpdateSummary>;
-  embed(options: { force: boolean; collection?: string }): Promise<EmbedSummary>;
+  embed(options: BackendEmbedOptions): Promise<EmbedSummary>;
   getStatus(): Promise<IndexStatusInfo>;
+  /** Drop every cached rerank score and expansion. Returns how many. */
+  purgeCache(): number;
+  /** Remove the vectors one worker wrote, so those documents embed again. Returns how many documents. */
+  purgeWorkerVectors(worker: string): number;
   snippet(body: string, query: string, maxLen: number, chunkPos: number, chunkLen: number, intent?: string): Snippet;
   addLineNumbers(text: string, startLine: number): string;
   models(): ModelStatus;
@@ -126,7 +157,23 @@ export interface QmdBackend extends MetadataSource {
  * `remote` routes it to a worker; `fallback` lets tokenizing and query embedding
  * run on this host's CPU when no worker answers.
  */
-export type LlmOptions = { mode: "local" } | { mode: "remote"; worker: WorkerOptions; fallback: boolean; statusPollMs?: number };
+export type LlmOptions =
+  | { mode: "local" }
+  | {
+      mode: "remote";
+      workers: PoolWorkerConfig[];
+      embedDimensions: number;
+      fallback: boolean;
+      statusPollMs?: number;
+      /** Tuning for the embedding farm's batches. */
+      embedBatchBytes?: number;
+      /** Tuning for the circuit breaker. */
+      breaker?: Partial<BreakerOptions>;
+      /** Deadline for one search-time rerank call. */
+      rerankTimeoutMs?: number;
+      /** How often each worker is asked to embed the probe text. */
+      probeEveryMs?: number;
+    };
 
 export interface OpenBackendOptions {
   dbPath: string | undefined;
@@ -135,6 +182,11 @@ export interface OpenBackendOptions {
   /** Receives one structured entry per worker call. */
   onLlmCall?: LlmCallSink;
   onLlmDegraded?: (entry: { operation: string; error: string; fallback: boolean }) => void;
+  /** Records which worker embedded what, and the probe's reference. Outside QMD's schema. */
+  provenance?: ProvenanceStore;
+  onProvenanceError?: (message: string) => void;
+  /** Told how many vector rows the startup repair removed, when it removes any. */
+  onVectorRepair?: (rows: number) => void;
 }
 
 /** Direct access to the model path, bypassing `llm_cache`. For the parity benchmark. */
@@ -146,6 +198,10 @@ export interface LlmProbe {
   expandQuery(query: string): Promise<Queryable[]>;
   /** Empty the cached expansions and rerank scores in this index. */
   clearCache(): void;
+  /** What is cached, so a test can show a failure wrote nothing. */
+  cacheEntries(): number;
+  /** Refresh worker state now rather than at the next heartbeat. */
+  refreshWorkers(): Promise<void>;
 }
 
 export interface OpenedBackend extends QmdBackend {
@@ -155,6 +211,88 @@ export interface OpenedBackend extends QmdBackend {
 /** `dist/llm.js` exports the SDK does not re-export from its entry point. */
 interface SdkLlmModule {
   setDefaultLlamaCpp(llm: unknown): void;
+  formatDocForEmbedding(text: string, title?: string, modelUri?: string): string;
+  DEFAULT_MODEL_CACHE_DIR: string;
+}
+
+/** `dist/store.js` exports likewise. Pinned by test/llm-surface.test.ts. */
+interface SdkStoreModule {
+  getEmbeddingFingerprint(model: string): string;
+  chunkDocumentByTokens(content: string, maxTokens: undefined, overlap: undefined, window: undefined, filepath: string, strategy: undefined, signal: AbortSignal): Promise<Array<{ text: string; pos: number }>>;
+  extractTitle(content: string, filename: string): string;
+  clearAllEmbeddings(db: unknown, collection?: string): void;
+  validateLexQuery(query: string): string | null;
+  validateSemanticQuery(query: string): string | null;
+}
+
+/**
+ * What remote mode needs from the SDK. The exports map hides these modules; a file
+ * URL reaches the same instances. The surface test pins this for the exact version.
+ */
+async function sdkHandles(storeInternal: unknown, local: LlmSurface): Promise<SdkHandles> {
+  const entry = import.meta.resolve("@tobilu/qmd");
+  const sdkStore = (await import(new URL("./store.js", entry).href)) as SdkStoreModule;
+  const sdkLlm = (await import(new URL("./llm.js", entry).href)) as SdkLlmModule;
+  if (typeof sdkLlm.setDefaultLlamaCpp !== "function") {
+    throw new Error("This QMD version has no setDefaultLlamaCpp; remote LLM mode needs updating for it.");
+  }
+  const internal = storeInternal as Pick<SdkHandles, "insertEmbedding" | "ensureVecTable"> & { db: SdkDb; getHashesNeedingEmbedding(model: string): unknown };
+  return {
+    db: internal.db,
+    local,
+    validators: sdkStore,
+    insertEmbedding: (...args) => internal.insertEmbedding(...args),
+    ensureVecTable: (dimensions) => internal.ensureVecTable(dimensions),
+    migrateVectors: (model) => void internal.getHashesNeedingEmbedding(model),
+    fingerprint: (model) => sdkStore.getEmbeddingFingerprint(model),
+    chunk: (body, path, signal) => sdkStore.chunkDocumentByTokens(body, undefined, undefined, undefined, path, undefined, signal),
+    format: (text, title, model) => sdkLlm.formatDocForEmbedding(text, title, model),
+    title: (body, path) => sdkStore.extractTitle(body, path),
+    clearVectors: () => sdkStore.clearAllEmbeddings(internal.db),
+    modelCacheDir: sdkLlm.DEFAULT_MODEL_CACHE_DIR,
+    setDefaultLlm: (llm) => sdkLlm.setDefaultLlamaCpp(llm),
+  };
+}
+
+/**
+ * The SDK writes `content_vectors` and then `vectors_vec` with no transaction, so a
+ * kill between them leaves a row claiming a vector that does not exist. The document
+ * then reads as fully embedded, for good. This runs at every start, in both LLM
+ * modes, and removes such rows so the document becomes pending again.
+ */
+export function repairVectorRows(db: { prepare(sql: string): { get(...a: unknown[]): unknown; run(...a: unknown[]): { changes: number | bigint } } }): number {
+  const table = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='vectors_vec'").get();
+  try {
+    const statement = table
+      ? "DELETE FROM content_vectors WHERE hash || '_' || seq NOT IN (SELECT hash_seq FROM vectors_vec)"
+      : "DELETE FROM content_vectors";
+    return Number(db.prepare(statement).run().changes);
+  } catch {
+    // A host without sqlite-vec cannot read that table, and so cannot judge it.
+    return 0;
+  }
+}
+
+function wantsVectors(o: BackendSearchOptions): boolean {
+  return o.query !== undefined || (o.queries ?? []).some((q) => q.type !== "lex");
+}
+
+function holdsVectors(db: { prepare(sql: string): { get(...a: unknown[]): unknown } }): boolean {
+  if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='vectors_vec'").get()) return false;
+  return db.prepare("SELECT 1 FROM content_vectors LIMIT 1").get() !== undefined;
+}
+
+function remoteHealth(remote: RemoteLlm): LlmHealth {
+  const status = remote.status();
+  const unavailable = (["embed", "rerank", "generate"] as const).filter((role) => !status[role]);
+  const workers = remote.pool.workers();
+  return {
+    mode: "remote",
+    degraded: unavailable.length > 0,
+    unavailable,
+    workersUp: workers.filter((w) => w.state === "up" || w.state === "busy").length,
+    workersTotal: workers.length,
+  };
 }
 
 interface LlamaLike {
@@ -174,60 +312,60 @@ interface HeadRow {
 }
 
 /**
+ * Degraded mode must not compete with a worker for this host's GPU. The SDK reads
+ * this when it first loads a model, which may be never. Process-wide: only set when
+ * a fallback can load, so the parity benchmark, which runs both modes in one process
+ * with the fallback off, keeps its local side's GPU.
+ */
+function requireIndex(dbPath: string): void {
+  if (!existsSync(dbPath)) {
+    throw new Error(`QMD index not found at ${dbPath}. Run \`qmd update\` on this host first, or set MEMORIA_QMD_DB_PATH.`);
+  }
+}
+
+function reportRepair(rows: number, options: OpenBackendOptions): void {
+  if (rows > 0) options.onVectorRepair?.(rows);
+}
+
+function keepFallbackOffGpu(llm: LlmOptions): void {
+  if (llm.mode === "remote" && llm.fallback) process.env.QMD_FORCE_CPU ??= "1";
+}
+
+/**
+ * The SDK hardcodes a five-minute idle unload. Zero disables the timer so the ~11s
+ * cold start is paid once per process, not once per lull.
+ */
+function disableIdleUnload(llm: LlamaLike | undefined): void {
+  if (llm) llm.inactivityTimeoutMs = 0;
+}
+
+async function wire(storeInternal: unknown, holder: { llm?: LlamaLike }, config: Extract<LlmOptions, { mode: "remote" }>, options: OpenBackendOptions): Promise<WiredRemote> {
+  const { wireRemote } = await import("./llm/wire.ts");
+  const wired = wireRemote(await sdkHandles(storeInternal, holder.llm as unknown as LlmSurface), config, options);
+  holder.llm = wired.llm as unknown as LlamaLike;
+  return wired;
+}
+
+/**
  * Open the real QMD store. The index must already exist — the sidecar serves
  * an index the host maintains with `qmd`, it does not create one.
  */
 export async function openBackend(options: OpenBackendOptions): Promise<OpenedBackend> {
   const llmOptions = options.llm ?? { mode: "local" as const };
-  if (llmOptions.mode === "remote" && llmOptions.fallback) {
-    // Degraded mode must not compete with a worker for this host's GPU. The SDK
-    // reads this when it first loads a model, which may be never. Process-wide:
-    // only set when a fallback can load, so the parity benchmark, which runs
-    // both modes in one process with the fallback off, keeps its local side's GPU.
-    process.env.QMD_FORCE_CPU ??= "1";
-  }
+  keepFallbackOffGpu(llmOptions);
   const qmd = await import("@tobilu/qmd");
   const dbPath = options.dbPath ?? qmd.getDefaultDbPath();
-  if (!existsSync(dbPath)) {
-    throw new Error(`QMD index not found at ${dbPath}. Run \`qmd update\` on this host first, or set MEMORIA_QMD_DB_PATH.`);
-  }
+  requireIndex(dbPath);
   // DB-only mode: collections and contexts come from store_collections inside
   // index.sqlite, which `qmd` keeps in sync with ~/.config/qmd/index.yml.
   const store = await qmd.createStore({ dbPath });
   // LlamaCpp keeps its model handles private; we only read them for status.
   const internal = store.internal as unknown as { llm?: LlamaLike };
   const llm = internal.llm;
-  if (options.keepWarm && llm && llmOptions.mode === "local") {
-    // The SDK hardcodes a five-minute idle unload. Zero disables the timer so
-    // the ~11s cold start is paid once per process, not once per lull.
-    llm.inactivityTimeoutMs = 0;
-  }
-  let remote: import("./llm/remote.ts").RemoteLlm | undefined;
-  let sdkLlmModule: SdkLlmModule | undefined;
-  if (llmOptions.mode === "remote") {
-    const { RemoteLlm } = await import("./llm/remote.ts");
-    const local = llm as unknown as LlmSurface;
-    remote = new RemoteLlm({
-      worker: llmOptions.worker,
-      models: { embed: local.embedModelName, rerank: local.rerankModelName, generate: local.generateModelName },
-      // The SDK's own instance. It loads nothing until a fallback first uses it.
-      fallback: llmOptions.fallback ? local : null,
-      statusPollMs: llmOptions.statusPollMs ?? 30_000,
-      ...(options.onLlmCall ? { onCall: options.onLlmCall } : {}),
-      ...(options.onLlmDegraded ? { onDegraded: options.onLlmDegraded } : {}),
-    });
-    internal.llm = remote as unknown as LlamaLike;
-    // The chunker ignores store.llm and asks for this process-wide singleton, so
-    // embedding documents would otherwise load a model on this host just to
-    // count tokens. The SDK's exports map hides the setter; a file URL reaches
-    // the same module instance. The surface test pins this for the exact version.
-    const sdkEntry = import.meta.resolve("@tobilu/qmd");
-    sdkLlmModule = (await import(new URL("./llm.js", sdkEntry).href)) as SdkLlmModule;
-    if (typeof sdkLlmModule.setDefaultLlamaCpp !== "function") {
-      throw new Error("This QMD version has no setDefaultLlamaCpp; remote LLM mode needs updating for it.");
-    }
-    sdkLlmModule.setDefaultLlamaCpp(remote);
-  }
+  if (llmOptions.mode === "local" && options.keepWarm) disableIdleUnload(llm);
+  reportRepair(repairVectorRows(store.internal.db), options);
+  const wired = llmOptions.mode === "remote" ? await wire(store.internal, internal, llmOptions, options) : undefined;
+  const remote = wired?.llm;
   const active = (remote ?? llm) as unknown as LlmSurface;
   const db = store.internal.db;
   const headsStatement = db.prepare(
@@ -238,31 +376,46 @@ export async function openBackend(options: OpenBackendOptions): Promise<OpenedBa
   // store.listCollections() drops this column. The integration test pins it to the SDK.
   const ignoreStatement = db.prepare(`SELECT ignore_patterns AS patterns FROM store_collections WHERE name = ?`);
 
+  const runSearch = async (o: BackendSearchOptions): Promise<SearchHit[]> => {
+    const results = await store.search({
+      ...(o.query !== undefined ? { query: o.query } : {}),
+      ...(o.queries !== undefined ? { queries: o.queries } : {}),
+      ...(o.intent !== undefined ? { intent: o.intent } : {}),
+      ...(o.collections !== undefined ? { collections: o.collections } : {}),
+      ...(o.candidateLimit !== undefined ? { candidateLimit: o.candidateLimit } : {}),
+      limit: o.limit,
+      minScore: o.minScore,
+      rerank: o.rerank,
+    });
+    return results.map((r) => ({
+      file: r.file,
+      displayPath: r.displayPath,
+      title: r.title,
+      body: r.body,
+      bestChunk: r.bestChunk,
+      bestChunkPos: r.bestChunkPos,
+      score: r.score,
+      context: r.context,
+      docid: r.docid,
+    }));
+  };
+
+  /** Whatever else happened, an index holding no vectors means vector search gave nothing. */
+  const searchDetailed = async (o: BackendSearchOptions): Promise<SearchOutcome> => {
+    const outcome = wired ? await wired.search(runSearch, o) : { hits: await runSearch(o), degradedReasons: [] };
+    if (!wantsVectors(o) || outcome.degradedReasons.includes("no_vectors") || holdsVectors(db)) return outcome;
+    return { hits: outcome.hits, degradedReasons: [...outcome.degradedReasons, "no_vectors"] };
+  };
+
+  const llmHealth = (): LlmHealth => (remote ? remoteHealth(remote) : { mode: "local", degraded: false, unavailable: [], workersUp: 0, workersTotal: 0 });
+
   return {
     dbPath: store.dbPath,
-    search: async (o) => {
-      const results = await store.search({
-        ...(o.query !== undefined ? { query: o.query } : {}),
-        ...(o.queries !== undefined ? { queries: o.queries } : {}),
-        ...(o.intent !== undefined ? { intent: o.intent } : {}),
-        ...(o.collections !== undefined ? { collections: o.collections } : {}),
-        ...(o.candidateLimit !== undefined ? { candidateLimit: o.candidateLimit } : {}),
-        limit: o.limit,
-        minScore: o.minScore,
-        rerank: o.rerank,
-      });
-      return results.map((r) => ({
-        file: r.file,
-        displayPath: r.displayPath,
-        title: r.title,
-        body: r.body,
-        bestChunk: r.bestChunk,
-        bestChunkPos: r.bestChunkPos,
-        score: r.score,
-        context: r.context,
-        docid: r.docid,
-      }));
-    },
+    search: async (o) => (await searchDetailed(o)).hits,
+    searchDetailed,
+    llmHealth,
+    workers: () => remote?.pool.workers() ?? [],
+    poolLoad: () => remote?.pool.load() ?? null,
     get: (reference) => store.get(reference, { includeBody: false }),
     getDocumentBody: (filepath, o) => store.getDocumentBody(filepath, o),
     multiGet: (pattern, o) => store.multiGet(pattern, o),
@@ -285,7 +438,10 @@ export async function openBackend(options: OpenBackendOptions): Promise<OpenedBa
         needsEmbedding: r.needsEmbedding,
       };
     },
+    purgeCache: () => Number(db.prepare("DELETE FROM llm_cache").run().changes),
+    purgeWorkerVectors: (worker) => wired?.purgeWorkerVectors(worker) ?? 0,
     embed: async (o) => {
+      if (wired) return wired.embed(o);
       const r = await store.embed({ force: o.force, ...(o.collection !== undefined ? { collection: o.collection } : {}) });
       return { docsProcessed: r.docsProcessed, chunksEmbedded: r.chunksEmbedded, errors: r.errors, durationMs: r.durationMs };
     },
@@ -301,10 +457,7 @@ export async function openBackend(options: OpenBackendOptions): Promise<OpenedBa
     addLineNumbers: (text, startLine) => qmd.addLineNumbers(text, startLine),
     models: () => (remote ? remoteModelStatus(remote, llm as unknown as LlmSurface) : modelStatus(llm)),
     close: async () => {
-      if (remote) {
-        await remote.dispose();
-        sdkLlmModule?.setDefaultLlamaCpp(null);
-      }
+      wired?.close();
       // store.close() disposes the SDK's own instance, which is also the fallback.
       await store.close();
     },
@@ -317,11 +470,16 @@ export async function openBackend(options: OpenBackendOptions): Promise<OpenedBa
       clearCache: () => {
         db.exec("DELETE FROM llm_cache");
       },
+      cacheEntries: () => (db.prepare("SELECT COUNT(*) AS n FROM llm_cache").get() as { n: number }).n,
+      refreshWorkers: async () => {
+        await remote?.refreshStatus();
+      },
     },
   };
 }
 
-function remoteModelStatus(remote: import("./llm/remote.ts").RemoteLlm, local: LlmSurface): ModelStatus {
+
+function remoteModelStatus(remote: RemoteLlm, local: LlmSurface): ModelStatus {
   const loaded = remote.status();
   return {
     embed: local.embedModelName,
