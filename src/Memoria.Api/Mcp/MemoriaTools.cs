@@ -1,6 +1,6 @@
 using System.ComponentModel;
+using Memoria.Api.Auth;
 using Memoria.Api.Configuration;
-using Memoria.Api.Endpoints;
 using Memoria.Api.Http;
 using Memoria.Api.Search;
 using Memoria.Core.Contracts;
@@ -13,13 +13,13 @@ namespace Memoria.Api.Mcp;
 
 /// <summary>
 /// The outward MCP surface. Each tool is a thin translation to
-/// <see cref="IMemoriaQmdClient"/> through the same request factory and scope
-/// the REST endpoints use, so a Claude Code session and a <c>curl</c> see the
-/// same defaults and the same collections. Memoria owns this surface; QMD's
-/// own MCP transport is never forwarded.
+/// <see cref="ScopedCorpus"/> through the same request factory the REST
+/// endpoints use, so a Claude Code session and a <c>curl</c> see the same
+/// defaults and the same collections. Memoria owns this surface; QMD's own MCP
+/// transport is never forwarded.
 /// </summary>
 [McpServerToolType]
-public sealed class MemoriaTools(IMemoriaQmdClient sidecar, ICallerScope scope, IOptions<MemoriaOptions> options)
+public sealed class MemoriaTools(ScopedCorpus corpus, ICallerScope scope, IRequestAudit audit, IOptions<MemoriaOptions> options)
 {
 	[McpServerTool(Name = "search", Title = "Search Memoria", ReadOnly = true, Idempotent = true, UseStructuredContent = true)]
 	[Description(
@@ -41,14 +41,18 @@ public sealed class MemoriaTools(IMemoriaQmdClient sidecar, ICallerScope scope, 
 		[Description("Frontmatter filter: every listed tag must be present.")] string[]? tags = null,
 		CancellationToken cancellationToken = default)
 	{
-		SearchInput input = new(query, collections, limit, minScore, rerank, intent, null, project, branch, since, until, tags);
-		SidecarSearchRequest? request = SearchRequestFactory.TryBuild(input, options.Value.Search, scope, out Dictionary<string, string[]> errors);
-		if (request is null)
+		audit.SetOperation("mcp.search");
+		return Guarded(async () =>
 		{
-			throw new McpException(string.Join(" ", errors.Select(e => $"{e.Key}: {string.Join(" ", e.Value)}")));
-		}
+			SearchInput input = new(query, collections, limit, minScore, rerank, intent, null, project, branch, since, until, tags);
+			SidecarSearchRequest? request = SearchRequestFactory.TryBuild(input, options.Value.Search, scope, out Dictionary<string, string[]> errors);
+			if (request is null)
+			{
+				throw new McpException(string.Join(" ", errors.Select(e => $"{e.Key}: {string.Join(" ", e.Value)}")));
+			}
 
-		return Guarded(async () => (await sidecar.SearchAsync(request, cancellationToken)).ToContract());
+			return await corpus.SearchAsync(request, cancellationToken);
+		});
 	}
 
 	[McpServerTool(Name = "get_document", Title = "Get a document", ReadOnly = true, Idempotent = true, UseStructuredContent = true)]
@@ -64,6 +68,7 @@ public sealed class MemoriaTools(IMemoriaQmdClient sidecar, ICallerScope scope, 
 		[Description("false returns metadata only. Default true.")] bool? includeBody = null,
 		CancellationToken cancellationToken = default)
 	{
+		audit.SetOperation("mcp.get_document");
 		if (string.IsNullOrWhiteSpace(reference))
 		{
 			throw new McpException("reference is required.");
@@ -71,13 +76,8 @@ public sealed class MemoriaTools(IMemoriaQmdClient sidecar, ICallerScope scope, 
 
 		return Guarded(async () =>
 		{
-			SidecarDocument document = await sidecar.GetDocumentAsync(reference, new SidecarDocumentQuery(fromLine, maxLines, lineNumbers, includeBody), cancellationToken);
-			if (!scope.Allows(document.Collection))
-			{
-				throw new McpException($"No document matches '{reference}'.");
-			}
-
-			return document.ToContract();
+			Document? document = await corpus.GetDocumentAsync(reference, new SidecarDocumentQuery(fromLine, maxLines, lineNumbers, includeBody), cancellationToken);
+			return document ?? throw new McpException($"not_found: {SidecarDisclosure.NotFoundMessage}");
 		});
 	}
 
@@ -93,6 +93,7 @@ public sealed class MemoriaTools(IMemoriaQmdClient sidecar, ICallerScope scope, 
 		[Description("false returns metadata only. Default true.")] bool? includeBody = null,
 		CancellationToken cancellationToken = default)
 	{
+		audit.SetOperation("mcp.get_documents");
 		bool hasIds = ids is { Length: > 0 };
 		bool hasPattern = !string.IsNullOrWhiteSpace(pattern);
 		if (!hasIds && !hasPattern)
@@ -105,56 +106,39 @@ public sealed class MemoriaTools(IMemoriaQmdClient sidecar, ICallerScope scope, 
 			throw new McpException("At most 200 ids per call.");
 		}
 
-		return Guarded(async () =>
+		return Guarded(() => corpus.MultiGetAsync(new SidecarMultiGetRequest
 		{
-			SidecarMultiGetResponse response = await sidecar.MultiGetAsync(new SidecarMultiGetRequest
-			{
-				Ids = hasIds ? ids : null,
-				Pattern = hasPattern ? pattern : null,
-				MaxBytes = maxBytes,
-				MaxLines = maxLines,
-				IncludeBody = includeBody,
-			}, cancellationToken);
-
-			return new MultiGetResult(
-				response.Docs.Where(d => scope.Allows(d.Collection)).Select(ContractMapping.ToContract).ToArray(),
-				response.Skipped.Select(s => new SkippedDocument(s.File, s.Reason)).ToArray(),
-				response.Errors);
-		});
+			Ids = hasIds ? ids : null,
+			Pattern = hasPattern ? pattern : null,
+			MaxBytes = maxBytes,
+			MaxLines = maxLines,
+			IncludeBody = includeBody,
+		}, cancellationToken));
 	}
 
 	[McpServerTool(Name = "list_collections", Title = "List collections", ReadOnly = true, Idempotent = true, UseStructuredContent = true)]
 	[Description("List the collections you can search, with document counts and a short description of what each holds.")]
 	public Task<CollectionList> ListCollectionsAsync(CancellationToken cancellationToken = default)
 	{
-		return Guarded(async () =>
-		{
-			SidecarCollectionsResponse response = await sidecar.ListCollectionsAsync(cancellationToken);
-			return new CollectionList(response.Collections.Where(c => scope.Allows(c.Name)).Select(ContractMapping.ToContract).ToArray());
-		});
+		audit.SetOperation("mcp.list_collections");
+		return Guarded(() => corpus.ListCollectionsAsync(cancellationToken));
 	}
 
 	[McpServerTool(Name = "status", Title = "Index status", ReadOnly = true, Idempotent = true, UseStructuredContent = true)]
-	[Description("Index totals: documents indexed, documents awaiting embedding, whether vector search is available, and per-collection counts.")]
+	[Description("Totals for the collections you can read: documents indexed, whether vector search is available, and per-collection counts. needsEmbedding covers the whole index, so it is null for a collection-scoped key.")]
 	public Task<IndexStatus> GetStatusAsync(CancellationToken cancellationToken = default)
 	{
-		return Guarded(async () =>
-		{
-			SidecarStatus status = await sidecar.GetStatusAsync(cancellationToken);
-			return new IndexStatus(
-				status.TotalDocuments,
-				status.NeedsEmbedding,
-				status.HasVectorIndex,
-				status.Collections.Where(c => scope.Allows(c.Name)).Select(ContractMapping.ToContract).ToArray());
-		});
+		audit.SetOperation("mcp.status");
+		return Guarded(() => corpus.GetStatusAsync(cancellationToken));
 	}
 
 	/// <summary>
 	/// The SDK hides the message of any exception that is not an <see cref="McpException"/>;
-	/// surface the sidecar's code and message so the model can act on "not_found"
-	/// or "sidecar_unreachable" instead of a generic failure.
+	/// surface the sidecar's code and whatever <see cref="SidecarDisclosure"/> lets
+	/// this caller see, so the model can act on "not_found" or "sidecar_unreachable"
+	/// instead of a generic failure.
 	/// </summary>
-	private static async Task<T> Guarded<T>(Func<Task<T>> action)
+	private async Task<T> Guarded<T>(Func<Task<T>> action)
 	{
 		try
 		{
@@ -162,7 +146,8 @@ public sealed class MemoriaTools(IMemoriaQmdClient sidecar, ICallerScope scope, 
 		}
 		catch (SidecarException ex)
 		{
-			throw new McpException($"{ex.Code}: {ex.Message}", ex);
+			SidecarFailureView view = SidecarDisclosure.For(ex, scope);
+			throw new McpException($"{view.Code}: {view.Message}", ex);
 		}
 		catch (CollectionForbiddenException ex)
 		{

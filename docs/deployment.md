@@ -174,8 +174,12 @@ docker build -t memoria-api:local .
 docker run --rm -p 8080:8080 \
   -e Memoria__Sidecar__BaseUrl=http://host.docker.internal:8282 \
   -e Memoria__Sidecar__Secret="$MEMORIA_QMD_SECRET" \
+  -v memoria-data:/data \
   memoria-api:local
 ```
+
+The image sets `Memoria__Auth__DatabasePath=/data/control.db`. Without a volume on
+`/data` the database dies with the container, and every key with it.
 
 ## Compose on the homelab
 
@@ -198,6 +202,34 @@ exist yet.
 Containers reach the sidecar on the desktop over the LAN with no special
 Docker networking: bridge networks NAT outbound traffic.
 
+### The control database volume
+
+API keys and the audit log live in a SQLite file at `/data/control.db`, on the
+`memoria-data` named volume the compose file declares. **The volume is required.**
+Unlike QMD's index, this is durable state that cannot be rebuilt: losing it revokes
+every key and loses the audit trail. Keep it on a local disk, because SQLite's WAL
+mode does not work over a network share, and include the volume in backups.
+
+### The first admin key
+
+Nothing can call the API until a key exists. Create the first one with a one-off
+container on the same volume. It prints the key once on stdout, and exits without
+starting a host:
+
+```bash
+docker compose -f deploy/compose.yaml run --rm --no-deps memoria-api \
+  --bootstrap-admin-key homelab-admin
+```
+
+The key is never stored in plaintext and cannot be shown again, so copy it into
+your password manager now. The command refuses while an active admin key exists;
+pass `--allow-additional-admin` after the label to add another deliberately. If you
+lose the only admin key, run the command with that flag, then revoke the lost key
+with the new one.
+
+This key has only the `admin` scope and cannot read the corpus. Issue clients their
+own scoped keys with it; see [configuration.md](configuration.md#memoriaauth--api-keys-rate-limits-audit).
+
 ### Required environment
 
 | Variable | Purpose |
@@ -205,6 +237,7 @@ Docker networking: bridge networks NAT outbound traffic.
 | `MEMORIA_VERSION` | Compose only: the image tag to run, e.g. `0.1.0`. |
 | `Memoria__Sidecar__BaseUrl` | Where the sidecar listens, e.g. `http://192.168.1.20:8282`. |
 | `Memoria__Sidecar__Secret` | The sidecar's `MEMORIA_QMD_SECRET`. The API refuses to start without it when the sidecar is not on loopback. |
+| `Memoria__Auth__DatabasePath` | Where the control database lives. The image sets it to `/data/control.db`. The API refuses to start without it unless `Memoria__Auth__Mode` is explicitly `Disabled`. |
 
 Everything else has a default. Pass secrets through the environment or a
 Docker secret; never bake them into the image or commit them.
@@ -226,19 +259,24 @@ needs one proxy host entry:
 `X-Trace-Id` on every response, and `traceId` in every problem-details body,
 are the ids to grep for in the API's and the sidecar's logs.
 
+Rate limits and the audit trail key on the API key, so they need nothing from the
+proxy. The proxy must terminate TLS: a key on plain HTTP is readable by anyone on
+the path. Do not log the `Authorization` header in the proxy's access log.
+
+`/ready` stays anonymous so an orchestrator can probe it, and tells anonymous
+callers only `ready` or `not_ready`. See
+[configuration.md](configuration.md#anonymous-routes).
+
 ## Exposure is gated
 
 Nothing in this repository exposes Memoria to the internet, and nothing
-should until two things land:
+should until **homelab hardening** (patching, firewall review) lands: the host
+epic's "patch homelab before public exposure" issue. API keys with collection
+scopes are enforced by default, but a key is only as private as the transport,
+so TLS through the proxy is part of that gate. `Memoria:Auth:Mode = Disabled` is
+for a trusted LAN and must never be set on an exposed host.
 
-1. **Homelab hardening** (patching, firewall review) — the host epic's
-   "patch homelab before public exposure" issue.
-2. **API keys with collection scopes** — the auth epic. Until then every
-   caller is unrestricted, which is acceptable on a trusted LAN and nowhere
-   else. `MemoriaScopeAttribute` and `ICallerScope` are already on every
-   endpoint so enforcing keys touches no endpoint code.
-
-Until both are done: keep the compose port on `127.0.0.1` or the LAN address,
+Until hardening is done: keep the compose port on `127.0.0.1` or the LAN address,
 do not create the proxy host entry, and do not forward a router port.
 
 ## Deployment checklist
@@ -277,7 +315,7 @@ has been bypassed entirely. When auditing the deployment, check that:
 
 - the sidecar port (8282) is reachable from the API host and from nowhere
   outside the LAN;
-- the API host's firewall allows 8080 only from the proxy (or the LAN during
-  the pre-auth phase);
+- the API host's firewall allows 8080 only from the proxy (or the LAN until the
+  proxy entry exists);
 - the sidecar's `MEMORIA_QMD_HOST` is the LAN address, never `0.0.0.0` on a
   machine with a public interface.

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Memoria.Api.Auth;
 using Microsoft.AspNetCore.Http.Metadata;
 
 namespace Memoria.Api.Http;
@@ -8,7 +9,8 @@ namespace Memoria.Api.Http;
 /// header so a client can quote the id that ties the API's line to the
 /// sidecar's. Registered outermost so it observes the final status code,
 /// including the one the exception handler wrote. Probes log at Debug to
-/// keep the stream readable.
+/// keep the stream readable. It logs the route template and the public key id,
+/// and never the query string, request headers or any part of a key's secret.
 /// </summary>
 public sealed partial class RequestLoggingMiddleware(RequestDelegate next, ILogger<RequestLoggingMiddleware> logger)
 {
@@ -37,18 +39,19 @@ public sealed partial class RequestLoggingMiddleware(RequestDelegate next, ILogg
 			string route = context.GetEndpoint()?.Metadata.GetMetadata<IRouteDiagnosticsMetadata>()?.Route ?? context.Request.Path.Value ?? "/";
 			string method = context.Request.Method;
 			string? remote = context.Connection.RemoteIpAddress?.ToString();
+			string? keyId = context.User.FindFirst(MemoriaClaims.KeyId)?.Value;
 
 			if (status >= 500)
 			{
-				LogServerError(logger, method, route, status, elapsedMs, traceId, remote);
+				LogServerError(logger, method, route, status, elapsedMs, traceId, remote, keyId);
 			}
 			else if (IsProbe(context.Request.Path))
 			{
-				LogProbe(logger, method, route, status, elapsedMs, traceId, remote);
+				LogProbe(logger, method, route, status, elapsedMs, traceId, remote, keyId);
 			}
 			else
 			{
-				LogRequest(logger, method, route, status, elapsedMs, traceId, remote);
+				LogRequest(logger, method, route, status, elapsedMs, traceId, remote, keyId);
 			}
 		}
 	}
@@ -64,12 +67,12 @@ public sealed partial class RequestLoggingMiddleware(RequestDelegate next, ILogg
 		return path.Equals("/health", StringComparison.OrdinalIgnoreCase) || path.Equals("/ready", StringComparison.OrdinalIgnoreCase);
 	}
 
-	[LoggerMessage(EventId = 1000, Level = LogLevel.Information, Message = "HTTP {Method} {Route} -> {StatusCode} in {ElapsedMs:0.0} ms (trace {TraceId}, from {RemoteIp})")]
-	private static partial void LogRequest(ILogger logger, string method, string route, int statusCode, double elapsedMs, string traceId, string? remoteIp);
+	[LoggerMessage(EventId = 1000, Level = LogLevel.Information, Message = "HTTP {Method} {Route} -> {StatusCode} in {ElapsedMs:0.0} ms (trace {TraceId}, from {RemoteIp}, key {KeyId})")]
+	private static partial void LogRequest(ILogger logger, string method, string route, int statusCode, double elapsedMs, string traceId, string? remoteIp, string? keyId);
 
-	[LoggerMessage(EventId = 1001, Level = LogLevel.Debug, Message = "HTTP {Method} {Route} -> {StatusCode} in {ElapsedMs:0.0} ms (trace {TraceId}, from {RemoteIp})")]
-	private static partial void LogProbe(ILogger logger, string method, string route, int statusCode, double elapsedMs, string traceId, string? remoteIp);
+	[LoggerMessage(EventId = 1001, Level = LogLevel.Debug, Message = "HTTP {Method} {Route} -> {StatusCode} in {ElapsedMs:0.0} ms (trace {TraceId}, from {RemoteIp}, key {KeyId})")]
+	private static partial void LogProbe(ILogger logger, string method, string route, int statusCode, double elapsedMs, string traceId, string? remoteIp, string? keyId);
 
-	[LoggerMessage(EventId = 1002, Level = LogLevel.Error, Message = "HTTP {Method} {Route} -> {StatusCode} in {ElapsedMs:0.0} ms (trace {TraceId}, from {RemoteIp})")]
-	private static partial void LogServerError(ILogger logger, string method, string route, int statusCode, double elapsedMs, string traceId, string? remoteIp);
+	[LoggerMessage(EventId = 1002, Level = LogLevel.Error, Message = "HTTP {Method} {Route} -> {StatusCode} in {ElapsedMs:0.0} ms (trace {TraceId}, from {RemoteIp}, key {KeyId})")]
+	private static partial void LogServerError(ILogger logger, string method, string route, int statusCode, double elapsedMs, string traceId, string? remoteIp, string? keyId);
 }

@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using Memoria.Api.Http;
+using Memoria.Api.Search;
 using Memoria.Core.Contracts;
 using Memoria.Core.Sidecar;
 using Microsoft.AspNetCore.Http.HttpResults;
@@ -25,7 +26,9 @@ public static class DocumentEndpoints
 			.WithSummary("Get several documents")
 			.WithDescription(
 				"Batch fetch by a list of references (paths or docids), by a glob such as `claude-sessions/2026-05*.md`, or both. "
-				+ "Bodies are capped at `maxBytes` each (default 64 KiB); documents over the cap are listed under `skipped`.")
+				+ "Bodies are capped at `maxBytes` each (default 64 KiB); documents over the cap are listed under `skipped`. "
+				+ "For a collection-scoped key every list is filtered per result and `errors` is always empty: "
+				+ "a reference that matched nothing the key may read is simply absent.")
 			.WithTags("Documents")
 			.ProducesValidationProblem();
 
@@ -38,29 +41,27 @@ public static class DocumentEndpoints
 		[FromQuery(Name = "maxLines")][Description("Number of lines to return from `fromLine`.")] int? maxLines,
 		[FromQuery(Name = "lineNumbers")][Description("Prefix each body line with `N: `.")] bool? lineNumbers,
 		[FromQuery(Name = "body")][Description("false returns metadata only.")] bool? body,
-		IMemoriaQmdClient sidecar,
-		ICallerScope scope,
+		ScopedCorpus corpus,
 		CancellationToken cancellationToken)
 	{
 		if (string.IsNullOrWhiteSpace(id))
 		{
-			return NotFound(id);
+			return NotFound();
 		}
 
-		SidecarDocument document = await sidecar.GetDocumentAsync(
+		Document? document = await corpus.GetDocumentAsync(
 			id,
 			new SidecarDocumentQuery(fromLine, maxLines, lineNumbers, body),
 			cancellationToken);
 
 		// A document outside the caller's scope is indistinguishable from a
 		// missing one; do not confirm that it exists.
-		return scope.Allows(document.Collection) ? TypedResults.Ok(document.ToContract()) : NotFound(id);
+		return document is null ? NotFound() : TypedResults.Ok(document);
 	}
 
 	private static async Task<Results<Ok<MultiGetResult>, ValidationProblem>> MultiGetAsync(
 		MultiGetRequest request,
-		IMemoriaQmdClient sidecar,
-		ICallerScope scope,
+		ScopedCorpus corpus,
 		CancellationToken cancellationToken)
 	{
 		Dictionary<string, string[]> errors = [];
@@ -92,7 +93,7 @@ public static class DocumentEndpoints
 			return TypedResults.ValidationProblem(errors);
 		}
 
-		SidecarMultiGetResponse response = await sidecar.MultiGetAsync(new SidecarMultiGetRequest
+		return TypedResults.Ok(await corpus.MultiGetAsync(new SidecarMultiGetRequest
 		{
 			Ids = hasIds ? request.Ids : null,
 			Pattern = hasPattern ? request.Pattern : null,
@@ -100,20 +101,15 @@ public static class DocumentEndpoints
 			MaxLines = request.MaxLines,
 			LineNumbers = request.LineNumbers,
 			IncludeBody = request.IncludeBody,
-		}, cancellationToken);
-
-		return TypedResults.Ok(new MultiGetResult(
-			response.Docs.Where(d => scope.Allows(d.Collection)).Select(ContractMapping.ToContract).ToArray(),
-			response.Skipped.Select(s => new SkippedDocument(s.File, s.Reason)).ToArray(),
-			response.Errors));
+		}, cancellationToken));
 	}
 
-	private static ProblemHttpResult NotFound(string id)
+	private static ProblemHttpResult NotFound()
 	{
 		return TypedResults.Problem(
 			statusCode: StatusCodes.Status404NotFound,
 			title: "Not found",
-			detail: $"No document matches '{id}'.",
+			detail: SidecarDisclosure.NotFoundMessage,
 			extensions: new Dictionary<string, object?> { ["code"] = "not_found" });
 	}
 }

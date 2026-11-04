@@ -6,6 +6,11 @@
 #   MEMORIA_SIDECAR_URL=http://192.168.1.20:8282 \
 #   MEMORIA_SIDECAR_SECRET=... \
 #   docker compose -f deploy/compose.yaml up -d
+#
+# Create the first admin key, once, with the same environment set:
+#
+#   docker compose -f deploy/compose.yaml run --rm --no-deps memoria-api \
+#     --bootstrap-admin-key homelab-admin
 
 services:
   memoria-api:
@@ -17,10 +22,15 @@ services:
       Memoria__Sidecar__Secret: ${MEMORIA_SIDECAR_SECRET:?set MEMORIA_SIDECAR_SECRET to the sidecar's MEMORIA_QMD_SECRET}
       Memoria__Sidecar__ReadyRequiresModels: "true"
       Memoria__Search__RerankByDefault: "true"
+      Memoria__Auth__DatabasePath: /data/control.db
+    volumes:
+      # API keys and the audit log. Durable and not rebuildable, unlike QMD's
+      # index: losing this volume revokes every key. Keep it on a local disk.
+      - memoria-data:/data
     ports:
       # LAN only. Public exposure goes through the reverse proxy once the
-      # homelab hardening and API-key work land; do not publish on 0.0.0.0 of
-      # a host with a public interface before then.
+      # homelab hardening work lands; do not publish on 0.0.0.0 of a host with a
+      # public interface before then.
       - "${MEMORIA_BIND_ADDRESS:-127.0.0.1}:8080:8080"
     healthcheck:
       test: ["CMD", "dotnet", "Memoria.Api.dll", "--health-check"]
@@ -28,3 +38,6 @@ services:
       timeout: 5s
       start_period: 10s
       retries: 3
+
+volumes:
+  memoria-data:

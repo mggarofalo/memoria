@@ -24,6 +24,15 @@ public sealed class MemoriaDocumentTransformer : IOpenApiDocumentTransformer
 			Contact = new OpenApiContact { Name = "Memoria", Url = new Uri("https://github.com/mggarofalo/memoria") },
 		};
 		document.Servers = [new OpenApiServer { Url = "/", Description = "The origin this document was fetched from." }];
+		document.Components ??= new OpenApiComponents();
+		document.Components.SecuritySchemes ??= new Dictionary<string, IOpenApiSecurityScheme>();
+		document.Components.SecuritySchemes[SecurityOperationTransformer.SchemeName] = new OpenApiSecurityScheme
+		{
+			Type = SecuritySchemeType.Http,
+			Scheme = "bearer",
+			BearerFormat = "mem_<id>_<secret>",
+			Description = "A Memoria API key.",
+		};
 		return Task.CompletedTask;
 	}
 }

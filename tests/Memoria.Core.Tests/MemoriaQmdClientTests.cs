@@ -102,6 +102,35 @@ public sealed class MemoriaQmdClientTests
 		Assert.Null(document.Metadata!.Branch);
 	}
 
+	[Theory]
+	[InlineData("../status")]
+	[InlineData("./status")]
+	[InlineData("a/../../status")]
+	[InlineData("qmd://a/../../../reindex/jobs")]
+	public async Task GetDocument_RefusesDotSegments_WithoutAnyRequest(string reference)
+	{
+		(MemoriaQmdClient client, FakeHttpHandler handler) = Create();
+
+		SidecarException failure = await Assert.ThrowsAsync<SidecarException>(() => client.GetDocumentAsync(reference));
+
+		Assert.Equal(HttpStatusCode.NotFound, failure.StatusCode);
+		Assert.Equal("not_found", failure.Code);
+		Assert.Empty(handler.Requests);
+	}
+
+	[Theory]
+	[InlineData("a/b..md", "docs/a/b..md")]
+	[InlineData("a/.hidden.md", "docs/a/.hidden.md")]
+	public async Task GetDocument_AllowsDotsInsideNames(string reference, string expected)
+	{
+		(MemoriaQmdClient client, FakeHttpHandler handler) = Create();
+		handler.Respond(HttpStatusCode.OK, Fixtures.Document);
+
+		await client.GetDocumentAsync(reference);
+
+		Assert.Equal(new Uri(BaseAddress, expected), Assert.Single(handler.Requests).Uri);
+	}
+
 	[Fact]
 	public async Task GetReadiness_Returns503BodyAsNotReady()
 	{

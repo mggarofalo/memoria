@@ -3,7 +3,7 @@ namespace Memoria.Api.Configuration;
 /// <summary>
 /// Root of the <c>Memoria</c> configuration section. Each child is one
 /// concern the host owns. Sections that later epics add keep this shape:
-/// API-key auth adds <c>Auth</c> (keys and collection scopes), the control plane adds
+/// the control plane adds
 /// <c>Workers</c> (the inference pool: name, url, token reference,
 /// capabilities, priority, availability thresholds) and <c>Queue</c>
 /// (concurrency, batch budget, priority classes). See docs/configuration.md.
@@ -17,6 +17,52 @@ public sealed class MemoriaOptions
 	public SearchOptions Search { get; set; } = new();
 
 	public McpOptions Mcp { get; set; } = new();
+
+	public AuthOptions Auth { get; set; } = new();
+}
+
+/// <summary>How callers authenticate.</summary>
+public enum AuthMode
+{
+	/// <summary>Every <c>/v1</c> and MCP route requires a key. The default: omitting the setting fails closed.</summary>
+	ApiKey = 0,
+
+	/// <summary>No authentication at all, for development on a trusted LAN. Must be set explicitly.</summary>
+	Disabled = 1,
+}
+
+/// <summary>API keys, their rate limits and the audit log.</summary>
+public sealed class AuthOptions
+{
+	public AuthMode Mode { get; set; } = AuthMode.ApiKey;
+
+	/// <summary>The SQLite control database holding keys and audit records. Durable state: put it on a volume, apart from QMD's index. Required in <see cref="AuthMode.ApiKey"/> mode.</summary>
+	public string? DatabasePath { get; set; }
+
+	public RateLimitOptions RateLimit { get; set; } = new();
+
+	public AuditOptions Audit { get; set; } = new();
+}
+
+/// <summary>Per-key request limits. Requests without a key are not limited here; they cannot reach the corpus.</summary>
+public sealed class RateLimitOptions
+{
+	public bool Enabled { get; set; } = true;
+
+	/// <summary>Requests one key may make per <see cref="Window"/>.</summary>
+	public int PermitLimit { get; set; } = 120;
+
+	public TimeSpan Window { get; set; } = TimeSpan.FromMinutes(1);
+}
+
+/// <summary>What the audit log keeps.</summary>
+public sealed class AuditOptions
+{
+	/// <summary>Also record search queries and document references. Off by default: queries can be as sensitive as the corpus.</summary>
+	public bool IncludeQueries { get; set; }
+
+	/// <summary>Days to keep audit records. Zero or less keeps them forever.</summary>
+	public int RetentionDays { get; set; } = 90;
 }
 
 /// <summary>The outward MCP server Claude clients connect to.</summary>

@@ -12,9 +12,28 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/oapi-codegen/runtime"
 )
+
+// ApiKeyInfo defines model for ApiKeyInfo.
+type ApiKeyInfo struct {
+	AllCollections bool       `json:"allCollections"`
+	Collections    []string   `json:"collections"`
+	CreatedAt      time.Time  `json:"createdAt"`
+	ExpiresAt      *time.Time `json:"expiresAt"`
+	Id             string     `json:"id"`
+	Label          string     `json:"label"`
+	LastUsedAt     *time.Time `json:"lastUsedAt"`
+	RevokedAt      *time.Time `json:"revokedAt"`
+	Scopes         []string   `json:"scopes"`
+}
+
+// ApiKeyList defines model for ApiKeyList.
+type ApiKeyList struct {
+	Keys []ApiKeyInfo `json:"keys"`
+}
 
 // CollectionInfo defines model for CollectionInfo.
 type CollectionInfo struct {
@@ -28,6 +47,15 @@ type CollectionInfo struct {
 // CollectionList defines model for CollectionList.
 type CollectionList struct {
 	Collections []CollectionInfo `json:"collections"`
+}
+
+// CreateApiKeyRequest defines model for CreateApiKeyRequest.
+type CreateApiKeyRequest struct {
+	AllCollections *bool      `json:"allCollections"`
+	Collections    *[]string  `json:"collections"`
+	ExpiresAt      *time.Time `json:"expiresAt"`
+	Label          *string    `json:"label"`
+	Scopes         *[]string  `json:"scopes"`
 }
 
 // Document defines model for Document.
@@ -85,8 +113,14 @@ type IndexCollectionStatus struct {
 type IndexStatus struct {
 	Collections    []IndexCollectionStatus `json:"collections"`
 	HasVectorIndex bool                    `json:"hasVectorIndex"`
-	NeedsEmbedding int32                   `json:"needsEmbedding"`
+	NeedsEmbedding *int32                  `json:"needsEmbedding"`
 	TotalDocuments int32                   `json:"totalDocuments"`
+}
+
+// IssuedApiKey defines model for IssuedApiKey.
+type IssuedApiKey struct {
+	Info ApiKeyInfo `json:"info"`
+	Key  string     `json:"key"`
 }
 
 // MultiGetRequest defines model for MultiGetRequest.
@@ -235,7 +269,7 @@ type SearchParams struct {
 	// Query Plain-text query. QMD expands it into lexical and semantic sub-queries.
 	Query *string `form:"query,omitempty" json:"query,omitempty"`
 
-	// Collection Collection to search. Repeat for several. Defaults to the configured default set, else QMD's default-included collections.
+	// Collection Collection to search. Repeat for several; names are case-sensitive. Omitted, a collection-scoped key searches all its collections; other callers get the configured default set, else QMD's default-included collections. A collection outside the key's scope is refused with 403.
 	Collection *[]string `form:"collection,omitempty" json:"collection,omitempty"`
 
 	// Limit Maximum results, 1 to the configured ceiling (100). Default 10.
@@ -268,6 +302,9 @@ type SearchParams struct {
 	// Tag Frontmatter filter: every listed tag must be present (case-insensitive). Repeatable.
 	Tag *[]string `form:"tag,omitempty" json:"tag,omitempty"`
 }
+
+// CreateApiKeyJSONRequestBody defines body for CreateApiKey for application/json ContentType.
+type CreateApiKeyJSONRequestBody = CreateApiKeyRequest
 
 // GetDocumentsJSONRequestBody defines body for GetDocuments for application/json ContentType.
 type GetDocumentsJSONRequestBody = MultiGetRequest
@@ -348,35 +385,74 @@ type ClientInterface interface {
 
 	// Health Liveness
 	//
-	// The API process is up. Does not contact the search backend; use `/ready` for that.
+	// The API process is up. Anonymous. Does not contact the search backend; use `/ready` for that.
 	//
 	// Corresponds with GET /health (the `Health` operationId).
 	Health(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// Ready Readiness
 	//
-	// Probes the memoria-qmd sidecar. 200 when its index is open and, by default, its models are resident; 503 with the same body shape while it warms up or when it cannot be reached.
+	// Probes the memoria-qmd sidecar. 200 when its index is open and, by default, its models are resident; 503 with the same body shape while it warms up or when it cannot be reached. Anonymous for orchestrators: without an admin key the body says only `ready` or `not_ready`, with `reason` and `sidecar` null. An admin key gets the full report.
 	//
 	// Corresponds with GET /ready (the `Ready` operationId).
 	Ready(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ListApiKeys List API keys
+	//
+	// Every key, including revoked and expired ones. Never includes key material. Requires the `admin` scope.
+	//
+	// Corresponds with GET /v1/admin/keys (the `ListApiKeys` operationId).
+	ListApiKeys(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// CreateApiKeyWithBody Issue an API key
+	//
+	// Creates a key and returns its plaintext. This response is the only time the plaintext exists. `read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. Requires the `admin` scope.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with POST /v1/admin/keys (the `CreateApiKey` operationId).
+	CreateApiKeyWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// CreateApiKey Issue an API key
+	//
+	// Creates a key and returns its plaintext. This response is the only time the plaintext exists. `read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. Requires the `admin` scope.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with POST /v1/admin/keys (the `CreateApiKey` operationId).
+	CreateApiKey(ctx context.Context, body CreateApiKeyJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RevokeApiKey Revoke an API key
+	//
+	// Takes effect on the key's next request. Revoking a revoked key succeeds and keeps the original timestamp. Requires the `admin` scope.
+	//
+	// Corresponds with DELETE /v1/admin/keys/{id} (the `RevokeApiKey` operationId).
+	RevokeApiKey(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RotateApiKey Rotate an API key
+	//
+	// Replaces the key's secret and returns the new plaintext, once. The id, scopes, collections and expiry stay; the previous token stops working immediately. A revoked or expired key cannot be rotated (409). Requires the `admin` scope.
+	//
+	// Corresponds with POST /v1/admin/keys/{id}:rotate (the `RotateApiKey` operationId).
+	RotateApiKey(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// ListCollections List collections
 	//
-	// Every collection the caller may search, with its active document count and root context.
+	// Every collection the caller may search, with its active document count and root context. Requires the `read` scope.
 	//
 	// Corresponds with GET /v1/collections (the `ListCollections` operationId).
 	ListCollections(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetDocument Get one document
 	//
-	// Fetch a document by display path (`collection/path.md`), by `qmd://` URI, or by its six-character docid. `fromLine` and `maxLines` narrow the body to the lines around a search hit; `body=false` returns metadata only.
+	// Fetch a document by display path (`collection/path.md`), by `qmd://` URI, or by its six-character docid. `fromLine` and `maxLines` narrow the body to the lines around a search hit; `body=false` returns metadata only. Requires the `read` scope.
 	//
 	// Corresponds with GET /v1/docs/{id} (the `GetDocument` operationId).
 	GetDocument(ctx context.Context, id string, params *GetDocumentParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetDocumentsWithBody Get several documents
 	//
-	// Batch fetch by a list of references (paths or docids), by a glob such as `claude-sessions/2026-05*.md`, or both. Bodies are capped at `maxBytes` each (default 64 KiB); documents over the cap are listed under `skipped`.
+	// Batch fetch by a list of references (paths or docids), by a glob such as `claude-sessions/2026-05*.md`, or both. Bodies are capped at `maxBytes` each (default 64 KiB); documents over the cap are listed under `skipped`. For a collection-scoped key every list is filtered per result and `errors` is always empty: a reference that matched nothing the key may read is simply absent. Requires the `read` scope.
 	//
 	// Takes any type of body and a specified content type.
 	//
@@ -385,7 +461,7 @@ type ClientInterface interface {
 
 	// GetDocuments Get several documents
 	//
-	// Batch fetch by a list of references (paths or docids), by a glob such as `claude-sessions/2026-05*.md`, or both. Bodies are capped at `maxBytes` each (default 64 KiB); documents over the cap are listed under `skipped`.
+	// Batch fetch by a list of references (paths or docids), by a glob such as `claude-sessions/2026-05*.md`, or both. Bodies are capped at `maxBytes` each (default 64 KiB); documents over the cap are listed under `skipped`. For a collection-scoped key every list is filtered per result and `errors` is always empty: a reference that matched nothing the key may read is simply absent. Requires the `read` scope.
 	//
 	// Takes a body of the `application/json` content type.
 	//
@@ -394,14 +470,14 @@ type ClientInterface interface {
 
 	// Search Search the corpus
 	//
-	// Hybrid search over the indexed documents: BM25 and vector retrieval fused by reciprocal rank, then reranked by a cross-encoder unless `rerank=false`. Reranked queries take a few seconds; `rerank=false` returns fused results in well under a second. Frontmatter filters (`project`, `branch`, `since`, `until`, `tag`) are applied after retrieval, so a filtered result set can be shorter than `limit` even when more matches exist.
+	// Hybrid search over the indexed documents: BM25 and vector retrieval fused by reciprocal rank, then reranked by a cross-encoder unless `rerank=false`. Reranked queries take a few seconds; `rerank=false` returns fused results in well under a second. Frontmatter filters (`project`, `branch`, `since`, `until`, `tag`) are applied after retrieval, so a filtered result set can be shorter than `limit` even when more matches exist. Requires the `read` scope.
 	//
 	// Corresponds with GET /v1/search (the `Search` operationId).
 	Search(ctx context.Context, params *SearchParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetStatus Index status
 	//
-	// Totals for the index: documents, documents awaiting embedding, whether a vector index exists, and per-collection counts.
+	// Totals for the collections the caller may read, whether a vector index exists, and per-collection counts. `needsEmbedding` is the backlog for the whole index, so it is null for a collection-scoped key. Requires the `read` scope.
 	//
 	// Corresponds with GET /v1/status (the `GetStatus` operationId).
 	GetStatus(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -409,7 +485,7 @@ type ClientInterface interface {
 
 // Health Liveness
 //
-// The API process is up. Does not contact the search backend; use `/ready` for that.
+// The API process is up. Anonymous. Does not contact the search backend; use `/ready` for that.
 //
 // Corresponds with GET /health (the `Health` operationId).
 func (c *Client) Health(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
@@ -426,7 +502,7 @@ func (c *Client) Health(ctx context.Context, reqEditors ...RequestEditorFn) (*ht
 
 // Ready Readiness
 //
-// Probes the memoria-qmd sidecar. 200 when its index is open and, by default, its models are resident; 503 with the same body shape while it warms up or when it cannot be reached.
+// Probes the memoria-qmd sidecar. 200 when its index is open and, by default, its models are resident; 503 with the same body shape while it warms up or when it cannot be reached. Anonymous for orchestrators: without an admin key the body says only `ready` or `not_ready`, with `reason` and `sidecar` null. An admin key gets the full report.
 //
 // Corresponds with GET /ready (the `Ready` operationId).
 func (c *Client) Ready(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
@@ -441,9 +517,98 @@ func (c *Client) Ready(ctx context.Context, reqEditors ...RequestEditorFn) (*htt
 	return c.Client.Do(req)
 }
 
+// ListApiKeys List API keys
+//
+// Every key, including revoked and expired ones. Never includes key material. Requires the `admin` scope.
+//
+// Corresponds with GET /v1/admin/keys (the `ListApiKeys` operationId).
+func (c *Client) ListApiKeys(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListApiKeysRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// CreateApiKeyWithBody Issue an API key
+//
+// Creates a key and returns its plaintext. This response is the only time the plaintext exists. `read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. Requires the `admin` scope.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with POST /v1/admin/keys (the `CreateApiKey` operationId).
+func (c *Client) CreateApiKeyWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateApiKeyRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// CreateApiKey Issue an API key
+//
+// Creates a key and returns its plaintext. This response is the only time the plaintext exists. `read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. Requires the `admin` scope.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with POST /v1/admin/keys (the `CreateApiKey` operationId).
+func (c *Client) CreateApiKey(ctx context.Context, body CreateApiKeyJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateApiKeyRequest(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// RevokeApiKey Revoke an API key
+//
+// Takes effect on the key's next request. Revoking a revoked key succeeds and keeps the original timestamp. Requires the `admin` scope.
+//
+// Corresponds with DELETE /v1/admin/keys/{id} (the `RevokeApiKey` operationId).
+func (c *Client) RevokeApiKey(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRevokeApiKeyRequest(c.Server, id)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// RotateApiKey Rotate an API key
+//
+// Replaces the key's secret and returns the new plaintext, once. The id, scopes, collections and expiry stay; the previous token stops working immediately. A revoked or expired key cannot be rotated (409). Requires the `admin` scope.
+//
+// Corresponds with POST /v1/admin/keys/{id}:rotate (the `RotateApiKey` operationId).
+func (c *Client) RotateApiKey(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRotateApiKeyRequest(c.Server, id)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 // ListCollections List collections
 //
-// Every collection the caller may search, with its active document count and root context.
+// Every collection the caller may search, with its active document count and root context. Requires the `read` scope.
 //
 // Corresponds with GET /v1/collections (the `ListCollections` operationId).
 func (c *Client) ListCollections(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
@@ -460,7 +625,7 @@ func (c *Client) ListCollections(ctx context.Context, reqEditors ...RequestEdito
 
 // GetDocument Get one document
 //
-// Fetch a document by display path (`collection/path.md`), by `qmd://` URI, or by its six-character docid. `fromLine` and `maxLines` narrow the body to the lines around a search hit; `body=false` returns metadata only.
+// Fetch a document by display path (`collection/path.md`), by `qmd://` URI, or by its six-character docid. `fromLine` and `maxLines` narrow the body to the lines around a search hit; `body=false` returns metadata only. Requires the `read` scope.
 //
 // Corresponds with GET /v1/docs/{id} (the `GetDocument` operationId).
 func (c *Client) GetDocument(ctx context.Context, id string, params *GetDocumentParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
@@ -477,7 +642,7 @@ func (c *Client) GetDocument(ctx context.Context, id string, params *GetDocument
 
 // GetDocumentsWithBody Get several documents
 //
-// Batch fetch by a list of references (paths or docids), by a glob such as `claude-sessions/2026-05*.md`, or both. Bodies are capped at `maxBytes` each (default 64 KiB); documents over the cap are listed under `skipped`.
+// Batch fetch by a list of references (paths or docids), by a glob such as `claude-sessions/2026-05*.md`, or both. Bodies are capped at `maxBytes` each (default 64 KiB); documents over the cap are listed under `skipped`. For a collection-scoped key every list is filtered per result and `errors` is always empty: a reference that matched nothing the key may read is simply absent. Requires the `read` scope.
 //
 // Takes any type of body and a specified content type.
 //
@@ -496,7 +661,7 @@ func (c *Client) GetDocumentsWithBody(ctx context.Context, contentType string, b
 
 // GetDocuments Get several documents
 //
-// Batch fetch by a list of references (paths or docids), by a glob such as `claude-sessions/2026-05*.md`, or both. Bodies are capped at `maxBytes` each (default 64 KiB); documents over the cap are listed under `skipped`.
+// Batch fetch by a list of references (paths or docids), by a glob such as `claude-sessions/2026-05*.md`, or both. Bodies are capped at `maxBytes` each (default 64 KiB); documents over the cap are listed under `skipped`. For a collection-scoped key every list is filtered per result and `errors` is always empty: a reference that matched nothing the key may read is simply absent. Requires the `read` scope.
 //
 // Takes a body of the `application/json` content type.
 //
@@ -515,7 +680,7 @@ func (c *Client) GetDocuments(ctx context.Context, body GetDocumentsJSONRequestB
 
 // Search Search the corpus
 //
-// Hybrid search over the indexed documents: BM25 and vector retrieval fused by reciprocal rank, then reranked by a cross-encoder unless `rerank=false`. Reranked queries take a few seconds; `rerank=false` returns fused results in well under a second. Frontmatter filters (`project`, `branch`, `since`, `until`, `tag`) are applied after retrieval, so a filtered result set can be shorter than `limit` even when more matches exist.
+// Hybrid search over the indexed documents: BM25 and vector retrieval fused by reciprocal rank, then reranked by a cross-encoder unless `rerank=false`. Reranked queries take a few seconds; `rerank=false` returns fused results in well under a second. Frontmatter filters (`project`, `branch`, `since`, `until`, `tag`) are applied after retrieval, so a filtered result set can be shorter than `limit` even when more matches exist. Requires the `read` scope.
 //
 // Corresponds with GET /v1/search (the `Search` operationId).
 func (c *Client) Search(ctx context.Context, params *SearchParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
@@ -532,7 +697,7 @@ func (c *Client) Search(ctx context.Context, params *SearchParams, reqEditors ..
 
 // GetStatus Index status
 //
-// Totals for the index: documents, documents awaiting embedding, whether a vector index exists, and per-collection counts.
+// Totals for the collections the caller may read, whether a vector index exists, and per-collection counts. `needsEmbedding` is the backlog for the whole index, so it is null for a collection-scoped key. Requires the `read` scope.
 //
 // Corresponds with GET /v1/status (the `GetStatus` operationId).
 func (c *Client) GetStatus(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
@@ -594,6 +759,141 @@ func NewReadyRequest(server string) (*http.Request, error) {
 	}
 
 	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewListApiKeysRequest constructs an http.Request for the ListApiKeys method
+func NewListApiKeysRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v1/admin/keys")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewCreateApiKeyRequest calls the generic CreateApiKey builder with application/json body
+func NewCreateApiKeyRequest(server string, body CreateApiKeyJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewCreateApiKeyRequestWithBody(server, "application/json", bodyReader)
+}
+
+// NewCreateApiKeyRequestWithBody constructs an http.Request for the CreateApiKey method, with any body, and a specified content type
+func NewCreateApiKeyRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v1/admin/keys")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewRevokeApiKeyRequest constructs an http.Request for the RevokeApiKey method
+func NewRevokeApiKeyRequest(server string, id string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v1/admin/keys/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodDelete, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewRotateApiKeyRequest constructs an http.Request for the RotateApiKey method
+func NewRotateApiKeyRequest(server string, id string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v1/admin/keys/%s:rotate", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1024,7 +1324,7 @@ type ClientWithResponsesInterface interface {
 
 	// HealthWithResponse Liveness
 	//
-	// The API process is up. Does not contact the search backend; use `/ready` for that.
+	// The API process is up. Anonymous. Does not contact the search backend; use `/ready` for that.
 	//
 	// Returns a wrapper object for the known response body format(s).
 	//
@@ -1033,16 +1333,61 @@ type ClientWithResponsesInterface interface {
 
 	// ReadyWithResponse Readiness
 	//
-	// Probes the memoria-qmd sidecar. 200 when its index is open and, by default, its models are resident; 503 with the same body shape while it warms up or when it cannot be reached.
+	// Probes the memoria-qmd sidecar. 200 when its index is open and, by default, its models are resident; 503 with the same body shape while it warms up or when it cannot be reached. Anonymous for orchestrators: without an admin key the body says only `ready` or `not_ready`, with `reason` and `sidecar` null. An admin key gets the full report.
 	//
 	// Returns a wrapper object for the known response body format(s).
 	//
 	// Corresponds with GET /ready (the `Ready` operationId).
 	ReadyWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ReadyResponse, error)
 
+	// ListApiKeysWithResponse List API keys
+	//
+	// Every key, including revoked and expired ones. Never includes key material. Requires the `admin` scope.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /v1/admin/keys (the `ListApiKeys` operationId).
+	ListApiKeysWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ListApiKeysResponse, error)
+
+	// CreateApiKeyWithBodyWithResponse Issue an API key
+	//
+	// Creates a key and returns its plaintext. This response is the only time the plaintext exists. `read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. Requires the `admin` scope.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /v1/admin/keys (the `CreateApiKey` operationId).
+	CreateApiKeyWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateApiKeyResponse, error)
+
+	// CreateApiKeyWithResponse Issue an API key
+	//
+	// Creates a key and returns its plaintext. This response is the only time the plaintext exists. `read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. Requires the `admin` scope.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /v1/admin/keys (the `CreateApiKey` operationId).
+	CreateApiKeyWithResponse(ctx context.Context, body CreateApiKeyJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateApiKeyResponse, error)
+
+	// RevokeApiKeyWithResponse Revoke an API key
+	//
+	// Takes effect on the key's next request. Revoking a revoked key succeeds and keeps the original timestamp. Requires the `admin` scope.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with DELETE /v1/admin/keys/{id} (the `RevokeApiKey` operationId).
+	RevokeApiKeyWithResponse(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*RevokeApiKeyResponse, error)
+
+	// RotateApiKeyWithResponse Rotate an API key
+	//
+	// Replaces the key's secret and returns the new plaintext, once. The id, scopes, collections and expiry stay; the previous token stops working immediately. A revoked or expired key cannot be rotated (409). Requires the `admin` scope.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /v1/admin/keys/{id}:rotate (the `RotateApiKey` operationId).
+	RotateApiKeyWithResponse(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*RotateApiKeyResponse, error)
+
 	// ListCollectionsWithResponse List collections
 	//
-	// Every collection the caller may search, with its active document count and root context.
+	// Every collection the caller may search, with its active document count and root context. Requires the `read` scope.
 	//
 	// Returns a wrapper object for the known response body format(s).
 	//
@@ -1051,7 +1396,7 @@ type ClientWithResponsesInterface interface {
 
 	// GetDocumentWithResponse Get one document
 	//
-	// Fetch a document by display path (`collection/path.md`), by `qmd://` URI, or by its six-character docid. `fromLine` and `maxLines` narrow the body to the lines around a search hit; `body=false` returns metadata only.
+	// Fetch a document by display path (`collection/path.md`), by `qmd://` URI, or by its six-character docid. `fromLine` and `maxLines` narrow the body to the lines around a search hit; `body=false` returns metadata only. Requires the `read` scope.
 	//
 	// Returns a wrapper object for the known response body format(s).
 	//
@@ -1060,7 +1405,7 @@ type ClientWithResponsesInterface interface {
 
 	// GetDocumentsWithBodyWithResponse Get several documents
 	//
-	// Batch fetch by a list of references (paths or docids), by a glob such as `claude-sessions/2026-05*.md`, or both. Bodies are capped at `maxBytes` each (default 64 KiB); documents over the cap are listed under `skipped`.
+	// Batch fetch by a list of references (paths or docids), by a glob such as `claude-sessions/2026-05*.md`, or both. Bodies are capped at `maxBytes` each (default 64 KiB); documents over the cap are listed under `skipped`. For a collection-scoped key every list is filtered per result and `errors` is always empty: a reference that matched nothing the key may read is simply absent. Requires the `read` scope.
 	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -1069,7 +1414,7 @@ type ClientWithResponsesInterface interface {
 
 	// GetDocumentsWithResponse Get several documents
 	//
-	// Batch fetch by a list of references (paths or docids), by a glob such as `claude-sessions/2026-05*.md`, or both. Bodies are capped at `maxBytes` each (default 64 KiB); documents over the cap are listed under `skipped`.
+	// Batch fetch by a list of references (paths or docids), by a glob such as `claude-sessions/2026-05*.md`, or both. Bodies are capped at `maxBytes` each (default 64 KiB); documents over the cap are listed under `skipped`. For a collection-scoped key every list is filtered per result and `errors` is always empty: a reference that matched nothing the key may read is simply absent. Requires the `read` scope.
 	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -1078,7 +1423,7 @@ type ClientWithResponsesInterface interface {
 
 	// SearchWithResponse Search the corpus
 	//
-	// Hybrid search over the indexed documents: BM25 and vector retrieval fused by reciprocal rank, then reranked by a cross-encoder unless `rerank=false`. Reranked queries take a few seconds; `rerank=false` returns fused results in well under a second. Frontmatter filters (`project`, `branch`, `since`, `until`, `tag`) are applied after retrieval, so a filtered result set can be shorter than `limit` even when more matches exist.
+	// Hybrid search over the indexed documents: BM25 and vector retrieval fused by reciprocal rank, then reranked by a cross-encoder unless `rerank=false`. Reranked queries take a few seconds; `rerank=false` returns fused results in well under a second. Frontmatter filters (`project`, `branch`, `since`, `until`, `tag`) are applied after retrieval, so a filtered result set can be shorter than `limit` even when more matches exist. Requires the `read` scope.
 	//
 	// Returns a wrapper object for the known response body format(s).
 	//
@@ -1087,7 +1432,7 @@ type ClientWithResponsesInterface interface {
 
 	// GetStatusWithResponse Index status
 	//
-	// Totals for the index: documents, documents awaiting embedding, whether a vector index exists, and per-collection counts.
+	// Totals for the collections the caller may read, whether a vector index exists, and per-collection counts. `needsEmbedding` is the backlog for the whole index, so it is null for a collection-scoped key. Requires the `read` scope.
 	//
 	// Returns a wrapper object for the known response body format(s).
 	//
@@ -1184,11 +1529,286 @@ func (r ReadyResponse) ContentType() string {
 	return ""
 }
 
+type ListApiKeysResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *ApiKeyList
+	// ApplicationproblemJSON401 the response for an HTTP 401 `application/problem+json` response
+	ApplicationproblemJSON401 *ProblemDetails
+	// ApplicationproblemJSON403 the response for an HTTP 403 `application/problem+json` response
+	ApplicationproblemJSON403 *ProblemDetails
+	// ApplicationproblemJSON429 the response for an HTTP 429 `application/problem+json` response
+	ApplicationproblemJSON429 *ProblemDetails
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r ListApiKeysResponse) GetJSON200() *ApiKeyList {
+	return r.JSON200
+}
+
+// GetApplicationproblemJSON401 returns the response for an HTTP 401 `application/problem+json` response
+func (r ListApiKeysResponse) GetApplicationproblemJSON401() *ProblemDetails {
+	return r.ApplicationproblemJSON401
+}
+
+// GetApplicationproblemJSON403 returns the response for an HTTP 403 `application/problem+json` response
+func (r ListApiKeysResponse) GetApplicationproblemJSON403() *ProblemDetails {
+	return r.ApplicationproblemJSON403
+}
+
+// GetApplicationproblemJSON429 returns the response for an HTTP 429 `application/problem+json` response
+func (r ListApiKeysResponse) GetApplicationproblemJSON429() *ProblemDetails {
+	return r.ApplicationproblemJSON429
+}
+
+// GetBody returns the raw response body bytes
+func (r ListApiKeysResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r ListApiKeysResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListApiKeysResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r ListApiKeysResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type CreateApiKeyResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON201 the response for an HTTP 201 `application/json` response
+	JSON201 *IssuedApiKey
+	// ApplicationproblemJSON400 the response for an HTTP 400 `application/problem+json` response
+	ApplicationproblemJSON400 *HttpValidationProblemDetails
+	// ApplicationproblemJSON401 the response for an HTTP 401 `application/problem+json` response
+	ApplicationproblemJSON401 *ProblemDetails
+	// ApplicationproblemJSON403 the response for an HTTP 403 `application/problem+json` response
+	ApplicationproblemJSON403 *ProblemDetails
+	// ApplicationproblemJSON429 the response for an HTTP 429 `application/problem+json` response
+	ApplicationproblemJSON429 *ProblemDetails
+}
+
+// GetJSON201 returns the response for an HTTP 201 `application/json` response
+func (r CreateApiKeyResponse) GetJSON201() *IssuedApiKey {
+	return r.JSON201
+}
+
+// GetApplicationproblemJSON400 returns the response for an HTTP 400 `application/problem+json` response
+func (r CreateApiKeyResponse) GetApplicationproblemJSON400() *HttpValidationProblemDetails {
+	return r.ApplicationproblemJSON400
+}
+
+// GetApplicationproblemJSON401 returns the response for an HTTP 401 `application/problem+json` response
+func (r CreateApiKeyResponse) GetApplicationproblemJSON401() *ProblemDetails {
+	return r.ApplicationproblemJSON401
+}
+
+// GetApplicationproblemJSON403 returns the response for an HTTP 403 `application/problem+json` response
+func (r CreateApiKeyResponse) GetApplicationproblemJSON403() *ProblemDetails {
+	return r.ApplicationproblemJSON403
+}
+
+// GetApplicationproblemJSON429 returns the response for an HTTP 429 `application/problem+json` response
+func (r CreateApiKeyResponse) GetApplicationproblemJSON429() *ProblemDetails {
+	return r.ApplicationproblemJSON429
+}
+
+// GetBody returns the raw response body bytes
+func (r CreateApiKeyResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r CreateApiKeyResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r CreateApiKeyResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r CreateApiKeyResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type RevokeApiKeyResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// ApplicationproblemJSON401 the response for an HTTP 401 `application/problem+json` response
+	ApplicationproblemJSON401 *ProblemDetails
+	// ApplicationproblemJSON403 the response for an HTTP 403 `application/problem+json` response
+	ApplicationproblemJSON403 *ProblemDetails
+	// ApplicationproblemJSON404 the response for an HTTP 404 `application/problem+json` response
+	ApplicationproblemJSON404 *ProblemDetails
+	// ApplicationproblemJSON429 the response for an HTTP 429 `application/problem+json` response
+	ApplicationproblemJSON429 *ProblemDetails
+}
+
+// GetApplicationproblemJSON401 returns the response for an HTTP 401 `application/problem+json` response
+func (r RevokeApiKeyResponse) GetApplicationproblemJSON401() *ProblemDetails {
+	return r.ApplicationproblemJSON401
+}
+
+// GetApplicationproblemJSON403 returns the response for an HTTP 403 `application/problem+json` response
+func (r RevokeApiKeyResponse) GetApplicationproblemJSON403() *ProblemDetails {
+	return r.ApplicationproblemJSON403
+}
+
+// GetApplicationproblemJSON404 returns the response for an HTTP 404 `application/problem+json` response
+func (r RevokeApiKeyResponse) GetApplicationproblemJSON404() *ProblemDetails {
+	return r.ApplicationproblemJSON404
+}
+
+// GetApplicationproblemJSON429 returns the response for an HTTP 429 `application/problem+json` response
+func (r RevokeApiKeyResponse) GetApplicationproblemJSON429() *ProblemDetails {
+	return r.ApplicationproblemJSON429
+}
+
+// GetBody returns the raw response body bytes
+func (r RevokeApiKeyResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r RevokeApiKeyResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RevokeApiKeyResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r RevokeApiKeyResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type RotateApiKeyResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *IssuedApiKey
+	// ApplicationproblemJSON401 the response for an HTTP 401 `application/problem+json` response
+	ApplicationproblemJSON401 *ProblemDetails
+	// ApplicationproblemJSON403 the response for an HTTP 403 `application/problem+json` response
+	ApplicationproblemJSON403 *ProblemDetails
+	// ApplicationproblemJSON404 the response for an HTTP 404 `application/problem+json` response
+	ApplicationproblemJSON404 *ProblemDetails
+	// ApplicationproblemJSON409 the response for an HTTP 409 `application/problem+json` response
+	ApplicationproblemJSON409 *ProblemDetails
+	// ApplicationproblemJSON429 the response for an HTTP 429 `application/problem+json` response
+	ApplicationproblemJSON429 *ProblemDetails
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r RotateApiKeyResponse) GetJSON200() *IssuedApiKey {
+	return r.JSON200
+}
+
+// GetApplicationproblemJSON401 returns the response for an HTTP 401 `application/problem+json` response
+func (r RotateApiKeyResponse) GetApplicationproblemJSON401() *ProblemDetails {
+	return r.ApplicationproblemJSON401
+}
+
+// GetApplicationproblemJSON403 returns the response for an HTTP 403 `application/problem+json` response
+func (r RotateApiKeyResponse) GetApplicationproblemJSON403() *ProblemDetails {
+	return r.ApplicationproblemJSON403
+}
+
+// GetApplicationproblemJSON404 returns the response for an HTTP 404 `application/problem+json` response
+func (r RotateApiKeyResponse) GetApplicationproblemJSON404() *ProblemDetails {
+	return r.ApplicationproblemJSON404
+}
+
+// GetApplicationproblemJSON409 returns the response for an HTTP 409 `application/problem+json` response
+func (r RotateApiKeyResponse) GetApplicationproblemJSON409() *ProblemDetails {
+	return r.ApplicationproblemJSON409
+}
+
+// GetApplicationproblemJSON429 returns the response for an HTTP 429 `application/problem+json` response
+func (r RotateApiKeyResponse) GetApplicationproblemJSON429() *ProblemDetails {
+	return r.ApplicationproblemJSON429
+}
+
+// GetBody returns the raw response body bytes
+func (r RotateApiKeyResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r RotateApiKeyResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RotateApiKeyResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r RotateApiKeyResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 type ListCollectionsResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 	// JSON200 the response for an HTTP 200 `application/json` response
 	JSON200 *CollectionList
+	// ApplicationproblemJSON401 the response for an HTTP 401 `application/problem+json` response
+	ApplicationproblemJSON401 *ProblemDetails
+	// ApplicationproblemJSON403 the response for an HTTP 403 `application/problem+json` response
+	ApplicationproblemJSON403 *ProblemDetails
+	// ApplicationproblemJSON429 the response for an HTTP 429 `application/problem+json` response
+	ApplicationproblemJSON429 *ProblemDetails
 	// ApplicationproblemJSON502 the response for an HTTP 502 `application/problem+json` response
 	ApplicationproblemJSON502 *ProblemDetails
 	// ApplicationproblemJSON503 the response for an HTTP 503 `application/problem+json` response
@@ -1200,6 +1820,21 @@ type ListCollectionsResponse struct {
 // GetJSON200 returns the response for an HTTP 200 `application/json` response
 func (r ListCollectionsResponse) GetJSON200() *CollectionList {
 	return r.JSON200
+}
+
+// GetApplicationproblemJSON401 returns the response for an HTTP 401 `application/problem+json` response
+func (r ListCollectionsResponse) GetApplicationproblemJSON401() *ProblemDetails {
+	return r.ApplicationproblemJSON401
+}
+
+// GetApplicationproblemJSON403 returns the response for an HTTP 403 `application/problem+json` response
+func (r ListCollectionsResponse) GetApplicationproblemJSON403() *ProblemDetails {
+	return r.ApplicationproblemJSON403
+}
+
+// GetApplicationproblemJSON429 returns the response for an HTTP 429 `application/problem+json` response
+func (r ListCollectionsResponse) GetApplicationproblemJSON429() *ProblemDetails {
+	return r.ApplicationproblemJSON429
 }
 
 // GetApplicationproblemJSON502 returns the response for an HTTP 502 `application/problem+json` response
@@ -1251,8 +1886,14 @@ type GetDocumentResponse struct {
 	HTTPResponse *http.Response
 	// JSON200 the response for an HTTP 200 `application/json` response
 	JSON200 *Document
+	// ApplicationproblemJSON401 the response for an HTTP 401 `application/problem+json` response
+	ApplicationproblemJSON401 *ProblemDetails
+	// ApplicationproblemJSON403 the response for an HTTP 403 `application/problem+json` response
+	ApplicationproblemJSON403 *ProblemDetails
 	// ApplicationproblemJSON404 the response for an HTTP 404 `application/problem+json` response
 	ApplicationproblemJSON404 *ProblemDetails
+	// ApplicationproblemJSON429 the response for an HTTP 429 `application/problem+json` response
+	ApplicationproblemJSON429 *ProblemDetails
 	// ApplicationproblemJSON502 the response for an HTTP 502 `application/problem+json` response
 	ApplicationproblemJSON502 *ProblemDetails
 	// ApplicationproblemJSON503 the response for an HTTP 503 `application/problem+json` response
@@ -1266,9 +1907,24 @@ func (r GetDocumentResponse) GetJSON200() *Document {
 	return r.JSON200
 }
 
+// GetApplicationproblemJSON401 returns the response for an HTTP 401 `application/problem+json` response
+func (r GetDocumentResponse) GetApplicationproblemJSON401() *ProblemDetails {
+	return r.ApplicationproblemJSON401
+}
+
+// GetApplicationproblemJSON403 returns the response for an HTTP 403 `application/problem+json` response
+func (r GetDocumentResponse) GetApplicationproblemJSON403() *ProblemDetails {
+	return r.ApplicationproblemJSON403
+}
+
 // GetApplicationproblemJSON404 returns the response for an HTTP 404 `application/problem+json` response
 func (r GetDocumentResponse) GetApplicationproblemJSON404() *ProblemDetails {
 	return r.ApplicationproblemJSON404
+}
+
+// GetApplicationproblemJSON429 returns the response for an HTTP 429 `application/problem+json` response
+func (r GetDocumentResponse) GetApplicationproblemJSON429() *ProblemDetails {
+	return r.ApplicationproblemJSON429
 }
 
 // GetApplicationproblemJSON502 returns the response for an HTTP 502 `application/problem+json` response
@@ -1322,6 +1978,12 @@ type GetDocumentsResponse struct {
 	JSON200 *MultiGetResult
 	// ApplicationproblemJSON400 the response for an HTTP 400 `application/problem+json` response
 	ApplicationproblemJSON400 *HttpValidationProblemDetails
+	// ApplicationproblemJSON401 the response for an HTTP 401 `application/problem+json` response
+	ApplicationproblemJSON401 *ProblemDetails
+	// ApplicationproblemJSON403 the response for an HTTP 403 `application/problem+json` response
+	ApplicationproblemJSON403 *ProblemDetails
+	// ApplicationproblemJSON429 the response for an HTTP 429 `application/problem+json` response
+	ApplicationproblemJSON429 *ProblemDetails
 	// ApplicationproblemJSON502 the response for an HTTP 502 `application/problem+json` response
 	ApplicationproblemJSON502 *ProblemDetails
 	// ApplicationproblemJSON503 the response for an HTTP 503 `application/problem+json` response
@@ -1338,6 +2000,21 @@ func (r GetDocumentsResponse) GetJSON200() *MultiGetResult {
 // GetApplicationproblemJSON400 returns the response for an HTTP 400 `application/problem+json` response
 func (r GetDocumentsResponse) GetApplicationproblemJSON400() *HttpValidationProblemDetails {
 	return r.ApplicationproblemJSON400
+}
+
+// GetApplicationproblemJSON401 returns the response for an HTTP 401 `application/problem+json` response
+func (r GetDocumentsResponse) GetApplicationproblemJSON401() *ProblemDetails {
+	return r.ApplicationproblemJSON401
+}
+
+// GetApplicationproblemJSON403 returns the response for an HTTP 403 `application/problem+json` response
+func (r GetDocumentsResponse) GetApplicationproblemJSON403() *ProblemDetails {
+	return r.ApplicationproblemJSON403
+}
+
+// GetApplicationproblemJSON429 returns the response for an HTTP 429 `application/problem+json` response
+func (r GetDocumentsResponse) GetApplicationproblemJSON429() *ProblemDetails {
+	return r.ApplicationproblemJSON429
 }
 
 // GetApplicationproblemJSON502 returns the response for an HTTP 502 `application/problem+json` response
@@ -1391,6 +2068,12 @@ type SearchResponse struct {
 	JSON200 *SearchResult
 	// ApplicationproblemJSON400 the response for an HTTP 400 `application/problem+json` response
 	ApplicationproblemJSON400 *HttpValidationProblemDetails
+	// ApplicationproblemJSON401 the response for an HTTP 401 `application/problem+json` response
+	ApplicationproblemJSON401 *ProblemDetails
+	// ApplicationproblemJSON403 the response for an HTTP 403 `application/problem+json` response
+	ApplicationproblemJSON403 *ProblemDetails
+	// ApplicationproblemJSON429 the response for an HTTP 429 `application/problem+json` response
+	ApplicationproblemJSON429 *ProblemDetails
 	// ApplicationproblemJSON502 the response for an HTTP 502 `application/problem+json` response
 	ApplicationproblemJSON502 *ProblemDetails
 	// ApplicationproblemJSON503 the response for an HTTP 503 `application/problem+json` response
@@ -1407,6 +2090,21 @@ func (r SearchResponse) GetJSON200() *SearchResult {
 // GetApplicationproblemJSON400 returns the response for an HTTP 400 `application/problem+json` response
 func (r SearchResponse) GetApplicationproblemJSON400() *HttpValidationProblemDetails {
 	return r.ApplicationproblemJSON400
+}
+
+// GetApplicationproblemJSON401 returns the response for an HTTP 401 `application/problem+json` response
+func (r SearchResponse) GetApplicationproblemJSON401() *ProblemDetails {
+	return r.ApplicationproblemJSON401
+}
+
+// GetApplicationproblemJSON403 returns the response for an HTTP 403 `application/problem+json` response
+func (r SearchResponse) GetApplicationproblemJSON403() *ProblemDetails {
+	return r.ApplicationproblemJSON403
+}
+
+// GetApplicationproblemJSON429 returns the response for an HTTP 429 `application/problem+json` response
+func (r SearchResponse) GetApplicationproblemJSON429() *ProblemDetails {
+	return r.ApplicationproblemJSON429
 }
 
 // GetApplicationproblemJSON502 returns the response for an HTTP 502 `application/problem+json` response
@@ -1458,6 +2156,12 @@ type GetStatusResponse struct {
 	HTTPResponse *http.Response
 	// JSON200 the response for an HTTP 200 `application/json` response
 	JSON200 *IndexStatus
+	// ApplicationproblemJSON401 the response for an HTTP 401 `application/problem+json` response
+	ApplicationproblemJSON401 *ProblemDetails
+	// ApplicationproblemJSON403 the response for an HTTP 403 `application/problem+json` response
+	ApplicationproblemJSON403 *ProblemDetails
+	// ApplicationproblemJSON429 the response for an HTTP 429 `application/problem+json` response
+	ApplicationproblemJSON429 *ProblemDetails
 	// ApplicationproblemJSON502 the response for an HTTP 502 `application/problem+json` response
 	ApplicationproblemJSON502 *ProblemDetails
 	// ApplicationproblemJSON503 the response for an HTTP 503 `application/problem+json` response
@@ -1469,6 +2173,21 @@ type GetStatusResponse struct {
 // GetJSON200 returns the response for an HTTP 200 `application/json` response
 func (r GetStatusResponse) GetJSON200() *IndexStatus {
 	return r.JSON200
+}
+
+// GetApplicationproblemJSON401 returns the response for an HTTP 401 `application/problem+json` response
+func (r GetStatusResponse) GetApplicationproblemJSON401() *ProblemDetails {
+	return r.ApplicationproblemJSON401
+}
+
+// GetApplicationproblemJSON403 returns the response for an HTTP 403 `application/problem+json` response
+func (r GetStatusResponse) GetApplicationproblemJSON403() *ProblemDetails {
+	return r.ApplicationproblemJSON403
+}
+
+// GetApplicationproblemJSON429 returns the response for an HTTP 429 `application/problem+json` response
+func (r GetStatusResponse) GetApplicationproblemJSON429() *ProblemDetails {
+	return r.ApplicationproblemJSON429
 }
 
 // GetApplicationproblemJSON502 returns the response for an HTTP 502 `application/problem+json` response
@@ -1517,7 +2236,7 @@ func (r GetStatusResponse) ContentType() string {
 
 // HealthWithResponse Liveness
 //
-// The API process is up. Does not contact the search backend; use `/ready` for that.
+// The API process is up. Anonymous. Does not contact the search backend; use `/ready` for that.
 //
 // Returns a wrapper object for the known response body format(s).
 //
@@ -1532,7 +2251,7 @@ func (c *ClientWithResponses) HealthWithResponse(ctx context.Context, reqEditors
 
 // ReadyWithResponse Readiness
 //
-// Probes the memoria-qmd sidecar. 200 when its index is open and, by default, its models are resident; 503 with the same body shape while it warms up or when it cannot be reached.
+// Probes the memoria-qmd sidecar. 200 when its index is open and, by default, its models are resident; 503 with the same body shape while it warms up or when it cannot be reached. Anonymous for orchestrators: without an admin key the body says only `ready` or `not_ready`, with `reason` and `sidecar` null. An admin key gets the full report.
 //
 // Returns a wrapper object for the known response body format(s).
 //
@@ -1545,9 +2264,84 @@ func (c *ClientWithResponses) ReadyWithResponse(ctx context.Context, reqEditors 
 	return ParseReadyResponse(rsp)
 }
 
+// ListApiKeysWithResponse List API keys
+//
+// Every key, including revoked and expired ones. Never includes key material. Requires the `admin` scope.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /v1/admin/keys (the `ListApiKeys` operationId).
+func (c *ClientWithResponses) ListApiKeysWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ListApiKeysResponse, error) {
+	rsp, err := c.ListApiKeys(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListApiKeysResponse(rsp)
+}
+
+// CreateApiKeyWithBodyWithResponse Issue an API key
+//
+// Creates a key and returns its plaintext. This response is the only time the plaintext exists. `read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. Requires the `admin` scope.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /v1/admin/keys (the `CreateApiKey` operationId).
+func (c *ClientWithResponses) CreateApiKeyWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateApiKeyResponse, error) {
+	rsp, err := c.CreateApiKeyWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCreateApiKeyResponse(rsp)
+}
+
+// CreateApiKeyWithResponse Issue an API key
+//
+// Creates a key and returns its plaintext. This response is the only time the plaintext exists. `read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. Requires the `admin` scope.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /v1/admin/keys (the `CreateApiKey` operationId).
+func (c *ClientWithResponses) CreateApiKeyWithResponse(ctx context.Context, body CreateApiKeyJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateApiKeyResponse, error) {
+	rsp, err := c.CreateApiKey(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCreateApiKeyResponse(rsp)
+}
+
+// RevokeApiKeyWithResponse Revoke an API key
+//
+// Takes effect on the key's next request. Revoking a revoked key succeeds and keeps the original timestamp. Requires the `admin` scope.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with DELETE /v1/admin/keys/{id} (the `RevokeApiKey` operationId).
+func (c *ClientWithResponses) RevokeApiKeyWithResponse(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*RevokeApiKeyResponse, error) {
+	rsp, err := c.RevokeApiKey(ctx, id, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRevokeApiKeyResponse(rsp)
+}
+
+// RotateApiKeyWithResponse Rotate an API key
+//
+// Replaces the key's secret and returns the new plaintext, once. The id, scopes, collections and expiry stay; the previous token stops working immediately. A revoked or expired key cannot be rotated (409). Requires the `admin` scope.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /v1/admin/keys/{id}:rotate (the `RotateApiKey` operationId).
+func (c *ClientWithResponses) RotateApiKeyWithResponse(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*RotateApiKeyResponse, error) {
+	rsp, err := c.RotateApiKey(ctx, id, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRotateApiKeyResponse(rsp)
+}
+
 // ListCollectionsWithResponse List collections
 //
-// Every collection the caller may search, with its active document count and root context.
+// Every collection the caller may search, with its active document count and root context. Requires the `read` scope.
 //
 // Returns a wrapper object for the known response body format(s).
 //
@@ -1562,7 +2356,7 @@ func (c *ClientWithResponses) ListCollectionsWithResponse(ctx context.Context, r
 
 // GetDocumentWithResponse Get one document
 //
-// Fetch a document by display path (`collection/path.md`), by `qmd://` URI, or by its six-character docid. `fromLine` and `maxLines` narrow the body to the lines around a search hit; `body=false` returns metadata only.
+// Fetch a document by display path (`collection/path.md`), by `qmd://` URI, or by its six-character docid. `fromLine` and `maxLines` narrow the body to the lines around a search hit; `body=false` returns metadata only. Requires the `read` scope.
 //
 // Returns a wrapper object for the known response body format(s).
 //
@@ -1577,7 +2371,7 @@ func (c *ClientWithResponses) GetDocumentWithResponse(ctx context.Context, id st
 
 // GetDocumentsWithBodyWithResponse Get several documents
 //
-// Batch fetch by a list of references (paths or docids), by a glob such as `claude-sessions/2026-05*.md`, or both. Bodies are capped at `maxBytes` each (default 64 KiB); documents over the cap are listed under `skipped`.
+// Batch fetch by a list of references (paths or docids), by a glob such as `claude-sessions/2026-05*.md`, or both. Bodies are capped at `maxBytes` each (default 64 KiB); documents over the cap are listed under `skipped`. For a collection-scoped key every list is filtered per result and `errors` is always empty: a reference that matched nothing the key may read is simply absent. Requires the `read` scope.
 //
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 //
@@ -1592,7 +2386,7 @@ func (c *ClientWithResponses) GetDocumentsWithBodyWithResponse(ctx context.Conte
 
 // GetDocumentsWithResponse Get several documents
 //
-// Batch fetch by a list of references (paths or docids), by a glob such as `claude-sessions/2026-05*.md`, or both. Bodies are capped at `maxBytes` each (default 64 KiB); documents over the cap are listed under `skipped`.
+// Batch fetch by a list of references (paths or docids), by a glob such as `claude-sessions/2026-05*.md`, or both. Bodies are capped at `maxBytes` each (default 64 KiB); documents over the cap are listed under `skipped`. For a collection-scoped key every list is filtered per result and `errors` is always empty: a reference that matched nothing the key may read is simply absent. Requires the `read` scope.
 //
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 //
@@ -1607,7 +2401,7 @@ func (c *ClientWithResponses) GetDocumentsWithResponse(ctx context.Context, body
 
 // SearchWithResponse Search the corpus
 //
-// Hybrid search over the indexed documents: BM25 and vector retrieval fused by reciprocal rank, then reranked by a cross-encoder unless `rerank=false`. Reranked queries take a few seconds; `rerank=false` returns fused results in well under a second. Frontmatter filters (`project`, `branch`, `since`, `until`, `tag`) are applied after retrieval, so a filtered result set can be shorter than `limit` even when more matches exist.
+// Hybrid search over the indexed documents: BM25 and vector retrieval fused by reciprocal rank, then reranked by a cross-encoder unless `rerank=false`. Reranked queries take a few seconds; `rerank=false` returns fused results in well under a second. Frontmatter filters (`project`, `branch`, `since`, `until`, `tag`) are applied after retrieval, so a filtered result set can be shorter than `limit` even when more matches exist. Requires the `read` scope.
 //
 // Returns a wrapper object for the known response body format(s).
 //
@@ -1622,7 +2416,7 @@ func (c *ClientWithResponses) SearchWithResponse(ctx context.Context, params *Se
 
 // GetStatusWithResponse Index status
 //
-// Totals for the index: documents, documents awaiting embedding, whether a vector index exists, and per-collection counts.
+// Totals for the collections the caller may read, whether a vector index exists, and per-collection counts. `needsEmbedding` is the backlog for the whole index, so it is null for a collection-scoped key. Requires the `read` scope.
 //
 // Returns a wrapper object for the known response body format(s).
 //
@@ -1694,6 +2488,218 @@ func ParseReadyResponse(rsp *http.Response) (*ReadyResponse, error) {
 	return response, nil
 }
 
+// ParseListApiKeysResponse parses an HTTP response from a ListApiKeysWithResponse call
+func ParseListApiKeysResponse(rsp *http.Response) (*ListApiKeysResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListApiKeysResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ApiKeyList
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 429:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON429 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseCreateApiKeyResponse parses an HTTP response from a CreateApiKeyWithResponse call
+func ParseCreateApiKeyResponse(rsp *http.Response) (*CreateApiKeyResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &CreateApiKeyResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
+		var dest IssuedApiKey
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest HttpValidationProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON400 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 429:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON429 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRevokeApiKeyResponse parses an HTTP response from a RevokeApiKeyWithResponse call
+func ParseRevokeApiKeyResponse(rsp *http.Response) (*RevokeApiKeyResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RevokeApiKeyResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case rsp.StatusCode == 204:
+		break // No content-type
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 429:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON429 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRotateApiKeyResponse parses an HTTP response from a RotateApiKeyWithResponse call
+func ParseRotateApiKeyResponse(rsp *http.Response) (*RotateApiKeyResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RotateApiKeyResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest IssuedApiKey
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 429:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON429 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseListCollectionsResponse parses an HTTP response from a ListCollectionsWithResponse call
 func ParseListCollectionsResponse(rsp *http.Response) (*ListCollectionsResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -1714,6 +2720,27 @@ func ParseListCollectionsResponse(rsp *http.Response) (*ListCollectionsResponse,
 			return nil, err
 		}
 		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 429:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON429 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 502:
 		var dest ProblemDetails
@@ -1762,12 +2789,33 @@ func ParseGetDocumentResponse(rsp *http.Response) (*GetDocumentResponse, error) 
 		}
 		response.JSON200 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON403 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
 		var dest ProblemDetails
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
 		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 429:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON429 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 502:
 		var dest ProblemDetails
@@ -1823,6 +2871,27 @@ func ParseGetDocumentsResponse(rsp *http.Response) (*GetDocumentsResponse, error
 		}
 		response.ApplicationproblemJSON400 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 429:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON429 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 502:
 		var dest ProblemDetails
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -1877,6 +2946,27 @@ func ParseSearchResponse(rsp *http.Response) (*SearchResponse, error) {
 		}
 		response.ApplicationproblemJSON400 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 429:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON429 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 502:
 		var dest ProblemDetails
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -1923,6 +3013,27 @@ func ParseGetStatusResponse(rsp *http.Response) (*GetStatusResponse, error) {
 			return nil, err
 		}
 		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 429:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON429 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 502:
 		var dest ProblemDetails

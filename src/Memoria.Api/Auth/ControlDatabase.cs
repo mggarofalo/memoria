@@ -1,0 +1,120 @@
+using System.Globalization;
+using Microsoft.Data.Sqlite;
+
+namespace Memoria.Api.Auth;
+
+/// <summary>
+/// The control database: durable API state in one SQLite file, separate from
+/// QMD's derived index. Deleting the index loses nothing; deleting this file
+/// revokes every key and loses the audit trail, so it lives on a volume.
+/// </summary>
+public sealed class ControlDatabase(string? path)
+{
+	private const int SchemaVersion = 1;
+
+	private const string SchemaV1 = """
+		CREATE TABLE api_keys (
+			id TEXT PRIMARY KEY NOT NULL,
+			sha256_hash BLOB NOT NULL,
+			label TEXT NOT NULL,
+			scopes TEXT NOT NULL,
+			collections TEXT NOT NULL,
+			all_collections INTEGER NOT NULL,
+			created_at TEXT NOT NULL,
+			expires_at TEXT NULL,
+			revoked_at TEXT NULL,
+			last_used_at TEXT NULL
+		);
+		CREATE TABLE audit_log (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			timestamp TEXT NOT NULL,
+			key_id TEXT NOT NULL,
+			operation TEXT NOT NULL,
+			collections TEXT NULL,
+			result_count INTEGER NULL,
+			status INTEGER NOT NULL,
+			trace_id TEXT NOT NULL,
+			query TEXT NULL
+		);
+		CREATE INDEX audit_log_timestamp ON audit_log (timestamp);
+		CREATE INDEX audit_log_key ON audit_log (key_id, timestamp);
+		""";
+
+	private readonly string _connectionString = new SqliteConnectionStringBuilder
+	{
+		DataSource = path ?? string.Empty,
+		Mode = SqliteOpenMode.ReadWriteCreate,
+	}.ToString();
+
+	/// <summary>Creates the file and applies the schema. Fails loudly on an unwritable path or a newer schema than this build knows.</summary>
+	public async Task InitializeAsync(CancellationToken cancellationToken = default)
+	{
+		EnsureConfigured();
+		string fullPath = Path.GetFullPath(path!);
+		if (Path.GetDirectoryName(fullPath) is { Length: > 0 } directory)
+		{
+			Directory.CreateDirectory(directory);
+		}
+
+		await using SqliteConnection connection = await OpenAsync(cancellationToken);
+		await ExecuteAsync(connection, "PRAGMA journal_mode = WAL;", cancellationToken);
+
+		await using SqliteCommand version = connection.CreateCommand();
+		version.CommandText = "PRAGMA user_version;";
+		int current = Convert.ToInt32(await version.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
+		if (current > SchemaVersion)
+		{
+			throw new InvalidOperationException($"The control database at {fullPath} has schema version {current}; this build understands up to {SchemaVersion}.");
+		}
+
+		if (current < 1)
+		{
+			await using SqliteTransaction transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
+			await ExecuteAsync(connection, SchemaV1, cancellationToken, transaction);
+			await ExecuteAsync(connection, $"PRAGMA user_version = {SchemaVersion};", cancellationToken, transaction);
+			await transaction.CommitAsync(cancellationToken);
+		}
+
+		if (!OperatingSystem.IsWindows())
+		{
+			File.SetUnixFileMode(fullPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+		}
+	}
+
+	/// <summary>Opens a connection. Commits are durable across a process crash; WAL with NORMAL keeps them cheap.</summary>
+	public async Task<SqliteConnection> OpenAsync(CancellationToken cancellationToken = default)
+	{
+		EnsureConfigured();
+		SqliteConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken);
+		await ExecuteAsync(connection, "PRAGMA synchronous = NORMAL;", cancellationToken);
+		return connection;
+	}
+
+	/// <summary>The one timestamp format the database holds; it sorts lexically, which audit pruning relies on.</summary>
+	public static string FormatTimestamp(DateTimeOffset value)
+	{
+		return value.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture);
+	}
+
+	public static DateTimeOffset ParseTimestamp(string value)
+	{
+		return DateTimeOffset.Parse(value, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal);
+	}
+
+	private void EnsureConfigured()
+	{
+		if (string.IsNullOrWhiteSpace(path))
+		{
+			throw new InvalidOperationException("Memoria:Auth:DatabasePath is not set.");
+		}
+	}
+
+	private static async Task ExecuteAsync(SqliteConnection connection, string sql, CancellationToken cancellationToken, SqliteTransaction? transaction = null)
+	{
+		await using SqliteCommand command = connection.CreateCommand();
+		command.CommandText = sql;
+		command.Transaction = transaction;
+		await command.ExecuteNonQueryAsync(cancellationToken);
+	}
+}

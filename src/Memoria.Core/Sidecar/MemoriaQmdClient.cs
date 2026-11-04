@@ -52,6 +52,14 @@ public sealed class MemoriaQmdClient(HttpClient http) : IMemoriaQmdClient
 	public Task<SidecarDocument> GetDocumentAsync(string reference, SidecarDocumentQuery? query = null, CancellationToken cancellationToken = default)
 	{
 		ArgumentException.ThrowIfNullOrWhiteSpace(reference);
+
+		// Dot segments survive percent-encoding and HttpClient would normalize them,
+		// turning `x/../../status` into a call to a different sidecar route.
+		if (reference.Split('/').Any(static segment => segment is "." or ".."))
+		{
+			throw new SidecarException("not_found", $"Document not found: {reference}", HttpStatusCode.NotFound);
+		}
+
 		return GetAsync(DocumentPath(reference, query), SidecarJsonContext.Default.SidecarDocument, cancellationToken);
 	}
 

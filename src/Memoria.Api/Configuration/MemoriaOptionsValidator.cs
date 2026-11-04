@@ -45,6 +45,21 @@ public sealed class MemoriaOptionsValidator : IValidateOptions<MemoriaOptions>
 			failures.Add("Memoria:Mcp:Path must start with '/' and must not sit under /v1.");
 		}
 
+		if (options.Auth.Mode == AuthMode.ApiKey && string.IsNullOrWhiteSpace(options.Auth.DatabasePath))
+		{
+			failures.Add("Memoria:Auth:DatabasePath is required when Memoria:Auth:Mode is ApiKey (the default). For anonymous development on a trusted LAN, set Memoria:Auth:Mode to Disabled explicitly.");
+		}
+
+		if (options.Auth.RateLimit.PermitLimit < 1)
+		{
+			failures.Add("Memoria:Auth:RateLimit:PermitLimit must be at least 1.");
+		}
+
+		if (options.Auth.RateLimit.Window <= TimeSpan.Zero)
+		{
+			failures.Add("Memoria:Auth:RateLimit:Window must be positive.");
+		}
+
 		return failures.Count == 0 ? ValidateOptionsResult.Success : ValidateOptionsResult.Fail(failures);
 	}
 
