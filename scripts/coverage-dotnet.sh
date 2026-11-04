@@ -5,7 +5,7 @@
 set -eu
 
 # Phase 1 ratchet: the value measured on main. The target is 90.
-MIN_BRANCH=77
+MIN_BRANCH=89
 
 out=TestResults/coverage
 rm -rf "$out"

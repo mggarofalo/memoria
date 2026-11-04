@@ -33,6 +33,14 @@ pre-commit:
         node ../node_modules/eslint/bin/eslint.js . &&
         npm run test:coverage --silent
 
+    - name: release-scripts
+      root: "scripts/release/"
+      glob: "**/*.{ts,json}"
+      run: >-
+        npm run typecheck --silent --prefix ../../sidecar &&
+        node ../../node_modules/eslint/bin/eslint.js . &&
+        npm run test:coverage --silent
+
     # -race needs cgo, which most Windows machines lack, so hooks leave it to CI.
     - name: cli
       root: "cli/"

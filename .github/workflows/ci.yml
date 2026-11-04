@@ -72,6 +72,7 @@ jobs:
               - .github/workflows/ci.yml
               - sidecar/**
               - worker/**
+              - scripts/release/**
               - package.json
               - package-lock.json
               - eslint.config.mjs
@@ -212,10 +213,13 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
       - name: Complexity
-        run: npx eslint sidecar
+        run: npx eslint sidecar scripts/release
         working-directory: .
-      - name: Unit tests and branch coverage
+      - name: Unit tests and coverage
         run: npm run test:coverage
+      - name: Release script tests and coverage
+        run: npm run test:coverage
+        working-directory: scripts/release
       - name: OpenAPI drift
         run: npm run openapi:check
       - name: Build
@@ -252,5 +256,5 @@ jobs:
       - name: Complexity
         run: npx eslint worker
         working-directory: .
-      - name: Unit tests and branch coverage
+      - name: Unit tests and coverage
         run: npm run test:coverage

@@ -69,7 +69,7 @@ go generate ./... && git diff --exit-code internal/api    # regenerate the API c
 cd sidecar
 npm run typecheck                                         # tsc --noEmit
 npm test                                                  # unit tests (fake backend, no SDK load)
-npm run test:coverage                                     # unit tests with the branch coverage gate
+npm run test:coverage                                     # unit tests with the branch and line coverage gates
 npm run openapi:check                                     # committed openapi.json matches routes
 npm run build                                             # emit dist/ for the service
 MEMORIA_QMD_INTEGRATION=1 npm run test:integration        # real SDK on a temp fixture index, mock worker
@@ -91,16 +91,16 @@ The only version in this repository is a `vX.Y.Z` tag, computed from Conventiona
 
 ## Quality Gates
 
-| Gate | C# | TypeScript (sidecar, worker) | Go (cli) |
+| Gate | C# | TypeScript (sidecar, worker, scripts/release) | Go (cli) |
 |---|---|---|---|
 | Cyclomatic complexity, per function | CA1502, a build error. Limit in `CodeMetricsConfig.txt` | ESLint `complexity`. Limit in `eslint.config.mjs` | golangci-lint `gocyclo`. Limit in `cli/.golangci.yml` |
-| Coverage | **Branch**. `scripts/coverage-dotnet.sh` merges both test projects | **Branch**. `npm run test:coverage` in each package | **Statement**, not branch. `scripts/coverage-go.sh` |
+| Coverage | **Branch**. `scripts/coverage-dotnet.sh` merges both test projects | **Branch and line**. `npm run test:coverage` in each package, limits in its `.c8rc.json` | **Statement**, not branch. `scripts/coverage-go.sh` |
 | Mutation (CI only) | Stryker.NET, `stryker/*.json` | StrykerJS, `stryker*.json` in each package | Gremlins, `cli/.gremlins.yaml` |
 
 - **Targets:** complexity 10 per function, and coverage 90 percent. Until the existing code is brought up to them, the limits in the files above are set to what `main` measures, so the gates stop things getting worse without breaking `main`. Never loosen a limit; tighten it when the code allows.
 - **Generated code is excluded,** and nothing else: `cli/internal/api/client.gen.go`, and source-generated C# (`coverage.runsettings`). Do not add `CompilerGeneratedAttribute` to the coverage exclusions: async methods compile to state machines that carry it, so it silently removes real code.
-- **The Node coverage figure has a blind spot.** It only counts files the tests load, so `sidecar/src/main.ts` is not measured at all, and a function that never runs barely registers (`sidecar/src/store.ts` reports 100 percent of branches and 53 percent of lines). Read the line column too.
-- **Go has no branch gate.** `gobco` is the only real option. It cannot run more than one package at a time, cannot exclude generated files, and has no threshold, so a gate would mean parsing its text output. The statement gate is what we enforce, and it should be read as that.
+- **Node coverage uses c8 with `all`,** so a source file no test loads counts as uncovered instead of vanishing (`sidecar/src/main.ts`). Only type-only files are left out (`sidecar/src/llm/types.ts`). V8 cannot see branches inside a function that never runs, so a file can read 100 percent of branches on 53 percent of lines (`sidecar/src/store.ts`, which only the integration tests reach). That is why line coverage is gated too.
+- **Go's blocking gate is statement coverage, not branch coverage.** Go's tooling has no native branch metric. `gobco` measures real branches but handles one package at a time, cannot exclude generated files, and has no threshold, so `scripts/coverage-go-branch.sh` wraps it as a nightly, non-blocking report (`Go Branch Coverage (report)` in `mutation.yml`).
 - **The CA1502 config file must be named exactly `CodeMetricsConfig.txt`.** With any other name the rule passes without checking anything.
 
 ### Git hooks
@@ -111,7 +111,7 @@ Hooks need `sh` and work wherever Git for Windows or a Unix shell is present. `-
 
 ### Mutation testing
 
-`.github/workflows/mutation.yml` is not a required check. On a pull request it mutates only what changed: `--since` for Stryker.NET, and the changed files for StrykerJS and Gremlins. Nightly it mutates everything and uploads the reports as artifacts. Authentication, scoping, and redaction code has its own stricter config (`stryker/security.json`, `sidecar/stryker.security.json`). Run one by hand with `sh scripts/mutation-js.sh sidecar`, `sh scripts/mutation-dotnet.sh`, or `sh scripts/mutation-go.sh`. Two local caveats: `--since` reads the main checkout's HEAD when run from a git worktree, and Gremlins misreads coverage on Windows, so use CI for those.
+`.github/workflows/mutation.yml` is not a required check. On a pull request it mutates only what changed: `--since` for Stryker.NET, and the changed files for StrykerJS and Gremlins. Nightly it mutates everything and uploads the reports as artifacts. Authentication, scoping, and redaction code has its own stricter config (`stryker/security.json`, `sidecar/stryker.security.json`). Run one by hand with `sh scripts/mutation-js.sh sidecar`, `sh scripts/mutation-dotnet.sh`, or `sh scripts/mutation-go.sh`. Two local caveats: `--since` reads the main checkout's HEAD when run from a git worktree, and Gremlins v0.6.0 misreads coverage on Windows, so `scripts/mutation-go.sh` refuses to run there. Use CI or WSL for those.
 
 ### Other CI
 

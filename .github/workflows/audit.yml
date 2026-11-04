@@ -9,6 +9,7 @@ on:
     branches: ["main"]
     paths:
       - .github/workflows/audit.yml
+      - package-lock.json
       - sidecar/package-lock.json
       - worker/package-lock.json
       - cli/go.sum
@@ -39,6 +40,15 @@ jobs:
       - name: Audit production dependencies
         working-directory: ${{ matrix.package }}
         run: npm audit --omit=dev --audit-level=high
+
+  # Dev tools run on developer machines and in CI, so every severity counts.
+  npm-dev-tools:
+    name: npm audit (dev tools)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Audit the root dev tooling
+        run: npm audit --audit-level=moderate
 
   go:
     name: govulncheck

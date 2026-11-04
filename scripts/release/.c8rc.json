@@ -1,0 +1,12 @@
+{
+  "all": true,
+  "src": ["."],
+  "include": ["*.ts"],
+  "extension": [".ts"],
+  "reporter": ["text"],
+  "reports-dir": "coverage",
+  "temp-directory": "coverage/tmp",
+  "check-coverage": true,
+  "branches": 98,
+  "lines": 98
+}
