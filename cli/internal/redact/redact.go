@@ -62,7 +62,7 @@ func (r *Redactor) Add(secret string) {
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	seen := make(map[string]struct{}, len(r.secrets)+len(variants))
+	seen := map[string]struct{}{}
 	for _, s := range r.secrets {
 		seen[s] = struct{}{}
 	}
