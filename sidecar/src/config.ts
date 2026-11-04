@@ -30,7 +30,21 @@ export interface SidecarConfig {
   reindexMaxWaitMs: number;
   /** How long shutdown waits for queued reindex jobs to finish. */
   shutdownDrainMs: number;
+  /** Where model work runs: in this process, or on a worker. */
+  llm: LlmConfig;
 }
+
+export type LlmConfig =
+  | { mode: "local" }
+  | {
+      mode: "remote";
+      workerUrl: string;
+      workerToken: string | undefined;
+      /** Tokenize and embed queries on this host's CPU when no worker answers. */
+      fallback: boolean;
+      /** Expected embedding length; 0 pins it to the first response. */
+      embedDimensions: number;
+    };
 
 const LOOPBACK_HOSTS = new Set(["localhost", "::1", "0:0:0:0:0:0:0:1"]);
 
@@ -55,6 +69,42 @@ function readInt(value: string | undefined, fallback: number, name: string, min:
     throw new Error(`${name} must be an integer between ${min} and ${max}, got "${value}"`);
   }
   return n;
+}
+
+/**
+ * Remote settings are read only in remote mode: in local mode a stray worker
+ * URL in the environment has no effect and cannot fail startup.
+ */
+function loadLlmConfig(env: NodeJS.ProcessEnv): LlmConfig {
+  const mode = env.MEMORIA_QMD_LLM?.trim().toLowerCase() || "local";
+  if (mode === "local") return { mode };
+  if (mode !== "remote") throw new Error(`MEMORIA_QMD_LLM must be "local" or "remote", got "${mode}"`);
+
+  const raw = env.MEMORIA_QMD_WORKER_URL?.trim();
+  if (!raw) throw new Error("MEMORIA_QMD_WORKER_URL is required when MEMORIA_QMD_LLM=remote");
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    // Not echoed: a malformed value could still hold a credential.
+    throw new Error("MEMORIA_QMD_WORKER_URL is not a valid URL");
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("MEMORIA_QMD_WORKER_URL must be http or https");
+  if (url.username !== "" || url.password !== "") throw new Error("MEMORIA_QMD_WORKER_URL must not contain credentials; use MEMORIA_QMD_WORKER_TOKEN");
+  if (url.search !== "" || url.hash !== "") throw new Error("MEMORIA_QMD_WORKER_URL must not contain a query or fragment");
+
+  const workerToken = env.MEMORIA_QMD_WORKER_TOKEN?.trim() || undefined;
+  if (workerToken === undefined && !isLoopbackHost(url.hostname.replace(/^\[|\]$/g, ""))) {
+    throw new Error("MEMORIA_QMD_WORKER_TOKEN is required when the worker is not on loopback");
+  }
+  if (workerToken !== undefined && workerToken.length < 16) throw new Error("MEMORIA_QMD_WORKER_TOKEN must be at least 16 characters");
+  return {
+    mode,
+    workerUrl: raw,
+    workerToken,
+    fallback: readBool(env.MEMORIA_QMD_LLM_FALLBACK, true),
+    embedDimensions: readInt(env.MEMORIA_QMD_EMBED_DIMENSIONS, 768, "MEMORIA_QMD_EMBED_DIMENSIONS", 0, 65536),
+  };
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): SidecarConfig {
@@ -90,5 +140,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): SidecarConfig 
     reindexDebounceMs,
     reindexMaxWaitMs,
     shutdownDrainMs: readInt(env.MEMORIA_QMD_SHUTDOWN_DRAIN_MS, 10_000, "MEMORIA_QMD_SHUTDOWN_DRAIN_MS", 0, 600_000),
+    llm: loadLlmConfig(env),
   };
 }

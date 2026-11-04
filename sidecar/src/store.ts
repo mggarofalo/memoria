@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import type { DocumentHead, MetadataSource } from "./metadata.ts";
 import type { EmbedSummary, UpdateSummary } from "./jobs.ts";
+import type { EmbeddingResult, LlmCallSink, LlmSurface, Queryable, RerankDocument, RerankResult, WorkerOptions } from "./llm/types.ts";
 
 /**
  * The slice of the QMD SDK the sidecar depends on, expressed as our own
@@ -118,9 +119,40 @@ export interface QmdBackend extends MetadataSource {
   close(): Promise<void>;
 }
 
+/**
+ * Where model work runs. `local` is the SDK's in-process path, untouched.
+ * `remote` routes it to a worker; `fallback` lets tokenizing and query embedding
+ * run on this host's CPU when no worker answers.
+ */
+export type LlmOptions = { mode: "local" } | { mode: "remote"; worker: WorkerOptions; fallback: boolean; statusPollMs?: number };
+
 export interface OpenBackendOptions {
   dbPath: string | undefined;
   keepWarm: boolean;
+  llm?: LlmOptions;
+  /** Receives one structured entry per worker call. */
+  onLlmCall?: LlmCallSink;
+  onLlmDegraded?: (entry: { operation: string; error: string; fallback: boolean }) => void;
+}
+
+/** Direct access to the model path, bypassing `llm_cache`. For the parity benchmark. */
+export interface LlmProbe {
+  readonly mode: "local" | "remote";
+  readonly rerankTransport: string;
+  embedBatch(texts: string[]): Promise<(EmbeddingResult | null)[]>;
+  rerank(query: string, documents: RerankDocument[]): Promise<RerankResult>;
+  expandQuery(query: string): Promise<Queryable[]>;
+  /** Empty the cached expansions and rerank scores in this index. */
+  clearCache(): void;
+}
+
+export interface OpenedBackend extends QmdBackend {
+  readonly llm: LlmProbe;
+}
+
+/** `dist/llm.js` exports the SDK does not re-export from its entry point. */
+interface SdkLlmModule {
+  setDefaultLlamaCpp(llm: unknown): void;
 }
 
 interface LlamaLike {
@@ -143,7 +175,15 @@ interface HeadRow {
  * Open the real QMD store. The index must already exist — the sidecar serves
  * an index the host maintains with `qmd`, it does not create one.
  */
-export async function openBackend(options: OpenBackendOptions): Promise<QmdBackend> {
+export async function openBackend(options: OpenBackendOptions): Promise<OpenedBackend> {
+  const llmOptions = options.llm ?? { mode: "local" as const };
+  if (llmOptions.mode === "remote" && llmOptions.fallback) {
+    // Degraded mode must not compete with a worker for this host's GPU. The SDK
+    // reads this when it first loads a model, which may be never. Process-wide:
+    // only set when a fallback can load, so the parity benchmark, which runs
+    // both modes in one process with the fallback off, keeps its local side's GPU.
+    process.env.QMD_FORCE_CPU ??= "1";
+  }
   const qmd = await import("@tobilu/qmd");
   const dbPath = options.dbPath ?? qmd.getDefaultDbPath();
   if (!existsSync(dbPath)) {
@@ -153,12 +193,40 @@ export async function openBackend(options: OpenBackendOptions): Promise<QmdBacke
   // index.sqlite, which `qmd` keeps in sync with ~/.config/qmd/index.yml.
   const store = await qmd.createStore({ dbPath });
   // LlamaCpp keeps its model handles private; we only read them for status.
-  const llm = (store.internal as unknown as { llm?: LlamaLike }).llm;
-  if (options.keepWarm && llm) {
+  const internal = store.internal as unknown as { llm?: LlamaLike };
+  const llm = internal.llm;
+  if (options.keepWarm && llm && llmOptions.mode === "local") {
     // The SDK hardcodes a five-minute idle unload. Zero disables the timer so
     // the ~11s cold start is paid once per process, not once per lull.
     llm.inactivityTimeoutMs = 0;
   }
+  let remote: import("./llm/remote.ts").RemoteLlm | undefined;
+  let sdkLlmModule: SdkLlmModule | undefined;
+  if (llmOptions.mode === "remote") {
+    const { RemoteLlm } = await import("./llm/remote.ts");
+    const local = llm as unknown as LlmSurface;
+    remote = new RemoteLlm({
+      worker: llmOptions.worker,
+      models: { embed: local.embedModelName, rerank: local.rerankModelName, generate: local.generateModelName },
+      // The SDK's own instance. It loads nothing until a fallback first uses it.
+      fallback: llmOptions.fallback ? local : null,
+      statusPollMs: llmOptions.statusPollMs ?? 30_000,
+      ...(options.onLlmCall ? { onCall: options.onLlmCall } : {}),
+      ...(options.onLlmDegraded ? { onDegraded: options.onLlmDegraded } : {}),
+    });
+    internal.llm = remote as unknown as LlamaLike;
+    // The chunker ignores store.llm and asks for this process-wide singleton, so
+    // embedding documents would otherwise load a model on this host just to
+    // count tokens. The SDK's exports map hides the setter; a file URL reaches
+    // the same module instance. The surface test pins this for the exact version.
+    const sdkEntry = import.meta.resolve("@tobilu/qmd");
+    sdkLlmModule = (await import(new URL("./llm.js", sdkEntry).href)) as SdkLlmModule;
+    if (typeof sdkLlmModule.setDefaultLlamaCpp !== "function") {
+      throw new Error("This QMD version has no setDefaultLlamaCpp; remote LLM mode needs updating for it.");
+    }
+    sdkLlmModule.setDefaultLlamaCpp(remote);
+  }
+  const active = (remote ?? llm) as unknown as LlmSurface;
   const db = store.internal.db;
   const headsStatement = db.prepare(
     `SELECT d.collection AS collection, d.path AS path, substr(c.doc, 1, ?) AS head
@@ -223,8 +291,36 @@ export async function openBackend(options: OpenBackendOptions): Promise<QmdBacke
       return { line: s.line, snippet: s.snippet };
     },
     addLineNumbers: (text, startLine) => qmd.addLineNumbers(text, startLine),
-    models: () => modelStatus(llm),
-    close: () => store.close(),
+    models: () => (remote ? remoteModelStatus(remote, llm as unknown as LlmSurface) : modelStatus(llm)),
+    close: async () => {
+      if (remote) {
+        await remote.dispose();
+        sdkLlmModule?.setDefaultLlamaCpp(null);
+      }
+      // store.close() disposes the SDK's own instance, which is also the fallback.
+      await store.close();
+    },
+    llm: {
+      mode: llmOptions.mode,
+      rerankTransport: remote ? remote.transportName : "in-process",
+      embedBatch: (texts) => active.embedBatch(texts),
+      rerank: (query, documents) => active.rerank(query, documents),
+      expandQuery: (query) => active.expandQuery(query),
+      clearCache: () => {
+        db.exec("DELETE FROM llm_cache");
+      },
+    },
+  };
+}
+
+function remoteModelStatus(remote: import("./llm/remote.ts").RemoteLlm, local: LlmSurface): ModelStatus {
+  const loaded = remote.status();
+  return {
+    embed: local.embedModelName,
+    rerank: local.rerankModelName,
+    generate: local.generateModelName,
+    loaded,
+    resident: loaded.embed && loaded.rerank && loaded.generate,
   };
 }
 

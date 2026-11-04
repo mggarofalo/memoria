@@ -2,7 +2,7 @@ import path from "node:path";
 import { homedir } from "node:os";
 import { buildApp, warmup } from "./app.ts";
 import { isLoopbackHost, loadConfig } from "./config.ts";
-import { openBackend } from "./store.ts";
+import { openBackend, type LlmOptions } from "./store.ts";
 
 /**
  * Process entry point. Opens the index once, builds the app, warms the
@@ -19,7 +19,23 @@ async function main(): Promise<void> {
   const config = loadConfig();
   const dbPath = config.dbPath ?? defaultDbPath();
 
-  const backend = await openBackend({ dbPath, keepWarm: config.keepWarm });
+  // The logger arrives with the app, after the backend opens.
+  let log: { info: (o: object, m: string) => void; warn: (o: object, m: string) => void } | undefined;
+  const llm: LlmOptions =
+    config.llm.mode === "local"
+      ? { mode: "local" }
+      : {
+          mode: "remote",
+          worker: { url: config.llm.workerUrl, token: config.llm.workerToken, embedDimensions: config.llm.embedDimensions },
+          fallback: config.llm.fallback,
+        };
+  const backend = await openBackend({
+    dbPath,
+    keepWarm: config.keepWarm,
+    llm,
+    onLlmCall: (entry) => log?.info(entry, "llm worker call"),
+    onLlmDegraded: (entry) => log?.warn(entry, "llm worker call degraded"),
+  });
   const app = await buildApp({
     backend,
     config,
@@ -28,6 +44,8 @@ async function main(): Promise<void> {
       redact: { paths: ["req.headers.authorization"], censor: "[redacted]" },
     },
   });
+  log = app.log;
+  app.log.info({ llm: config.llm.mode, rerankTransport: backend.llm.rerankTransport }, "llm mode");
 
   if (config.secret === undefined) {
     app.log.warn({ host: config.host }, "MEMORIA_QMD_SECRET is not set; running unauthenticated on loopback only");

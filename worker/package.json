@@ -1,0 +1,21 @@
+{
+  "name": "memoria-worker",
+  "version": "0.1.0",
+  "description": "Inference worker for Memoria: supervises llama-server instances for QMD's three models and serves them over a small authenticated HTTP API.",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "start": "node src/main.ts",
+    "smoke": "node scripts/smoke.ts",
+    "test": "node --test --test-reporter=spec \"test/**/*.test.ts\"",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.0",
+    "typescript": "^5.9.3"
+  }
+}

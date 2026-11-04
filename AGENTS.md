@@ -63,8 +63,12 @@ npm run typecheck                                         # tsc --noEmit
 npm test                                                  # unit tests (fake backend, no SDK load)
 npm run openapi:check                                     # committed openapi.json matches routes
 npm run build                                             # emit dist/ for the service
-MEMORIA_QMD_INTEGRATION=1 npm run test:integration        # real SDK on a temp fixture index
+MEMORIA_QMD_INTEGRATION=1 npm run test:integration        # real SDK on a temp fixture index, mock worker
+MEMORIA_QMD_WORKER_URL=... npm run test:live              # opt-in, against a real worker
+MEMORIA_QMD_WORKER_URL=... npm run bench:parity -- --db <index>   # opt-in, in-process versus worker
 ```
+
+The sidecar's `npm test` and `npm run typecheck` also cover `worker/`, which is how CI reaches it.
 
 ```bash
 docker build -t memoria-api:local .                       # the image CI publishes to ghcr.io/mggarofalo/memoria
@@ -98,10 +102,11 @@ clients (Claude Code / CLI / scripts)
 | `tests/Memoria.Api.Tests/` | xUnit tests against `WebApplicationFactory<Program>` with a scripted `FakeSidecar` handler |
 | `tests/Memoria.Core.Tests/` | Client unit tests and `SidecarContractTests`, which pins the C# wire types to `sidecar/openapi.json` |
 | `sidecar/` | `memoria-qmd`: TypeScript REST service over the QMD SDK; `openapi.json` is its contract |
+| `worker/` | `memoria-worker`: supervises `llama-server` for QMD's models on a GPU host and serves them to the sidecar. No runtime npm dependencies; runs from source. See `docs/workers.md` |
 | `cli/` | Go module `github.com/mggarofalo/memoria/cli`, binary `memoria`; `internal/api` is the client oapi-codegen generates from `src/Memoria.Api/openapi.json` |
 | `deploy/` | `compose.yaml` for the always-on host |
 | `Dockerfile` | `Memoria.Api` only; the sidecar runs as its own service beside the models (docs/deployment.md) |
-| `docs/` | Plane workflow (`plane.md`), API configuration (`configuration.md`), deployment (`deployment.md`) |
+| `docs/` | Plane workflow (`plane.md`), API configuration (`configuration.md`), deployment (`deployment.md`), inference workers (`workers.md`) |
 
 **Inside `Memoria.Api`:** `Configuration/` (the `Memoria` options root and its validator), `Sidecar/` (typed-client registration and trace propagation), `Http/` (request logging, problem-details mapping, the `MemoriaScope` and `ICallerScope` seams for API-key auth), `Endpoints/` (`/health`, `/ready`, `/v1/*`), `Mcp/` (the outward MCP server; tools translate to the sidecar client through the same `Search/SearchRequestFactory` the REST endpoints use), `OpenApi/` (document and schema transformers that keep the committed spec generator-friendly), `Hosting/` (the container health-check switch). The sidecar client itself (`IMemoriaQmdClient`, its wire records) lives in `Memoria.Core/Sidecar/`; the public v1 contracts in `Memoria.Core/Contracts/`. When the sidecar contract changes, update the records in `Memoria.Core/Sidecar/SidecarContracts.cs` — `SidecarContractTests` fails until they match the committed `openapi.json`.
 
@@ -118,7 +123,7 @@ clients (Claude Code / CLI / scripts)
 
 **C#:** File-scoped namespaces, `sealed` by default, nullable enabled, primary constructors where they read cleanly. Style is enforced by `.editorconfig` and gated by `dotnet format`.
 
-**TypeScript (sidecar/):** ESM, strict `tsconfig`, Node's native type stripping for tests (`erasableSyntaxOnly`: no enums, no parameter properties, `import type` for types, `.ts` extensions on relative imports). `@tobilu/qmd` is imported in exactly one file, `src/store.ts`; everything else depends on the `QmdBackend` interface so tests run on the in-memory fake. Route changes must regenerate `openapi.json` (`npm run openapi`).
+**TypeScript (sidecar/):** ESM, strict `tsconfig`, Node's native type stripping for tests (`erasableSyntaxOnly`: no enums, no parameter properties, `import type` for types, `.ts` extensions on relative imports). `@tobilu/qmd` is imported in exactly one file, `src/store.ts`; everything else depends on the `QmdBackend` interface so tests run on the in-memory fake. Route changes must regenerate `openapi.json` (`npm run openapi`). `MEMORIA_QMD_LLM=local` is the default, and `src/llm/` must stay unloaded in that mode. `test/llm-surface.test.ts` pins remote mode to the exact SDK version, so re-read the SDK when it fails rather than only updating the list. Worker responses are untrusted input, and the worker token must never reach a log or an error message (`docs/workers.md`).
 
 **OpenAPI (Memoria.Api):** the served document is pinned to `src/Memoria.Api/openapi.json` by `OpenApiContractTests`. After changing an endpoint or contract record, refresh it with `MEMORIA_WRITE_OPENAPI=1 dotnet test Memoria.slnx --filter OpenApiContract`, then `cd cli && go generate ./...` so the Go client follows. Both drifts fail CI.
 
