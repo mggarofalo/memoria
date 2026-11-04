@@ -20,6 +20,13 @@ internal static class SecretHeuristics
 	private const double StrictEntropy = 3.0;
 	private const double ShortEntropy = 2.5;
 	private const double HighEntropy = 3.5;
+	private const double UserInfoEntropy = 2.0;
+	private const int QuoteLookback = 512;
+
+	private static readonly HashSet<string> AddressNames = new(StringComparer.OrdinalIgnoreCase)
+	{
+		"email", "e-mail", "mail", "mailto", "author", "from", "to", "cc", "bcc", "reply-to", "committer", "contact", "npm", "pkg", "pip", "gem", "cargo", "nuget", "go", "image", "docker",
+	};
 
 	private static readonly HashSet<string> SourceExtensions = new(StringComparer.OrdinalIgnoreCase)
 	{
@@ -152,9 +159,55 @@ internal static class SecretHeuristics
 			return IsUrlPassword(value);
 		}
 
-		bool digest = string.CompareOrdinal(candidate.Input, hostStart, "sha", 0, 3) == 0;
+		return !IsVersionOrDigestHost(candidate.Input, hostStart)
+			&& HasPasswordShape(value)
+			&& !IsAddressLike(candidate, value)
+			&& IsUrlPassword(value);
+	}
+
+	/// <summary><c>image:tag@sha256:...</c> and <c>npm:name@1.2.3</c>.</summary>
+	private static bool IsVersionOrDigestHost(string input, int hostStart)
+	{
+		return string.CompareOrdinal(input, hostStart, "sha", 0, 3) == 0
+			|| (hostStart < input.Length && char.IsAsciiDigit(input[hostStart]));
+	}
+
+	private static bool HasPasswordShape(string value)
+	{
 		bool enoughShape = value.Any(char.IsAsciiDigit) || value.Any(static c => !char.IsAsciiLetterOrDigit(c) && c != '_');
-		return !digest && enoughShape && value.Length >= PasswordLength && !value.Contains('\\') && !IsVersion(value) && IsUrlPassword(value);
+		return enoughShape
+			&& value.Length >= PasswordLength
+			&& !value.Contains('\\')
+			&& !IsVersion(value)
+			&& ShannonEntropy(value) >= UserInfoEntropy;
+	}
+
+	/// <summary>The name before the colon says this is an address or a package, as in <c>email:me2@x</c>; a clock time such as <c>12:30pm@home</c> has a number there.</summary>
+	private static bool IsAddressLike(SecretCandidate candidate, string value)
+	{
+		string input = candidate.Input;
+		int colon = candidate.Secret.Index - 1;
+		int start = colon;
+		while (start > 0 && (char.IsAsciiLetterOrDigit(input[start - 1]) || input[start - 1] is '_' or '-' or '.'))
+		{
+			start--;
+		}
+
+		string name = input[start..colon];
+		bool plainMailbox = value.AsSpan().TrimEnd("0123456789").ToString().All(char.IsAsciiLetter) && HostHasPublicSuffix(input, candidate.End + 1);
+		return AddressNames.Contains(name) || name.All(char.IsAsciiDigit) || plainMailbox;
+	}
+
+	private static bool HostHasPublicSuffix(string input, int hostStart)
+	{
+		int end = hostStart;
+		while (end < input.Length && (char.IsAsciiLetterOrDigit(input[end]) || input[end] is '.' or '-'))
+		{
+			end++;
+		}
+
+		ReadOnlySpan<char> host = input.AsSpan(hostStart, end - hostStart);
+		return host.EndsWith(".com", StringComparison.OrdinalIgnoreCase) || host.EndsWith(".org", StringComparison.OrdinalIgnoreCase) || host.EndsWith(".net", StringComparison.OrdinalIgnoreCase) || host.EndsWith(".io", StringComparison.OrdinalIgnoreCase);
 	}
 
 	/// <summary>Go's <c>tcp(</c> and <c>unix(</c> say plainly that what came before the <c>@</c> is a login.</summary>
@@ -168,6 +221,7 @@ internal static class SecretHeuristics
 	{
 		string value = candidate.JudgedValue;
 		return value.Length >= PasswordLength
+			&& value[0] != '/'
 			&& !ValueShapes.IsPlaceholder(value)
 			&& !Keywords.Contains(value)
 			&& !ValueShapes.IsCodeReference(value);
@@ -176,20 +230,21 @@ internal static class SecretHeuristics
 	/// <summary><c>curl -u user:password</c>. The flag is common, so the line must be a curl command.</summary>
 	public static bool IsCurlUserPassword(SecretCandidate candidate)
 	{
-		return IsOnCommandLine(candidate, "curl") && IsUrlPassword(candidate.JudgedValue) && !ValueShapes.IsCodeReference(candidate.JudgedValue);
+		return CommandLines.IsCommand(candidate.Input, candidate.Match.Index, "curl") && IsUrlPassword(candidate.JudgedValue) && !ValueShapes.IsCodeReference(candidate.JudgedValue);
 	}
 
 	/// <summary><c>-b</c> and <c>--cookie</c> with a value of <c>name=value</c>. A file name has no equals sign.</summary>
 	public static bool IsCurlCookie(SecretCandidate candidate)
 	{
-		return IsOnCommandLine(candidate, "curl") && IsSessionCookie(candidate.JudgedValue);
+		return CommandLines.IsCommand(candidate.Input, candidate.Match.Index, "curl") && IsSessionCookie(candidate.JudgedValue);
 	}
 
 	/// <summary><c>mysql -pSECRET</c>. A flag with the value attached, so the line must be a MySQL client.</summary>
 	public static bool IsMysqlPassword(SecretCandidate candidate)
 	{
-		bool mysql = IsOnCommandLine(candidate, "mysql") || IsOnCommandLine(candidate, "mysqldump") || IsOnCommandLine(candidate, "mysqladmin") || IsOnCommandLine(candidate, "mariadb");
-		return mysql && !ValueShapes.IsPlaceholder(candidate.JudgedValue);
+		string value = candidate.JudgedValue;
+		bool port = value.All(static c => char.IsAsciiDigit(c) || c == ':');
+		return !port && !ValueShapes.IsPlaceholder(value) && CommandLines.IsCommand(candidate.Input, candidate.Match.Index, "mysql", "mysqldump", "mysqladmin", "mariadb", "mariadb-dump");
 	}
 
 	/// <summary>A cookie header carrying at least one value long and varied enough to be a session id.</summary>
@@ -246,7 +301,12 @@ internal static class SecretHeuristics
 	public static int ExtendAssignment(SecretCandidate candidate)
 	{
 		string input = candidate.Input;
-		int end = candidate.End;
+		int end = ExtendPastStrayQuote(input, candidate.Secret.Index, candidate.End);
+		if (end > candidate.End)
+		{
+			return end;
+		}
+
 		bool delimited = end < input.Length && input[end] is ',' or ';' or '&';
 		if (!delimited || IsQuoted(input, candidate.Secret.Index) || StartsNameAssignment(input, end + 1))
 		{
@@ -271,10 +331,55 @@ internal static class SecretHeuristics
 		return keyStart > 0 && input[keyStart - 1] is '"' or '\'' && runEnd < input.Length && input[runEnd] == input[keyStart - 1];
 	}
 
+	/// <summary>
+	/// A quote is a delimiter only if it pairs up. An unquoted value stops at one only when another follows on the line, as in
+	/// <c>password=it's9x</c> it does not. A closing quote with text straight after it did not close anything, as in <c>"ab"9x"</c>.
+	/// </summary>
+	private static int ExtendPastStrayQuote(string input, int start, int end)
+	{
+		if (end >= input.Length || input[end] is not ('"' or '\''))
+		{
+			return end;
+		}
+
+		char quote = input[end];
+		if (OpensBeforeValue(input, start, quote))
+		{
+			return end;
+		}
+
+		int close = input.IndexOfAny([quote, '\n', '\r'], end + 1);
+		bool closes = close >= 0 && input[close] == quote;
+		if (start > 0 && input[start - 1] == quote)
+		{
+			return closes && IsTextAt(input, end + 1) ? close : end;
+		}
+
+		return closes ? end : RunEnd(input, end + 1);
+	}
+
+	private static bool IsTextAt(string input, int position)
+	{
+		return position < input.Length && char.IsAsciiLetterOrDigit(input[position]);
+	}
+
+	/// <summary>An unquoted value with an unpaired quote earlier on its line sits inside that string, as in <c>f("password=x")</c>, so the next quote closes it.</summary>
+	private static bool OpensBeforeValue(string input, int start, char quote)
+	{
+		int limit = Math.Max(0, start - QuoteLookback);
+		int count = 0;
+		for (int i = start - 1; i >= limit && input[i] is not ('\n' or '\r'); i--)
+		{
+			count += input[i] == quote ? 1 : 0;
+		}
+
+		return count % 2 == 1 && input[start - 1] != quote;
+	}
+
 	private static bool Judge(SecretCandidate candidate, Func<string, KeyKind> classify)
 	{
 		Group keyGroup = candidate.Match.Groups["key"];
-		KeyKind kind = keyGroup.Length > MaxKeyLength ? KeyKind.NotSecret : classify(keyGroup.Value);
+		KeyKind kind = classify(KeyTail(keyGroup.Value));
 		if (kind == KeyKind.NotSecret)
 		{
 			return false;
@@ -282,6 +387,22 @@ internal static class SecretHeuristics
 
 		string value = NormalizeRemainder(WholeValue(candidate));
 		return !IsBenignCandidate(candidate, keyGroup, value) && JudgeByKind(candidate, keyGroup, kind, value);
+	}
+
+	/// <summary>
+	/// The end of a long name, starting at a word. A run with no spaces can run straight into a key, as in
+	/// <c>word-word-...-password=x</c>, and only its end names the value. One unbroken word this long is data, not a name.
+	/// </summary>
+	private static string KeyTail(string key)
+	{
+		if (key.Length <= MaxKeyLength)
+		{
+			return key;
+		}
+
+		string tail = key[^MaxKeyLength..];
+		int separator = tail.IndexOfAny(['_', '-', '.', ' ']);
+		return separator < 0 ? "" : tail[(separator + 1)..];
 	}
 
 	/// <summary>What will be replaced if the candidate is accepted, so the judgement covers all of it.</summary>
@@ -331,7 +452,7 @@ internal static class SecretHeuristics
 		return kind switch
 		{
 			KeyKind.Password => IsPasswordValue(value, compact || IsExplicitPasswordForm(candidate, keyGroup.Index, separator)),
-			KeyKind.KeyFamily => value.Length >= StrictTokenLength && IsTokenValue(value),
+			KeyKind.KeyFamily => value.Length >= StrictTokenLength && !ValueShapes.ReadsAsIdentifierWithDigits(value) && IsTokenValue(value),
 			KeyKind.Descriptive => IsHighInformation(value),
 			_ => IsTokenValue(value, compact && IsUpperSnake(keyGroup.Value)),
 		};
@@ -474,23 +595,6 @@ internal static class SecretHeuristics
 		}
 
 		return true;
-	}
-
-	/// <summary>True when the line holding the candidate starts with the command, optionally after a prompt or <c>sudo</c>.</summary>
-	private static bool IsOnCommandLine(SecretCandidate candidate, string command)
-	{
-		string input = candidate.Input;
-		int lineStart = input.LastIndexOfAny(['\n', '\r'], Math.Max(candidate.Secret.Index - 1, 0)) + 1;
-		ReadOnlySpan<char> before = input.AsSpan(lineStart, candidate.Secret.Index - lineStart);
-		int found = before.IndexOf(command, StringComparison.Ordinal);
-		if (found < 0)
-		{
-			return false;
-		}
-
-		bool startsWord = found == 0 || !char.IsAsciiLetterOrDigit(before[found - 1]);
-		int after = found + command.Length;
-		return startsWord && after < before.Length && !char.IsAsciiLetterOrDigit(before[after]);
 	}
 
 	private static bool StartsNameAssignment(string input, int position)

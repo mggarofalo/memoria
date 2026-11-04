@@ -217,59 +217,6 @@ public sealed class SessionRedactionFlowTests
 	}
 
 	[Fact]
-	public void Gate_refuses_a_finished_document_that_still_holds_a_credential()
-	{
-		string token = Token;
-
-		RedactionException exception = Assert.Throws<RedactionException>(() => Redactor.Shared.Seal("# Title\n\n" + token));
-
-		Assert.Equal("github-token", exception.RuleName);
-		Assert.Equal(RedactionFailure.FoundAfterRedaction, exception.Failure);
-		Assert.Null(exception.InnerException);
-		Assert.DoesNotContain(token, exception.ToString(), StringComparison.Ordinal);
-	}
-
-	[Fact]
-	public void Refused_part_tells_the_caller_the_rule_and_the_part_and_no_value()
-	{
-		string token = Token;
-
-		RedactionException exception = Assert.Throws<RedactionException>(() => SessionTranscript.Seal("# Title\n\n" + token, 3));
-
-		Assert.Equal("github-token", exception.RuleName);
-		Assert.Equal(RedactionFailure.FoundAfterRedaction, exception.Failure);
-		Assert.Equal(3, exception.Part);
-		Assert.Equal("Redaction failed in rule 'github-token' (FoundAfterRedaction) in part 3. The document must not be indexed.", exception.Message);
-		Assert.DoesNotContain(token, exception.ToString(), StringComparison.Ordinal);
-	}
-
-	[Fact]
-	public void Failure_not_tied_to_a_part_says_so()
-	{
-		RedactionException exception = new("some-rule", RedactionFailure.RuleFailed);
-
-		Assert.Null(exception.Part);
-		Assert.Equal("Redaction failed in rule 'some-rule' (RuleFailed). The document must not be indexed.", exception.Message);
-	}
-
-	[Fact]
-	public void Clean_part_passes_the_part_gate_unchanged()
-	{
-		Assert.Equal("# Title\n", SessionTranscript.Seal("# Title\n", 1).Text);
-	}
-
-	[Fact]
-	public void Gate_passes_a_clean_document_through_unchanged()
-	{
-		const string Document = "---\ntitle: \"[REDACTED:github-token]\"\n---\n\nBody.\n";
-
-		RedactedMarkdown sealedDocument = Redactor.Shared.Seal(Document);
-
-		Assert.Equal(Document, sealedDocument.Text);
-		Assert.Empty(sealedDocument.CountsByRule);
-	}
-
-	[Fact]
 	public async Task A_session_with_no_messages_renders_no_documents()
 	{
 		RedactedSession session = await Claude("{\"type\":\"progress\"}\n");

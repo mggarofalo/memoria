@@ -8,19 +8,27 @@ using System.Text.Json;
 using Memoria.Core.Redaction;
 using Memoria.Core.Sessions;
 
-if (args.Length != 1 || !Directory.Exists(args[0]))
+if (args.Length == 0 || !args.All(Directory.Exists))
 {
-	Console.Error.WriteLine("usage: RedactionCheck <directory of .md files>");
+	Console.Error.WriteLine("usage: RedactionCheck <directory of .md files> [more directories]");
 	return 2;
 }
 
 string work = Directory.CreateTempSubdirectory("memoria-redaction-check-").FullName;
 try
 {
-	Summary summary = Redact(args[0], Path.Combine(work, "redacted"));
-	Dictionary<string, int> findings = RunGitleaks(Path.Combine(work, "redacted"), Path.Combine(work, "report.json"));
-	Print(summary, findings);
-	return findings.Count == 0 && summary.Refused == 0 ? 0 : 1;
+	bool clean = true;
+	for (int i = 0; i < args.Length; i++)
+	{
+		string redacted = Path.Combine(work, $"redacted-{i}");
+		Summary summary = Redact(args[i], redacted);
+		Dictionary<string, int> findings = RunGitleaks(redacted, Path.Combine(work, $"report-{i}.json"));
+		Console.WriteLine($"== directory {i + 1} of {args.Length}");
+		Print(summary, findings);
+		clean &= findings.Count == 0 && summary.Refused == 0;
+	}
+
+	return clean ? 0 : 1;
 }
 finally
 {
@@ -37,7 +45,7 @@ static Summary Redact(string source, string target)
 		summary.Files++;
 		try
 		{
-			RedactedMarkdown result = redactor.Redact(new UnredactedMarkdown(File.ReadAllText(file)));
+			RedactedMarkdown result = redactor.Redact(UnredactedMarkdown.FromText(File.ReadAllText(file)));
 			summary.Add(result.CountsByRule);
 			File.WriteAllText(Path.Combine(target, $"{summary.Files}.md"), result.Text);
 		}

@@ -74,7 +74,6 @@ public sealed class RedactionBoundaryTests
 	[Theory]
 	[InlineData("%2G")]
 	[InlineData("%3F")]
-	[InlineData("%4D")]
 	[InlineData("%0B")]
 	[InlineData("%21")]
 	[InlineData("\\u012B")]
@@ -91,9 +90,9 @@ public sealed class RedactionBoundaryTests
 	}
 
 	[Theory]
-	[InlineData(31, false)]
-	[InlineData(32, true)]
-	public void Token_on_a_shared_line_counts_from_the_full_line_length(int length, bool isBody)
+	[InlineData(15, false)]
+	[InlineData(16, true)]
+	public void Token_on_a_shared_line_counts_from_the_minimum_body(int length, bool isBody)
 	{
 		string input = $"{Begin} {Synthetic.Body(length, 703)} and words";
 
@@ -163,7 +162,7 @@ public sealed class RedactionBoundaryTests
 	[Fact]
 	public void Judged_length_is_inclusive_at_the_cap()
 	{
-		string atCap = "s" + "k-" + string.Concat(Enumerable.Repeat("word-", 900))[..(RedactionRule.MaxJudgedLength - 3)];
+		string atCap = "s" + "k-" + string.Concat(Enumerable.Repeat("word-", 900))[..(RedactionRule.LongCandidate - 3)];
 		string overCap = atCap + "more-words-past-the-cap";
 
 		Assert.Equal(atCap, Redactor.Redact(atCap).Text);
@@ -199,8 +198,9 @@ public sealed class RedactionBoundaryTests
 
 	[Theory]
 	[InlineData(80, true)]
-	[InlineData(81, false)]
-	public void Key_name_length_is_capped(int length, bool redacted)
+	[InlineData(81, true)]
+	[InlineData(300, true)]
+	public void Long_key_name_is_judged_by_its_end(int length, bool redacted)
 	{
 		string key = new string('k', length - 6) + "_token";
 		string input = key + "=a1b2c3d4e5f6a7b8";

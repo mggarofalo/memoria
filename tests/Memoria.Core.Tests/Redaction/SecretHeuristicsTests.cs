@@ -243,7 +243,7 @@ public sealed class SecretHeuristicsTests
 
 	[Theory]
 	[InlineData("token=" + "a1b2c3d4e5f6a7b8", "token=[REDACTED:secret-assignment]")]
-	[InlineData("key_name_that_is_way_too_long_for_a_real_configuration_variable_name_really_it_is_token=a1b2c3d4e5f6a7b8", "key_name_that_is_way_too_long_for_a_real_configuration_variable_name_really_it_is_token=a1b2c3d4e5f6a7b8")]
+	[InlineData("key_name_that_is_way_too_long_for_a_real_configuration_variable_name_really_it_was_token=a1b2c3d4e5f6a7b8", "key_name_that_is_way_too_long_for_a_real_configuration_variable_name_really_it_was_token=[REDACTED:secret-assignment]")]
 	[InlineData("password=hunter2 ", "password=[REDACTED:secret-assignment] ")]
 	[InlineData("password = hunter", "password = hunter")]
 	[InlineData("password = hunter2", "password = [REDACTED:secret-assignment]")]

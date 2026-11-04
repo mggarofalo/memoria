@@ -4,9 +4,10 @@ title = "Gitleaks config for redacted corpus output"
 useDefault = true
 
 # Go module checksums (go.sum lines, "module v1.2.3 h1:<base64>=") are hashes that must survive
-# redaction, and their entropy trips the generic rule. Only that exact shape is allowed here.
+# redaction, and their entropy trips the generic rule. Only a finding that is exactly such a hash is allowed,
+# judged on the match and not the line, so a real secret sharing a line with a checksum is still reported.
 [[allowlists]]
 description = "Go module checksums"
 targetRules = ["generic-api-key"]
-regexTarget = "line"
-regexes = ['''\bh1:[A-Za-z0-9+/]{43}=''']
+regexTarget = "match"
+regexes = ['''h1:[A-Za-z0-9+/]{43}=["'`]?$''']

@@ -44,7 +44,7 @@ internal sealed class ClaudeTranscript(SessionSource source, SessionRenderOption
 	public override RedactedSession Render()
 	{
 		RedactMessages();
-		string shortId = SessionPaths.ClaudeShortId(RedactMetadata(Source.SessionId));
+		string shortId = SessionPaths.ClaudeShortId(PathId(Source.SessionId));
 		string sessionId = Clip(Source.SessionId);
 		string project = Clip(_cwd.Length > 0
 			? SessionProject.FromClaudeCwd(_cwd, Source.HomeDirectory)
@@ -61,6 +61,7 @@ internal sealed class ClaudeTranscript(SessionSource source, SessionRenderOption
 			documents,
 			Report,
 			CountsByRule,
+			Refusals,
 			path => SessionPaths.IsClaudeFamily(path, shortId));
 	}
 
@@ -98,7 +99,8 @@ internal sealed class ClaudeTranscript(SessionSource source, SessionRenderOption
 		{
 			return;
 		}
-		string path = Clip(name).Replace('\\', '/');
+		// Redacted after the transform, because turning backslashes into slashes can form a URL.
+		string path = Clip(name.Replace('\\', '/'));
 		if (_files.ContainsKey(path))
 		{
 			return;
@@ -184,10 +186,11 @@ internal sealed class ClaudeTranscript(SessionSource source, SessionRenderOption
 
 	private List<string> Tags(string project)
 	{
-		List<string> tags = [$"project/{project}"];
+		List<string> tags = [RedactMetadata($"project/{project}")];
 		if (_gitBranch.Length > 0)
 		{
-			tags.Add($"branch/{_gitBranch.Replace('/', '-')}");
+			// Redacted after the transform, because turning slashes into dashes can form a token.
+			tags.Add(RedactMetadata($"branch/{_gitBranch.Replace('/', '-')}"));
 		}
 		return tags;
 	}

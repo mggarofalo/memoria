@@ -15,6 +15,7 @@ internal sealed partial class CodexTranscript : SessionTranscript
 		new(["session_meta", "turn_context", "event_msg", "compacted", "response_item"], StringComparer.Ordinal);
 
 	private string _sessionId;
+	private string _pathId;
 	private string _rootThreadId = "";
 	private string _parentThreadId = "";
 	private string _forkedFromId = "";
@@ -28,7 +29,9 @@ internal sealed partial class CodexTranscript : SessionTranscript
 		: base(source, options, report)
 	{
 		Match uuid = UuidPattern().Match(source.SessionId);
-		_sessionId = Clip(uuid.Success ? uuid.Value : source.SessionId);
+		string id = uuid.Success ? uuid.Value : source.SessionId;
+		_sessionId = Clip(id);
+		_pathId = PathId(id);
 	}
 
 	public override void Add(JsonElement record)
@@ -50,7 +53,7 @@ internal sealed partial class CodexTranscript : SessionTranscript
 	public override RedactedSession Render()
 	{
 		RedactMessages();
-		string safeId = SessionPaths.SafeSegment(_sessionId);
+		string safeId = SessionPaths.SafeSegment(_pathId);
 		string project = SessionProject.FromCodexCwd(_cwd, Source.HomeDirectory);
 		List<RedactedSessionDocument> documents = BuildDocuments(
 			SplitIntoParts(),
@@ -62,6 +65,7 @@ internal sealed partial class CodexTranscript : SessionTranscript
 			documents,
 			Report,
 			CountsByRule,
+			Refusals,
 			path => SessionPaths.IsCodexFamily(path, safeId));
 	}
 
@@ -89,6 +93,8 @@ internal sealed partial class CodexTranscript : SessionTranscript
 
 	private void ApplyMeta(JsonElement payload)
 	{
+		string? rawId = JsonValues.String(payload, "id", Report);
+		_pathId = string.IsNullOrEmpty(rawId) ? _pathId : PathId(rawId);
 		_sessionId = MetaOr(payload, "id", _sessionId);
 		_rootThreadId = MetaOr(payload, "session_id", _sessionId);
 		_parentThreadId = MetaOr(payload, "parent_thread_id", "");

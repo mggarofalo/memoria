@@ -74,7 +74,7 @@ public static partial class SessionPaths
 			&& value[^1] != '.';
 	}
 
-	private static string Digest(string value)
+	internal static string Digest(string value)
 	{
 		return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(value)))[..8];
 	}

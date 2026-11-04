@@ -92,7 +92,10 @@ public sealed class RedactorRuleTests
 			.. RedactionCases.Contextual.Select(c => c.Rule),
 			.. ReviewCases.ProviderTokens.Select(t => t.Rule),
 			.. ReviewCases.Positives.Select(c => c.Rule),
-			"private-key", "private-key-end", "private-key-lines", "private-key-der", "base64-private-key", "discord-webhook",
+			"private-key", "private-key-end", "private-key-lines", "private-key-der", "base64-private-key", "discord-webhook", "putty-private-key", "digest-response",
+			"query-credential", "teams-webhook", "cloudflare-token", "sentry-token", "grafana-token", "figma-token", "tavily-key", "perplexity-key", "replicate-token", "render-key",
+			"netlify-token", "planetscale-token", "doppler-token", "alibaba-key", "square-token", "hubspot-token", "atlassian-cookie-token", "supabase-secret", "facebook-token",
+			"huggingface-org-token", "gitlab-feature-flag-token",
 		];
 		HashSet<string> negative = [.. RedactionCases.Negatives.Select(n => n.Rule)];
 

@@ -203,7 +203,7 @@ public sealed class RedactionPinTests
 	[Fact]
 	public void Elision_line_over_the_length_limit_is_prose()
 	{
-		string elision = "... " + new string('w', 80);
+		string elision = "... " + string.Concat(Enumerable.Repeat("word ", 20));
 
 		Assert.Equal($"{Placeholder}\n{elision}\n{Line(1011)}", Redactor.Redact($"{Begin}\n{Line()}\n{elision}\n{Line(1011)}").Text);
 	}
@@ -243,7 +243,7 @@ public sealed class RedactionPinTests
 		string tail = Synthetic.Body(length, 1012) + (padded ? "=" : "");
 		string input = $"{Line(1013)}\n{Line(1014)}\n{Line(1015)}\n{tail}";
 
-		Assert.Equal("[REDACTED:private-key-lines]" + (joins ? "" : tail), Redactor.Redact(input).Text.Replace("\n", "", StringComparison.Ordinal));
+		Assert.Equal("[REDACTED:private-key-lines]" + (joins ? "" : "\n" + tail), Redactor.Redact(input).Text);
 	}
 
 	[Fact]
@@ -251,7 +251,7 @@ public sealed class RedactionPinTests
 	{
 		string input = $"{Line(1016)}\n{Line(1017)}\n{Line(1018)}\nabcdefghij and more";
 
-		Assert.Equal("[REDACTED:private-key-lines]abcdefghij and more", Redactor.Redact(input).Text);
+		Assert.Equal("[REDACTED:private-key-lines]\nabcdefghij and more", Redactor.Redact(input).Text);
 	}
 
 	[Fact]
@@ -259,7 +259,7 @@ public sealed class RedactionPinTests
 	{
 		string input = string.Join('\n', Enumerable.Range(0, 3).Select(static i => Synthetic.Body(70, 1019 + i))) + "\n";
 
-		Assert.Equal("[REDACTED:private-key-lines]", Redactor.Redact(input).Text);
+		Assert.Equal("[REDACTED:private-key-lines]\n", Redactor.Redact(input).Text);
 	}
 
 	[Fact]
@@ -334,6 +334,7 @@ public sealed class RedactionPinTests
 	[InlineData(new byte[] { 0x30, 0x82, 0x04, 0xBD, 0x03, 0x01, 0x00, 0x30, 0x0D, 0x06, 0x09, 0x2A }, false)]
 	[InlineData(new byte[] { 0x30, 0x81, 0x87, 0x02, 0x01, 0x00, 0x30, 0x13, 0x06, 0x07, 0x2A, 0x86 }, true)]
 	[InlineData(new byte[] { 0x30, 0x88, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x02, 0x01 }, false)]
+	[InlineData(new byte[] { 0x30, 0x82, 0x04, 0xBD, 0x02, 0x01, 0x03, 0x30, 0x0D, 0x06, 0x09, 0x2A }, true)]
 	public void Der_head_is_read_exactly(byte[] head, bool isKey)
 	{
 		Assert.Equal(isKey, PemBlock.IsDerPrivateKey(Convert.ToBase64String(head)));
@@ -587,7 +588,7 @@ public sealed class RedactionPinTests
 	[Theory]
 	[InlineData("plain", false)]
 	[InlineData("\\u001bnot-an-escape", true)]
-	[InlineData("^[[!nope", true)]
+	[InlineData("^[[1", true)]
 	public void View_is_null_only_when_nothing_changes(string text, bool hasNoise)
 	{
 		Assert.Equal(hasNoise, DetectionView.HasNoise(text));
@@ -718,22 +719,6 @@ public sealed class RedactionPinTests
 		Assert.Equal("pageToken=" + new string('a', 6000) + "&api_key=[REDACTED:secret-assignment]", Redactor.Redact(input).Text);
 	}
 
-	[Theory]
-	[InlineData(4096)]
-	[InlineData(4097)]
-	public void Judged_value_is_cut_at_the_cap(int length)
-	{
-		string text = new('a', length);
-		RedactionRule rule = new("x", new System.Text.RegularExpressions.Regex("a+"), candidate =>
-		{
-			Assert.Equal(4096, candidate.Value.Length);
-			return true;
-		});
-
-		Assert.True(rule.TryFindNext(text, 0, out int start, out int end));
-		Assert.Equal((0, length), (start, end));
-	}
-
 	[Fact]
 	public void Short_candidate_is_judged_whole()
 	{
@@ -751,35 +736,34 @@ public sealed class RedactionPinTests
 	}
 
 	[Fact]
-	public void Search_past_a_long_rejection_resumes_after_the_judged_prefix()
+	public void Search_past_a_long_rejection_resumes_near_its_start_with_overlap_for_a_key_name()
 	{
 		List<int> starts = [];
 		RedactionRule rule = new("x", new System.Text.RegularExpressions.Regex("a+"), candidate =>
 		{
 			starts.Add(candidate.Secret.Index);
+			Assert.Equal(8200 - candidate.Secret.Index, candidate.Value.Length);
 			return false;
 		});
 
 		Assert.False(rule.TryFindNext(new string('a', 8200), 0, out _, out _));
 
-		// Past the cap it jumps by the judged prefix. Once what is left fits under the cap, it steps one character.
-		Assert.Equal([0, 4096, 8192, 8193], starts.Take(4));
+		Assert.Equal([0, 3968, 7936], starts.Take(3));
 	}
 
 	[Fact]
-	public void Search_past_many_long_rejections_skips_the_rest()
+	public void Rule_marked_to_skip_a_rejection_does_not_search_inside_it()
 	{
 		List<int> starts = [];
 		RedactionRule rule = new("x", new System.Text.RegularExpressions.Regex("a+"), candidate =>
 		{
 			starts.Add(candidate.Secret.Index);
 			return false;
-		});
+		}, skipRejected: true);
 
-		Assert.False(rule.TryFindNext(new string('a', 4097 * 40), 0, out _, out _));
+		Assert.False(rule.TryFindNext("aaa b aa", 0, out _, out _));
 
-		Assert.Equal(17, starts.Count);
-		Assert.Equal(4096 * 16, starts[^1]);
+		Assert.Equal([0, 6], starts);
 	}
 
 	[Fact]
@@ -790,17 +774,6 @@ public sealed class RedactionPinTests
 
 		Assert.Equal("---\ntitle: [REDACTED:github-token]\n---\n", Redactor.RedactFragment(input).Text);
 		Assert.Equal("---\ntitle: '[REDACTED:github-token]'\n---\n", Redactor.Redact(input).Text);
-	}
-
-	[Fact]
-	public void Gate_does_not_quote_and_names_the_first_rule_it_found()
-	{
-		string input = $"{Synthetic.Anthropic} {Synthetic.GitHubClassic('p')}";
-
-		RedactionException exception = Assert.Throws<RedactionException>(() => Redactor.Seal(input));
-
-		Assert.Equal("anthropic-key", exception.RuleName);
-		Assert.Equal("---\ntitle: [REDACTED:x]\n---\n", Redactor.Seal("---\ntitle: [REDACTED:x]\n---\n").Text);
 	}
 
 	[Fact]

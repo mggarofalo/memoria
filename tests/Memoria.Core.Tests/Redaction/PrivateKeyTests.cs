@@ -154,11 +154,11 @@ public sealed class PrivateKeyTests
 	}
 
 	[Fact]
-	public void Concatenation_plus_at_the_end_of_text_is_part_of_the_token()
+	public void Lone_plus_at_the_end_of_text_is_not_key_material()
 	{
 		string input = $"{Begin}\n{Line1}\n+";
 
-		Assert.Equal(Placeholder, Redactor.Redact(input).Text);
+		Assert.Equal(Placeholder + "\n+", Redactor.Redact(input).Text);
 	}
 
 	[Fact]

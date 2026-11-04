@@ -78,29 +78,55 @@ public sealed class Redactor : IRedactor
 	}
 
 	/// <summary>
-	/// The last check on a finished document. Its parts were already redacted, so a hit here means
-	/// assembly created or uncovered a credential, and the document is refused rather than repaired.
+	/// Finds the first thing a rule would still replace in finished text, or null when it is clean. A clean result is exactly
+	/// what makes a pass change nothing, so this judges the same text the same way the redactor does.
 	/// </summary>
-	/// <exception cref="RedactionException">The document still holds something a rule detects.</exception>
-	internal RedactedMarkdown Seal(string finishedDocument)
+	internal GateHit? FindFirstHit(string text)
 	{
-		RedactionResult gate = Run(finishedDocument, quoteFrontmatter: false);
-		if (gate.WasRedacted)
+		Stopwatch clock = Stopwatch.StartNew();
+		ViewBuffers buffers = new();
+		foreach (bool join in new[] { false, true })
 		{
-			throw new RedactionException(gate.CountsByRule.Keys.First(), RedactionFailure.FoundAfterRedaction);
+			Dictionary<string, int> unused = [];
+			ViewCache views = new(join, buffers);
+			foreach (RedactionRule rule in join ? _tokenRules : _rules)
+			{
+				GateHit? hit = FindGuarded(rule, text, views, clock);
+				if (hit is not null)
+				{
+					return hit;
+				}
+			}
 		}
 
-		return new RedactedMarkdown(finishedDocument, gate.CountsByRule);
+		return null;
+	}
+
+	private GateHit? FindGuarded(RedactionRule rule, string text, ViewCache views, Stopwatch clock)
+	{
+		return Guarded(rule, () =>
+		{
+			DetectionView? view = views.Get(text);
+			ScanGuard guard = new(rule, text.Length, clock, _budget);
+			if (!rule.TryFindNext(view?.Text ?? text, 0, guard, out int start, out int end))
+			{
+				return null;
+			}
+
+			(int originalStart, int originalEnd) = view?.ToOriginal(start, end) ?? (start, end);
+			return new GateHit(rule.Name, originalStart, originalEnd);
+		});
 	}
 
 	private RedactionResult Run(string text, bool quoteFrontmatter)
 	{
 		Stopwatch clock = Stopwatch.StartNew();
 		Dictionary<string, int> counts = [];
+		ViewBuffers buffers = new();
 		string current = text;
 		for (int pass = 0; pass < MaxPasses; pass++)
 		{
-			string next = RunPass(current, quoteFrontmatter, clock, counts);
+			string next = RunPass(current, quoteFrontmatter, clock, counts, buffers);
 			if (ReferenceEquals(next, current))
 			{
 				return new RedactionResult(current, counts);
@@ -117,38 +143,33 @@ public sealed class Redactor : IRedactor
 	/// whole: replacing its first line alone would move the line off its column and strand the tail. Then every
 	/// rule on the noise-free view, and quoting.
 	/// </summary>
-	private string RunPass(string text, bool quoteFrontmatter, Stopwatch clock, Dictionary<string, int> counts)
+	private string RunPass(string text, bool quoteFrontmatter, Stopwatch clock, Dictionary<string, int> counts, ViewBuffers buffers)
 	{
-		string current = Sweep(_lineRules, text, joinWrappedLines: false, clock, counts);
-		current = Sweep(_tokenRules, current, joinWrappedLines: true, clock, counts);
-		current = Sweep(_rules, current, joinWrappedLines: false, clock, counts);
+		string current = Sweep(_lineRules, text, joinWrappedLines: false, clock, counts, buffers);
+		current = Sweep(_tokenRules, current, joinWrappedLines: true, clock, counts, buffers);
+		current = Sweep(_rules, current, joinWrappedLines: false, clock, counts, buffers);
 		string quoted = quoteFrontmatter ? YamlFrontmatter.QuotePlaceholders(current) : current;
 		return quoted == text ? text : quoted;
 	}
 
-	private string Sweep(IReadOnlyList<RedactionRule> rules, string text, bool joinWrappedLines, Stopwatch clock, Dictionary<string, int> counts)
+	private string Sweep(IReadOnlyList<RedactionRule> rules, string text, bool joinWrappedLines, Stopwatch clock, Dictionary<string, int> counts, ViewBuffers buffers)
 	{
 		string current = text;
-		DetectionView? view = DetectionView.Create(current, joinWrappedLines);
+		ViewCache views = new(joinWrappedLines, buffers);
 		foreach (RedactionRule rule in rules)
 		{
-			string next = ApplyGuarded(rule, current, view, clock, counts);
-			if (!ReferenceEquals(next, current))
-			{
-				current = next;
-				view = DetectionView.Create(current, joinWrappedLines);
-			}
+			current = Guarded(rule, () => Apply(rule, current, views, clock, counts));
 		}
 
 		return current;
 	}
 
 	/// <summary>Turns any failure into a typed exception that says nothing about the input.</summary>
-	private string ApplyGuarded(RedactionRule rule, string input, DetectionView? view, Stopwatch clock, Dictionary<string, int> counts)
+	private static T Guarded<T>(RedactionRule rule, Func<T> body)
 	{
 		try
 		{
-			return Apply(rule, input, view, clock, counts);
+			return body();
 		}
 		catch (RedactionException)
 		{
@@ -165,18 +186,20 @@ public sealed class Redactor : IRedactor
 		}
 	}
 
-	private string Apply(RedactionRule rule, string input, DetectionView? view, Stopwatch clock, Dictionary<string, int> counts)
+	private string Apply(RedactionRule rule, string input, ViewCache views, Stopwatch clock, Dictionary<string, int> counts)
 	{
+		DetectionView? view = views.Get(input);
 		string searched = view?.Text ?? input;
+		ScanGuard guard = new(rule, searched.Length, clock, _budget);
 		StringBuilder? output = null;
 		int copied = 0;
 		int position = 0;
 		int hits = 0;
 
-		ThrowIfOverBudget(rule, clock);
-		while (rule.TryFindNext(searched, position, out int start, out int end))
+		guard.ThrowIfOverBudget();
+		while (rule.TryFindNext(searched, position, guard, out int start, out int end))
 		{
-			ThrowIfOverBudget(rule, clock);
+			guard.ThrowIfOverBudget();
 			position = end;
 			(int originalStart, int originalEnd) = view?.ToOriginal(start, end) ?? (start, end);
 
@@ -197,26 +220,66 @@ public sealed class Redactor : IRedactor
 		return output.ToString();
 	}
 
-	/// <summary>A span crossing message boundaries leaves a placeholder in each message, so the boundaries survive.</summary>
+	/// <summary>A span crossing message boundaries leaves a placeholder in each message it covers text of, so the boundaries survive.</summary>
 	private static void AppendReplacement(StringBuilder output, string input, int start, int end, string placeholder)
 	{
 		int cursor = start;
-		int boundary = input.IndexOf(MessageBoundary, cursor, end - cursor);
-		while (boundary >= 0)
+		int boundary = NextBoundary(input, cursor, end);
+		if (boundary < 0)
 		{
-			output.Append(placeholder).Append(MessageSeparator);
-			cursor = boundary + 1;
-			boundary = input.IndexOf(MessageBoundary, cursor, end - cursor);
+			output.Append(placeholder);
+			return;
 		}
 
-		output.Append(placeholder);
+		while (boundary >= 0)
+		{
+			AppendPiece(output, input, cursor, boundary, placeholder);
+			output.Append(MessageSeparator);
+			cursor = boundary + 1;
+			boundary = NextBoundary(input, cursor, end);
+		}
+
+		AppendPiece(output, input, cursor, end, placeholder);
 	}
 
-	private void ThrowIfOverBudget(RedactionRule rule, Stopwatch clock)
+	/// <summary>A boundary character outside a separator is only noise, and the replacement swallows it.</summary>
+	private static int NextBoundary(string input, int start, int end)
 	{
-		if (clock.Elapsed > _budget)
+		int boundary = input.IndexOf(MessageBoundary, start, end - start);
+		while (boundary >= 0 && !DetectionView.IsSeparatorBoundary(input, boundary))
 		{
-			throw new RedactionException(rule.Name, RedactionFailure.TimedOut);
+			boundary = input.IndexOf(MessageBoundary, boundary + 1, end - boundary - 1);
+		}
+
+		return boundary;
+	}
+
+	private static void AppendPiece(StringBuilder output, string input, int start, int end, string placeholder)
+	{
+		if (!input.AsSpan(start, end - start).IsWhiteSpace())
+		{
+			output.Append(placeholder);
+		}
+	}
+
+	/// <summary>The view of the text a sweep is on. Built when a rule first needs it, inside the guard, so running out of memory is a typed refusal.</summary>
+	private sealed class ViewCache(bool join, ViewBuffers buffers)
+	{
+		private string? _text;
+		private DetectionView? _view;
+
+		public DetectionView? Get(string text)
+		{
+			if (!ReferenceEquals(_text, text))
+			{
+				_view = DetectionView.Create(text, join, buffers);
+				_text = text;
+			}
+
+			return _view;
 		}
 	}
 }
+
+/// <summary>What a rule would still replace in finished text. Holds positions and a rule name, never the value.</summary>
+internal sealed record GateHit(string Rule, int Start, int End);

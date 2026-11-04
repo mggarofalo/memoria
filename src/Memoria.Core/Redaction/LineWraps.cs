@@ -16,7 +16,14 @@ internal static class LineWraps
 
 	private const int CommonPrefixLength = 4;
 
-	private static ReadOnlySpan<int> WrapColumns => [64, 72, 76, 80, 100, 120];
+	private static ReadOnlySpan<int> WrapColumns => [64, 72, 76, 78, 80, 90, 100, 120, 132];
+
+	/// <summary>A run starting with one of these is a token at any column, so a line ending in one is cut however wide the terminal was.</summary>
+	private static readonly string[] s_tokenPrefixes =
+	[
+		"ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "sk-", "xox", "xapp-", "eyJ", "glpat-", "AIza", "ya29.", "hf_", "npm_", "hvs.", "SG.", "dop_v1_",
+		"vcp_", "sbp_", "pypi-", "dckr_pat_", "ATATT3", "ATCTT3", "gsk_", "xai-", "lsv2_", "ops_", "plane_api_", "lin_api_", "mem_", "sk_live_", "rk_live_", "sntrys_", "glsa_",
+	];
 
 	/// <summary>True when some line break in the text wraps a token. Allocates nothing, so a text with none costs one scan.</summary>
 	public static bool Any(string input)
@@ -60,9 +67,22 @@ internal static class LineWraps
 		}
 
 		// The next line must look like a token's tail. Otherwise a token that merely ends at a wrap column would swallow the word after it.
-		bool fixedColumn = IsWrapColumn(lineEnd - lineStart);
+		bool fixedColumn = IsWrapColumn(lineEnd - lineStart) || StartsWithTokenPrefix(input, lineEnd - run);
 		bool wholeLine = run == lineEnd - lineStart && run >= WholeLineLength && nextRun >= MinimumContinuation;
 		return (fixedColumn || wholeLine) && LooksRandom(input, nextStart, nextRun);
+	}
+
+	private static bool StartsWithTokenPrefix(string input, int runStart)
+	{
+		foreach (string prefix in s_tokenPrefixes)
+		{
+			if (string.CompareOrdinal(input, runStart, prefix, 0, prefix.Length) == 0)
+			{
+				return true;
+			}
+		}
+
+		return false;
 	}
 
 	/// <summary>Two tokens listed on consecutive lines usually share a prefix, and one wrapped token does not.</summary>

@@ -127,6 +127,12 @@ public sealed record RedactedSessionDocument(
 	int MessageCount,
 	RedactedMarkdown Content);
 
+/// <summary>A field or message the check on a finished part replaced with a marker. Names only, so it is safe to log.</summary>
+/// <param name="Part">The 1-based part number.</param>
+/// <param name="Field">The frontmatter key, <c>title</c>, or <c>message:N</c> with N the message's index in the session.</param>
+/// <param name="Rule">The rule that found it.</param>
+public sealed record SessionFieldRefusal(int Part, string Field, string Rule);
+
 /// <summary>A rendered session: every part, in order, with what was skipped along the way.</summary>
 public sealed class RedactedSession
 {
@@ -138,6 +144,7 @@ public sealed class RedactedSession
 		IReadOnlyList<RedactedSessionDocument> documents,
 		SessionReadReport report,
 		IReadOnlyDictionary<string, int> countsByRule,
+		IReadOnlyList<SessionFieldRefusal> refusals,
 		Func<string, bool> isInSessionFamily)
 	{
 		Format = format;
@@ -145,6 +152,7 @@ public sealed class RedactedSession
 		Documents = documents;
 		Report = report;
 		CountsByRule = countsByRule;
+		Refusals = refusals;
 		_isInSessionFamily = isInSessionFamily;
 	}
 
@@ -159,6 +167,9 @@ public sealed class RedactedSession
 
 	/// <summary>Replacements across the whole session, by rule name, for a redaction report. Never holds a matched value.</summary>
 	public IReadOnlyDictionary<string, int> CountsByRule { get; }
+
+	/// <summary>Fields and messages replaced by the check on finished parts. A hit here means assembly made a match, so it is worth an operator's attention.</summary>
+	public IReadOnlyList<SessionFieldRefusal> Refusals { get; }
 
 	/// <summary>
 	/// True when an existing corpus path belongs to this session but is no longer among its parts.

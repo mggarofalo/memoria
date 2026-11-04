@@ -49,7 +49,7 @@ internal static class SecretKeyNames
 	private static readonly HashSet<string> NonSecretKeyQualifiers = new(StringComparer.OrdinalIgnoreCase)
 	{
 		"public", "primary", "foreign", "sort", "partition", "cache", "idempotency", "dedup", "dedupe", "object", "map", "hash", "lookup", "composite", "unique",
-		"index", "group", "routing", "row", "join", "shard", "message", "event", "query", "ssh", "gpg", "pgp", "the", "a", "an", "this", "that", "your", "my", "our", "each", "any", "by", "of", "s3",
+		"index", "group", "routing", "row", "join", "shard", "message", "event", "query", "ssh", "gpg", "pgp", "file", "data", "record", "storage", "the", "a", "an", "this", "that", "your", "my", "our", "each", "any", "by", "of", "s3",
 	};
 
 	private static readonly HashSet<string> ExactPasswordWords = new(StringComparer.OrdinalIgnoreCase) { "psk" };

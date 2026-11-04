@@ -8,8 +8,9 @@ namespace Memoria.Core.Sessions;
 /// stream and nothing else, not the clock, the host's home directory, or the filesystem, so
 /// the same input always yields the same paths and bytes and re-ingest overwrites.
 /// Redaction is part of rendering and cannot be skipped: every metadata string and all the message
-/// text are redacted before anything is derived from them, and each finished part must then pass
-/// a second check or the whole session is refused.
+/// text are redacted before anything is derived from them. Each finished part is then checked again,
+/// and a field or message that still holds a credential is replaced and reported, while the rest is
+/// indexed. Only a failure that makes the output untrustworthy throws, with the read report attached.
 /// </summary>
 public static class SessionRenderer
 {
@@ -34,8 +35,15 @@ public static class SessionRenderer
 			SessionFormat.Codex => new CodexTranscript(source, options, report),
 			_ => throw new ArgumentException("Unknown session format.", nameof(source)),
 		};
-		await JsonlReader.ReadAsync(payload, options.MaxLineBytes, report, transcript.Add, cancellationToken);
-		return transcript.Render();
+		try
+		{
+			await JsonlReader.ReadAsync(payload, options.MaxLineBytes, report, transcript.Add, cancellationToken);
+			return transcript.Render();
+		}
+		catch (RedactionException exception)
+		{
+			throw new RedactionException(exception.RuleName, exception.Failure, exception.Part) { ReadReport = report };
+		}
 	}
 
 	private static void Validate(SessionSource source, SessionRenderOptions options)
@@ -75,6 +83,9 @@ internal abstract class SessionTranscript(SessionSource source, SessionRenderOpt
 
 	/// <summary>Replacements made so far, by rule name, across metadata and messages.</summary>
 	protected Dictionary<string, int> CountsByRule { get; } = [];
+
+	/// <summary>Fields and messages the check on a finished part replaced.</summary>
+	protected List<SessionFieldRefusal> Refusals { get; } = [];
 
 	public abstract RedactedSession Render();
 
@@ -157,7 +168,7 @@ internal abstract class SessionTranscript(SessionSource source, SessionRenderOpt
 		string joined = string.Join(Redactor.MessageSeparator, Messages.Select(RepairBoundary));
 		RedactionResult result = Redactor.Shared.RedactFragment(joined);
 		AddCounts(result);
-		string[] texts = result.Text.Split(Redactor.MessageSeparator);
+		string[] texts = SplitMessages(result.Text);
 		if (texts.Length != Math.Max(Messages.Count, 1))
 		{
 			throw new RedactionException(RedactionException.WholeDocument, RedactionFailure.RuleFailed);
@@ -166,6 +177,26 @@ internal abstract class SessionTranscript(SessionSource source, SessionRenderOpt
 		{
 			Messages[i] = Messages[i] with { Text = texts[i], CodePoints = PythonText.CodePointLength(texts[i]) };
 		}
+	}
+
+	/// <summary>Splits on the boundary itself, then takes off the separator's own newlines, so a span that ended beside a boundary cannot change the count.</summary>
+	private static string[] SplitMessages(string joined)
+	{
+		string[] pieces = joined.Split(Redactor.MessageBoundary);
+		for (int i = 0; i < pieces.Length; i++)
+		{
+			string piece = pieces[i];
+			piece = i > 0 && piece.StartsWith('\n') ? piece[1..] : piece;
+			pieces[i] = i + 1 < pieces.Length && piece.EndsWith('\n') ? piece[..^1] : piece;
+		}
+
+		return pieces;
+	}
+
+	/// <summary>The id a path is built from. When redaction changed the id, a digest of the raw id keeps two such sessions apart. A digest reveals nothing.</summary>
+	protected string PathId(string rawId)
+	{
+		return RedactMetadata(rawId) == rawId ? rawId : SessionPaths.Digest(rawId);
 	}
 
 	private string RepairBoundary(SessionMessage message)
@@ -211,19 +242,6 @@ internal abstract class SessionTranscript(SessionSource source, SessionRenderOpt
 		return parts;
 	}
 
-	/// <summary>A refused part refuses the whole session, because a session with a part missing would look complete. The caller is told which part and which rule.</summary>
-	internal static RedactedMarkdown Seal(string document, int part)
-	{
-		try
-		{
-			return Redactor.Shared.Seal(document);
-		}
-		catch (RedactionException exception)
-		{
-			throw new RedactionException(exception.RuleName, exception.Failure, part);
-		}
-	}
-
 	protected List<RedactedSessionDocument> BuildDocuments(
 		List<ArraySegment<SessionMessage>> segments,
 		Func<SessionPart, string> render,
@@ -240,7 +258,7 @@ internal abstract class SessionTranscript(SessionSource source, SessionRenderOpt
 				part.Number,
 				messageStart,
 				segments[i].Count,
-				Seal(render(part), part.Number)));
+				PartGate.Clean(render(part), part, Refusals)));
 			messageStart += segments[i].Count;
 		}
 		return documents;

@@ -118,6 +118,12 @@ internal static class ValueShapes
 		return value.AsSpan().ContainsAny(":/\\") && ReadsAsNames(value.AsSpan().Trim('"'));
 	}
 
+	/// <summary>A name in test or code style with a number on the end, such as <c>TestFoo_Works2</c>. Not a generated value.</summary>
+	public static bool ReadsAsIdentifierWithDigits(string value)
+	{
+		return value.Contains('_') && value.Split('_').All(static part => part.Length > 0 && IsWordy(part.AsSpan().TrimEnd("0123456789").ToString()));
+	}
+
 	/// <summary>True when every part is a plain word: <c>my-token-name</c>, <c>TokenValue</c>, <c>session.key</c>. A long unbroken run is not treated as a word.</summary>
 	public static bool IsWordy(string value)
 	{

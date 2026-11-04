@@ -5,8 +5,8 @@
 # Exits 0 when clean, 1 when gitleaks found something or a document was refused, 2 on bad usage.
 set -eu
 
-if [ "$#" -ne 1 ]; then
-  echo "usage: scripts/redaction-report.sh <directory of .md files>" >&2
+if [ "$#" -lt 1 ]; then
+  echo "usage: scripts/redaction-report.sh <directory of .md files> [more directories]" >&2
   exit 2
 fi
 
@@ -16,4 +16,4 @@ if ! command -v gitleaks >/dev/null 2>&1; then
 fi
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-exec dotnet run --project "$root/tools/RedactionCheck/RedactionCheck.csproj" -c Release --verbosity quiet -- "$1"
+exec dotnet run --project "$root/tools/RedactionCheck/RedactionCheck.csproj" -c Release --verbosity quiet -- "$@"

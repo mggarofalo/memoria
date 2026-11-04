@@ -9,10 +9,13 @@ public enum RedactionFailure
 	/// <summary>A rule's regex or the whole document exceeded its time budget.</summary>
 	TimedOut,
 
+	/// <summary>A crafted run of rejected candidates used up the rule's allowance for rereading text. Skipping the rest could skip a secret.</summary>
+	ScanBudgetExhausted,
+
 	/// <summary>Repeated passes kept changing the text, so the result cannot be trusted as complete.</summary>
 	DidNotConverge,
 
-	/// <summary>The finished document still held a detectable credential after redaction, so the gate refused it.</summary>
+	/// <summary>The finished document still held a credential that replacing its field or message could not remove.</summary>
 	FoundAfterRedaction,
 }
 
@@ -35,6 +38,9 @@ public sealed class RedactionException(string ruleName, RedactionFailure failure
 
 	/// <summary>The 1-based session part the gate refused, or null when the failure is not tied to one part.</summary>
 	public int? Part { get; } = part;
+
+	/// <summary>What was read before the failure, when rendering a session. Counts only.</summary>
+	public Memoria.Core.Sessions.SessionReadReport? ReadReport { get; internal init; }
 
 	/// <summary>Value of <see cref="RuleName"/> for failures that span every rule.</summary>
 	public const string WholeDocument = "*";

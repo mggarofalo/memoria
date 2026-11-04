@@ -63,11 +63,18 @@ public sealed class RedactorSafetyTests
 	{
 		Stopwatch clock = Stopwatch.StartNew();
 
-		string once = Redactor.Redact(input).Text;
-		string twice = Redactor.Redact(once).Text;
+		// A crafted run may use up the rescan credit, which refuses the document rather than skipping anything.
+		try
+		{
+			string once = Redactor.Redact(input).Text;
+			Assert.Equal(once, Redactor.Redact(once).Text);
+		}
+		catch (RedactionException exception)
+		{
+			Assert.Equal(RedactionFailure.ScanBudgetExhausted, exception.Failure);
+		}
 
 		Assert.True(clock.Elapsed < TimeSpan.FromSeconds(60), "Two passes over 2 MB exceeded the budget.");
-		Assert.Equal(once, twice);
 	}
 
 	[Fact]

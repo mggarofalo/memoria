@@ -8,7 +8,6 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="Memoria.Core.Tests" />
-    <InternalsVisibleTo Include="RedactionCheck" />
   </ItemGroup>
 
 </Project>

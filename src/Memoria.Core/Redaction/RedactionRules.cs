@@ -26,6 +26,9 @@ internal static class RedactionRules
 	/// </summary>
 	private const string Left = @"(?:^|[^A-Za-z0-9]|\\+[nrtfbv0]|\\u[0-9A-Fa-f]{4}|%[0-9A-Fa-f]{2})";
 
+	/// <summary>A left boundary for a prefix that is also ordinary text, such as <c>key-</c> in <c>cache-key-abc</c>: no dash may touch it.</summary>
+	private const string StrictLeft = @"(?:^|[^A-Za-z0-9\-]|\\+[nrtfbv0]|\\u[0-9A-Fa-f]{4}|%[0-9A-Fa-f]{2})";
+
 	/// <summary>What may follow a fixed-length token, so a run of base64 that happens to contain the prefix is not cut.</summary>
 	private const string Right = @"(?:$|[^A-Za-z0-9])";
 
@@ -70,12 +73,8 @@ internal static class RedactionRules
 
 	private const string KeyMarkerName = @"(?:[a-z0-9]+" + Space + @"){0,4}private" + Space + @"key(?:" + Space + @"block)?";
 
-	/// <summary>The prefixes a transcript can add to each line of a key, as a regex.</summary>
-	private const string LinePrefix = @"(?:[0-9]+[\t\u2192:|][ ]?|[>#*;\-][ ]?)?";
-
-	private const string Base64Line = @"[A-Za-z0-9+/]{64}";
-
-	private const string Base64WideLine = @"[A-Za-z0-9+/]{70}";
+	/// <summary>A line ending in a long base64 run, with anything before the run.</summary>
+	private const string RunOnLine = @"[A-Za-z0-9+/]{40,}={0,2}";
 
 	/// <summary>
 	/// PEM private keys of every flavor, including PGP blocks and keys cut off with no END line. The marker
@@ -96,23 +95,23 @@ internal static class RedactionRules
 		linesMatter: true);
 
 	/// <summary>
-	/// A run of at least three base64 lines at PEM's own widths, with no marker in sight. Lines under a
-	/// certificate marker or in a data URI are skipped, and MIME's 76 columns do not match.
+	/// A run of at least three lines ending in base64 of one width, whatever precedes each, with no marker in sight.
+	/// <see cref="PemBlock.IsUnmarkedKeyBody"/> rules out data: MIME's width, hex, data URIs, and bodies under a non-private BEGIN.
+	/// The span ends before the last newline, so a message's end stays a line end.
 	/// </summary>
 	public static readonly RedactionRule PrivateKeyLines = new(
 		"private-key-lines",
 		Pattern(
-			@"(?:^|[\r\n])[ \t]*" + LinePrefix + @"(?<secret>"
-			+ @"(?:" + Base64Line + @"\r?\n[ \t]*" + LinePrefix + @"){3,}"
-			+ @"|(?:" + Base64WideLine + @"\r?\n[ \t]*" + LinePrefix + @"){3,})"),
+			@"(?:^|[\r\n])[^\r\n]*?(?<secret>" + RunOnLine + @"(?:[ \t]*\r?\n[^\r\n]*?" + RunOnLine + @"){2,})[ \t]*(?:$|[\r\n])"),
 		PemBlock.IsUnmarkedKeyBody,
 		extend: PemBlock.ExtendLines,
-		linesMatter: true);
+		linesMatter: true,
+		skipRejected: true);
 
 	/// <summary>A key's base64 with no marker at all. The decoded head proves it: a certificate or public key starts differently.</summary>
 	public static readonly RedactionRule PrivateKeyDer = new(
 		"private-key-der",
-		Pattern(@"(?:^|[^A-Za-z0-9+/])(?<secret>(?:MII|MHc|MIG|b3BlbnNzaC1rZXktdjE)[A-Za-z0-9+/]{60,}={0,2})"),
+		Pattern(@"(?:^|[^A-Za-z0-9+/])(?<secret>(?:(?:MII|MHc|MIG|b3BlbnNzaC1rZXktdjE)[A-Za-z0-9+/]{60,}|MC4CAQAwBQYDK2Vw[A-Za-z0-9+/]{20,})={0,2})"),
 		c => PemBlock.IsDerPrivateKey(c.Value));
 
 	/// <summary>A whole PEM key encoded as base64, as in a kubeconfig's <c>client-key-data</c>. A base64 certificate survives.</summary>
@@ -133,7 +132,7 @@ internal static class RedactionRules
 		Pattern(
 			@"(?:(?i:(?:aws[_.\-]?secret[_.\-]?(?:access[_.\-]?)?key|secret[_.\-]?access[_.\-]?key))" + Close + Operator + @"(?:\\*[""'`]|%2[27])?"
 			+ @"(?<secret>(?:[A-Za-z0-9/+]|%2[BbFf]){40,}(?:=|%3[Dd]){0,2})"
-			+ @"|(?:AKIA|ASIA)[A-Z0-9]{16}[""']?(?:[:,;/|\s]|\\+[nt]){1,6}[""']?(?<secret>[A-Za-z0-9/+]{40})" + Right + ")"),
+			+ @"|(?:AKIA|ASIA)[A-Z0-9]{16}[""']?(?:[:,;/|\s]|\\+[nt]){1,6}[""']?(?<secret>[A-Za-z0-9/+]{36,44})" + Right + ")"),
 		c => !ValueShapes.IsPlaceholder(c.Value));
 
 	/// <summary>Anthropic API, admin, and OAuth keys: <c>sk-ant-api03-</c>, <c>sk-ant-admin01-</c>, <c>sk-ant-oat01-</c>.</summary>
@@ -263,7 +262,7 @@ internal static class RedactionRules
 		"url-password",
 		Pattern(
 			@"[A-Za-z][A-Za-z0-9+.\-]*(?::|%3[Aa])(?:\\*/\\*/|%2[Ff]%2[Ff])[^\s/:@""'`<>\[]*(?::|%3[Aa])"
-			+ @"(?:(?<secret>[^\s/""'`]+)(?:@|%40)|(?<secret>[^\s/""'`@]+/[^\s""'`@]*)@)"),
+			+ @"(?:(?<secret>[^\s/""`]+)(?:@|%40)|(?<secret>[^\s/""`@]+/[^\s""`@]*)@)"),
 		SecretHeuristics.IsUrlPasswordCandidate);
 
 	/// <summary>A bare token as URL userinfo, as in <c>https://TOKEN@host/repo.git</c>. Requires a token-like value, so <c>ssh://git@host</c> survives.</summary>
@@ -287,13 +286,13 @@ internal static class RedactionRules
 	/// <summary><c>Authorization</c> and <c>Proxy-Authorization</c> headers with a Bearer, Basic, Token, or ApiKey scheme, in shell, JSON at any escaping depth, and URL-encoded form.</summary>
 	public static readonly RedactionRule AuthorizationHeader = new(
 		"authorization-header",
-		Pattern(@"(?i:authorization)" + Close + Operator + @"(?:\\*[""'`]|%2[27])?(?:[ \t]|%20|\+)*(?i:bearer|basic|token|apikey)(?:[ \t]|%20|\+)+(?<secret>[^\s""'`\\,;<>&]+)"),
+		Pattern(@"(?i:authorization)" + Close + Operator + @"(?:\\*[""'`]|%2[27])?(?:[ \t]|%20|\+)*(?i:bearer|basic|token|apikey)(?:[ \t]|%20|\+)+(?<secret>[^\s""'`\\,;<>&]+(?:[,;]+[^\s""'`\\,;<>&]+)*)"),
 		c => SecretHeuristics.IsExplicitCredential(c.JudgedValue));
 
 	/// <summary>A bearer token with no header name around it, such as a value in a config or a log line. Stricter than <see cref="AuthorizationHeader"/>, because prose says "bearer" too.</summary>
 	public static readonly RedactionRule BearerToken = new(
 		"bearer-token",
-		Pattern(@"(?i:\bbearer)(?:[ \t]|%20|\+)+(?<secret>[A-Za-z0-9._~+/=\-]{20,})"),
+		Pattern(@"(?i:\bbearer)(?:[ \t]|%20|\+)+(?<secret>[A-Za-z0-9._~+/=\-]{20,}(?:[,;]+[A-Za-z0-9._~+/=\-]+)*)"),
 		c => !ValueShapes.IsPlaceholder(c.Value) && SecretHeuristics.IsTokenValue(c.Value));
 
 	/// <summary>The password in <c>curl -u user:password</c>. Anchored on the flag, so every occurrence on a line is found and <c>--user-agent</c> is not one.</summary>
@@ -305,7 +304,7 @@ internal static class RedactionRules
 	/// <summary><c>Cookie</c> and <c>Set-Cookie</c> headers holding a session-length value. The whole header goes, because any cookie in it may be the live one.</summary>
 	public static readonly RedactionRule CookieHeader = new(
 		"cookie-header",
-		Pattern(@"(?i:\b(?:set-)?cookie)(?:\\*[""'])?[ \t]*(?::|%3[Aa])[ \t]*(?:\\*[""'])?(?<secret>[^\r\n""'\\`|]+)"),
+		Pattern(@"(?i:\b(?:set-)?cookie)(?:\\*[""'])?[ \t]*(?::|%3[Aa]|\|)[ \t]*(?:\\*[""'])?(?<secret>[^\r\n""'\\`|]+)"),
 		c => SecretHeuristics.IsSessionCookie(c.Value));
 
 	/// <summary>curl's <c>-b</c> and <c>--cookie</c> with inline cookies. A cookie file name has no equals sign.</summary>
@@ -317,22 +316,23 @@ internal static class RedactionRules
 	/// <summary>Session cookies known by name: <c>PHPSESSID</c>, <c>JSESSIONID</c>, <c>ASP.NET_SessionId</c>, <c>connect.sid</c>.</summary>
 	public static readonly RedactionRule SessionCookieValue = new(
 		"session-cookie",
-		Pattern(@"(?i:PHPSESSID|JSESSIONID|ASP\.NET_SessionId|connect\.sid)=(?<secret>[^\s;,""'&]+)"),
+		Pattern(@"(?i:PHPSESSID|JSESSIONID|ASP\.NET_SessionId|connect\.sid|sessionid)=(?<secret>[^\s;,""'&]+)"),
 		c => SecretHeuristics.IsSessionValue(c.Value));
 
-	/// <summary>Passwords in the conventional flags of common tools: <c>sshpass -p</c>, <c>docker login -p</c>, <c>redis-cli -a</c>, <c>htpasswd -b</c>, <c>az login -p</c>.</summary>
+	/// <summary>Passwords in the conventional places of common tools: <c>sshpass -p</c>, <c>docker login -p</c>, <c>redis-cli -a</c>, <c>htpasswd -b</c>, <c>az login -p</c>, <c>ssh-keygen -N</c> and <c>-P</c>, <c>cmdkey /pass:</c>, <c>net use</c>, <c>setx</c>.</summary>
 	public static readonly RedactionRule CommandPassword = new(
 		"command-password",
 		Pattern(
 			@"(?:\bsshpass\s+-p[ ]?|\bdocker\s+login\b[^\r\n|]*?\s-p[ ]+|\bredis-cli\b[^\r\n|]*?\s-a[ ]+|\baz\s+login\b[^\r\n|]*?\s(?:-p|--password)[ ]+"
-			+ @"|\bhtpasswd\s+-[a-mo-zA-Z]*b[a-zA-Z]*\s+\S+\s+\S+\s+|\bhtpasswd\s+-[a-zA-Z]*n[a-zA-Z]*b[a-zA-Z]*\s+\S+\s+)"
+			+ @"|\bhtpasswd\s+-[a-mo-zA-Z]*b[a-zA-Z]*\s+\S+\s+\S+\s+|\bhtpasswd\s+-[a-zA-Z]*n[a-zA-Z]*b[a-zA-Z]*\s+\S+\s+"
+			+ @"|\bssh-keygen\b[^\r\n|]*?\s-[NP][ ]+|\bcmdkey\b[^\r\n|]*?\s/pass:|\bnet\s+use\s+(?:[A-Za-z]:\s+)?\\\\\S+\s+|\bsetx\s+\S*(?i:pass|secret|token|key)\S*\s+)"
 			+ @"(?:""(?<secret>[^""\r\n]+)|'(?<secret>[^'\r\n]+)|(?<secret>[^\s""'`|;&]+))"),
 		SecretHeuristics.IsCommandCredential);
 
 	/// <summary><c>mysql -pSECRET</c>, <c>mysqldump</c>, <c>mysqladmin</c>, and <c>mariadb</c>, where the password is attached to the flag.</summary>
 	public static readonly RedactionRule MysqlPassword = new(
 		"mysql-password",
-		Pattern(@"\s-p(?<secret>[^\s""'`|;&]+)"),
+		Pattern(@"\s-p(?:'(?<secret>[^'\r\n]+)|""(?<secret>[^""\r\n]+)|(?<secret>[^\s""'`|;&]+))"),
 		SecretHeuristics.IsMysqlPassword);
 
 	/// <summary>The plain text passed to PowerShell's <c>ConvertTo-SecureString</c>.</summary>
@@ -360,14 +360,40 @@ internal static class RedactionRules
 		"xml-secret",
 		Pattern(
 			@"(?i:<(?:password|passwd|secret|token|api[_\-]?key|access[_\-]?key|secret[_\-]?key|client[_\-]?secret)>)(?<secret>[^<\r\n]+)<"
-			+ @"|(?i:<add\s+(?:key|name)=[""'][A-Za-z0-9_.:\-]*(?:password|pwd|secret|token|key)[""']\s+value=)[""'](?<secret>[^""'\r\n]+)"),
+			+ @"|(?i:<add\s+(?:key|name)=[""'][A-Za-z0-9_.:\-]*(?:password|pwd|secret|token|key)[""']\s+value=)[""'](?<secret>[^""'\r\n]+)"
+			+ @"|(?i:<add\s+value=)[""'](?<secret>[^""'\r\n]+)[""'](?i:\s+(?:key|name)=[""'][A-Za-z0-9_.:\-]*(?:password|pwd|secret|token|key)[""'])"),
 		SecretHeuristics.IsCommandCredential);
 
-	/// <summary>SQL that sets a password: <c>IDENTIFIED BY 'x'</c> and <c>WITH PASSWORD 'x'</c>.</summary>
+	/// <summary>SQL that sets a password: <c>IDENTIFIED BY 'x'</c>, <c>IDENTIFIED BY "x"</c>, and <c>WITH PASSWORD 'x'</c>.</summary>
 	public static readonly RedactionRule SqlPassword = new(
 		"sql-password",
-		Pattern(@"(?i:\bIDENTIFIED\s+BY|\bPASSWORD)\s+'(?<secret>(?:[^'\r\n]|'')+)'"),
+		Pattern(@"(?i:\bIDENTIFIED\s+BY\s+""(?<secret>[^""\r\n]+)""|(?:\bIDENTIFIED\s+BY|\bPASSWORD)\s+'(?<secret>(?:[^'\r\n]|'')+)')"),
 		SecretHeuristics.IsCommandCredential);
+
+	/// <summary>A PuTTY private key file. Its private lines run from the count to the MAC, and the public lines above them survive.</summary>
+	public static readonly RedactionRule PuttyPrivateKey = new(
+		"putty-private-key",
+		Pattern(@"Private-Lines:[ \t]*[0-9]+\r?\n(?<secret>(?:[A-Za-z0-9+/=]+\r?\n)+Private-(?:MAC|Hash):[ \t]*[0-9a-fA-F]+)"),
+		literal: "Private-Lines:",
+		linesMatter: true);
+
+	/// <summary>The computed <c>response</c> of a Digest authorization header, which can be replayed.</summary>
+	public static readonly RedactionRule DigestResponse = new(
+		"digest-response",
+		Pattern(@"(?i:\bdigest\s)[^\r\n]*?(?i:\bresponse=)[""']?(?<secret>[0-9a-fA-F]{32,})"));
+
+	/// <summary>Query parameters that carry a credential under a plain name: <c>?key=</c> and OAuth's <c>?code=</c>. Only a value that reads as generated counts.</summary>
+	public static readonly RedactionRule QueryCredential = new(
+		"query-credential",
+		Pattern(@"(?:[?&]|%3[Ff]|%26|\\u0026)(?:key|code)=(?<secret>[A-Za-z0-9_.~%\-]{16,})"),
+		c => !ValueShapes.IsPlaceholder(c.Value) && SecretHeuristics.IsTokenValue(c.Value));
+
+	/// <summary>A Microsoft Teams incoming webhook, which authorizes posting with no other credential. The host stays readable.</summary>
+	public static readonly RedactionRule TeamsWebhook = new(
+		"teams-webhook",
+		Pattern(@"webhook\.office\.com" + Slash + @"webhookb2" + Slash + @"(?<secret>[A-Za-z0-9\-@_/\\%]{40,})"),
+		c => !ValueShapes.IsPlaceholder(c.Value),
+		literal: "webhook.office.com");
 
 	/// <summary>Command line flags with the value after a space or as the next array item: <c>--password x</c>, <c>--api-key x</c>, <c>["--token", "x"]</c>. Judged like an assignment.</summary>
 	public static readonly RedactionRule SecretFlag = new(
@@ -396,7 +422,7 @@ internal static class RedactionRules
 	[
 		Provider("sendgrid-key", "SG.", @"SG\.[A-Za-z0-9_\-]{16,}\.[A-Za-z0-9_\-]{16,}"),
 		Provider("twilio-key", null, @"(?:AC|SK)[0-9a-f]{32}" , fixedLength: true),
-		Provider("mailgun-key", "key-", @"key-[0-9a-f]{32}", fixedLength: true),
+		Provider("mailgun-key", "key-", @"key-[0-9a-f]{32}", fixedLength: true, strictLeft: true),
 		Provider("digitalocean-token", "_v1_", @"do[por]_v1_[0-9a-f]{40,}"),
 		Provider("vercel-token", "vcp_", @"vcp_[A-Za-z0-9]{24,}"),
 		Provider("supabase-token", "sbp_", @"sbp_[A-Za-z0-9]{32,}"),
@@ -418,6 +444,25 @@ internal static class RedactionRules
 		Provider("xai-key", "xai-", @"xai-[A-Za-z0-9]{32,}"),
 		Provider("langsmith-key", "lsv2_", @"lsv2_[A-Za-z0-9_]{32,}"),
 		Provider("onepassword-token", "ops_", @"ops_[A-Za-z0-9_\-]{32,}"),
+		Provider("cloudflare-token", "cfut_", @"cfut_[A-Za-z0-9_\-]{32,}"),
+		Provider("sentry-token", "sntrys_", @"sntrys_[A-Za-z0-9_\-]{32,}"),
+		Provider("grafana-token", null, @"(?:glsa_|glc_)[A-Za-z0-9_+/=\-]{32,}"),
+		Provider("figma-token", "figd_", @"figd_[A-Za-z0-9_\-]{32,}"),
+		Provider("tavily-key", "tvly-", @"tvly-[A-Za-z0-9_\-]{24,}"),
+		Provider("perplexity-key", "pplx-", @"pplx-[A-Za-z0-9]{32,}"),
+		Provider("replicate-token", "r8_", @"r8_[A-Za-z0-9]{32,}"),
+		Provider("render-key", "rnd_", @"rnd_[A-Za-z0-9]{24,}"),
+		Provider("netlify-token", "nfp_", @"nfp_[A-Za-z0-9]{32,}"),
+		Provider("planetscale-token", "pscale_tkn_", @"pscale_tkn_[A-Za-z0-9_\-]{32,}"),
+		Provider("doppler-token", "dp.st.", @"dp\.st\.[A-Za-z0-9_.\-]{32,}"),
+		Provider("alibaba-key", "LTAI", @"LTAI[A-Za-z0-9]{12,20}", fixedLength: true),
+		Provider("square-token", "sq0atp-", @"sq0atp-[A-Za-z0-9_\-]{22,}"),
+		Provider("hubspot-token", "pat-", @"pat-(?:na|eu|ap)[0-9]-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"),
+		Provider("atlassian-cookie-token", "ATCTT3", @"ATCTT3[A-Za-z0-9_=\-]{32,}"),
+		Provider("supabase-secret", "sb_secret_", @"sb_secret_[A-Za-z0-9_\-]{20,}"),
+		Provider("facebook-token", "EAAC", @"EAAC[A-Za-z0-9]{40,}"),
+		Provider("huggingface-org-token", "api_org_", @"api_org_[A-Za-z0-9]{30,}"),
+		Provider("gitlab-feature-flag-token", "glffct-", @"glffct-[A-Za-z0-9_\-]{20,}"),
 	];
 
 	/// <summary>A Discord webhook path, which authorizes posting with no other credential. The host and channel id stay readable.</summary>
@@ -434,6 +479,7 @@ internal static class RedactionRules
 		PrivateKeyEnd,
 		PrivateKeyLines,
 		PrivateKeyDer,
+		PuttyPrivateKey,
 		Base64PrivateKey,
 		AwsSecretKey,
 		AnthropicKey,
@@ -455,12 +501,15 @@ internal static class RedactionRules
 		MemoriaApiKey,
 		.. ProviderTokens,
 		DiscordWebhook,
+		TeamsWebhook,
 		MemoriaSharedSecret,
 		UrlPassword,
 		UrlToken,
 		UserInfoPassword,
 		ConnectionStringPassword,
 		AuthorizationHeader,
+		DigestResponse,
+		QueryCredential,
 		BearerToken,
 		CurlUserPassword,
 		CookieHeader,
@@ -477,9 +526,9 @@ internal static class RedactionRules
 		SecretAssignment,
 	];
 
-	private static RedactionRule Provider(string name, string? literal, string pattern, bool fixedLength = false)
+	private static RedactionRule Provider(string name, string? literal, string pattern, bool fixedLength = false, bool strictLeft = false)
 	{
-		string regex = Left + "(?<secret>" + pattern + ")" + (fixedLength ? Right : "");
+		string regex = (strictLeft ? StrictLeft : Left) + "(?<secret>" + pattern + ")" + (fixedLength ? Right : "");
 		return new RedactionRule(name, Pattern(regex), SecretHeuristics.IsRealToken, literal: literal);
 	}
 
