@@ -1,3 +1,4 @@
+import { isBusy } from "./sqlite-busy.ts";
 import type { FastifyInstance } from "fastify";
 import type { AppContext } from "./app.ts";
 import { SIDECAR_VERSION } from "./app.ts";
@@ -7,7 +8,7 @@ import { parseLineRange } from "./line-range.ts";
 import { hasFilters, matchesFilters, parseBound, type DocumentMetadata, type SearchFilters } from "./metadata.ts";
 import { resolveMultiGet } from "./multi-get.ts";
 import { errorResponses, metadataOrNull } from "./schemas.ts";
-import type { DocumentInfo, DocumentLookupError, QmdBackend, SearchQuery } from "./store.ts";
+import type { DocumentInfo, DocumentLookupError, QmdBackend, SearchHit, SearchQuery } from "./store.ts";
 
 // --- helpers -----------------------------------------------------------------
 
@@ -58,6 +59,53 @@ async function resolveCollections(backend: QmdBackend, requested: string[] | und
     throw new HttpError(400, "unknown_collection", `Unknown collection(s): ${unknown.join(", ")}`);
   }
   return [...new Set(requested)];
+}
+
+/** Exactly one of a plain query or typed searches. Returns the plain query, or null. */
+function checkedSearchInput(body: SearchBody): string | null {
+  const text = body.query?.trim() ?? "";
+  const hasSearches = Array.isArray(body.searches) && body.searches.length > 0;
+  if ((text !== "") === hasSearches) throw new HttpError(400, "validation", "Provide exactly one of `query` or `searches`");
+  return text === "" ? null : text;
+}
+
+/** Bounds are validated up front so a bad date is a 400, not an empty result. */
+function checkedFilters(filters: SearchFilters | undefined): SearchFilters | undefined {
+  if (!hasFilters(filters)) return undefined;
+  try {
+    if (filters.since?.trim()) parseBound(filters.since, "since");
+    if (filters.until?.trim()) parseBound(filters.until, "until");
+  } catch (err) {
+    throw new HttpError(400, "validation", err instanceof Error ? err.message : String(err));
+  }
+  return filters;
+}
+
+/** Filters apply after retrieval, so a filtered search has to fetch more than it will return. */
+function searchWindow(body: SearchBody, filtered: boolean, config: { filterOverfetch: number; filterMaxFetch: number }): { fetchLimit: number; candidateLimit: number | undefined } {
+  if (!filtered) return { fetchLimit: body.limit, candidateLimit: body.candidateLimit };
+  const fetchLimit = Math.min(body.limit * config.filterOverfetch, config.filterMaxFetch);
+  return { fetchLimit, candidateLimit: body.candidateLimit ?? (fetchLimit > 40 ? fetchLimit : undefined) };
+}
+
+function primarySearch(searches: SearchQuery[]): string {
+  return (searches.find((s) => s.type === "lex") ?? searches.find((s) => s.type === "vec") ?? searches[0]!).query;
+}
+
+function searchResult(hit: SearchHit, line: number, snippet: string, meta: DocumentMetadata | undefined) {
+  const { collection, path } = splitDisplayPath(hit.displayPath);
+  return {
+    docid: hit.docid,
+    file: hit.displayPath,
+    collection,
+    path,
+    title: hit.title,
+    score: Math.round(hit.score * 10000) / 10000,
+    context: hit.context,
+    line,
+    snippet,
+    metadata: meta ?? null,
+  };
 }
 
 // --- schemas local to routes -------------------------------------------------
@@ -143,6 +191,30 @@ interface ReindexBody {
 
 // --- routes ------------------------------------------------------------------
 
+function definedRange(fromLine: number | undefined, maxLines: number | undefined): { fromLine?: number; maxLines?: number } {
+  return { ...(fromLine !== undefined ? { fromLine } : {}), ...(maxLines !== undefined ? { maxLines } : {}) };
+}
+
+async function readBody(backend: QmdBackend, file: string, range: { fromLine?: number; maxLines?: number }, lineNumbers: boolean | undefined): Promise<string> {
+  const body = (await backend.getDocumentBody(file, range)) ?? "";
+  return lineNumbers ? backend.addLineNumbers(body, range.fromLine ?? 1) : body;
+}
+
+function firstLines(body: string, maxLines: number | undefined): { body: string; truncatedTo?: number } {
+  if (maxLines === undefined) return { body };
+  const lines = body.split("\n");
+  return lines.length > maxLines ? { body: lines.slice(0, maxLines).join("\n"), truncatedTo: maxLines } : { body };
+}
+
+function multiGetView(doc: Parameters<typeof documentView>[0] & { body?: string | undefined }, request: MultiGetBody, backend: QmdBackend, ctx: Parameters<typeof documentView>[1]) {
+  if (!request.includeBody) return documentView(doc, ctx, { body: null });
+  const { body, truncatedTo } = firstLines(doc.body ?? "", request.maxLines);
+  return documentView(doc, ctx, {
+    body: request.lineNumbers ? backend.addLineNumbers(body, 1) : body,
+    ...(truncatedTo !== undefined ? { maxLines: truncatedTo } : {}),
+  });
+}
+
 export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Promise<void> {
   const { backend, config } = ctx;
 
@@ -172,7 +244,20 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     type: "object",
     required: ["status", "version", "uptimeSeconds", "index", "models", "warmup", "metadata", "jobs"],
     properties: {
-      status: { type: "string", enum: ["ready", "warming"] },
+      status: { type: "string", enum: ["ready", "warming", "degraded"], description: "`degraded`: remote LLM mode with some model role no worker can serve." },
+      llm: {
+        type: "object",
+        required: ["mode", "degraded", "unavailable", "workersUp", "workersTotal"],
+        properties: {
+          mode: { type: "string", enum: ["local", "remote"] },
+          degraded: { type: "boolean" },
+          unavailable: { type: "array", items: { type: "string", enum: ["embed", "rerank", "generate", "documents"] }, description: "Roles no worker can serve right now. `documents` means document embedding is out while query vectors still work." },
+          workersUp: { type: "integer" },
+          workersTotal: { type: "integer" },
+          embedDisagreement: { type: "array", items: { type: "string" }, description: "Workers that embedded the same text differently. Reported only: nothing acts on it. Empty until two workers have been compared." },
+          documentsSetAside: { type: "integer", description: "Documents out of vector search because a worker refused them. Retried by themselves within a day, or at once by `POST /queue/dead-letters:clear`." },
+        },
+      },
       version: { type: "string" },
       uptimeSeconds: { type: "integer" },
       index: {
@@ -215,7 +300,14 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         required: ["documents", "refreshedAt"],
         properties: { documents: { type: "integer" }, refreshedAt: { type: "string", nullable: true } },
       },
-      jobs: { type: "object", required: ["pending"], properties: { pending: { type: "integer" } } },
+      jobs: {
+        type: "object",
+        required: ["pending"],
+        properties: {
+          pending: { type: "integer" },
+          persistent: { type: "boolean", description: "False means jobs are in memory only and would not survive a restart." },
+        },
+      },
     },
   } as const;
 
@@ -238,8 +330,16 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     async (request, reply) => {
       const status = await backend.getStatus();
       const models = backend.models();
+      const llm = backend.llmHealth();
+      // In remote mode workers warm themselves, so "warm" can only mean workers
+      // are serving, now. A stored flag would read as healthy with none up.
+      const warmupState =
+        llm.mode === "remote"
+          ? { ...ctx.warmup, done: !llm.degraded, error: llm.degraded ? `No worker can serve: ${llm.unavailable.join(", ")}` : null }
+          : ctx.warmup;
       const body = {
-        status: models.resident ? ("ready" as const) : ("warming" as const),
+        status: llm.degraded ? ("degraded" as const) : models.resident ? ("ready" as const) : ("warming" as const),
+        llm,
         version: SIDECAR_VERSION,
         uptimeSeconds: Math.floor((Date.now() - ctx.startedAt) / 1000),
         index: {
@@ -249,9 +349,9 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
           hasVectorIndex: status.hasVectorIndex,
         },
         models,
-        warmup: ctx.warmup,
+        warmup: warmupState,
         metadata: { documents: ctx.metadata.size, refreshedAt: ctx.metadata.refreshedAt?.toISOString() ?? null },
-        jobs: { pending: ctx.jobs.pending },
+        jobs: { pending: ctx.jobs.pending, persistent: ctx.jobs.persistence().healthy },
       };
       if (request.query.requireModels && !models.resident) {
         return reply.code(503).send(body);
@@ -348,6 +448,12 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
               results: { type: "array", items: searchResultSchema },
               total: { type: "integer" },
               tookMs: { type: "integer" },
+              degraded: { type: "boolean", description: "True when this search ran without something a full search uses. Results are valid but may rank worse." },
+              degradedReasons: {
+                type: "array",
+                items: { type: "string", enum: ["no_rerank", "no_expansion", "cpu_embedding", "no_vectors"] },
+                description: "What it went without. With `no_rerank`, scores are rank-derived rather than reranker scores, and `minScore` was not applied.",
+              },
               query: {
                 type: "object",
                 required: ["collections", "rerank", "filtered", "fetched", "limit"],
@@ -367,30 +473,15 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     },
     async (request) => {
       const body = request.body;
-      const hasQuery = typeof body.query === "string" && body.query.trim() !== "";
-      const hasSearches = Array.isArray(body.searches) && body.searches.length > 0;
-      if (hasQuery === hasSearches) {
-        throw new HttpError(400, "validation", "Provide exactly one of `query` or `searches`");
-      }
-      const filters: SearchFilters | undefined = hasFilters(body.filters) ? body.filters : undefined;
+      const text = checkedSearchInput(body);
+      const filters = checkedFilters(body.filters);
       const filtered = filters !== undefined;
-      if (filters) {
-        // Validate bounds up front so a bad date is a 400, not an empty result.
-        try {
-          if (filters.since?.trim()) parseBound(filters.since, "since");
-          if (filters.until?.trim()) parseBound(filters.until, "until");
-        } catch (err) {
-          throw new HttpError(400, "validation", err instanceof Error ? err.message : String(err));
-        }
-      }
       const collections = await resolveCollections(backend, body.collections);
-      const fetchLimit = filtered ? Math.min(body.limit * config.filterOverfetch, config.filterMaxFetch) : body.limit;
-      const candidateLimit = body.candidateLimit ?? (filtered && fetchLimit > 40 ? fetchLimit : undefined);
+      const { fetchLimit, candidateLimit } = searchWindow(body, filtered, config);
 
       const started = Date.now();
-      const hits = await backend.search({
-        ...(hasQuery ? { query: body.query!.trim() } : {}),
-        ...(hasSearches ? { queries: body.searches!.map((s) => ({ type: s.type, query: s.query })) } : {}),
+      const { hits, degradedReasons } = await backend.searchDetailed({
+        ...(text !== null ? { query: text } : { queries: body.searches!.map((s) => ({ type: s.type, query: s.query })) }),
         ...(body.intent ? { intent: body.intent } : {}),
         ...(candidateLimit !== undefined ? { candidateLimit } : {}),
         collections,
@@ -399,28 +490,13 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         rerank: body.rerank,
       });
 
-      const primaryQuery = hasQuery
-        ? body.query!.trim()
-        : (body.searches!.find((s) => s.type === "lex")?.query ?? body.searches!.find((s) => s.type === "vec")?.query ?? body.searches![0]!.query);
-
+      const primaryQuery = text ?? primarySearch(body.searches!);
       const results = [];
       for (const hit of hits) {
         const meta: DocumentMetadata | undefined = ctx.metadata.get(hit.displayPath);
         if (filters && !matchesFilters(meta, filters)) continue;
         const { line, snippet } = backend.snippet(hit.body, primaryQuery, 300, hit.bestChunkPos, hit.bestChunk.length, body.intent);
-        const { collection, path } = splitDisplayPath(hit.displayPath);
-        results.push({
-          docid: hit.docid,
-          file: hit.displayPath,
-          collection,
-          path,
-          title: hit.title,
-          score: Math.round(hit.score * 10000) / 10000,
-          context: hit.context,
-          line,
-          snippet,
-          metadata: meta ?? null,
-        });
+        results.push(searchResult(hit, line, snippet, meta));
         if (results.length >= body.limit) break;
       }
 
@@ -428,6 +504,8 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         results,
         total: results.length,
         tookMs: Date.now() - started,
+        degraded: degradedReasons.length > 0,
+        degradedReasons,
         query: { collections, rerank: body.rerank, filtered, fetched: hits.length, limit: body.limit },
       };
     },
@@ -468,12 +546,9 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       const found = await backend.get(parsed.lookup);
       if ("error" in found) return reply.code(404).send(lookupErrorBody(found));
 
-      let body: string | null = null;
-      if (request.query.body) {
-        body = (await backend.getDocumentBody(found.filepath, { ...(fromLine !== undefined ? { fromLine } : {}), ...(maxLines !== undefined ? { maxLines } : {}) })) ?? "";
-        if (request.query.lineNumbers) body = backend.addLineNumbers(body, fromLine ?? 1);
-      }
-      return documentView(found, ctx, { ...(fromLine !== undefined ? { fromLine } : {}), ...(maxLines !== undefined ? { maxLines } : {}), body });
+      const range = definedRange(fromLine, maxLines);
+      const body = request.query.body ? await readBody(backend, found.filepath, range, request.query.lineNumbers) : null;
+      return documentView(found, ctx, { ...range, body });
     },
   );
 
@@ -526,21 +601,8 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       const out = [];
       const skipped = [];
       for (const entry of docs) {
-        if (entry.skipped) {
-          skipped.push({ file: entry.doc.displayPath, reason: entry.skipReason });
-          continue;
-        }
-        let body: string | null = request.body.includeBody ? (entry.doc.body ?? "") : null;
-        let truncatedTo: number | undefined;
-        if (body !== null && request.body.maxLines !== undefined) {
-          const lines = body.split("\n");
-          if (lines.length > request.body.maxLines) {
-            body = lines.slice(0, request.body.maxLines).join("\n");
-            truncatedTo = request.body.maxLines;
-          }
-        }
-        if (body !== null && request.body.lineNumbers) body = backend.addLineNumbers(body, 1);
-        out.push(documentView(entry.doc, ctx, { body, ...(truncatedTo !== undefined ? { maxLines: truncatedTo } : {}) }));
+        if (entry.skipped) skipped.push({ file: entry.doc.displayPath, reason: entry.skipReason });
+        else out.push(multiGetView(entry.doc, request.body, backend, ctx));
       }
       return { docs: out, skipped, errors };
     },
@@ -776,6 +838,245 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       const job = ctx.jobs.get(request.params.id);
       if (!job) return reply.code(404).send({ error: "not_found", message: `No job ${request.params.id}` });
       return { job };
+    },
+  );
+
+  // ---- queue -----------------------------------------------------------------
+
+  const classLoad = { type: "object", required: ["inFlight", "waiting"], properties: { inFlight: { type: "integer" }, waiting: { type: "integer" } } } as const;
+
+  app.get(
+    "/queue",
+    {
+      schema: {
+        tags: ["index"],
+        summary: "Queue depth",
+        description:
+          "Reindex jobs by state, model calls by priority class, and calls per worker. Jobs persist across restarts in their " +
+          "own database beside the index. Model call figures are live and are empty in local LLM mode.",
+        response: {
+          200: {
+            type: "object",
+            required: ["jobs", "classes", "workers", "persistence", "deadLetters"],
+            properties: {
+              deadLetters: { type: "integer", description: "Documents set aside because no worker could embed them. See `GET /queue/dead-letters`." },
+              persistence: {
+                type: "object",
+                required: ["enabled", "healthy"],
+                description: "Whether jobs would survive a restart. `healthy: false` means the queue is carrying on in memory.",
+                properties: { enabled: { type: "boolean" }, healthy: { type: "boolean" } },
+              },
+              jobs: {
+                type: "object",
+                required: ["queued", "held", "running", "succeeded", "failed"],
+                properties: {
+                  queued: { type: "integer" },
+                  held: { type: "integer", description: "The queued jobs waiting on the debounce or a retry delay." },
+                  running: { type: "integer" },
+                  succeeded: { type: "integer" },
+                  failed: { type: "integer" },
+                },
+              },
+              classes: {
+                type: "object",
+                required: ["interactive", "background"],
+                properties: { interactive: classLoad, background: classLoad },
+              },
+              workers: {
+                type: "array",
+                items: {
+                  type: "object",
+                  required: ["name", "interactive", "background", "queueDepth"],
+                  properties: { name: { type: "string" }, interactive: { type: "integer" }, background: { type: "integer" }, queueDepth: { type: "number", description: "As the worker last reported it." } },
+                },
+              },
+            },
+          },
+          ...errorResponses,
+        },
+      },
+    },
+    async () => {
+      const load = backend.poolLoad();
+      return {
+        jobs: ctx.jobs.counts(),
+        persistence: ctx.jobs.persistence(),
+        deadLetters: backend.deadLetters().length,
+        classes: load?.classes ?? { interactive: { inFlight: 0, waiting: 0 }, background: { inFlight: 0, waiting: 0 } },
+        workers: load?.workers ?? [],
+      };
+    },
+  );
+
+  app.get(
+    "/queue/dead-letters",
+    {
+      schema: {
+        tags: ["index"],
+        summary: "Documents set aside",
+        description:
+          "Documents a worker definitely refused (400 or 413) while it could embed a known-good text. Later jobs skip them, " +
+          "so they are out of vector search, but can still be found lexically. They are tried again when their content or " +
+          "path changes, when the workers or model change, after 24 hours, by a force job, or when cleared.",
+        response: {
+          200: {
+            type: "object",
+            required: ["documents"],
+            properties: {
+              documents: {
+                type: "array",
+                items: {
+                  type: "object",
+                  required: ["hash", "path", "reason", "at"],
+                  properties: { hash: { type: "string" }, path: { type: "string" }, reason: { type: "string" }, at: { type: "string" } },
+                },
+              },
+            },
+          },
+          ...errorResponses,
+        },
+      },
+    },
+    async () => ({ documents: backend.deadLetters() }),
+  );
+
+  app.post(
+    "/queue/dead-letters::clear",
+    {
+      schema: {
+        tags: ["index"],
+        summary: "Try set-aside documents again",
+        description: "Let every set-aside document embed again, and queue a job for it. For after a worker or model has been fixed.",
+        response: { 202: { type: "object", required: ["documents", "job"], properties: { documents: { type: "integer" }, job: { $ref: "Job#" } } }, ...errorResponses },
+      },
+    },
+    async (_request, reply) => {
+      const documents = backend.clearDeadLetters();
+      const job = ctx.jobs.enqueue({ collections: null, embed: true, force: false, reason: "POST /queue/dead-letters:clear" });
+      return reply.code(202).send({ documents, job });
+    },
+  );
+
+  app.post<{ Params: { id: string } }>(
+    "/queue/jobs/:id([^:]+)::retry",
+    {
+      schema: {
+        tags: ["index"],
+        summary: "Retry a failed job",
+        description: "Queue a failed job again under the same id. Returns 409 unless it has failed.",
+        params: { type: "object", required: ["id"], properties: { id: { type: "string" } } },
+        response: { 202: { type: "object", required: ["job"], properties: { job: { $ref: "Job#" } } }, ...errorResponses },
+      },
+    },
+    async (request, reply) => {
+      if (!ctx.jobs.get(request.params.id)) return reply.code(404).send({ error: "not_found", message: `No job ${request.params.id}` });
+      const job = ctx.jobs.retry(request.params.id);
+      if (!job) return reply.code(409).send({ error: "not_retryable", message: "Only a failed job can be retried" });
+      return reply.code(202).send({ job });
+    },
+  );
+
+  app.post<{ Params: { id: string } }>(
+    "/queue/jobs/:id([^:]+)::cancel",
+    {
+      schema: {
+        tags: ["index"],
+        summary: "Cancel a job",
+        description:
+          "Stop a job that has not finished. A waiting job ends at once. A running one stops at its next safe point, so it " +
+          "may still read `running` in this response. A cancelled job reports `failed` with the error `Cancelled`. Returns 409 " +
+          "if it has already finished.",
+        params: { type: "object", required: ["id"], properties: { id: { type: "string" } } },
+        response: { 202: { type: "object", required: ["job"], properties: { job: { $ref: "Job#" } } }, ...errorResponses },
+      },
+    },
+    async (request, reply) => {
+      if (!ctx.jobs.get(request.params.id)) return reply.code(404).send({ error: "not_found", message: `No job ${request.params.id}` });
+      const job = ctx.jobs.cancel(request.params.id);
+      if (!job) return reply.code(409).send({ error: "not_cancellable", message: "This job has already finished" });
+      return reply.code(202).send({ job });
+    },
+  );
+
+  // ---- workers ---------------------------------------------------------------
+
+  app.get(
+    "/workers",
+    {
+      schema: {
+        tags: ["workers"],
+        summary: "The worker pool",
+        description: "Each worker's state, last heartbeat, in-flight calls and error rate. Empty in local LLM mode. Never includes tokens.",
+        response: {
+          200: {
+            type: "object",
+            required: ["mode", "workers"],
+            properties: {
+              mode: { type: "string", enum: ["local", "remote"] },
+              workers: {
+                type: "array",
+                items: {
+                  type: "object",
+                  required: ["name", "host", "state", "circuit", "circuits", "embedDisagrees", "capabilities", "priority", "maxConcurrent", "embedModelCompatible", "rerankTransport", "lastHeartbeat", "inFlight", "queueDepth", "calls", "errorRate"],
+                  properties: {
+                    name: { type: "string" },
+                    host: { type: "string", description: "Host and port." },
+                    state: { type: "string", enum: ["unknown", "up", "busy", "starting", "down", "circuit_open"] },
+                    circuit: { type: "string", enum: ["closed", "open", "half_open"], description: "The worst of `circuits`, over the roles this worker is configured for." },
+                    circuits: {
+                      type: "object",
+                      required: ["embed", "rerank", "generate", "documents"],
+                      description: "`documents` is document embedding, kept apart from `embed`, which is query vectors.",
+                      properties: {
+                        embed: { type: "string", enum: ["closed", "open", "half_open"] },
+                        rerank: { type: "string", enum: ["closed", "open", "half_open"] },
+                        generate: { type: "string", enum: ["closed", "open", "half_open"] },
+                        documents: { type: "string", enum: ["closed", "open", "half_open"] },
+                      },
+                    },
+                    embedDisagrees: { type: "boolean", description: "This worker embedded the same text differently from another. Reported only: nothing acts on it." },
+                    capabilities: { type: "array", items: { type: "string", enum: ["embed", "rerank", "generate"] } },
+                    priority: { type: "integer" },
+                    maxConcurrent: { type: "integer" },
+                    embedModelCompatible: { type: "boolean", nullable: true, description: "False keeps this worker off embedding and tokens. Null until checked." },
+                    rerankTransport: { type: "string", nullable: true },
+                    lastHeartbeat: { type: "string", nullable: true },
+                    inFlight: { type: "integer" },
+                    queueDepth: { type: "number" },
+                    calls: { type: "integer" },
+                    errorRate: { type: "number", description: "Failed share of the last 100 calls." },
+                  },
+                },
+              },
+            },
+          },
+          ...errorResponses,
+        },
+      },
+    },
+    async () => ({ mode: backend.llmHealth().mode, workers: backend.workers() }),
+  );
+
+  app.post(
+    "/cache::purge",
+    {
+      schema: {
+        tags: ["workers"],
+        summary: "Purge cached model answers",
+        description:
+          "Drop every cached rerank score and query expansion. Replacing a worker already leaves its answers behind when its " +
+          "name, address or model files change, and they expire after a week; this is for a worker that gave bad answers and " +
+          "then came back unchanged.",
+        response: { 200: { type: "object", required: ["entries"], properties: { entries: { type: "integer" } } }, ...errorResponses },
+      },
+    },
+    async () => {
+      try {
+        return { entries: backend.purgeCache() };
+      } catch (err) {
+        if (isBusy(err)) throw new HttpError(503, "busy", "The index is busy. Try again shortly.");
+        throw err;
+      }
     },
   );
 

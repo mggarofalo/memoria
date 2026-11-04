@@ -34,16 +34,33 @@ export function parseEmbeddings(raw: unknown, expectedCount: number, dimensions:
     if (!Array.isArray(vector) || vector.length === 0) fail("an embedding is not a non-empty array");
     if (length === 0) length = vector.length;
     if (vector.length !== length) fail("an embedding has the wrong number of dimensions");
-    let nonZero = false;
-    for (const value of vector as unknown[]) {
-      if (typeof value !== "number" || !Number.isFinite(value)) fail("an embedding holds a non-finite value");
-      if (value !== 0) nonZero = true;
-    }
-    // Cosine distance is undefined for a zero vector.
-    if (!nonZero) fail("an embedding is all zeros");
+    checkStorable(vector);
     out.push(vector as number[]);
   }
   return out;
+}
+
+/**
+ * Vectors are stored as float32, and judged by what survives that cast: `1e308`
+ * becomes infinity and `1e-320` becomes zero, either of which breaks cosine
+ * distance for every search that touches the vector.
+ */
+function checkStorable(vector: unknown[]): void {
+  let norm = 0;
+  for (const value of vector) {
+    if (typeof value !== "number" || !Number.isFinite(value)) fail("an embedding holds a non-finite value");
+    const stored = Math.fround(value);
+    if (!Number.isFinite(stored) || (value !== 0 && stored === 0)) fail("an embedding holds a value float32 cannot store");
+    norm = Math.fround(norm + Math.fround(stored * stored));
+  }
+  // Cosine distance is undefined for a zero vector, and for one whose length overflows.
+  if (norm === 0) fail("an embedding is all zeros");
+  if (!Number.isFinite(norm)) fail("an embedding is too long for float32");
+}
+
+/** An embed response also says which model produced it, so the caller can refuse a mismatch. */
+export function parseEmbedResponse(raw: unknown, expectedCount: number, dimensions: number): { vectors: number[][]; model: unknown } {
+  return { vectors: parseEmbeddings(raw, expectedCount, dimensions), model: asObject(raw).model };
 }
 
 /** Validate `{ results: [{ index, score }] }` and return scores aligned to the request order. */
@@ -104,15 +121,22 @@ export function parseCapabilities(raw: unknown): WorkerCapabilities {
   };
 }
 
-export interface WorkerHealthModels {
-  embed: boolean;
-  rerank: boolean;
-  generate: boolean;
+export interface WorkerHealth {
+  status: "ok" | "busy" | "starting";
+  models: { embed: boolean; rerank: boolean; generate: boolean };
+  queueDepth: number;
 }
 
-/** Only the per-role loaded flags matter here; anything else in the body is ignored. */
-export function parseHealthModels(raw: unknown): WorkerHealthModels {
-  const models = asObject(asObject(raw).models);
+/** Routing reads these, so each is coerced to something safe. Anything else in the body is ignored. */
+export function parseHealth(raw: unknown): WorkerHealth {
+  const body = asObject(raw);
+  const models = asObject(body.models);
   const loaded = (v: unknown): boolean => typeof v === "object" && v !== null && (v as { loaded?: unknown }).loaded === true;
-  return { embed: loaded(models.embed), rerank: loaded(models.rerank), generate: loaded(models.generate) };
+  const depth = body.queueDepth;
+  return {
+    status: body.status === "busy" || body.status === "starting" ? body.status : "ok",
+    models: { embed: loaded(models.embed), rerank: loaded(models.rerank), generate: loaded(models.generate) },
+    // A worker cannot attract traffic by reporting a negative or absurd depth.
+    queueDepth: typeof depth === "number" && Number.isFinite(depth) && depth > 0 ? depth : 0,
+  };
 }

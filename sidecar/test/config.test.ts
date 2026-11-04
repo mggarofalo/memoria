@@ -47,6 +47,7 @@ test("remote mode needs a clean worker URL and, off loopback, a token", () => {
   const TOKEN = "0123456789abcdefXYZ";
   const remote = (over: NodeJS.ProcessEnv) => loadConfig({ MEMORIA_QMD_LLM: "remote", ...over });
   assert.throws(() => remote({}), /MEMORIA_QMD_WORKER_URL is required/);
+  const one = (url: string, token: string | undefined) => [{ name: new URL(url).host, url, token, capabilities: ["embed", "rerank", "generate"], priority: 100, maxConcurrent: 4 }];
   assert.throws(() => remote({ MEMORIA_QMD_WORKER_URL: "http://192.168.1.20:8383" }), /MEMORIA_QMD_WORKER_TOKEN is required/);
   assert.throws(() => remote({ MEMORIA_QMD_WORKER_URL: "http://192.168.1.20:8383", MEMORIA_QMD_WORKER_TOKEN: "short" }), /at least 16/);
   assert.throws(() => remote({ MEMORIA_QMD_WORKER_URL: "ftp://127.0.0.1:1" }), /http or https/);
@@ -55,9 +56,57 @@ test("remote mode needs a clean worker URL and, off loopback, a token", () => {
   for (const url of [`http://me:${TOKEN}@127.0.0.1:1`, `not a url ${TOKEN}`]) {
     assert.throws(() => remote({ MEMORIA_QMD_WORKER_URL: url }), (err: Error) => !err.message.includes(TOKEN));
   }
-  assert.deepEqual(remote({ MEMORIA_QMD_WORKER_URL: "http://127.0.0.1:8383" }).llm, { mode: "remote", workerUrl: "http://127.0.0.1:8383", workerToken: undefined, fallback: true, embedDimensions: 768 });
+  assert.deepEqual(remote({ MEMORIA_QMD_WORKER_URL: "http://127.0.0.1:8383" }).llm, { mode: "remote", workers: one("http://127.0.0.1:8383", undefined), fallback: true, embedDimensions: 768, pollMs: 10_000, embedBatchBytes: 262_144, rerankTimeoutMs: 20_000, searchDeadlineMs: 60_000 });
   assert.deepEqual(remote({ MEMORIA_QMD_WORKER_URL: "http://[::1]:8383" }).llm.mode, "remote");
-  assert.deepEqual(remote({ MEMORIA_QMD_WORKER_URL: "http://192.168.1.20:8383", MEMORIA_QMD_WORKER_TOKEN: TOKEN, MEMORIA_QMD_LLM_FALLBACK: "0", MEMORIA_QMD_EMBED_DIMENSIONS: "0" }).llm, { mode: "remote", workerUrl: "http://192.168.1.20:8383", workerToken: TOKEN, fallback: false, embedDimensions: 0 });
+  assert.deepEqual(remote({ MEMORIA_QMD_WORKER_URL: "http://192.168.1.20:8383", MEMORIA_QMD_WORKER_TOKEN: TOKEN, MEMORIA_QMD_LLM_FALLBACK: "0", MEMORIA_QMD_EMBED_DIMENSIONS: "0", MEMORIA_QMD_WORKER_POLL_MS: "500", MEMORIA_QMD_EMBED_BATCH_BYTES: "2048" }).llm, { mode: "remote", workers: one("http://192.168.1.20:8383", TOKEN), fallback: false, embedDimensions: 0, pollMs: 500, embedBatchBytes: 2048, rerankTimeoutMs: 20_000, searchDeadlineMs: 60_000 });
+});
+
+test("a worker list names each token's environment variable and holds no secrets itself", () => {
+  const TOKEN = "0123456789abcdefXYZ";
+  const list = (workers: unknown, env: NodeJS.ProcessEnv = {}) => loadConfig({ MEMORIA_QMD_LLM: "remote", MEMORIA_QMD_WORKERS: JSON.stringify(workers), ...env });
+  const c = list(
+    [
+      { name: "desktop", url: "http://192.168.1.20:8383", tokenEnv: "DESKTOP_TOKEN", priority: 1, maxConcurrent: 8 },
+      { name: "macbook.local", url: "http://127.0.0.1:8383", capabilities: ["rerank"] },
+    ],
+    { DESKTOP_TOKEN: TOKEN },
+  );
+  assert.ok(c.llm.mode === "remote");
+  assert.deepEqual(c.llm.workers, [
+    { name: "desktop", url: "http://192.168.1.20:8383", token: TOKEN, capabilities: ["embed", "rerank", "generate"], priority: 1, maxConcurrent: 8 },
+    { name: "macbook.local", url: "http://127.0.0.1:8383", token: undefined, capabilities: ["rerank"], priority: 100, maxConcurrent: 4 },
+  ]);
+
+  const good = { name: "a", url: "http://127.0.0.1:1" };
+  assert.throws(() => list([]), /non-empty/);
+  assert.throws(() => loadConfig({ MEMORIA_QMD_LLM: "remote", MEMORIA_QMD_WORKERS: `not json ${TOKEN}` }), (e: Error) => /valid JSON/.test(e.message) && !e.message.includes(TOKEN));
+  assert.throws(() => loadConfig({ MEMORIA_QMD_LLM: "remote", MEMORIA_QMD_WORKERS: JSON.stringify([good]), MEMORIA_QMD_WORKER_URL: "http://127.0.0.1:1" }), /not both/);
+  assert.throws(() => list([{ ...good, token: TOKEN }]), (e: Error) => /must not hold a token/.test(e.message) && !e.message.includes(TOKEN));
+  assert.throws(() => list([good, good]), /repeats/);
+  assert.throws(() => list([{ ...good, name: "bad name" }]), /name must be/);
+  assert.throws(() => list([{ name: "a" }]), /url is required/);
+  assert.throws(() => list([{ name: "a", url: `http://x:${TOKEN}@127.0.0.1:1` }]), (e: Error) => /credentials/.test(e.message) && !e.message.includes(TOKEN));
+  assert.throws(() => list([{ name: "a", url: "http://192.168.1.20:1" }]), /required when the worker is not on loopback/);
+  assert.throws(() => list([{ ...good, tokenEnv: "UNSET_TOKEN" }]), /UNSET_TOKEN, which is not set/);
+  assert.throws(() => list([{ ...good, tokenEnv: "SHORT" }], { SHORT: "abc" }), /at least 16/);
+  assert.throws(() => list([{ ...good, capabilities: ["transcribe"] }]), /capabilities/);
+  assert.throws(() => list([{ ...good, maxConcurrent: 0 }]), /maxConcurrent/);
+  assert.equal(loadConfig({}).queueDbPath, undefined);
+  assert.equal(loadConfig({ MEMORIA_QMD_QUEUE_DB_PATH: " /q/jobs.sqlite " }).queueDbPath, "/q/jobs.sqlite");
+});
+
+test("a pool token can come from a file, like every other secret", async () => {
+  const { mkdtemp, writeFile, chmod } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const file = join(await mkdtemp(join(tmpdir(), "memoria-config-")), "token");
+  await writeFile(file, "0123456789abcdefXYZ\n");
+  await chmod(file, 0o600);
+  const workers = JSON.stringify([{ name: "a", url: "http://192.168.1.20:1", tokenEnv: "A_TOKEN" }]);
+  const c = loadConfig({ MEMORIA_QMD_LLM: "remote", MEMORIA_QMD_WORKERS: workers, A_TOKEN_FILE: file });
+  assert.ok(c.llm.mode === "remote");
+  assert.equal(c.llm.workers[0]!.token, "0123456789abcdefXYZ");
+  assert.throws(() => loadConfig({ MEMORIA_QMD_LLM: "remote", MEMORIA_QMD_WORKERS: workers, A_TOKEN_FILE: file, A_TOKEN: "0123456789abcdefXYZ" }), /only one/);
 });
 
 test("loopback detection covers the usual spellings", () => {

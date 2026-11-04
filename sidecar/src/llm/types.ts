@@ -85,3 +85,75 @@ export interface WorkerOptions {
   /** Expected length of every embedding; 0 pins it to the first response. */
   embedDimensions: number;
 }
+
+export type Capability = "embed" | "rerank" | "generate";
+
+/** Interactive is search-time work. Background is embedding, which can wait. */
+export type PriorityClass = "interactive" | "background";
+
+/** One entry of the worker pool's configuration. */
+export interface PoolWorkerConfig {
+  name: string;
+  url: string;
+  token: string | undefined;
+  capabilities: Capability[];
+  /** Tiebreak between workers of equal load. Lower is preferred. */
+  priority: number;
+  /** Calls this sidecar sends this worker at once. */
+  maxConcurrent: number;
+}
+
+/** What a search went without. Reported to callers with `degraded: true`. */
+export type DegradedReason = "no_rerank" | "no_expansion" | "cpu_embedding" | "no_vectors";
+
+/** What `GET /workers` returns per worker. Holds no URL path or token. */
+export interface WorkerView {
+  name: string;
+  host: string;
+  state: "unknown" | "up" | "busy" | "starting" | "down" | "circuit_open";
+  /** The worst of `circuits`, over the roles this worker is configured for. */
+  circuit: "closed" | "open" | "half_open";
+  /** `documents` is document embedding, kept apart from `embed`, which is query vectors. */
+  circuits: Record<Capability | "documents", "closed" | "open" | "half_open">;
+  /** This worker embedded the same text differently from another. Reported only: nothing acts on it. */
+  embedDisagrees: boolean;
+  capabilities: Capability[];
+  priority: number;
+  maxConcurrent: number;
+  /** Null until checked. False keeps the worker off embedding and tokens. */
+  embedModelCompatible: boolean | null;
+  rerankTransport: string | null;
+  lastHeartbeat: string | null;
+  inFlight: number;
+  queueDepth: number;
+  calls: number;
+  /** Failed share of the last 100 calls. */
+  errorRate: number;
+}
+
+export interface PoolLoad {
+  classes: Record<PriorityClass, { inFlight: number; waiting: number }>;
+  workers: Array<{ name: string; interactive: number; background: number; queueDepth: number }>;
+}
+
+/** A document a worker could not embed, set aside so it stops failing every later job. */
+export interface DeadLetter {
+  hash: string;
+  path: string;
+  reason: string;
+  at: string;
+}
+
+/** Whether model work is at full strength. Drives `/ready`. */
+export interface LlmHealth {
+  mode: "local" | "remote";
+  degraded: boolean;
+  /** Roles no worker can serve right now. `documents` is listed when only document embedding is out. */
+  unavailable: Array<Capability | "documents">;
+  workersUp: number;
+  workersTotal: number;
+  /** Workers that embedded the same text differently. Reported only: nothing acts on it. */
+  embedDisagreement: string[];
+  /** Documents out of vector search because a worker refused them. Retried by themselves within a day. */
+  documentsSetAside: number;
+}

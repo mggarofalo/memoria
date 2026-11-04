@@ -81,7 +81,7 @@ Every route needs `Authorization: Bearer <token>` when a token is set. Errors ar
 |---|---|---|
 | `GET /health` | | `status` (`ok`, `busy`, `starting`), `busyReasons`, per-model `loaded`, `state` and `restarts`, `inFlight`, `queueDepth`, `vram`, `loadPerCore`, `cpuSpeedLimit` |
 | `GET /capabilities` | | `operations`, model file names, `rerankTransport` |
-| `POST /v1/embed` | `{ texts }`, up to 256 | `{ embeddings }` |
+| `POST /v1/embed` | `{ texts }`, up to 256 | `{ embeddings, model }`. The sidecar refuses vectors whose `model` is not its index's. |
 | `POST /v1/rerank` | `{ query, documents }`, up to 1000 | `{ results: [{ index, score }], transport }` |
 | `POST /v1/complete` | `{ prompt, grammar?, maxTokens?, temperature?, topK?, topP?, repeatLastN?, presencePenalty? }` | `{ text }` |
 | `POST /v1/tokenize` | `{ text }` | `{ tokens }` |

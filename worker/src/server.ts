@@ -197,52 +197,57 @@ export function createWorkerServer(options: WorkerServerOptions): { server: Serv
     };
   };
 
+  const read = (request: IncomingMessage) => readJson(request, options.bodyLimitBytes);
+
+  const operations: Record<string, (request: IncomingMessage) => Promise<unknown>> = {
+    "/v1/embed": async (request) => {
+      const gate = served("embed");
+      const texts = stringList((await read(request)).texts, "texts", MAX_EMBED_TEXTS);
+      const embeddings = await gate.run(() => inference.embed(texts));
+      // Named on every response, so the sidecar can refuse vectors from the wrong model.
+      return { embeddings, model: options.servers().find((s) => s.role === "embed")?.file ?? null };
+    },
+    "/v1/rerank": async (request) => {
+      const gate = served("rerank");
+      const body = await read(request);
+      if (typeof body.query !== "string" || body.query === "") throw new HttpFailure(400, "invalid_body", "query must be a non-empty string");
+      const query = body.query;
+      const documents = stringList(body.documents, "documents", MAX_RERANK_DOCUMENTS);
+      const scores = await gate.run(() => inference.rerank(query, documents));
+      return { results: scores.map((score, index) => ({ index, score })), transport: inference.rerankBackend };
+    },
+    "/v1/complete": async (request) => {
+      const gate = served("generate");
+      const parsed = parseComplete(await read(request));
+      return { text: await gate.run(() => inference.complete(parsed)) };
+    },
+    "/v1/tokenize": async (request) => {
+      const gate = served("embed");
+      const { text } = await read(request);
+      if (typeof text !== "string") throw new HttpFailure(400, "invalid_body", "text must be a string");
+      return { tokens: await gate.run(() => inference.tokenize(text)) };
+    },
+    "/v1/detokenize": async (request) => {
+      const gate = served("embed");
+      const { tokens } = await read(request);
+      if (!Array.isArray(tokens) || tokens.length > MAX_DETOKENIZE_TOKENS || !tokens.every((t) => Number.isSafeInteger(t) && t >= 0)) {
+        throw new HttpFailure(400, "invalid_body", "tokens must be a list of non-negative integers");
+      }
+      return { text: await gate.run(() => inference.detokenize(tokens as number[])) };
+    },
+  };
+
+  // A Map, because the path comes from the client: `__proto__` must not find anything on an object.
+  const operationsByPath = new Map(Object.entries(operations));
+
   const route = async (request: IncomingMessage): Promise<unknown> => {
     const path = (request.url ?? "/").split("?")[0];
     const method = request.method ?? "GET";
     if (method === "GET" && path === "/health") return health();
     if (method === "GET" && path === "/capabilities") return capabilities();
-    if (method !== "POST") throw new HttpFailure(404, "no_route", "No such route");
-    switch (path) {
-      case "/v1/embed": {
-        const gate = served("embed");
-        const body = await readJson(request, options.bodyLimitBytes);
-        const texts = stringList(body.texts, "texts", MAX_EMBED_TEXTS);
-        return { embeddings: await gate.run(() => inference.embed(texts)) };
-      }
-      case "/v1/rerank": {
-        const gate = served("rerank");
-        const body = await readJson(request, options.bodyLimitBytes);
-        if (typeof body.query !== "string" || body.query === "") throw new HttpFailure(400, "invalid_body", "query must be a non-empty string");
-        const query = body.query;
-        const documents = stringList(body.documents, "documents", MAX_RERANK_DOCUMENTS);
-        const scores = await gate.run(() => inference.rerank(query, documents));
-        return { results: scores.map((score, index) => ({ index, score })), transport: inference.rerankBackend };
-      }
-      case "/v1/complete": {
-        const gate = served("generate");
-        const parsed = parseComplete(await readJson(request, options.bodyLimitBytes));
-        return { text: await gate.run(() => inference.complete(parsed)) };
-      }
-      case "/v1/tokenize": {
-        const gate = served("embed");
-        const body = await readJson(request, options.bodyLimitBytes);
-        if (typeof body.text !== "string") throw new HttpFailure(400, "invalid_body", "text must be a string");
-        const text = body.text;
-        return { tokens: await gate.run(() => inference.tokenize(text)) };
-      }
-      case "/v1/detokenize": {
-        const gate = served("embed");
-        const body = await readJson(request, options.bodyLimitBytes);
-        const tokens = body.tokens;
-        if (!Array.isArray(tokens) || tokens.length > MAX_DETOKENIZE_TOKENS || !tokens.every((t) => Number.isSafeInteger(t) && t >= 0)) {
-          throw new HttpFailure(400, "invalid_body", "tokens must be a list of non-negative integers");
-        }
-        return { text: await gate.run(() => inference.detokenize(tokens as number[])) };
-      }
-      default:
-        throw new HttpFailure(404, "no_route", "No such route");
-    }
+    const operation = method === "POST" ? operationsByPath.get(path ?? "") : undefined;
+    if (typeof operation !== "function") throw new HttpFailure(404, "no_route", "No such route");
+    return operation(request);
   };
 
   const send = (response: ServerResponse, status: number, body: unknown): void => {

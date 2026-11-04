@@ -177,7 +177,9 @@ class ManagedServer {
     } catch {
       healthy = false;
     }
-    if (this.#owner.stopping) return;
+    // The server may have exited while this check was in flight. Scheduling another
+    // check now would overwrite the timer that restarts it.
+    if (this.#owner.stopping || this.state === "backoff") return;
     if (healthy) {
       if (this.state !== "ready") this.#owner.log.info({ role: this.config.role, startMs: Date.now() - this.#startedAt }, "llama-server ready");
       this.state = "ready";

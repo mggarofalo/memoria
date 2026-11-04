@@ -8,16 +8,17 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { buildApp, warmup } from "../src/app.ts";
 import { loadConfig } from "../src/config.ts";
 import type { LlmCallLog } from "../src/llm/types.ts";
+import { queueDbPathFor, SqliteJobStore } from "../src/queue-store.ts";
 import { openBackend, type OpenedBackend } from "../src/store.ts";
 import { authHeaders, tempDir, testConfig } from "./helpers.ts";
-import { MockWorker, WORKER_TOKEN } from "./mock-worker.ts";
+import { EMBED_FILE, MockWorker, WORKER_TOKEN } from "./mock-worker.ts";
 
 const skip = process.env.MEMORIA_QMD_INTEGRATION === "1" ? false : "set MEMORIA_QMD_INTEGRATION=1";
 
@@ -82,7 +83,7 @@ async function openRemote(): Promise<Remote> {
   const backend = await openBackend({
     dbPath,
     keepWarm: true,
-    llm: { mode: "remote", worker: { url: worker.url, token: WORKER_TOKEN, embedDimensions: 8 }, fallback: false, statusPollMs: 0 },
+    llm: { mode: "remote", workers: [{ name: "only", url: worker.url, token: WORKER_TOKEN, capabilities: ["embed", "rerank", "generate"], priority: 1, maxConcurrent: 4 }], embedDimensions: 8, fallback: false, statusPollMs: 0, breaker: { threshold: 1000 } },
     onLlmCall: (e) => {
       calls.push(e);
       logs.push(JSON.stringify(e));
@@ -159,19 +160,27 @@ test("a reranked search runs the whole pipeline remotely and caches apart from l
   }
 });
 
-test("bad worker scores fail the search and leave nothing in QMD's cache", { skip }, async () => {
+const LEX = [{ type: "lex" as const, query: "AuthenticationHandler" }];
+
+test("bad worker scores degrade the search and leave nothing in QMD's cache", { skip }, async () => {
   const r = await openRemote();
   try {
     await r.backend.embed({ force: false });
-    const search = () => r.backend.search({ searches: undefined, queries: [{ type: "lex", query: "AuthenticationHandler" }], limit: 5, minScore: 0, rerank: true } as never);
+    const search = () => r.backend.searchDetailed({ queries: LEX, limit: 5, minScore: 0, rerank: true });
     r.worker.on("POST /v1/rerank", (b) => ({ body: { results: (b.documents as string[]).map((_, index) => ({ index, score: 42 })) } }));
-    await assert.rejects(search(), /invalid_response/);
+    r.backend.llm.clearCache();
+    const degraded = await search();
+    assert.deepEqual(degraded.degradedReasons, ["no_rerank"]);
+    assert.equal(degraded.hits.length, 2);
+    assert.equal(r.backend.llm.cacheEntries(), 0, "nothing bogus was cached");
 
     r.worker.on("POST /v1/rerank", (b) => ({ body: { results: (b.documents as string[]).map((_, index) => ({ index, score: 0.75 })) } }));
-    const hits = await search();
-    assert.equal(hits.length, 2);
-    assert.equal(r.worker.count("/v1/rerank"), 2, "the bad answer was not cached");
-    assert.ok(hits.every((h) => h.score !== 42));
+    const healthy = await search();
+    assert.deepEqual(healthy.degradedReasons, []);
+    assert.equal(healthy.hits.length, 2);
+    assert.equal(r.worker.count("/v1/rerank"), 2, "the bad answer was not replayed");
+    assert.ok(healthy.hits.every((h) => h.score !== 42));
+    assert.ok(r.backend.llm.cacheEntries() > 0, "a real answer is cached as usual");
   } finally {
     await r.done();
   }
@@ -180,23 +189,323 @@ test("bad worker scores fail the search and leave nothing in QMD's cache", { ski
 test("vectors of the wrong size never reach sqlite-vec", { skip }, async () => {
   const r = await openRemote();
   try {
-    r.worker.on("POST /v1/embed", (b) => ({ body: { embeddings: (b.texts as string[]).map(() => [1, 2, 3]) } }));
-    await assert.rejects(r.backend.embed({ force: false }), /embedding dimensions/);
-    assert.equal((await r.backend.getStatus()).hasVectorIndex, false);
+    r.worker.on("POST /v1/embed", (b) => ({ body: { model: EMBED_FILE, embeddings: (b.texts as string[]).map(() => [1, 2, 3]) } }));
+    // Even the known-good text comes back wrong, so that is the worker at fault, not the documents.
+    await assert.rejects(r.backend.embed({ force: false }), /No worker can embed/);
+    assert.deepEqual(r.backend.deadLetters(), []);
+    const status = await r.backend.getStatus();
+    assert.equal(status.hasVectorIndex, false);
+    assert.equal(status.needsEmbedding, 2, "the documents stay pending");
   } finally {
     await r.done();
   }
 });
 
-test("lexical search still works with the worker down when reranking is off", { skip }, async () => {
+// --- degraded mode ------------------------------------------------------------------
+
+test("with no worker up, every search kind answers, says so, and caches nothing", { skip }, async () => {
   const r = await openRemote();
   try {
+    await r.backend.embed({ force: false });
+    r.backend.llm.clearCache();
     await r.worker.stop();
-    const hits = await r.backend.search({ queries: [{ type: "lex", query: "AuthenticationHandler" }], limit: 5, minScore: 0, rerank: false });
-    assert.equal(hits.length, 2);
-    await assert.rejects(r.backend.search({ queries: [{ type: "lex", query: "AuthenticationHandler" }], limit: 5, minScore: 0, rerank: true }), /unavailable/);
+    await r.backend.llm.refreshWorkers();
+
+    // A plain query would need expansion and reranking.
+    const plain = await r.backend.searchDetailed({ query: "AuthenticationHandler", limit: 5, minScore: 0.9, rerank: true });
+    assert.equal(plain.hits.length, 2, "minScore is not applied to rank-derived scores");
+    assert.deepEqual([...plain.degradedReasons].sort(), ["no_expansion", "no_rerank", "no_vectors"]);
+
+    const typed = await r.backend.searchDetailed({ queries: LEX, limit: 5, minScore: 0, rerank: true });
+    assert.equal(typed.hits.length, 2);
+    assert.deepEqual(typed.degradedReasons, ["no_rerank"]);
+
+    // A query QMD's lexical syntax would refuse must not turn into a 500 here.
+    const awkward = await r.backend.searchDetailed({ query: 'AuthenticationHandler "unbalanced', limit: 5, minScore: 0, rerank: true });
+    assert.ok(awkward.degradedReasons.includes("no_rerank"));
+
+    // Unreranked was asked for, so nothing was given up except vectors, had any been asked for.
+    const lexOnly = await r.backend.searchDetailed({ queries: LEX, limit: 5, minScore: 0, rerank: false });
+    assert.deepEqual(lexOnly.degradedReasons, []);
+
+    assert.equal(r.backend.llm.cacheEntries(), 0, "no placeholder score or expansion was written");
+    assert.deepEqual(r.backend.models().loaded, { embed: false, rerank: false, generate: false });
+    assert.equal(r.backend.models().resident, false);
+    const health = r.backend.llmHealth();
+    assert.equal(health.degraded, true);
+    assert.deepEqual(health.unavailable, ["embed", "rerank", "generate"]);
+    assert.equal(health.workersUp, 0);
   } finally {
     await r.backend.close();
+  }
+});
+
+test("a worker dying mid-search degrades that search, then recovery gets real scores", { skip }, async () => {
+  const r = await openRemote();
+  try {
+    await r.backend.embed({ force: false });
+    r.backend.llm.clearCache();
+    r.worker.on("POST /v1/rerank", () => ({ status: 503, body: {} }));
+    const query = { queries: LEX, limit: 5, minScore: 0, rerank: true };
+    const during = await r.backend.searchDetailed(query);
+    assert.deepEqual(during.degradedReasons, ["no_rerank"]);
+    assert.equal(during.hits.length, 2);
+    assert.equal(r.backend.llm.cacheEntries(), 0);
+
+    r.worker.on("POST /v1/rerank", (b) => ({ body: { results: (b.documents as string[]).map((_, index) => ({ index, score: 0.9 })) } }));
+    const after = await r.backend.searchDetailed(query);
+    assert.deepEqual(after.degradedReasons, []);
+    assert.ok(r.worker.count("/v1/rerank") === 2, "asked again: nothing stale stood in for it");
+    assert.ok(r.backend.llm.cacheEntries() > 0);
+  } finally {
+    await r.done();
+  }
+});
+
+test("a search error that is not about workers is still an error", { skip }, async () => {
+  const r = await openRemote();
+  try {
+    await assert.rejects(r.backend.searchDetailed({ queries: [{ type: "lex", query: "two\nlines" }], limit: 5, minScore: 0, rerank: true }), /single-line/);
+  } finally {
+    await r.done();
+  }
+});
+
+test("/ready over a real backend reads degraded with no worker, and healthy with one", { skip }, async () => {
+  const r = await openRemote();
+  const app = await buildApp({ backend: r.backend, config: testConfig(), logger: false });
+  try {
+    await r.backend.llm.refreshWorkers();
+    await warmup(app.ctx, { info: () => {}, warn: () => {} });
+    const up = (await app.inject({ method: "GET", url: "/ready", headers: authHeaders })).json();
+    assert.equal(up.status, "ready");
+    assert.equal(up.models.resident, true);
+    assert.equal(up.warmup.done, true);
+    assert.equal(up.llm.degraded, false);
+    assert.equal(up.llm.workersUp, 1);
+
+    r.worker.on("GET /health", () => ({ status: 500, body: {} }));
+    await r.backend.llm.refreshWorkers();
+    const down = await app.inject({ method: "GET", url: "/ready?requireModels=true", headers: authHeaders });
+    assert.equal(down.statusCode, 503);
+    const body = down.json();
+    assert.equal(body.status, "degraded");
+    assert.equal(body.models.resident, false);
+    assert.equal(body.warmup.done, false);
+    assert.equal(body.llm.workersUp, 0);
+    assert.deepEqual(body.llm.unavailable, ["embed", "rerank", "generate"]);
+
+    const search = (await app.inject({ method: "POST", url: "/search", headers: authHeaders, payload: { query: "AuthenticationHandler" } })).json();
+    assert.equal(search.degraded, true);
+    assert.ok(search.degradedReasons.includes("no_rerank"));
+    assert.equal(search.total, 2);
+  } finally {
+    await app.close();
+    await r.done();
+  }
+});
+
+// --- the farm and the queue on the real SDK ------------------------------------------
+
+test("embedding work spreads across workers, on one model, through QMD's own tables", { skip }, async () => {
+  const { dbPath } = await fixtureIndex();
+  const a = await new MockWorker(8).start();
+  const b = await new MockWorker(8).start();
+  const wrong = await new MockWorker(8, "some-other-model.gguf").start();
+  const backend = await openBackend({
+    dbPath,
+    keepWarm: true,
+    llm: {
+      mode: "remote",
+      workers: [
+        { name: "a", url: a.url, token: undefined, capabilities: ["embed"], priority: 1, maxConcurrent: 2 },
+        { name: "b", url: b.url, token: undefined, capabilities: ["embed"], priority: 2, maxConcurrent: 2 },
+        { name: "wrong", url: wrong.url, token: undefined, capabilities: ["embed"], priority: 0, maxConcurrent: 8 },
+      ],
+      embedDimensions: 8,
+      fallback: false,
+      statusPollMs: 0,
+      embedBatchBytes: 1024,
+    },
+  });
+  try {
+    await backend.llm.refreshWorkers();
+    const seen = new Set<string>();
+    const out = await backend.embed({ force: false, onWorker: (n) => seen.add(n) });
+    assert.equal(out.errors, 0);
+    assert.ok(out.chunksEmbedded >= 2);
+    assert.equal(wrong.count("/v1/embed"), 0, "the other model never embedded");
+    assert.equal(wrong.count("/v1/tokenize"), 0);
+    assert.ok([...seen].every((n) => n !== "wrong"));
+    const status = await backend.getStatus();
+    assert.equal(status.needsEmbedding, 0);
+    assert.equal(status.hasVectorIndex, true);
+
+    // QMD can search what the farm wrote, and considers the work done.
+    const vec = await backend.searchDetailed({ queries: [{ type: "vec", query: "AuthenticationHandler" }], limit: 5, minScore: 0, rerank: false });
+    assert.ok(vec.hits.length > 0);
+    assert.equal((await backend.embed({ force: false })).docsProcessed, 0, "nothing left");
+
+    // Force re-embeds everything, and works in one collection.
+    const forced = await backend.embed({ force: true, collection: "sessions" });
+    assert.equal(forced.docsProcessed, 2);
+    assert.equal((await backend.getStatus()).needsEmbedding, 0);
+  } finally {
+    await backend.close();
+    await a.stop();
+    await b.stop();
+    await wrong.stop();
+  }
+});
+
+test("a failed batch recovers within the run, and the document ends up whole", { skip }, async () => {
+  const { dbPath, corpus } = await fixtureIndex();
+  // Long enough to make several chunks, one chunk to a batch.
+  await writeFile(path.join(corpus, "long.md"), `# Long\n\n${"paragraph about the AuthenticationHandler. ".repeat(600)}\n`, "utf8");
+  const qmd = await import("@tobilu/qmd");
+  const seed = await qmd.createStore({ dbPath, config: { collections: { sessions: { path: corpus, pattern: "**/*.md" } } } });
+  await seed.update();
+  await seed.close();
+
+  const worker = await new MockWorker(8).start();
+  const open = () => openBackend({
+    dbPath,
+    keepWarm: true,
+    llm: { mode: "remote", workers: [{ name: "w", url: worker.url, token: undefined, capabilities: ["embed"], priority: 1, maxConcurrent: 1 }], embedDimensions: 8, fallback: false, statusPollMs: 0, embedBatchBytes: 1024 },
+  });
+  const backend = await open();
+  try {
+    // Fail one batch: its document's other chunks must not stand.
+    let batches = 0;
+    const healthy = worker.handlers.get("POST /v1/embed")!;
+    worker.on("POST /v1/embed", (b, req) => {
+      batches++;
+      return batches === 2 ? { status: 500, body: {} } : healthy(b, req);
+    });
+    const first = await backend.embed({ force: false });
+    assert.equal(batches > 2, true);
+    assert.equal(first.errors, 0, "the second try got through");
+    assert.equal(first.docsPending, 0);
+    assert.equal((await backend.getStatus()).needsEmbedding, 0);
+  } finally {
+    await backend.close();
+    await worker.stop();
+  }
+});
+
+test("a job with no worker keeps documents searchable and finishes when one appears", { skip }, async () => {
+  const r = await openRemote();
+  const store = new SqliteJobStore(`${r.dbPath}.queue.sqlite`);
+  const app = await buildApp({ backend: r.backend, config: testConfig(), jobStore: store, logger: false });
+  try {
+    const healthy = r.worker.handlers.get("GET /health")!;
+    r.worker.on("GET /health", () => ({ status: 500, body: {} }));
+    await r.backend.llm.refreshWorkers();
+
+    const ingest = await app.inject({ method: "POST", url: "/documents", headers: authHeaders, payload: { collection: "sessions", path: "gamma.md", content: "# Gamma\n\nzebrafinch deferral marker\n" } });
+    assert.equal(ingest.statusCode, 202);
+    const id = ingest.json().job.id;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const waiting = (await app.inject({ method: "GET", url: `/reindex/jobs/${id}`, headers: authHeaders })).json().job;
+    assert.equal(waiting.state, "queued");
+    assert.match(waiting.error, /No worker can embed/);
+    const lexical = await app.inject({ method: "POST", url: "/search", headers: authHeaders, payload: { searches: [{ type: "lex", query: "zebrafinch" }], rerank: false } });
+    assert.equal(lexical.json().total, 1, "the scan ran, so it is findable");
+
+    r.worker.on("GET /health", healthy);
+    await r.backend.llm.refreshWorkers();
+    app.ctx.jobs.flush();
+    await app.ctx.jobs.idle();
+    const done = (await app.inject({ method: "GET", url: `/reindex/jobs/${id}`, headers: authHeaders })).json().job;
+    assert.equal(done.state, "succeeded");
+    assert.equal(done.worker, "only");
+    assert.equal(done.error, null);
+    assert.equal((await r.backend.getStatus()).needsEmbedding, 0);
+  } finally {
+    await app.close();
+    store.close();
+    await r.done();
+  }
+});
+
+test("the queue's database sits beside the index, and QMD's has no trace of it", { skip }, async () => {
+  const r = await openRemote();
+  const queueFile = queueDbPathFor(r.dbPath);
+  const store = new SqliteJobStore(queueFile);
+  const app = await buildApp({ backend: r.backend, config: testConfig(), jobStore: store, logger: false });
+  try {
+    await app.inject({ method: "POST", url: "/reindex", headers: authHeaders, payload: { embed: false } });
+    await app.ctx.jobs.idle();
+    assert.equal(store.load().length, 1);
+    assert.equal(path.dirname(queueFile), path.dirname(r.dbPath));
+  } finally {
+    await app.close();
+    store.close();
+    await r.done();
+  }
+  const { DatabaseSync } = await import("node:sqlite");
+  const index = new DatabaseSync(r.dbPath, { readOnly: true });
+  const tables = index.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>;
+  index.close();
+  assert.ok(tables.some((t) => t.name === "documents"), "this is QMD's index");
+  assert.ok(!tables.some((t) => t.name === "jobs"));
+});
+
+test("two workers' tokens stay out of everything callers can see", { skip }, async () => {
+  const { dbPath } = await fixtureIndex();
+  const TOKENS = ["pool-token-one-0123456789", "pool-token-two-0123456789"];
+  const a = await new MockWorker(8).start();
+  const b = await new MockWorker(8).start();
+  const logs: string[] = [];
+  const backend = await openBackend({
+    dbPath,
+    keepWarm: true,
+    llm: {
+      mode: "remote",
+      workers: [
+        { name: "one", url: a.url, token: TOKENS[0], capabilities: ["embed", "rerank", "generate"], priority: 1, maxConcurrent: 4 },
+        { name: "two", url: b.url, token: TOKENS[1], capabilities: ["embed", "rerank", "generate"], priority: 2, maxConcurrent: 4 },
+      ],
+      embedDimensions: 8,
+      fallback: false,
+      statusPollMs: 0,
+    },
+    onLlmCall: (e) => logs.push(JSON.stringify(e)),
+    onLlmDegraded: (e) => logs.push(JSON.stringify(e)),
+  });
+  const store = new SqliteJobStore(`${dbPath}.queue.sqlite`);
+  const app = await buildApp({ backend, config: testConfig(), jobStore: store, logger: { level: "trace", stream: { write: (line: string) => void logs.push(line) } } });
+  try {
+    await app.ready();
+    await backend.llm.refreshWorkers();
+    for (const worker of [a, b]) {
+      const echo = (_: unknown, request: { headers: { authorization?: string } }) => ({ status: 500, body: { error: request.headers.authorization, message: `token: ${request.headers.authorization}` } });
+      for (const route of ["POST /v1/rerank", "POST /v1/embed", "POST /v1/tokenize", "POST /v1/complete"]) worker.on(route, echo as never);
+    }
+    const replies: string[] = [];
+    const get = async (url: string) => replies.push((await app.inject({ method: "GET", url, headers: authHeaders })).body);
+    replies.push((await app.inject({ method: "POST", url: "/search", headers: authHeaders, payload: { query: "AuthenticationHandler" } })).body);
+    const job = (await app.inject({ method: "POST", url: "/reindex", headers: authHeaders, payload: {} })).json().job;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    await get(`/reindex/jobs/${job.id}`);
+    await get("/workers");
+    await get("/queue");
+    await get("/ready");
+    assert.ok(a.requests.some((q) => q.authorization === `Bearer ${TOKENS[0]}`), "the worker did get its token");
+    assert.ok(b.requests.every((q) => q.authorization === `Bearer ${TOKENS[1]}`), "and only its own");
+    const queueBytes = (await readFile(`${dbPath}.queue.sqlite`)).toString("latin1");
+    const queueLog = await readFile(`${dbPath}.queue.sqlite-wal`).then((x) => x.toString("latin1"), () => "");
+    for (const token of TOKENS) {
+      for (const text of [...replies, ...logs, queueBytes, queueLog]) assert.ok(!text.includes(token), text.slice(0, 300));
+    }
+    const workers = JSON.parse(replies[2]!).workers as Array<{ name: string; host: string }>;
+    assert.deepEqual(workers.map((w) => w.name), ["one", "two"]);
+  } finally {
+    await app.close();
+    store.close();
+    await backend.close();
+    await a.stop();
+    await b.stop();
   }
 });
 
@@ -215,15 +524,17 @@ test("the token reaches no API response or log line, whatever the worker sends b
 
     const replies: string[] = [];
     const search = await app.inject({ method: "POST", url: "/search", headers: authHeaders, payload: { searches: [{ type: "lex", query: "AuthenticationHandler" }], rerank: true } });
-    assert.equal(search.statusCode, 500);
-    assert.deepEqual(search.json(), { error: "internal", message: "Internal error; see sidecar logs" });
+    assert.equal(search.statusCode, 200, "it degrades rather than fails");
+    assert.equal(search.json().degraded, true);
     replies.push(search.body);
 
     // Failed embed work surfaces through the job record and /ready, both of which reach callers.
     const job = await app.inject({ method: "POST", url: "/reindex", headers: authHeaders, payload: { embed: true } });
-    await app.ctx.jobs.idle();
-    const record = await app.inject({ method: "GET", url: `/reindex/jobs/${job.json().job.id}`, headers: authHeaders });
-    assert.ok(record.json().job.state === "failed" || record.json().job.result.embed.errors > 0, record.body);
+    // Every embed fails, so it waits for a worker: it does not finish.
+    const fetchRecord = () => app.inject({ method: "GET", url: `/reindex/jobs/${job.json().job.id}`, headers: authHeaders });
+    for (let i = 0; i < 2000 && (await fetchRecord()).json().job.error === null; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    const record = await fetchRecord();
+    assert.match(record.json().job.error, /No worker can embed/);
     replies.push(record.body);
 
     // Whether warmup records an error depends on its query finding candidates to

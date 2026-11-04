@@ -81,6 +81,8 @@ export const jobSchema = {
             chunksEmbedded: { type: "integer" },
             errors: { type: "integer" },
             durationMs: { type: "number" },
+            docsPending: { type: "integer", description: "Documents this run could not finish, including any it set aside. The job does not report success." },
+            docsDeadLettered: { type: "integer", description: "Of those, how many were set aside for good. Later jobs skip them until a retry is due: see `GET /queue/dead-letters`." },
           },
         },
         metadata: {
@@ -91,6 +93,9 @@ export const jobSchema = {
       },
     },
     error: { type: "string", nullable: true },
+    priority: { type: "string", enum: ["background"], description: "Reindex jobs are background work." },
+    attempts: { type: "integer", description: "How many times this job has started." },
+    worker: { type: "string", nullable: true, description: "Workers that embedded for the latest attempt, comma-separated." },
   },
 } as const;
 

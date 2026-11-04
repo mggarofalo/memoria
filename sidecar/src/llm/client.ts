@@ -15,7 +15,10 @@ export type WorkerErrorCode =
   | "unauthorized"
   | "rejected"
   | "invalid_response"
-  | "model_mismatch";
+  | "model_mismatch"
+  | "no_worker"
+  | "saturated"
+  | "deadline";
 
 export class WorkerError extends Error {
   readonly code: WorkerErrorCode;
@@ -34,14 +37,18 @@ export class WorkerError extends Error {
 }
 
 export interface OperationTimeouts {
+  /** Document chunks, which can wait. */
   embed: number;
+  /** A search's query vectors. */
+  embedQuery: number;
   rerank: number;
   complete: number;
   tokenize: number;
   status: number;
 }
 
-export const DEFAULT_TIMEOUTS: OperationTimeouts = { embed: 120_000, rerank: 120_000, complete: 60_000, tokenize: 15_000, status: 5_000 };
+/** Per call. A search as a whole has its own, shorter deadline: see `DEFAULT_SEARCH_DEADLINE_MS`. */
+export const DEFAULT_TIMEOUTS: OperationTimeouts = { embed: 120_000, embedQuery: 10_000, rerank: 20_000, complete: 10_000, tokenize: 15_000, status: 5_000 };
 
 /** Larger than any legitimate response: 256 embeddings of 4096 numbers, as JSON. */
 export const DEFAULT_MAX_RESPONSE_BYTES = 64 * 1024 * 1024;
@@ -86,21 +93,22 @@ export class WorkerClient {
     this.#onCall = options.onCall;
   }
 
-  post(operation: string, timeout: keyof OperationTimeouts, path: string, body: unknown, batchSize: number): Promise<unknown> {
-    return this.#request(operation, timeout, path, batchSize, { method: "POST", body: JSON.stringify(body) });
+  /** `withinMs` shortens the deadline, for a search with only so long left. */
+  post(operation: string, timeout: keyof OperationTimeouts, path: string, body: unknown, batchSize: number, withinMs?: number | null): Promise<unknown> {
+    const ms = Math.min(this.#timeouts[timeout], withinMs ?? Infinity);
+    if (ms <= 0) return Promise.reject(new WorkerError("deadline", operation, this.name, "the search's time ran out first"));
+    return this.#request(operation, ms, path, batchSize, { method: "POST", body: JSON.stringify(body) });
   }
 
   get(operation: string, path: string): Promise<unknown> {
-    return this.#request(operation, "status", path, 0, { method: "GET" });
+    return this.#request(operation, this.#timeouts.status, path, 0, { method: "GET" });
   }
 
-  async #request(operation: string, timeout: keyof OperationTimeouts, path: string, batchSize: number, init: { method: string; body?: string }): Promise<unknown> {
+  async #request(operation: string, timeoutMs: number, path: string, batchSize: number, init: { method: string; body?: string }): Promise<unknown> {
     const started = Date.now();
     let status: number | undefined;
     try {
-      const headers: Record<string, string> = { accept: "application/json" };
-      if (init.body !== undefined) headers["content-type"] = "application/json";
-      if (this.#token !== undefined) headers.authorization = `Bearer ${this.#token}`;
+      const headers = this.#headers(init.body !== undefined);
       let response: Response;
       try {
         response = await this.#fetch(new URL(path.replace(/^\//, ""), this.#withTrailingSlash()), {
@@ -108,7 +116,7 @@ export class WorkerClient {
           headers,
           // A redirect would resend the bearer token to wherever it points.
           redirect: "error",
-          signal: AbortSignal.timeout(this.#timeouts[timeout]),
+          signal: AbortSignal.timeout(timeoutMs),
         });
       } catch (err) {
         throw this.#networkError(operation, err);
@@ -128,6 +136,13 @@ export class WorkerClient {
       this.#onCall?.({ worker: this.name, operation, batchSize, durationMs: Date.now() - started, ok: false, ...(status !== undefined ? { status } : {}), errorCode: code });
       throw err;
     }
+  }
+
+  #headers(hasBody: boolean): Record<string, string> {
+    const headers: Record<string, string> = { accept: "application/json" };
+    if (hasBody) headers["content-type"] = "application/json";
+    if (this.#token !== undefined) headers.authorization = `Bearer ${this.#token}`;
+    return headers;
   }
 
   #withTrailingSlash(): URL {
@@ -158,8 +173,10 @@ export class WorkerClient {
     }
     const detail = `HTTP ${status}${remote}`;
     if (status === 401 || status === 403) return new WorkerError("unauthorized", operation, this.name, detail, status);
-    if (status >= 500 || status === 408 || status === 429) return new WorkerError("unavailable", operation, this.name, detail, status);
-    return new WorkerError("rejected", operation, this.name, detail, status);
+    // Only these say something about the request. A 404, 410 or similar is about
+    // this worker, so another may well answer.
+    if (status === 400 || status === 413) return new WorkerError("rejected", operation, this.name, detail, status);
+    return new WorkerError("unavailable", operation, this.name, detail, status);
   }
 
   async #readCapped(operation: string, response: Response): Promise<string> {
