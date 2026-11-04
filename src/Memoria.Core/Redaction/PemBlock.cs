@@ -21,8 +21,17 @@ internal static class PemBlock
 
 	private const int MaxSkippedLineLength = 512;
 
-	/// <summary>A body line this long ends the line it is on, whatever comes before it, such as a log timestamp.</summary>
-	private const int TrailingRunLength = 40;
+	/// <summary>A base64 run this long is a body line wherever it sits on the line: after a log timestamp, inside a JSON value, or inside a box.</summary>
+	private const int LongRunLength = 40;
+
+	/// <summary>The longest note in brackets allowed after a body line, such as <c>(line 2)</c>.</summary>
+	private const int MaxNoteLength = 22;
+
+	/// <summary>The most closing punctuation allowed after a body line, such as <c>"},</c>.</summary>
+	private const int MaxClosers = 4;
+
+	private const string DataUriStart = "data:";
+	private const string DataUriEnd = ";base64,";
 
 	private const int MimeWidth = 76;
 
@@ -90,7 +99,7 @@ internal static class PemBlock
 	public static int ExtendLines(SecretCandidate candidate)
 	{
 		string input = candidate.Input;
-		int next = candidate.End;
+		int next = SkipAfterRun(input, candidate.End);
 		next += next < input.Length && input[next] == '\r' ? 1 : 0;
 		if (next >= input.Length || input[next] != '\n')
 		{
@@ -116,13 +125,45 @@ internal static class PemBlock
 
 	private static bool IsFinalShortLine(string input, int start, int end)
 	{
-		if (end <= start || (end < input.Length && input[end] is not ('\r' or '\n')))
+		int after = SkipAfterRun(input, end);
+		if (end <= start || (after < input.Length && input[after] is not ('\r' or '\n')))
 		{
 			return false;
 		}
 
 		bool padded = input[end - 1] == '=';
 		return padded || (end - start >= 8 && LooksRandom(input.AsSpan(start, end - start)));
+	}
+
+	/// <summary>Skips closing punctuation and a short note in brackets. A word after them means the line is not over, which the caller sees by what is next.</summary>
+	private static int SkipAfterRun(string input, int start)
+	{
+		int cursor = SkipBlanks(input, start);
+		int limit = Math.Min(input.Length, cursor + MaxClosers);
+		while (cursor < limit && IsCloser(input[cursor]))
+		{
+			cursor++;
+		}
+
+		cursor = SkipBlanks(input, cursor);
+		int noteEnd = cursor < input.Length && input[cursor] == '(' ? input.IndexOf(')', cursor, Math.Min(MaxNoteLength, input.Length - cursor)) : -1;
+		return noteEnd < 0 ? cursor : SkipBlanks(input, noteEnd + 1);
+	}
+
+	private static int SkipBlanks(string input, int position)
+	{
+		int cursor = position;
+		while (cursor < input.Length && input[cursor] is ' ' or '\t')
+		{
+			cursor++;
+		}
+
+		return cursor;
+	}
+
+	private static bool IsCloser(char c)
+	{
+		return !char.IsAsciiLetterOrDigit(c) && !char.IsWhiteSpace(c) && c != '(';
 	}
 
 	/// <summary>How much text comes before the base64 on the run's last line.</summary>
@@ -160,7 +201,7 @@ internal static class PemBlock
 		bool hasNonHex = false;
 		foreach (ReadOnlySpan<char> line in run.EnumerateLines())
 		{
-			int length = TrailingBase64Length(line);
+			int length = TrailingBase64Length(WithoutNote(line));
 			width = width < 0 ? length : width;
 			if (length != width)
 			{
@@ -168,11 +209,28 @@ internal static class PemBlock
 			}
 
 			// One encoded value has padding on its last line only. Padding on more is a list of values: go.sum, lockfiles.
-			paddedLines += line.TrimEnd().EndsWith("=") ? 1 : 0;
-			hasNonHex |= line[^length..].IndexOfAnyExcept(HexDigits) >= 0;
+			ReadOnlySpan<char> text = WithoutNote(line);
+			paddedLines += text.EndsWith("=") ? 1 : 0;
+			hasNonHex |= text[^length..].IndexOfAnyExcept(HexDigits) >= 0;
 		}
 
 		return hasNonHex && paddedLines <= 1 && width != MimeWidth && run.IndexOfAnyInRange('A', 'Z') >= 0 && run.IndexOfAnyInRange('a', 'z') >= 0;
+	}
+
+	/// <summary>The line up to the end of its base64, without what <see cref="SkipAfterRun"/> allows after it.</summary>
+	private static ReadOnlySpan<char> WithoutNote(ReadOnlySpan<char> line)
+	{
+		ReadOnlySpan<char> text = line.TrimEnd();
+		int open = text.EndsWith(")") ? text.LastIndexOf('(') : -1;
+		text = open >= 0 && text.Length - open <= MaxNoteLength ? text[..open].TrimEnd() : text;
+		int closers = 0;
+		while (closers < MaxClosers && text.Length > 0 && IsCloser(text[^1]) && text[^1] is not ('+' or '/' or '='))
+		{
+			text = text[..^1];
+			closers++;
+		}
+
+		return text.TrimEnd();
 	}
 
 	private static int TrailingBase64Length(ReadOnlySpan<char> line)
@@ -216,11 +274,25 @@ internal static class PemBlock
 		return false;
 	}
 
-	/// <summary>The line before the run, or the start of its own line, ends a data URI's header.</summary>
+	/// <summary>Only a real header directly joined to the run: <c>data:image/png;base64,AAAA</c>. The word on its own proves nothing.</summary>
 	private static bool FollowsDataUri(SecretCandidate candidate)
 	{
-		ReadOnlySpan<char> before = candidate.Input.AsSpan(0, candidate.Secret.Index).TrimEnd();
-		return before.EndsWith("base64,", StringComparison.Ordinal);
+		string input = candidate.Input;
+		int lineStart = candidate.Secret.Index == 0 ? 0 : input.LastIndexOfAny(['\r', '\n'], candidate.Secret.Index - 1) + 1;
+		ReadOnlySpan<char> before = input.AsSpan(lineStart, candidate.Secret.Index - lineStart);
+		if (!before.EndsWith(DataUriEnd, StringComparison.Ordinal))
+		{
+			return false;
+		}
+
+		int start = before.LastIndexOf(DataUriStart, StringComparison.Ordinal);
+		if (start < 0)
+		{
+			return false;
+		}
+
+		ReadOnlySpan<char> mediaType = before[(start + DataUriStart.Length)..^DataUriEnd.Length];
+		return mediaType.Contains('/') && !mediaType.ContainsAny(" \t,\"'");
 	}
 
 	/// <summary>A certificate cut off at its top ends right after the run. Anything further away proves nothing.</summary>
@@ -354,15 +426,34 @@ internal static class PemBlock
 			return false;
 		}
 
-		// A line ending in key material is not a header, whatever it starts with: a grep location or a log timestamp looks like one.
+		// A line holding key material is not a header, whatever it starts with: a grep location or a log timestamp looks like one.
 		int end = SkipToLineEnd(input, cursor);
-		if (TrailingBase64Length(input.AsSpan(cursor, end - cursor)) >= TrailingRunLength)
+		if (FindLongRuns(input, cursor, end) is not null)
 		{
 			return false;
 		}
 
 		position = end;
 		return true;
+	}
+
+	/// <summary>The start of the first long base64 run in the span and the end of the last, or null when it holds none.</summary>
+	private static (int Start, int End)? FindLongRuns(string input, int start, int end)
+	{
+		(int Start, int End)? found = null;
+		int cursor = start;
+		while (cursor < end)
+		{
+			int run = Math.Min(Base64RunLength(input, cursor), end - cursor);
+			if (run >= LongRunLength)
+			{
+				found = (found?.Start ?? cursor, cursor + run);
+			}
+
+			cursor += Math.Max(run, 1);
+		}
+
+		return found;
 	}
 
 	/// <summary>Skips a line that stands in for removed lines, such as <c>[...]</c> or <c>... 12 lines omitted ...</c>.</summary>
@@ -402,6 +493,7 @@ internal static class PemBlock
 		private int _proseLeft = ProseLineBudget;
 		private bool _atStart = true;
 		private bool _needsFullLine;
+		private bool _afterLongRun;
 
 		/// <summary>Consumes one line. False when the block is over.</summary>
 		public bool Advance()
@@ -418,6 +510,7 @@ internal static class PemBlock
 			bool crossedMessage = _input.AsSpan(lineStart, _position - lineStart).Contains(Redactor.MessageBoundary);
 			bool lineBreakBefore = (lineFeeds == 1 && !crossedMessage) || _atStart;
 			_atStart = false;
+			_afterLongRun &= lineFeeds == 0;
 			return !AtBlockEnd() && AdvanceInBlock(lineBreakBefore);
 		}
 
@@ -460,8 +553,8 @@ internal static class PemBlock
 		}
 
 		/// <summary>
-		/// Whatever precedes it, a line ending in a long base64 run is a body line: a log timestamp, a grep location, a box-drawing
-		/// border. A shorter line with the same prefix is the key's tail. A marker anywhere in the line ends the block.
+		/// Whatever surrounds it, a long base64 run is a body line: a log timestamp, a grep location, a box-drawing border, a JSON
+		/// value. A shorter line with the same prefix is the key's tail. A marker anywhere in the line ends the block.
 		/// </summary>
 		private bool TryAcceptAfterPrefix()
 		{
@@ -473,18 +566,34 @@ internal static class PemBlock
 				return false;
 			}
 
-			int run = TrailingBase64Length(_input.AsSpan(_position, lineEnd - _position));
-			int end = lineEnd - (lineEnd - _position - _input.AsSpan(_position, lineEnd - _position).TrimEnd().Length);
-			int start = end - run;
-			bool longRun = run >= TrailingRunLength;
-			bool tail = !longRun && _prefixWidth > 0 && start == _position + _prefixWidth && run >= 4 && LooksRandom(_input.AsSpan(start, run));
-			if (!longRun && !tail)
+			if (FindLongRuns(_input, _position, lineEnd) is { } runs)
+			{
+				_prefixWidth = runs.Start - _position;
+				Accept(runs.End - runs.Start, _input.AsSpan(runs.Start, runs.End - runs.Start), runs.End);
+				return true;
+			}
+
+			return TryAcceptTail(lineEnd);
+		}
+
+		/// <summary>The last line of a key is the only short one, so it comes once. Words after it mean the line is prose, not a tail.</summary>
+		private bool TryAcceptTail(int lineEnd)
+		{
+			int start = _position + _prefixWidth;
+			if (_prefixWidth == 0 || start >= lineEnd)
 			{
 				return false;
 			}
 
-			_prefixWidth = longRun ? start - _position : _prefixWidth;
-			Accept(run, _input.AsSpan(start, run), end);
+			int run = Math.Min(Base64RunLength(_input, start), lineEnd - start);
+			int after = SkipAfterRun(_input, start + run);
+			if (run < 4 || after < lineEnd || !LooksRandom(_input.AsSpan(start, run)))
+			{
+				return false;
+			}
+
+			_prefixWidth = 0;
+			Accept(run, _input.AsSpan(start, run), start + run);
 			return true;
 		}
 
@@ -505,6 +614,15 @@ internal static class PemBlock
 		/// <summary>Before the key, a line of prose or a label on the marker's line. After it, an elision with more key behind it.</summary>
 		private bool TrySkipNonBody()
 		{
+			if (_afterLongRun)
+			{
+				// The rest of a body line, such as "(line 2)" or a closing brace. It stays in the output, and the next line decides.
+				int rest = SkipToLineEnd(_input, _position);
+				bool skipped = rest > _position;
+				_position = rest;
+				return skipped;
+			}
+
 			if (_bodyLength > 0)
 			{
 				_needsFullLine = TrySkipElision(_input, ref _position);
@@ -558,6 +676,7 @@ internal static class PemBlock
 			_position = end;
 			_lastAccepted = end;
 			_needsFullLine = false;
+			_afterLongRun = units >= LongRunLength;
 		}
 
 		/// <summary>Short tokens count only when they fill a line or close the block, so the prose after a truncated key survives.</summary>

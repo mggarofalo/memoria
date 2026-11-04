@@ -256,7 +256,7 @@ internal static class ReviewCases
 		"The END " + Synthetic.PrivateWord + " KEY line closes it.",
 		"it ends with -----END " + Synthetic.PrivateWord + " KEY----- as usual",
 		"begin\nprivate key\nend",
-		"data:image/png;base64,\n" + Synthetic.PemBody(4, 868),
+		"data:image/png;base64," + Synthetic.PemBody(4, 868),
 		Synthetic.Hex(40, 869) + "\n" + Synthetic.Hex(40, 870) + "\n" + Synthetic.Hex(40, 871),
 		string.Join('\n', Enumerable.Range(0, 5).Select(static i => Synthetic.Base64(76, 872 + i))),
 		"MII" + Synthetic.Base64(80, 877),

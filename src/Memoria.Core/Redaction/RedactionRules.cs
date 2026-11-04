@@ -76,6 +76,24 @@ internal static class RedactionRules
 	/// <summary>A line ending in a long base64 run, with anything before the run.</summary>
 	private const string RunOnLine = @"[A-Za-z0-9+/]{40,}={0,2}";
 
+	/// <summary>What a log or a list may leave after a body line: closing punctuation and a short note in brackets, but no words.</summary>
+	private const string AfterRun = @"[ \t]*[^A-Za-z0-9\s]{0,4}[ \t]*(?:\([^()\r\n]{0,20}\)[ \t]*)?";
+
+	/// <summary>A line ending in a shell's continuation character: backslash, PowerShell's backtick, or cmd's caret.</summary>
+	private const string Continuation = @"[\\`^]\r?\n";
+
+	/// <summary>Space between words of a command, which may run onto the next line.</summary>
+	private const string CommandGap = @"(?:\s|" + Continuation + ")+";
+
+	/// <summary>The arguments before a flag, on this line or a continued one.</summary>
+	private const string CommandArguments = @"(?:[^\r\n|]|" + Continuation + ")*?";
+
+	/// <summary>What comes before a flag. A plain newline is not here: it ends the command.</summary>
+	private const string FlagStart = @"(?:[ \t]|" + Continuation + ")";
+
+	/// <summary>Space between a flag and its value, which may run onto the next line.</summary>
+	private const string FlagGap = @"(?:[ ]|" + Continuation + ")+";
+
 	/// <summary>
 	/// PEM private keys of every flavor, including PGP blocks and keys cut off with no END line. The marker
 	/// may be lower case or have a single dash. <see cref="PemBlock"/> finds the end. A marker named in code or
@@ -95,14 +113,14 @@ internal static class RedactionRules
 		linesMatter: true);
 
 	/// <summary>
-	/// A run of at least three lines ending in base64 of one width, whatever precedes each, with no marker in sight.
+	/// A run of at least three lines holding base64 of one width, whatever precedes each and with no words after it, with no marker in sight.
 	/// <see cref="PemBlock.IsUnmarkedKeyBody"/> rules out data: MIME's width, hex, data URIs, and bodies under a non-private BEGIN.
 	/// The span ends before the last newline, so a message's end stays a line end.
 	/// </summary>
 	public static readonly RedactionRule PrivateKeyLines = new(
 		"private-key-lines",
 		Pattern(
-			@"(?:^|[\r\n])[^\r\n]*?(?<secret>" + RunOnLine + @"(?:[ \t]*\r?\n[^\r\n]*?" + RunOnLine + @"){2,})[ \t]*(?:$|[\r\n])"),
+			@"(?:^|[\r\n])[^\r\n]*?(?<secret>" + RunOnLine + "(?:" + AfterRun + @"\r?\n[^\r\n]*?" + RunOnLine + "){2,})" + AfterRun + @"(?:$|[\r\n])"),
 		PemBlock.IsUnmarkedKeyBody,
 		extend: PemBlock.ExtendLines,
 		linesMatter: true,
@@ -323,7 +341,7 @@ internal static class RedactionRules
 	public static readonly RedactionRule CommandPassword = new(
 		"command-password",
 		Pattern(
-			@"(?:\bsshpass\s+-p[ ]?|\bdocker\s+login\b[^\r\n|]*?\s-p[ ]+|\bredis-cli\b[^\r\n|]*?\s-a[ ]+|\baz\s+login\b[^\r\n|]*?\s(?:-p|--password)[ ]+"
+			@"(?:\bsshpass" + CommandGap + "-p(?:" + FlagGap + @")?|\bdocker" + CommandGap + @"login\b" + CommandArguments + FlagStart + "-p" + FlagGap + @"|\bredis-cli\b" + CommandArguments + FlagStart + "-a" + FlagGap + @"|\baz\s+login\b" + CommandArguments + FlagStart + "(?:-p|--password)" + FlagGap
 			+ @"|\bhtpasswd\s+-[a-mo-zA-Z]*b[a-zA-Z]*\s+\S+\s+\S+\s+|\bhtpasswd\s+-[a-zA-Z]*n[a-zA-Z]*b[a-zA-Z]*\s+\S+\s+"
 			+ @"|\bssh-keygen\b[^\r\n|]*?\s-[NP][ ]+|\bcmdkey\b[^\r\n|]*?\s/pass:|\bnet\s+use\s+(?:[A-Za-z]:\s+)?\\\\\S+\s+|\bsetx\s+\S*(?i:pass|secret|token|key)\S*\s+)"
 			+ @"(?:""(?<secret>[^""\r\n]+)|'(?<secret>[^'\r\n]+)|(?<secret>[^\s""'`|;&]+))"),

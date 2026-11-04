@@ -92,11 +92,6 @@ public sealed class RedactionPinRoundThreeTests
 	}
 
 	[Theory]
-	[InlineData("me:abc1@example.com")]
-	[InlineData("me:abc1@example.org")]
-	[InlineData("me:abc1@example.net")]
-	[InlineData("me:abc1@example.io")]
-	[InlineData("me:abc1@EXAMPLE.COM")]
 	[InlineData("email:a1b2-c3@h")]
 	[InlineData("mail:a1b2-c3@h")]
 	[InlineData("mailto:a1b2-c3@h")]

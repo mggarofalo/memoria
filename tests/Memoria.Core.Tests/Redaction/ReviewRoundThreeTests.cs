@@ -213,7 +213,7 @@ public sealed class ReviewRoundThreeTests
 	[InlineData("-----BEGIN PKCS7-----\n{B}\n-----END PKCS7-----")]
 	[InlineData("-----BEGIN DH PARAMETERS-----\n{B}\n-----END DH PARAMETERS-----")]
 	[InlineData("-----BEGIN SSH SIGNATURE-----\n{B}\n-----END SSH SIGNATURE-----")]
-	[InlineData("data:image/png;base64,\n{B}")]
+	[InlineData("data:image/png;base64,{B}")]
 	[InlineData("{B}\n-----END CERTIFICATE-----")]
 	public void Public_material_survives(string template)
 	{

@@ -3,13 +3,13 @@ namespace Memoria.Core.Redaction;
 /// <summary>
 /// Reads the shell command a flag belongs to, looking back over a bounded window and reading only as many
 /// words as it needs, so judging stays linear however many flags a line holds. Lines ending in a backslash
-/// or a PowerShell backtick continue the command.
+/// a PowerShell backtick, or cmd's caret continue the command.
 /// </summary>
 internal static class CommandLines
 {
 	private const int Window = 1024;
 
-	private static readonly HashSet<string> Wrappers = new(StringComparer.Ordinal) { "sudo", "doas", "env", "time", "exec", "nohup", "command", "$", "#", ">", "PS>", "%", "\\", "`" };
+	private static readonly HashSet<string> Wrappers = new(StringComparer.Ordinal) { "sudo", "doas", "env", "time", "exec", "nohup", "command", "$", "#", ">", "PS>", "%", "\\", "`", "^" };
 
 	private static readonly System.Buffers.SearchValues<char> SeparatorChars = System.Buffers.SearchValues.Create(";|(&`\"\n");
 
@@ -144,7 +144,7 @@ internal static class CommandLines
 			before--;
 		}
 
-		return before >= 0 && input[before] is '\\' or '`';
+		return before >= 0 && input[before] is '\\' or '`' or '^';
 	}
 
 	private static bool IsEnvAssignment(string word)

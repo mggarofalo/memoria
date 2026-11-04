@@ -145,9 +145,9 @@ public sealed class PartGatePinTests
 	}
 
 	[Fact]
-	public void Too_many_hits_refuse_rather_than_loop()
+	public void More_field_hits_than_any_real_document_refuse_rather_than_loop()
 	{
-		string fields = string.Concat(Enumerable.Range(0, 70).Select(i => $"f{i}: \"{Token}\"\n"));
+		string fields = string.Concat(Enumerable.Range(0, 129).Select(i => $"f{i}: \"{Token}\"\n"));
 		SessionMessage[] all = [new(SessionMessage.User, "x", null, null, 1)];
 		SessionPart part = new(new ArraySegment<SessionMessage>(all), 1, 0, SessionTimestamp.FromFallback(null));
 
@@ -155,6 +155,37 @@ public sealed class PartGatePinTests
 
 		Assert.Equal(RedactionFailure.DidNotConverge, exception.Failure);
 		Assert.Equal(1, exception.Part);
+	}
+
+	[Fact]
+	public void Many_field_hits_are_each_replaced()
+	{
+		string fields = string.Concat(Enumerable.Range(0, 70).Select(i => $"f{i}: \"{Token}\"\n"));
+		SessionMessage[] all = [new(SessionMessage.User, "x", null, null, 1)];
+		SessionPart part = new(new ArraySegment<SessionMessage>(all), 1, 0, SessionTimestamp.FromFallback(null));
+		List<SessionFieldRefusal> refusals = [];
+
+		string output = PartGate.Clean("---\n" + fields + "---\n\n## User\n\nx\n", part, refusals).Text;
+
+		Assert.Equal(70, refusals.Count);
+		Assert.DoesNotContain(Token, output, StringComparison.Ordinal);
+		Assert.EndsWith("---\n\n## User\n\nx\n", output, StringComparison.Ordinal);
+	}
+
+	[Fact]
+	public void Too_many_message_hits_cost_the_part_its_messages_not_the_session()
+	{
+		string[] texts = [.. Enumerable.Range(0, 70).Select(static i => "m" + i + " " + Token), "clean"];
+		SessionMessage[] all = [.. texts.Select(static text => new SessionMessage(SessionMessage.User, text, null, null, text.Length))];
+		SessionPart part = new(new ArraySegment<SessionMessage>(all), 1, 0, SessionTimestamp.FromFallback(null));
+		List<SessionFieldRefusal> refusals = [];
+
+		string output = PartGate.Clean(Render(null, texts), part, refusals).Text;
+
+		Assert.DoesNotContain(Token, output, StringComparison.Ordinal);
+		Assert.DoesNotContain("clean", output, StringComparison.Ordinal);
+		Assert.Equal(71, refusals.Count);
+		Assert.Equal(71, refusals.Select(static r => r.Field).Distinct().Count());
 	}
 
 	private static string Render(string? title, string[] texts)

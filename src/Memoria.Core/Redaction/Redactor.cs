@@ -53,6 +53,15 @@ public sealed class Redactor : IRedactor
 	/// <summary>The instance the renderer uses. Redactors hold no per-call state.</summary>
 	internal static Redactor Shared { get; } = new();
 
+	/// <summary>How long one redaction may take, and so how long a session may spend looking for the part of it that cannot be redacted.</summary>
+	internal TimeSpan Budget => _budget;
+
+	/// <summary>True when the text itself made redaction give up. Replacing that text ends the problem. Running out of time or an internal fault does not depend on any one piece of text.</summary>
+	internal static bool IsCausedByText(RedactionFailure failure)
+	{
+		return failure is RedactionFailure.DidNotConverge or RedactionFailure.ScanBudgetExhausted;
+	}
+
 	/// <summary>The name of every built-in rule, for dashboards and audit logs.</summary>
 	public static IReadOnlyList<string> RuleNames { get; } = [.. RedactionRules.All.Select(static r => r.Name)];
 

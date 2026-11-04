@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using Memoria.Core.Redaction;
 
@@ -10,13 +11,15 @@ namespace Memoria.Core.Sessions;
 /// Redaction is part of rendering and cannot be skipped: every metadata string and all the message
 /// text are redacted before anything is derived from them. Each finished part is then checked again,
 /// and a field or message that still holds a credential is replaced and reported, while the rest is
-/// indexed. Only a failure that makes the output untrustworthy throws, with the read report attached.
+/// indexed. A field or message that redaction cannot finish is replaced and reported the same way, so hostile
+/// text cannot keep a session out of the index. Only a blown overall budget or an internal fault throws, with
+/// the read report attached.
 /// </summary>
 public static class SessionRenderer
 {
 	/// <summary>Renders one session. The stream is read to its end and is not disposed.</summary>
 	/// <exception cref="ArgumentException">The session id is blank or an option is out of range.</exception>
-	/// <exception cref="RedactionException">Redaction failed or a finished part still held a credential. Refuse the session.</exception>
+	/// <exception cref="RedactionException">The overall budget ran out or an internal fault made the output untrustworthy. Refuse the session.</exception>
 	public static async Task<RedactedSession> RenderAsync(
 		Stream payload,
 		SessionSource source,
@@ -65,7 +68,11 @@ internal abstract class SessionTranscript(SessionSource source, SessionRenderOpt
 	/// <summary>Per-entry overhead charged to the budget, so many tiny entries cannot evade it.</summary>
 	protected const int EntryOverhead = 64;
 
+	/// <summary>Rounds of replacing messages before every remaining message is replaced. Each round's cost is about one redaction per doubling of the message count.</summary>
+	private const int MaxMessageRounds = 8;
+
 	private readonly Dictionary<string, string> _redactedMetadata = new(StringComparer.Ordinal);
+	private readonly Dictionary<int, string> _refusedMessages = [];
 	private long _retained;
 	private bool _overBudget;
 
@@ -147,10 +154,25 @@ internal abstract class SessionTranscript(SessionSource source, SessionRenderOpt
 		{
 			return known;
 		}
-		RedactionResult result = Redactor.Shared.RedactFragment(value);
-		AddCounts(result);
-		_redactedMetadata[value] = result.Text;
-		return result.Text;
+		string redacted = RedactMetadataOrRefuse(value);
+		_redactedMetadata[value] = redacted;
+		return redacted;
+	}
+
+	/// <summary>A value redaction cannot finish becomes a marker, reported against part 0 because it belongs to the whole session.</summary>
+	private string RedactMetadataOrRefuse(string value)
+	{
+		try
+		{
+			RedactionResult result = Redactor.Shared.RedactFragment(value);
+			AddCounts(result);
+			return result.Text;
+		}
+		catch (RedactionException exception) when (Redactor.IsCausedByText(exception.Failure))
+		{
+			Refusals.Add(new SessionFieldRefusal(0, "metadata", exception.RuleName));
+			return PartGate.FieldMarker;
+		}
 	}
 
 	/// <summary>A title is cut from redacted text, and the cut can change how the remainder reads, so it is judged again.</summary>
@@ -165,8 +187,26 @@ internal abstract class SessionTranscript(SessionSource source, SessionRenderOpt
 	/// </summary>
 	protected void RedactMessages()
 	{
-		string joined = string.Join(Redactor.MessageSeparator, Messages.Select(RepairBoundary));
-		RedactionResult result = Redactor.Shared.RedactFragment(joined);
+		string[] texts = [.. Messages.Select(RepairBoundary)];
+		Stopwatch clock = Stopwatch.StartNew();
+		for (int round = 0; round < MaxMessageRounds; round++)
+		{
+			RedactionException? failure = TryRedactRange(texts, 0, texts.Length, clock, out RedactionResult? result);
+			if (failure is null)
+			{
+				ApplyRedacted(result!);
+				return;
+			}
+
+			RefuseFailing(texts, 0, texts.Length, failure, clock);
+		}
+
+		RefuseEveryMessage(texts);
+		ApplyRedacted(Redactor.Shared.RedactFragment(string.Join(Redactor.MessageSeparator, texts)));
+	}
+
+	private void ApplyRedacted(RedactionResult result)
+	{
 		AddCounts(result);
 		string[] texts = SplitMessages(result.Text);
 		if (texts.Length != Math.Max(Messages.Count, 1))
@@ -176,6 +216,90 @@ internal abstract class SessionTranscript(SessionSource source, SessionRenderOpt
 		for (int i = 0; i < Messages.Count; i++)
 		{
 			Messages[i] = Messages[i] with { Text = texts[i], CodePoints = PythonText.CodePointLength(texts[i]) };
+		}
+	}
+
+	/// <summary>Returns the failure when the text caused it. Anything else, and a search that has gone on too long, refuses the session.</summary>
+	private static RedactionException? TryRedactRange(string[] texts, int start, int count, Stopwatch clock, out RedactionResult? result)
+	{
+		result = null;
+		if (clock.Elapsed > Redactor.Shared.Budget)
+		{
+			throw new RedactionException(RedactionException.WholeDocument, RedactionFailure.TimedOut);
+		}
+
+		try
+		{
+			result = Redactor.Shared.RedactFragment(string.Join(Redactor.MessageSeparator, texts, start, count));
+			return null;
+		}
+		catch (RedactionException exception) when (Redactor.IsCausedByText(exception.Failure))
+		{
+			return exception;
+		}
+	}
+
+	/// <summary>
+	/// Halves a range known to fail until it finds the messages that fail alone. When both halves pass, the two together are what
+	/// fails, so the messages either side of the split go. Nothing here is kept: the whole text is redacted again as one string
+	/// afterwards, so a key spread across messages is still one key.
+	/// </summary>
+	private void RefuseFailing(string[] texts, int start, int count, RedactionException failure, Stopwatch clock)
+	{
+		if (count <= 1)
+		{
+			RefuseMessage(texts, start, failure.RuleName);
+			return;
+		}
+
+		int half = count / 2;
+		RedactionException? left = TryRedactRange(texts, start, half, clock, out _);
+		RedactionException? right = TryRedactRange(texts, start + half, count - half, clock, out _);
+		if (left is not null)
+		{
+			RefuseFailing(texts, start, half, left, clock);
+		}
+		if (right is not null)
+		{
+			RefuseFailing(texts, start + half, count - half, right, clock);
+		}
+		if (left is null && right is null)
+		{
+			RefuseMessage(texts, start + half - 1, failure.RuleName);
+			RefuseMessage(texts, start + half, failure.RuleName);
+		}
+	}
+
+	private void RefuseMessage(string[] texts, int index, string rule)
+	{
+		// A session with no messages still redacts one empty string, and has nothing to replace.
+		if (index < texts.Length)
+		{
+			texts[index] = PartGate.MessageMarker;
+			_refusedMessages[index] = rule;
+		}
+	}
+
+	private void RefuseEveryMessage(string[] texts)
+	{
+		for (int i = 0; i < texts.Length; i++)
+		{
+			if (!_refusedMessages.ContainsKey(i))
+			{
+				RefuseMessage(texts, i, RedactionException.WholeDocument);
+			}
+		}
+	}
+
+	private void ReportRefusedMessages(SessionPart part)
+	{
+		for (int i = 0; i < part.Messages.Count; i++)
+		{
+			int index = part.MessageStart + i;
+			if (_refusedMessages.TryGetValue(index, out string? rule))
+			{
+				Refusals.Add(new SessionFieldRefusal(part.Number, $"message:{index}", rule));
+			}
 		}
 	}
 
@@ -253,6 +377,7 @@ internal abstract class SessionTranscript(SessionSource source, SessionRenderOpt
 		for (int i = 0; i < segments.Count; i++)
 		{
 			SessionPart part = new(segments[i], i + 1, messageStart, start);
+			ReportRefusedMessages(part);
 			documents.Add(new RedactedSessionDocument(
 				path(start.DateText, part.Number),
 				part.Number,

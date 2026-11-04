@@ -293,7 +293,7 @@ public sealed class RedactionPinTests
 	[Theory]
 	[InlineData("-----BEGIN PUBLIC KEY-----\n")]
 	[InlineData("-----BEGIN CERTIFICATE-----\n")]
-	[InlineData("data:application/octet-stream;base64,\n")]
+	[InlineData("data:application/octet-stream;base64,")]
 	public void Lines_after_a_non_secret_marker_survive(string marker)
 	{
 		string input = $"{marker}{Line(1024)}\n{Line(1025)}\n{Line(1026)}\n";

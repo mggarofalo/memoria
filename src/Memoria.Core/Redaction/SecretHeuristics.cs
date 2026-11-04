@@ -28,6 +28,12 @@ internal static class SecretHeuristics
 		"email", "e-mail", "mail", "mailto", "author", "from", "to", "cc", "bcc", "reply-to", "committer", "contact", "npm", "pkg", "pip", "gem", "cargo", "nuget", "go", "image", "docker",
 	};
 
+	/// <summary>Accounts that exist to log in to a database or server. After one of these, what follows the colon is a password even if it is a plain word.</summary>
+	private static readonly HashSet<string> ServerLogins = new(StringComparer.OrdinalIgnoreCase)
+	{
+		"root", "admin", "administrator", "postgres", "mysql", "mariadb", "sa", "dba", "dbadmin", "dbuser",
+	};
+
 	private static readonly HashSet<string> SourceExtensions = new(StringComparer.OrdinalIgnoreCase)
 	{
 		"cs", "ts", "tsx", "js", "jsx", "py", "go", "md", "json", "yaml", "yml", "rs", "java", "rb", "sh", "txt", "html", "css", "sql", "toml",
@@ -159,17 +165,67 @@ internal static class SecretHeuristics
 			return IsUrlPassword(value);
 		}
 
-		return !IsVersionOrDigestHost(candidate.Input, hostStart)
-			&& HasPasswordShape(value)
-			&& !IsAddressLike(candidate, value)
-			&& IsUrlPassword(value);
+		if (IsVersionOrDigestHost(candidate.Input, hostStart))
+		{
+			return false;
+		}
+
+		string name = UserInfoName(candidate);
+		return ServerLogins.Contains(name)
+			? IsServerLoginPassword(value)
+			: HasPasswordShape(value) && !IsAddressName(name) && IsUrlPassword(value);
 	}
 
-	/// <summary><c>image:tag@sha256:...</c> and <c>npm:name@1.2.3</c>.</summary>
+	/// <summary><c>image:tag@sha256:...</c> and <c>npm:name@1.2.3</c>. An address or a port after the <c>@</c> is a host, so what comes before it is a password.</summary>
 	private static bool IsVersionOrDigestHost(string input, int hostStart)
 	{
-		return string.CompareOrdinal(input, hostStart, "sha", 0, 3) == 0
-			|| (hostStart < input.Length && char.IsAsciiDigit(input[hostStart]));
+		return string.CompareOrdinal(input, hostStart, "sha", 0, 3) == 0 || IsThreePartVersion(input, hostStart);
+	}
+
+	private static bool IsThreePartVersion(string input, int start)
+	{
+		int cursor = SkipDigits(input, start);
+		if (cursor == start || cursor >= input.Length || input[cursor] != '.')
+		{
+			return false;
+		}
+
+		int second = cursor + 1;
+		cursor = SkipDigits(input, second);
+		if (cursor == second || cursor >= input.Length || input[cursor] != '.')
+		{
+			return false;
+		}
+
+		int third = cursor + 1;
+		cursor = SkipDigits(input, third);
+		return cursor > third && !IsAddressOrPortNext(input, cursor);
+	}
+
+	private static int SkipDigits(string input, int start)
+	{
+		int cursor = start;
+		while (cursor < input.Length && char.IsAsciiDigit(input[cursor]))
+		{
+			cursor++;
+		}
+
+		return cursor;
+	}
+
+	/// <summary>A fourth number makes an address and a colon makes a port. A dot on its own ends a sentence.</summary>
+	private static bool IsAddressOrPortNext(string input, int position)
+	{
+		bool port = position < input.Length && input[position] == ':';
+		bool fourthPart = position + 1 < input.Length && input[position] == '.' && char.IsAsciiDigit(input[position + 1]);
+		return port || fourthPart;
+	}
+
+	/// <summary>A capitalized word such as <c>Password</c> is what a person picks. All lower case, it is how documentation writes the slot.</summary>
+	private static bool IsServerLoginPassword(string value)
+	{
+		return value.Length >= PasswordLength
+			&& (IsUrlPassword(value) || (Keywords.Contains(value) && char.IsAsciiLetterUpper(value[0])));
 	}
 
 	private static bool HasPasswordShape(string value)
@@ -183,7 +239,12 @@ internal static class SecretHeuristics
 	}
 
 	/// <summary>The name before the colon says this is an address or a package, as in <c>email:me2@x</c>; a clock time such as <c>12:30pm@home</c> has a number there.</summary>
-	private static bool IsAddressLike(SecretCandidate candidate, string value)
+	private static bool IsAddressName(string name)
+	{
+		return AddressNames.Contains(name) || name.All(char.IsAsciiDigit);
+	}
+
+	private static string UserInfoName(SecretCandidate candidate)
 	{
 		string input = candidate.Input;
 		int colon = candidate.Secret.Index - 1;
@@ -193,21 +254,7 @@ internal static class SecretHeuristics
 			start--;
 		}
 
-		string name = input[start..colon];
-		bool plainMailbox = value.AsSpan().TrimEnd("0123456789").ToString().All(char.IsAsciiLetter) && HostHasPublicSuffix(input, candidate.End + 1);
-		return AddressNames.Contains(name) || name.All(char.IsAsciiDigit) || plainMailbox;
-	}
-
-	private static bool HostHasPublicSuffix(string input, int hostStart)
-	{
-		int end = hostStart;
-		while (end < input.Length && (char.IsAsciiLetterOrDigit(input[end]) || input[end] is '.' or '-'))
-		{
-			end++;
-		}
-
-		ReadOnlySpan<char> host = input.AsSpan(hostStart, end - hostStart);
-		return host.EndsWith(".com", StringComparison.OrdinalIgnoreCase) || host.EndsWith(".org", StringComparison.OrdinalIgnoreCase) || host.EndsWith(".net", StringComparison.OrdinalIgnoreCase) || host.EndsWith(".io", StringComparison.OrdinalIgnoreCase);
+		return input[start..colon];
 	}
 
 	/// <summary>Go's <c>tcp(</c> and <c>unix(</c> say plainly that what came before the <c>@</c> is a login.</summary>

@@ -7,7 +7,8 @@ namespace Memoria.Core.Sessions;
 /// The last check on a finished part. Everything in it was already redacted, so a hit means assembly created a
 /// match. Rather than let one hostile branch name keep a whole session out of the index, the field or message
 /// holding the hit is replaced with a typed marker and reported, and the rest is indexed. It never falls
-/// back to raw text. Only a failure that makes the output untrustworthy refuses the session.
+/// back to raw text. Only a blown budget or an internal fault refuses the session. Too many hits, or a part the check
+/// cannot finish, costs the part its messages and title instead.
 /// </summary>
 internal static class PartGate
 {
@@ -27,12 +28,22 @@ internal static class PartGate
 	{
 		string frontmatter = FrontmatterOf(document);
 		Body body = Body.Parse(document[frontmatter.Length..], part);
-		for (int i = 0; i < MaxReplacements; i++)
+		for (int i = 0; i < MaxReplacements * 2; i++)
 		{
 			string current = frontmatter + body.Render();
-			if (Redactor.Shared.FindFirstHit(current) is not { } hit)
+			if (FindHit(current, body, part, refusals, out GateHit? found))
+			{
+				continue;
+			}
+
+			if (found is not { } hit)
 			{
 				return new RedactedMarkdown(current, new Dictionary<string, int>());
+			}
+
+			if (i >= MaxReplacements && hit.Start >= frontmatter.Length && body.RefuseAll(hit.Rule, part, refusals))
+			{
+				continue;
 			}
 
 			if (hit.Start < frontmatter.Length)
@@ -51,6 +62,21 @@ internal static class PartGate
 		}
 
 		throw new RedactionException(RedactionException.WholeDocument, RedactionFailure.DidNotConverge, part.Number);
+	}
+
+	/// <summary>True when the check could not finish, so the body was replaced and the part must be checked again.</summary>
+	private static bool FindHit(string text, Body body, SessionPart part, List<SessionFieldRefusal> refusals, out GateHit? hit)
+	{
+		try
+		{
+			hit = Redactor.Shared.FindFirstHit(text);
+			return false;
+		}
+		catch (RedactionException exception) when (Redactor.IsCausedByText(exception.Failure) && body.RefuseAll(exception.RuleName, part, refusals))
+		{
+			hit = null;
+			return true;
+		}
 	}
 
 	private static string FrontmatterOf(string document)
@@ -109,6 +135,7 @@ internal static class PartGate
 	{
 		private readonly SessionMessage[] _messages;
 		private string? _title;
+		private bool _allRefused;
 
 		private Body(string? title, SessionMessage[] messages)
 		{
@@ -169,6 +196,33 @@ internal static class PartGate
 			StringBuilder block = new();
 			AppendMessage(block, _messages, index);
 			return block.Length;
+		}
+
+		/// <summary>Replaces the title and every message not already replaced. False when that has already happened, so a further failure is not the body's.</summary>
+		public bool RefuseAll(string rule, SessionPart part, List<SessionFieldRefusal> refusals)
+		{
+			if (_allRefused)
+			{
+				return false;
+			}
+
+			_allRefused = true;
+			if (_title is not null and not FieldMarker)
+			{
+				_title = FieldMarker;
+				refusals.Add(new SessionFieldRefusal(part.Number, "title", rule));
+			}
+
+			for (int i = 0; i < _messages.Length; i++)
+			{
+				if (_messages[i].Text != MessageMarker)
+				{
+					_messages[i] = _messages[i] with { Text = MessageMarker };
+					refusals.Add(new SessionFieldRefusal(part.Number, $"message:{part.MessageStart + i}", rule));
+				}
+			}
+
+			return true;
 		}
 
 		private static string RenderMessages(SessionMessage[] messages)
