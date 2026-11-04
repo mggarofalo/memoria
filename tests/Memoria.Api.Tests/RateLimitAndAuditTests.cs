@@ -453,6 +453,8 @@ public sealed class AuditTests(AuthApiFactory factory) : IClassFixture<AuthApiFa
 		Assert.Equal(5, rows.Count);
 		Assert.Equal("op39", rows[^1].Operation);
 		Assert.Contains(all, r => r.KeyId == quiet && r.Operation == "kept");
+		Assert.Single(factory.Logs, l => l.EventId.Id == 3102 && l.Message.Contains(noisy, StringComparison.Ordinal));
+		Assert.DoesNotContain(factory.Logs, l => l.EventId.Id == 3102 && l.Message.Contains(quiet, StringComparison.Ordinal));
 	}
 
 	private async Task<McpClient> ConnectAsync(string token)

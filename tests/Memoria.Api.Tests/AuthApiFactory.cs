@@ -105,10 +105,27 @@ public sealed class AuthApiFactory : MemoriaApiFactory
 	{
 		base.Dispose(disposing);
 		SqliteConnection.ClearAllPools();
-		string? directory = Path.GetDirectoryName(DatabasePath);
-		if (directory is not null && Directory.Exists(directory))
+		DeleteTempDirectory(Path.GetDirectoryName(DatabasePath)!);
+	}
+
+	/// <summary>
+	/// Best effort. On Windows a file can stay locked briefly after its connection
+	/// closes, for example behind an MCP stream's audit write, and a leftover temp
+	/// directory is no reason to fail a run.
+	/// </summary>
+	private static void DeleteTempDirectory(string directory)
+	{
+		for (int attempt = 0; attempt < 10 && Directory.Exists(directory); attempt++)
 		{
-			Directory.Delete(directory, recursive: true);
+			try
+			{
+				SqliteConnection.ClearAllPools();
+				Directory.Delete(directory, recursive: true);
+			}
+			catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+			{
+				Thread.Sleep(50);
+			}
 		}
 	}
 

@@ -195,6 +195,13 @@ correlation only; the audit id is what identifies a record. Requests with no val
 key are logged but not audited: they have no key to attribute, and recording them
 would let anyone grow the table.
 
+**The audit log is not tamper-evident against the key it records.** `Audit:MaxRowsPerKey`
+keeps one noisy key from growing the table or evicting another key's history, but it also
+means a key can roll its own oldest rows out by making enough requests. The API logs one
+warning per key per process when its rows are first trimmed, and the log stream keeps every
+record the table drops. If you need a record the acting key cannot erase, ship the log stream
+or the rows off the box.
+
 The request log line carries the route template and the key id. Logs never carry
 the query string, request headers, or a key's secret. The JSON console format's
 scopes do include ASP.NET Core's raw `RequestPath`, so a document path requested

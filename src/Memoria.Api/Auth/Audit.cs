@@ -64,6 +64,8 @@ public sealed partial class SqliteAuditLog(
 
 	private readonly ConcurrentDictionary<string, int> _writesSinceTrim = new(StringComparer.Ordinal);
 
+	private readonly ConcurrentDictionary<string, byte> _keysTrimmed = new(StringComparer.Ordinal);
+
 	private long _lastPruneTicks;
 
 	/// <summary>Writes between per-key trims, so a key's rows stay within the cap plus this many.</summary>
@@ -122,7 +124,10 @@ public sealed partial class SqliteAuditLog(
 			""";
 		trim.Parameters.AddWithValue("$key", keyId);
 		trim.Parameters.AddWithValue("$cap", _maxRowsPerKey);
-		await trim.ExecuteNonQueryAsync();
+		if (await trim.ExecuteNonQueryAsync() > 0 && _keysTrimmed.TryAdd(keyId, 0))
+		{
+			LogFirstTrim(logger, keyId, _maxRowsPerKey);
+		}
 	}
 
 	private async Task PruneIfDueAsync(SqliteConnection connection)
@@ -142,6 +147,9 @@ public sealed partial class SqliteAuditLog(
 
 	[LoggerMessage(EventId = 3100, Level = LogLevel.Information, Message = "Audit {AuditId}: key {KeyId} {Operation} collections {Collections} attempted {AttemptedCollections} results {ResultCount} status {Status} (trace {TraceId}) target {Target}")]
 	private static partial void LogAudit(ILogger logger, string auditId, string keyId, string operation, string? collections, string? attemptedCollections, int? resultCount, int status, string traceId, string? target);
+
+	[LoggerMessage(EventId = 3102, Level = LogLevel.Warning, Message = "Audit rows for key {KeyId} reached the {MaxRowsPerKey}-row cap, and its oldest rows are now being removed. Logged once per key per process.")]
+	private static partial void LogFirstTrim(ILogger logger, string keyId, int maxRowsPerKey);
 
 	[LoggerMessage(EventId = 3101, Level = LogLevel.Error, Message = "Could not store audit record {AuditId}")]
 	private static partial void LogWriteFailed(ILogger logger, Exception exception, string auditId);
