@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { Inference, LlamaServerRerank, LlamaServers, UpstreamError } from "../src/inference.ts";
+import { Inference, LlamaServers, QmdTokensRerank, UpstreamError } from "../src/inference.ts";
 import { busyReasons, CachedMachine, readMachine, runCommand, systemProbes } from "../src/probes.ts";
 
 /** Answers each llama-server route from a table, and records what the worker sent. */
@@ -68,10 +68,11 @@ test("a malformed embedding response is refused, and a gap is not filled in", as
   assert.deepEqual(await embed([{ index: 1, embedding: [2] }, { index: 0, embedding: [1] }]), [[1], [2]]);
 });
 
-test("a rerank score must be a number from 0 to 1, inclusive", async () => {
-  const score = (value: unknown) => new LlamaServerRerank(servers({ rerank: { results: [{ index: 0, relevance_score: value }] } }).servers).score("q", ["d"]);
+test("a rerank probability must be a number from 0 to 1, inclusive", async () => {
+  const score = (value: unknown) =>
+    new QmdTokensRerank(servers({ tokenize: { tokens: [1] }, completion: { completion_probabilities: [{ top_probs: [{ id: 1, prob: value }] }] } }).servers).score("q", ["d"]);
   assert.deepEqual(await score(0), [0]);
-  assert.deepEqual(await score(1), [1]);
+  assert.deepEqual(await score(1), [0.5]);
   for (const value of [-0.001, 1.001, "0.5", null, undefined]) {
     await assert.rejects(score(value), (err: unknown) => err instanceof UpstreamError && err.code === "rerank_score_out_of_range", String(value));
   }

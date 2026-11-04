@@ -33,28 +33,35 @@ public sealed class NullableReferenceDocumentTransformer : IOpenApiDocumentTrans
 			{
 				foreach (OpenApiOperation operation in path.Operations?.Values ?? Enumerable.Empty<OpenApiOperation>())
 				{
-					foreach (IOpenApiParameter parameter in operation.Parameters ?? [])
-					{
-						Visit(parameter.Schema, seen);
-					}
-
-					foreach (OpenApiMediaType media in operation.RequestBody?.Content?.Values ?? Enumerable.Empty<OpenApiMediaType>())
-					{
-						Visit(media.Schema, seen);
-					}
-
-					foreach (IOpenApiResponse response in operation.Responses?.Values ?? Enumerable.Empty<IOpenApiResponse>())
-					{
-						foreach (OpenApiMediaType media in response.Content?.Values ?? Enumerable.Empty<OpenApiMediaType>())
-						{
-							Visit(media.Schema, seen);
-						}
-					}
+					VisitOperation(operation, seen);
 				}
 			}
 		}
 
 		return Task.CompletedTask;
+	}
+
+	private static void VisitOperation(OpenApiOperation operation, HashSet<IOpenApiSchema> seen)
+	{
+		foreach (IOpenApiParameter parameter in operation.Parameters ?? [])
+		{
+			Visit(parameter.Schema, seen);
+		}
+
+		VisitContent(operation.RequestBody?.Content, seen);
+
+		foreach (IOpenApiResponse response in operation.Responses?.Values ?? Enumerable.Empty<IOpenApiResponse>())
+		{
+			VisitContent(response.Content, seen);
+		}
+	}
+
+	private static void VisitContent(IDictionary<string, OpenApiMediaType>? content, HashSet<IOpenApiSchema> seen)
+	{
+		foreach (OpenApiMediaType media in content?.Values ?? Enumerable.Empty<OpenApiMediaType>())
+		{
+			Visit(media.Schema, seen);
+		}
 	}
 
 	private static void Visit(IOpenApiSchema? node, HashSet<IOpenApiSchema> seen)

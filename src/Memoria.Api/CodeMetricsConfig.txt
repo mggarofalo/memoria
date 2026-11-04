@@ -1,3 +1,0 @@
-# CA1502 limit for Memoria.Api only, at its current highest. Delete this file when
-# the project reaches the limit in the root CodeMetricsConfig.txt. Never raise it.
-CA1502(Method): 21

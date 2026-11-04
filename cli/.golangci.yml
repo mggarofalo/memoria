@@ -7,8 +7,7 @@ linters:
     - gocyclo
   settings:
     gocyclo:
-      # Phase 1 ratchet: the highest value on main. The target is 10.
-      min-complexity: 21
+      min-complexity: 10
   exclusions:
     # Skips files with the standard "Code generated ... DO NOT EDIT." header,
     # which is how internal/api/client.gen.go is left out.

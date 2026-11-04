@@ -4,8 +4,7 @@
 # Reads the existing build, so run `dotnet build` first.
 set -eu
 
-# The whole solution, held down by Memoria.Api until it is refactored. Target 90.
-MIN_BRANCH=89
+MIN_BRANCH=90
 # Memoria.Core on its own, so Memoria.Api's gaps cannot hide a drop here.
 MIN_BRANCH_CORE=95
 

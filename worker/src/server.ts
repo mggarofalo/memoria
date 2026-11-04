@@ -118,13 +118,19 @@ function optionalNumber(body: Record<string, unknown>, field: string, min: numbe
   return value;
 }
 
+function optionalString(body: Record<string, unknown>, field: string): string | undefined {
+  const value = body[field];
+  if (value !== undefined && typeof value !== "string") throw new HttpFailure(400, "invalid_body", `${field} must be a string`);
+  return value;
+}
+
 function parseComplete(body: Record<string, unknown>): CompleteRequest {
   if (typeof body.prompt !== "string" || body.prompt === "") throw new HttpFailure(400, "invalid_body", "prompt must be a non-empty string");
-  if (body.grammar !== undefined && typeof body.grammar !== "string") throw new HttpFailure(400, "invalid_body", "grammar must be a string");
-  if (body.system !== undefined && typeof body.system !== "string") throw new HttpFailure(400, "invalid_body", "system must be a string");
   const request: CompleteRequest = { prompt: body.prompt };
-  if (typeof body.system === "string") request.system = body.system;
-  if (typeof body.grammar === "string") request.grammar = body.grammar;
+  const grammar = optionalString(body, "grammar");
+  if (grammar !== undefined) request.grammar = grammar;
+  const system = optionalString(body, "system");
+  if (system !== undefined) request.system = system;
   const numbers: Array<[keyof CompleteRequest & string, number, number]> = [
     ["maxTokens", 1, 8192],
     ["temperature", 0, 5],

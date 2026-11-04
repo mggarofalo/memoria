@@ -9,5 +9,5 @@
   "temp-directory": "coverage/tmp",
   "check-coverage": true,
   "branches": 94,
-  "lines": 91
+  "lines": 92
 }

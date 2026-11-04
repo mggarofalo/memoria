@@ -37,32 +37,7 @@ public static class SearchRequestFactory
 		ArgumentNullException.ThrowIfNull(defaults);
 		ArgumentNullException.ThrowIfNull(scope);
 
-		errors = [];
-
-		if (string.IsNullOrWhiteSpace(input.Query))
-		{
-			errors["query"] = ["A non-empty query is required."];
-		}
-		else if (input.Query.Length > MaxQueryLength)
-		{
-			errors["query"] = [$"The query may be at most {MaxQueryLength} characters."];
-		}
-
-		if (input.Limit is int limit && (limit < 1 || limit > defaults.MaxLimit))
-		{
-			errors["limit"] = [$"limit must be between 1 and {defaults.MaxLimit}."];
-		}
-
-		if (input.MinScore is double minScore && (minScore < 0 || minScore > 1))
-		{
-			errors["minScore"] = ["minScore must be between 0 and 1."];
-		}
-
-		if (input.CandidateLimit is int candidates && (candidates < 1 || candidates > MaxCandidateLimit))
-		{
-			errors["candidateLimit"] = [$"candidateLimit must be between 1 and {MaxCandidateLimit}."];
-		}
-
+		errors = Validate(input, defaults);
 		if (errors.Count > 0)
 		{
 			return null;
@@ -86,6 +61,48 @@ public static class SearchRequestFactory
 			CandidateLimit = input.CandidateLimit,
 			Rerank = input.Rerank ?? defaults.RerankByDefault,
 		};
+	}
+
+	private static Dictionary<string, string[]> Validate(SearchInput input, SearchOptions defaults)
+	{
+		Dictionary<string, string[]> errors = [];
+
+		if (QueryProblem(input.Query) is string problem)
+		{
+			errors["query"] = [problem];
+		}
+
+		if (IsOutside(input.Limit, defaults.MaxLimit))
+		{
+			errors["limit"] = [$"limit must be between 1 and {defaults.MaxLimit}."];
+		}
+
+		if (input.MinScore is double minScore && (minScore < 0 || minScore > 1))
+		{
+			errors["minScore"] = ["minScore must be between 0 and 1."];
+		}
+
+		if (IsOutside(input.CandidateLimit, MaxCandidateLimit))
+		{
+			errors["candidateLimit"] = [$"candidateLimit must be between 1 and {MaxCandidateLimit}."];
+		}
+
+		return errors;
+	}
+
+	private static bool IsOutside(int? value, int max)
+	{
+		return value is int actual && (actual < 1 || actual > max);
+	}
+
+	private static string? QueryProblem(string? query)
+	{
+		if (string.IsNullOrWhiteSpace(query))
+		{
+			return "A non-empty query is required.";
+		}
+
+		return query.Length > MaxQueryLength ? $"The query may be at most {MaxQueryLength} characters." : null;
 	}
 
 	private static string? Trimmed(string? value)
