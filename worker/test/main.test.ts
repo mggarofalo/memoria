@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { runSmoke } from "../scripts/smoke.ts";
@@ -57,6 +60,30 @@ test("bad configuration exits non-zero, names the setting, and does not repeat a
   assert.equal(short.status, 1);
   assert.match(short.stderr, /at least 16/);
   assert.ok(!short.stderr.includes("short-secret"));
+});
+
+test("the entry point reads its token from a file, and a bad file stops it without repeating the content", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "memoria-worker-token-"));
+  const run = (over: NodeJS.ProcessEnv) => spawnSync(process.execPath, [main], { env: { ...process.env, MEMORIA_WORKER_TOKEN: "", MEMORIA_WORKER_MODEL_DIR: "/definitely/not/here", ...over }, encoding: "utf8", timeout: 20_000 });
+
+  const missing = run({ MEMORIA_WORKER_TOKEN_FILE: path.join(dir, "absent") });
+  assert.equal(missing.status, 1);
+  assert.match(missing.stderr, /MEMORIA_WORKER_TOKEN_FILE: cannot read/);
+
+  const twoLines = path.join(dir, "two-lines");
+  await writeFile(twoLines, `${TOKEN}\nsecond-line\n`, { mode: 0o600 });
+  const refused = run({ MEMORIA_WORKER_TOKEN_FILE: twoLines });
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /must hold one line/);
+  assert.ok(!refused.stderr.includes(TOKEN));
+
+  // Past the token: this run gets as far as looking for models, so the file was accepted.
+  const good = path.join(dir, "token");
+  await writeFile(good, `${TOKEN}\n`, { mode: 0o600 });
+  const accepted = run({ MEMORIA_WORKER_TOKEN_FILE: good });
+  assert.equal(accepted.status, 1);
+  assert.match(accepted.stderr, /cannot be read/);
+  assert.ok(!accepted.stderr.includes(TOKEN));
 });
 
 test("a missing model is a clear startup failure, not a crash loop of llama-server", () => {

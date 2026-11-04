@@ -1,15 +1,40 @@
 <#
 .SYNOPSIS
-    Stop and remove the memoria-worker Windows service. Run from an elevated PowerShell.
+    Stop and remove the memoria-worker service, its installed files and its
+    token. Logs stay. Requires an elevated shell; -WhatIf prints the steps and
+    changes nothing.
+
+.DESCRIPTION
+    Pass the same paths the install granted access to (the model directory and
+    llama-server's directory) as -DataPath, so the service account's permissions
+    come off them while its name still resolves.
 #>
-[CmdletBinding()]
-param([string]$ServiceName = "memoria-worker")
+[CmdletBinding(SupportsShouldProcess = $true)]
+param(
+    [string]$ServiceName = "memoria-worker",
+    [string]$InstallDir = "",
+    [string]$StateDir = "",
+    [string[]]$DataPath = @()
+)
 
 $ErrorActionPreference = "Stop"
-if (-not (Get-Command nssm -ErrorAction SilentlyContinue)) {
-    throw "NSSM is not on PATH."
+$worker = Split-Path -Parent $PSScriptRoot
+Import-Module (Join-Path (Split-Path -Parent $worker) "deploy/windows/MemoriaService.psm1") -Force
+
+if ([string]::IsNullOrWhiteSpace($InstallDir)) { $InstallDir = Join-Path $env:ProgramFiles "Memoria\$ServiceName" }
+if ([string]::IsNullOrWhiteSpace($StateDir)) { $StateDir = Join-Path $env:ProgramData $ServiceName }
+
+$nssm = Join-Path $InstallDir "nssm.exe"
+if (-not $WhatIfPreference -and -not (Test-Path -LiteralPath $nssm)) {
+    $found = Get-Command nssm -ErrorAction SilentlyContinue
+    if (-not $found) { throw "NSSM was found neither in $InstallDir nor on PATH." }
+    $nssm = $found.Source
 }
-nssm stop $ServiceName confirm | Out-Null
-nssm remove $ServiceName confirm
-if ($LASTEXITCODE -ne 0) { throw "nssm remove failed" }
-Write-Host "Removed $ServiceName. Logs remain in $env:ProgramData\memoria-worker\logs."
+
+$plan = New-MemoriaUninstallPlan -ServiceName $ServiceName -Nssm $nssm -InstallDir $InstallDir -SecretDir (Join-Path $StateDir "secret") -DataPaths $DataPath
+if ($WhatIfPreference) {
+    Show-MemoriaPlan -Plan $plan
+    return
+}
+Invoke-MemoriaPlan -Plan $plan
+Write-Host "Removed $ServiceName. Logs remain in $StateDir\logs."

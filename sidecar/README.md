@@ -37,7 +37,8 @@ Everything is an environment variable. See [`.env.example`](.env.example) for th
 |---|---|---|
 | `MEMORIA_QMD_HOST` | `127.0.0.1` | Bind address. Use the desktop's LAN address for `Memoria.Api`. |
 | `MEMORIA_QMD_PORT` | `8282` | Port. |
-| `MEMORIA_QMD_SECRET` | unset | Bearer secret. Required unless bound to loopback. |
+| `MEMORIA_QMD_SECRET` | unset | Bearer secret. Required unless bound to loopback. For development: services use the file below. |
+| `MEMORIA_QMD_SECRET_FILE` | unset | Read the secret from this file at startup: one line of UTF-8, with surrounding whitespace ignored. Setting both this and `MEMORIA_QMD_SECRET` is an error. On POSIX the sidecar refuses to start if group or others have any access to the file (`chmod 600`). `MEMORIA_QMD_WORKER_TOKEN_FILE` works the same way. |
 | `MEMORIA_QMD_DB_PATH` | `~/.cache/qmd/index.sqlite` | Index to serve. Must exist. |
 | `MEMORIA_QMD_KEEP_WARM` | `1` | Disable the SDK's 5-minute idle model unload. |
 | `MEMORIA_QMD_WARMUP` | `1` | Load models at startup. |
@@ -49,13 +50,14 @@ Everything is an environment variable. See [`.env.example`](.env.example) for th
 
 ### As a Windows service
 
-[`scripts/install-service.ps1`](scripts/install-service.ps1) registers the sidecar with [NSSM](https://nssm.cc/) (`winget install NSSM.NSSM`) so it starts at boot and restarts on failure. Run it from an elevated shell:
+[`scripts/install-service.ps1`](scripts/install-service.ps1) registers the sidecar with [NSSM](https://nssm.cc/) (`winget install NSSM.NSSM`) so it starts at boot and restarts on failure. **It has not been run on a real install yet.** Print the plan first, which needs no elevation and changes nothing, then run it from an elevated shell:
 
 ```powershell
-.\scripts\install-service.ps1 -Host 192.168.1.20 -Secret $env:MEMORIA_QMD_SECRET
+.\scripts\install-service.ps1 -BindHost 192.168.1.20 -SecretFile .\secret.txt -CollectionRoot D:\corpus\sessions -WhatIf
+.\scripts\install-service.ps1 -BindHost 192.168.1.20 -SecretFile .\secret.txt -CollectionRoot D:\corpus\sessions
 ```
 
-Logs land in `%ProgramData%\memoria-qmd\logs`. `scripts/uninstall-service.ps1` removes it.
+It installs to `%ProgramFiles%\Memoria\memoria-qmd` and runs as `NT SERVICE\memoria-qmd`, with the secret in a file only that account and Administrators can read. Logs land in `%ProgramData%\memoria-qmd\logs` and rotate at 10 MiB. Pass every collection directory as `-CollectionRoot`, or document writes will fail. `scripts/uninstall-service.ps1` removes the service, its files and the secret, and leaves the logs. [`docs/deployment.md`](../docs/deployment.md#running-as-a-service) has the details, including what to do when upgrading an earlier install and what has yet to be confirmed.
 
 ## The contract
 
@@ -156,6 +158,7 @@ Layout:
 | `src/metadata.ts` | Frontmatter parsing, filter matching, the in-memory metadata index. |
 | `src/jobs.ts` | Single-worker reindex queue with an injectable debounce clock. |
 | `src/ingest.ts` | Path validation, file writes and deletes for `/documents`. |
+| `src/secret-file.ts` | Reads a secret from `<NAME>_FILE`. Kept identical to the worker's copy by a test. |
 | `src/multi-get.ts` | Splits a multi-get into the separate calls QMD can read, and merges the results. |
 | `src/llm/` | Remote mode: `RemoteLlm`, the worker client, response validation and the rerank transport. Loaded only when `MEMORIA_QMD_LLM=remote`. |
 | `bench/` | The parity benchmark and its query set. |
