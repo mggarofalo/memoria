@@ -340,9 +340,8 @@ test("a force job failing partway keeps the old vectors of everything not yet re
     const before = await counts(o.dbPath);
     const healthy = o.mock.handlers.get("POST /v1/embed")!;
     o.mock.on("POST /v1/embed", (b, req) => ((b.texts as string[]).some((t) => t.includes("memoria worker identity probe")) ? healthy(b, req) : { status: 400, body: {} }));
-    const out = await o.backend.embed({ force: true });
-    assert.equal(out.chunksEmbedded, 0);
-    assert.ok(out.docsPending! > 0);
+    await assert.rejects(o.backend.embed({ force: true }), /refused too many/);
+    assert.deepEqual(o.backend.deadLetters(), []);
     assert.deepEqual(await counts(o.dbPath), before, "not one vector lost");
   } finally {
     await o.done();
@@ -624,10 +623,7 @@ const refuseText = (mock: MockWorker, status: number, needle: string): void => {
 
 const vecSearch = { queries: [{ type: "vec" as const, query: "AuthenticationHandler" }], limit: 5, minScore: 0, rerank: false };
 
-for (const [label, status, needle] of [
-  ["answered with 502", 502, "Nested document"],
-  ["answered with 400, all of a long document", 400, "A long paragraph"],
-] as Array<[string, number, string]>) {
+for (const [label, status, needle] of [["answered with 400, all of a long document", 400, "A long paragraph"]] as Array<[string, number, string]>) {
   test(`a chunk ${label} costs one document, once, and search keeps its vectors`, { skip }, async () => {
     const { dbPath } = await fixture();
     const mock = await new MockWorker(8).start();
@@ -1012,5 +1008,265 @@ test("document heads come from the index, and an empty body reads as an empty he
     if (empty) assert.equal(empty.head, "");
   } finally {
     await local.close();
+  }
+});
+
+// --- what may set a document aside, on the real pool and index -------------------------------------------------
+
+/** Document text, as QMD formats it: not the known-good text, and not a query. */
+const realText = (b: { texts: string[] }): boolean => b.texts.some((t) => t.startsWith("title:"));
+
+test("a 502 chunk stays pending and is tried again, and search keeps its vectors", { skip }, async () => {
+  const { dbPath } = await fixture();
+  const mock = await new MockWorker(8).start();
+  const backend = await openBackend({ dbPath, keepWarm: false, llm: remoteOptions([worker("only", mock)]) });
+  try {
+    const healthy = mock.handlers.get("POST /v1/embed")!;
+    refuseText(mock, 502, "Nested document");
+    const first = await backend.embed({ force: false });
+    assert.equal(first.docsPending, 1);
+    assert.equal(first.docsDeadLettered, 0);
+    assert.deepEqual(backend.deadLetters(), []);
+    assert.deepEqual((await backend.searchDetailed(vecSearch)).degradedReasons, []);
+    mock.on("POST /v1/embed", healthy);
+    const second = await backend.embed({ force: false });
+    assert.equal(second.docsProcessed, 1, "it was not forgotten");
+    assert.equal(second.docsPending, 0);
+  } finally {
+    await backend.close();
+    await mock.stop();
+  }
+});
+
+test("a brief window of 502s on real text sets nothing aside on the real pool", { skip }, async () => {
+  const docs: Record<string, string> = {};
+  for (let i = 0; i < 12; i++) docs[`d${i}.md`] = `# Doc ${i}\n\nUnique text number ${i}.\n`;
+  const { dbPath } = await fixture(docs);
+  const mock = await new MockWorker(8).start();
+  const backend = await openBackend({ dbPath, keepWarm: false, llm: remoteOptions([worker("only", mock)]) });
+  try {
+    const healthy = mock.handlers.get("POST /v1/embed")!;
+    const healAt = Date.now() + 1_000;
+    mock.on("POST /v1/embed", (b, req) => (realText(b) && Date.now() < healAt ? { status: 502, body: {} } : healthy(b, req)));
+    await backend.embed({ force: false }).catch((err: Error) => assert.match(err.message, /keep failing|No worker/));
+    assert.deepEqual(backend.deadLetters(), []);
+    await new Promise((resolve) => setTimeout(resolve, Math.max(0, healAt - Date.now())));
+    assert.equal((await backend.embed({ force: false })).docsPending, 0);
+    assert.equal((await backend.getStatus()).needsEmbedding, 0);
+  } finally {
+    await backend.close();
+    await mock.stop();
+  }
+});
+
+test("400 on all real text condemns nothing on the real pool, and search keeps working", { skip }, async () => {
+  const { dbPath } = await fixture();
+  const mock = await new MockWorker(8).start();
+  const backend = await openBackend({ dbPath, keepWarm: false, llm: remoteOptions([worker("only", mock)]) });
+  try {
+    await backend.embed({ force: false });
+    const before = await counts(dbPath);
+    const healthy = mock.handlers.get("POST /v1/embed")!;
+    mock.on("POST /v1/embed", (b, req) => (realText(b) ? { status: 400, body: {} } : healthy(b, req)));
+    await assert.rejects(backend.embed({ force: true }), /refused too many/);
+    assert.deepEqual(backend.deadLetters(), []);
+    assert.deepEqual(await counts(dbPath), before);
+    assert.deepEqual((await backend.searchDetailed(vecSearch)).degradedReasons, []);
+  } finally {
+    await backend.close();
+    await mock.stop();
+  }
+});
+
+// --- when a set-aside ends ---------------------------------------------------------------------------------------
+
+async function withSetAside(run: (o: { dbPath: string; corpus: string; mock: MockWorker; backend: OpenedBackend }) => Promise<void>): Promise<void> {
+  const { dbPath, corpus } = await fixture();
+  const mock = await new MockWorker(8).start();
+  const backend = await openBackend({ dbPath, keepWarm: false, llm: remoteOptions([worker("only", mock)]) });
+  try {
+    const healthy = mock.handlers.get("POST /v1/embed")!;
+    refuseText(mock, 400, "Nested document");
+    await backend.embed({ force: false });
+    assert.equal(backend.deadLetters().length, 1);
+    mock.on("POST /v1/embed", healthy);
+    await run({ dbPath, corpus, mock, backend });
+  } finally {
+    await backend.close();
+    await mock.stop();
+  }
+}
+
+const setLetterTime = async (dbPath: string, at: string): Promise<void> => {
+  const { DatabaseSync } = await import("node:sqlite");
+  const raw = new DatabaseSync(dbPath);
+  raw.prepare("UPDATE memoria_dead_letters SET at = ?").run(at);
+  raw.close();
+};
+
+test("a set-aside holds across jobs, and ends after 24 hours", { skip }, () =>
+  withSetAside(async ({ dbPath, backend }) => {
+    assert.equal((await backend.embed({ force: false })).docsProcessed, 0, "it holds");
+    await setLetterTime(dbPath, new Date(Date.now() - 25 * 3_600_000).toISOString());
+    assert.deepEqual(backend.deadLetters(), [], "not shown as held");
+    assert.equal((await backend.embed({ force: false })).docsProcessed, 1);
+    assert.equal((await backend.getStatus()).needsEmbedding, 0);
+  }));
+
+test("a set-aside dated in the future, from a clock moved back, holds nothing", { skip }, () =>
+  withSetAside(async ({ dbPath, backend }) => {
+    await setLetterTime(dbPath, new Date(Date.now() + 25 * 3_600_000).toISOString());
+    assert.equal((await backend.embed({ force: false })).docsProcessed, 1);
+  }));
+
+test("a set-aside ends when the workers change", { skip }, async () => {
+  const { dbPath } = await fixture();
+  const first = await new MockWorker(8).start();
+  const backend = await openBackend({ dbPath, keepWarm: false, llm: remoteOptions([worker("first", first)]) });
+  refuseText(first, 400, "Nested document");
+  await backend.embed({ force: false });
+  await backend.close();
+
+  const same = await openBackend({ dbPath, keepWarm: false, llm: remoteOptions([worker("first", first)]) });
+  assert.equal(same.deadLetters().length, 1, "the same worker back again changes nothing");
+  assert.equal((await same.embed({ force: false })).docsProcessed, 0);
+  await same.close();
+  await first.stop();
+
+  const second = await new MockWorker(8).start();
+  const other = await openBackend({ dbPath, keepWarm: false, llm: remoteOptions([worker("second", second)]) });
+  try {
+    assert.deepEqual(other.deadLetters(), []);
+    assert.equal((await other.embed({ force: false })).docsProcessed, 1);
+    assert.equal((await other.getStatus()).needsEmbedding, 0);
+  } finally {
+    await other.close();
+    await second.stop();
+  }
+});
+
+test("the same content under a new path is tried afresh, and a deleted document leaves no record", { skip }, () =>
+  withSetAside(async ({ dbPath, corpus, backend }) => {
+    const body = "# Delta\n\nNested document about something else entirely.\n";
+    await rm(path.join(corpus, "sub/delta.md"));
+    await writeFile(path.join(corpus, "renamed.md"), body);
+    await backend.update({});
+    const out = await backend.embed({ force: false });
+    assert.equal(out.docsProcessed, 1, "the hash alone keeps nothing out");
+    assert.equal(out.docsPending, 0);
+    assert.deepEqual(backend.deadLetters(), []);
+    const { DatabaseSync } = await import("node:sqlite");
+    const raw = new DatabaseSync(dbPath);
+    const rows = (raw.prepare("SELECT COUNT(*) AS n FROM memoria_dead_letters").get() as { n: number }).n;
+    raw.close();
+    assert.equal(rows, 0);
+  }));
+
+test("the same content gaining a name that sorts first is tried afresh while the old name stands", { skip }, () =>
+  withSetAside(async ({ corpus, backend }) => {
+    await writeFile(path.join(corpus, "a-copy.md"), "# Delta\n\nNested document about something else entirely.\n");
+    await backend.update({});
+    const out = await backend.embed({ force: false });
+    assert.equal(out.docsProcessed, 1, "the hash alone keeps nothing out");
+    assert.equal(out.docsPending, 0);
+  }));
+
+test("a deleted document's record goes with the next job, even with its content unwritten", { skip }, () =>
+  withSetAside(async ({ corpus, backend }) => {
+    await rm(path.join(corpus, "sub/delta.md"));
+    await backend.update({});
+    await backend.embed({ force: false });
+    assert.deepEqual(backend.deadLetters(), []);
+  }));
+
+// --- /ready says so ----------------------------------------------------------------------------------------------
+
+test("/ready counts set-aside documents, and reads the document circuit", { skip }, async () => {
+  const { dbPath } = await fixture();
+  const mock = await new MockWorker(8).start();
+  const backend = await openBackend({ dbPath, keepWarm: false, llm: remoteOptions([worker("only", mock)], { breaker: { threshold: 1, backoffBaseMs: 60_000, backoffMaxMs: 60_000 } }) });
+  const app = await buildApp({ backend, config: testConfig(), logger: false });
+  const ready = async () => (await app.inject({ method: "GET", url: "/ready", headers: authHeaders })).json();
+  try {
+    await backend.llm.refreshWorkers();
+    assert.equal((await ready()).llm.documentsSetAside, 0);
+    assert.deepEqual((await ready()).llm.unavailable, []);
+    refuseText(mock, 400, "Nested document");
+    await backend.embed({ force: false });
+    assert.equal((await ready()).llm.documentsSetAside, 1, "job history is not the only signal");
+
+    // Document failures open the document circuit, and no known-good call clears it in an outage.
+    mock.on("POST /v1/embed", () => ({ status: 502, body: {} }));
+    await assert.rejects(backend.embed({ force: true }), /No worker can embed/);
+    const out = await ready();
+    assert.ok(out.llm.unavailable.includes("documents"), JSON.stringify(out.llm));
+    assert.ok(!out.llm.unavailable.includes("embed"));
+    assert.equal(out.status, "degraded");
+  } finally {
+    await app.close();
+    await backend.close();
+    await mock.stop();
+  }
+});
+
+// --- force and poison --------------------------------------------------------------------------------------------
+
+test("a document set aside during a force loses its old vectors, so the docs are true", { skip }, async () => {
+  const o = await opened();
+  try {
+    await o.backend.embed({ force: false });
+    const before = await counts(o.dbPath);
+    refuseText(o.mock, 400, "Nested document");
+    const out = await o.backend.embed({ force: true });
+    assert.equal(out.docsDeadLettered, 1);
+    const after = await counts(o.dbPath);
+    assert.ok(after.cv < before.cv, `${after.cv} < ${before.cv}`);
+    assert.equal(after.cv, after.vec);
+    const search = await o.backend.searchDetailed({ queries: [{ type: "vec", query: "Nested document about something else entirely" }], limit: 10, minScore: 0, rerank: false });
+    assert.ok(!search.hits.some((h) => h.displayPath.includes("delta")), "no longer searched by its old vector");
+    const lexical = await o.backend.searchDetailed({ queries: [{ type: "lex", query: "Nested" }], limit: 10, minScore: 0, rerank: false });
+    assert.ok(lexical.hits.some((h) => h.displayPath.includes("delta")), "still found by its words");
+  } finally {
+    await o.done();
+  }
+});
+
+test("a partial force removes a deleted document's vectors, so restoring it embeds it afresh", { skip }, async () => {
+  const { dbPath, corpus } = await fixture();
+  const mock = await new MockWorker(8).start();
+  const backend = await openBackend({ dbPath, keepWarm: false, llm: remoteOptions([worker("w", mock)]) });
+  try {
+    await backend.embed({ force: false });
+    const body = "# Alpha\n\nHow should the AuthenticationHandler validate API keys?\n\nCompare the bearer token in constant time.\n";
+    await rm(path.join(corpus, "alpha.md"));
+    await backend.update({});
+    refuseText(mock, 400, "Nested document");
+    const partial = await backend.embed({ force: true });
+    assert.equal(partial.docsPending, 1, "partial");
+    await writeFile(path.join(corpus, "alpha.md"), body);
+    await backend.update({});
+    const restored = await backend.embed({ force: false });
+    assert.equal(restored.docsProcessed, 1, "not live again on its old, possibly poisoned, vectors");
+  } finally {
+    await backend.close();
+    await mock.stop();
+  }
+});
+
+test("a force job waiting on an outage has already removed a deleted document's vectors", { skip }, async () => {
+  const { dbPath, corpus } = await fixture();
+  const mock = await new MockWorker(8).start();
+  const backend = await openBackend({ dbPath, keepWarm: false, llm: remoteOptions([worker("w", mock)]) });
+  try {
+    await backend.embed({ force: false });
+    const whole = await counts(dbPath);
+    await rm(path.join(corpus, "alpha.md"));
+    await backend.update({});
+    mock.on("POST /v1/embed", () => ({ status: 503, body: {} }));
+    await assert.rejects(backend.embed({ force: true }), /No worker can embed/);
+    assert.ok((await counts(dbPath)).cv < whole.cv);
+  } finally {
+    await backend.close();
+    await mock.stop();
   }
 });

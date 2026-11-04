@@ -74,7 +74,7 @@ export class FakeBackend implements QmdBackend {
   /** Replaces embed's default answer, so a test can defer, fail or hold a job. */
   embedImpl: ((options: BackendEmbedOptions) => Promise<EmbedSummary>) | null = null;
   degradedReasons: DegradedReason[] = [];
-  health: LlmHealth = { mode: "local", degraded: false, unavailable: [], workersUp: 0, workersTotal: 0, embedDisagreement: [] };
+  health: LlmHealth = { mode: "local", degraded: false, unavailable: [], workersUp: 0, workersTotal: 0, embedDisagreement: [], documentsSetAside: 0 };
   workerViews: WorkerView[] = [];
   load: PoolLoad | null = null;
   deadLetterList: DeadLetter[] = [];

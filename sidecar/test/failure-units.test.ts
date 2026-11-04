@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { createInterface } from "node:readline";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { JobDeferred, JobPartial, JobQueue, type JobResult, type JobStore, type PersistedJob, type ReindexRequest } from "../src/jobs.ts";
 import { WorkerClient, WorkerError } from "../src/llm/client.ts";
 import { MAX_EXPANSION_QUERIES, parseExpansion } from "../src/llm/expansion.ts";
@@ -12,7 +15,7 @@ import { acceptedEmbedFiles, RemoteLlm, type RemoteLlmOptions } from "../src/llm
 import type { Capability, LocalFallback, PoolWorkerConfig } from "../src/llm/types.ts";
 import { parseEmbeddings, ResponseViolation } from "../src/llm/validate.ts";
 import { guardedFallback, sdkCacheFileName, type SdkDb } from "../src/llm/wire.ts";
-import { openJobStore, SqliteJobStore } from "../src/queue-store.ts";
+import { openJobStore, retryJobStore, SqliteJobStore } from "../src/queue-store.ts";
 import { loadConfig } from "../src/config.ts";
 import { ManualScheduler } from "./helpers.ts";
 import { EMBED_FILE, MockWorker, vectorFor } from "./mock-worker.ts";
@@ -1297,4 +1300,201 @@ test("both drivers' way of saying busy is recognized, and nothing else is", asyn
   assert.ok(!isBusy({ code: "SQLITE_FULL" }));
   assert.ok(!isBusy({ errcode: 13 }));
   assert.ok(!isBusy(new Error("nope")));
+});
+
+// --- an explicit force means from now -------------------------------------------------------------------------
+
+test("asking again for a waiting force job gives it a new accept time, here and in the store", async () => {
+  const file = await tempFile("q.sqlite");
+  const first = new SqliteJobStore(file);
+  const scheduler = new ManualScheduler();
+  const seen: string[] = [];
+  const before = new JobQueue(async () => {
+    throw new JobDeferred("no worker");
+  }, { store: first, scheduler });
+  const job = before.enqueue(req({ force: true, collections: null }));
+  await scheduler.advance(0);
+  before.suspend();
+  first.close();
+  await new Promise((r) => setTimeout(r, 5));
+
+  // The sidecar restarts without the bad worker, and the operator asks for a new force.
+  const second = new SqliteJobStore(file);
+  const after = new JobQueue(async (_, context) => {
+    seen.push(context.jobCreatedAt);
+    return result;
+  }, { store: second, scheduler: new ManualScheduler() });
+  const again = after.enqueue(req({ force: true, collections: null }));
+  assert.equal(again.id, job.id, "still one job");
+  assert.ok(again.createdAt > job.createdAt, "whatever the bad worker wrote is older than this");
+  assert.equal(second.load().find((e) => e.job.id === job.id)?.job.createdAt, again.createdAt, "and that survives a restart");
+  second.close();
+  assert.deepEqual(seen, []);
+});
+
+test("the runner gets the new accept time, and a plain request or a restart leaves it alone", async () => {
+  const seen: string[] = [];
+  let release = (): void => {};
+  const gate = new Promise<void>((r) => (release = r));
+  const store = new SqliteJobStore(await tempFile("q.sqlite"));
+  const queue = new JobQueue(async (_, context) => {
+    seen.push(context.jobCreatedAt);
+    await gate;
+    return result;
+  }, { store });
+  queue.enqueue(req({ collections: ["busy"] }));
+  const force = queue.enqueue(req({ force: true, collections: null }));
+  const accepted = force.createdAt;
+  await new Promise((r) => setTimeout(r, 5));
+  const again = queue.enqueue(req({ force: true, collections: null }));
+  assert.ok(again.createdAt > accepted);
+  assert.equal(store.load().find((e) => e.job.id === force.id)?.job.createdAt, again.createdAt, "saved, for a job that was not held");
+  const plain = queue.enqueue(req({ collections: ["plain"] }));
+  const plainAccepted = plain.createdAt;
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(queue.enqueue(req({ collections: ["plain"] })).createdAt, plainAccepted, "only a force has a reason to");
+  release();
+  await queue.idle();
+  store.close();
+  assert.ok(seen.includes(again.createdAt));
+});
+
+// --- shut out of the queue file, for now ---------------------------------------------------------------------------
+
+function manualTimers() {
+  const pending: Array<() => void> = [];
+  return { pending, setTimer: (run: () => void) => (pending.push(run), {}), clearTimer: () => void pending.splice(0) };
+}
+
+test("a sidecar shut out by another keeps trying, then takes over the file and its jobs", async () => {
+  const file = await tempFile("q.sqlite");
+  const old = new SqliteJobStore(file);
+  const previous = new JobQueue(() => never, { store: old });
+  const waiting = previous.enqueue(req({ collections: ["from-the-file"] }));
+  previous.suspend();
+
+  const warnings: string[] = [];
+  const opened = openJobStore(file, (m) => warnings.push(m));
+  assert.equal(opened.store, null);
+  assert.equal(opened.locked, true);
+  assert.match(warnings[0]!, /unless the file comes free/);
+
+  const ran: string[] = [];
+  const queue = new JobQueue(async (request) => {
+    ran.push(String(request.collections));
+    return result;
+  });
+  const here = queue.enqueue(req({ collections: ["from-memory"] }));
+  await queue.idle();
+  assert.equal(queue.persistence().enabled, false);
+
+  const timers = manualTimers();
+  const got: { store?: SqliteJobStore } = {};
+  retryJobStore(file, (store) => {
+    got.store = store;
+    queue.adoptStore(store);
+  }, (m) => warnings.push(m), timers);
+  timers.pending.shift()!();
+  assert.equal(got.store === undefined, true, "still held");
+  assert.equal(timers.pending.length, 1, "so it tries again");
+  assert.equal(warnings.length, 1, "without repeating itself");
+
+  old.close();
+  timers.pending.shift()!();
+  assert.ok(got.store);
+  assert.equal(timers.pending.length, 0, "and stops");
+  assert.deepEqual(queue.persistence(), { enabled: true, healthy: true });
+  await queue.idle();
+  assert.ok(ran.includes("from-the-file"), "the file's waiting job ran");
+  const saved = got.store.load().map((e) => e.job.id).sort();
+  assert.deepEqual(saved, [here.id, waiting.id].sort(), "and this queue's job reached the file");
+  const seqs = got.store.load().map((e) => e.seq);
+  assert.equal(new Set(seqs).size, 2, "with numbers of its own");
+  queue.suspend();
+  got.store.close();
+});
+
+test("a store is adopted only once, and not after shutting down", async () => {
+  const a = await tempFile("a.sqlite");
+  const b = await tempFile("b.sqlite");
+  const storeA = new SqliteJobStore(a);
+  const storeB = new SqliteJobStore(b);
+  const queue = new JobQueue(async () => result);
+  queue.adoptStore(storeA);
+  const job = queue.enqueue(req());
+  await queue.idle();
+  queue.adoptStore(storeB);
+  assert.deepEqual(storeB.load(), []);
+  assert.equal(storeA.load()[0]?.job.id, job.id);
+  const stopped = new JobQueue(async () => result);
+  stopped.suspend();
+  stopped.adoptStore(storeB);
+  assert.equal(stopped.persistence().enabled, false);
+  storeA.close();
+  storeB.close();
+});
+
+test("the retry stops by itself on a file that will never do, and can be stopped", async () => {
+  const file = await tempFile("q.sqlite");
+  new SqliteJobStore(file).close();
+  const { DatabaseSync } = await import("node:sqlite");
+  const db = new DatabaseSync(file);
+  db.exec("PRAGMA user_version = 999");
+  db.close();
+  const timers = manualTimers();
+  const warnings: string[] = [];
+  retryJobStore(file, () => assert.fail("not this file"), (m) => warnings.push(m), timers);
+  timers.pending.shift()!();
+  assert.equal(timers.pending.length, 0);
+  assert.match(warnings[0]!, /in memory only/);
+
+  const other = new SqliteJobStore(await tempFile("r.sqlite"));
+  const stopTimers = manualTimers();
+  const stop = retryJobStore(file, () => {}, () => {}, stopTimers);
+  stop();
+  assert.equal(stopTimers.pending.length, 0);
+  other.close();
+  const real = retryJobStore(file, () => {}, () => {}, { everyMs: 60_000 });
+  real();
+});
+
+test("a process killed while holding the queue file lets the next one take it and its jobs", { timeout: 60_000 }, async () => {
+  const file = await tempFile("q.sqlite");
+  const holder = spawn(process.execPath, [fileURLToPath(new URL("./fixtures/queue-hold.ts", import.meta.url)), file], { stdio: ["ignore", "pipe", "inherit"] });
+  const exited = new Promise<void>((resolve) => holder.once("exit", () => resolve()));
+  await new Promise<void>((resolve) => createInterface({ input: holder.stdout }).once("line", () => resolve()));
+  try {
+    const shutOut = openJobStore(file, () => {});
+    assert.equal(shutOut.store, null, "held, across processes");
+    assert.equal(shutOut.locked, true);
+  } finally {
+    holder.kill("SIGKILL");
+    await exited;
+  }
+  const after = openJobStore(file, () => {});
+  assert.ok(after.store, "the operating system released the lock");
+  assert.equal(after.movedTo, null, "and nothing about a kill looks like corruption");
+  const jobs = after.store.load();
+  assert.equal(jobs.length, 1);
+  assert.equal(jobs[0]!.job.request.reason, "accepted before the kill");
+  after.store.close();
+});
+
+test("the document circuit reads as a role out in the pool's status, apart from query vectors", async () => {
+  const a = await new MockWorker(8).start();
+  let now = 1_000_000;
+  const llm = new RemoteLlm({ workers: [workerConfig("a", a.url)], embedDimensions: 8, models: MODELS, fallback: null, now: () => now, breaker: { threshold: 1, backoffBaseMs: 60_000, backoffMaxMs: 60_000 } });
+  try {
+    assert.equal(llm.pool.documentsUp(), false, "nothing known yet");
+    await llm.refreshStatus();
+    assert.equal(llm.pool.documentsUp(), true);
+    await llm.pool.dispatch("embed", "background", "embed", () => Promise.reject(new WorkerError("unavailable", "embed", "a", "HTTP 503", 503))).catch(() => {});
+    assert.equal(llm.pool.documentsUp(), false);
+    assert.equal(llm.status().embed, true);
+    now += 60_000;
+    await llm.refreshStatus();
+    assert.equal(llm.pool.documentsUp(), true, "a heartbeat's trial brings it back");
+  } finally {
+    await a.stop();
+  }
 });

@@ -571,7 +571,7 @@ test("GET /workers is empty in local mode and passes through only declared field
   const { app, backend } = await makeApp();
   try {
     assert.deepEqual((await app.inject({ method: "GET", url: "/workers", headers: authHeaders })).json(), { mode: "local", workers: [] });
-    backend.health = { mode: "remote", degraded: false, unavailable: [], workersUp: 1, workersTotal: 1, embedDisagreement: [] };
+    backend.health = { mode: "remote", degraded: false, unavailable: [], workersUp: 1, workersTotal: 1, embedDisagreement: [], documentsSetAside: 0 };
     const view = { name: "d", host: "h:1", state: "up" as const, circuit: "closed" as const, circuits: { embed: "closed" as const, rerank: "closed" as const, generate: "closed" as const, documents: "closed" as const }, embedDisagrees: false, capabilities: ["embed" as const], priority: 1, maxConcurrent: 2, embedModelCompatible: true, rerankTransport: null, lastHeartbeat: null, inFlight: 0, queueDepth: 0, calls: 0, errorRate: 0 };
     // Even if a token somehow reached the view, the response schema would drop it.
     backend.workerViews = [{ ...view, token: "should-not-appear" } as never];
@@ -591,13 +591,13 @@ test("/ready and search say so when degraded, and warmup does not read as done",
     assert.equal(ready.llm.mode, "local");
     assert.equal(ready.llm.degraded, false);
 
-    backend.health = { mode: "remote", degraded: true, unavailable: ["rerank", "generate"], workersUp: 0, workersTotal: 2, embedDisagreement: ["x", "y"] };
+    backend.health = { mode: "remote", degraded: true, unavailable: ["rerank", "generate"], workersUp: 0, workersTotal: 2, embedDisagreement: ["x", "y"], documentsSetAside: 4 };
     app.ctx.warmup.done = true;
     const response = await app.inject({ method: "GET", url: "/ready", headers: authHeaders });
     assert.equal(response.statusCode, 200);
     ready = response.json();
     assert.equal(ready.status, "degraded");
-    assert.deepEqual(ready.llm, { mode: "remote", degraded: true, unavailable: ["rerank", "generate"], workersUp: 0, workersTotal: 2, embedDisagreement: ["x", "y"] });
+    assert.deepEqual(ready.llm, { mode: "remote", degraded: true, unavailable: ["rerank", "generate"], workersUp: 0, workersTotal: 2, embedDisagreement: ["x", "y"], documentsSetAside: 4 });
     assert.equal(ready.warmup.done, false, "a stored flag must not read as healthy");
     assert.match(ready.warmup.error, /rerank, generate/);
     assert.equal(ready.models.resident, false);

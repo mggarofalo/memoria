@@ -828,7 +828,7 @@ test("a warmup that fails records why, and models load on first use instead", as
 test("warmup leaves a remote sidecar alone: workers warm themselves", async () => {
   const { app, backend } = await makeApp({ modelsResident: false });
   try {
-    backend.health = { mode: "remote", degraded: false, unavailable: [], workersUp: 1, workersTotal: 1, embedDisagreement: [] };
+    backend.health = { mode: "remote", degraded: false, unavailable: [], workersUp: 1, workersTotal: 1, embedDisagreement: [], documentsSetAside: 0 };
     backend.search = async () => {
       throw new Error("must not be called");
     };

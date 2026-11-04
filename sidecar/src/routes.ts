@@ -251,10 +251,11 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         properties: {
           mode: { type: "string", enum: ["local", "remote"] },
           degraded: { type: "boolean" },
-          unavailable: { type: "array", items: { type: "string", enum: ["embed", "rerank", "generate"] }, description: "Roles no worker can serve right now." },
+          unavailable: { type: "array", items: { type: "string", enum: ["embed", "rerank", "generate", "documents"] }, description: "Roles no worker can serve right now. `documents` means document embedding is out while query vectors still work." },
           workersUp: { type: "integer" },
           workersTotal: { type: "integer" },
           embedDisagreement: { type: "array", items: { type: "string" }, description: "Workers that embedded the same text differently. Reported only: nothing acts on it. Empty until two workers have been compared." },
+          documentsSetAside: { type: "integer", description: "Documents out of vector search because a worker refused them. Retried by themselves within a day, or at once by `POST /queue/dead-letters:clear`." },
         },
       },
       version: { type: "string" },
@@ -914,9 +915,9 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         tags: ["index"],
         summary: "Documents set aside",
         description:
-          "Documents a worker refused or could not embed while it could embed a known-good text. They are recorded once and " +
-          "later jobs skip them, so they stay out of vector search until cleared. A changed document is tried afresh, and a " +
-          "force job retries them. They can still be found lexically.",
+          "Documents a worker definitely refused (400 or 413) while it could embed a known-good text. Later jobs skip them, " +
+          "so they are out of vector search, but can still be found lexically. They are tried again when their content or " +
+          "path changes, when the workers or model change, after 24 hours, by a force job, or when cleared.",
         response: {
           200: {
             type: "object",

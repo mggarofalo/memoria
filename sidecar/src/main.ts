@@ -2,7 +2,7 @@ import path from "node:path";
 import { homedir } from "node:os";
 import { buildApp, warmup, type App } from "./app.ts";
 import { isLoopbackHost, loadConfig, type SidecarConfig } from "./config.ts";
-import { openJobStore, queueDbPathFor } from "./queue-store.ts";
+import { openJobStore, retryJobStore, queueDbPathFor } from "./queue-store.ts";
 import { openBackend, type LlmOptions } from "./store.ts";
 
 /**
@@ -48,7 +48,9 @@ async function main(): Promise<void> {
   // Beside the index but not in it: rebuilding index.sqlite leaves jobs alone. Only
   // job records live here, so nothing about this file may stop search from starting.
   const earlyWarnings: string[] = [];
-  const { store: jobStore } = openJobStore(config.queueDbPath ?? queueDbPathFor(dbPath), (message) => earlyWarnings.push(message));
+  const queueFile = config.queueDbPath ?? queueDbPathFor(dbPath);
+  const opened = openJobStore(queueFile, (message) => earlyWarnings.push(message));
+  let jobStore = opened.store;
   const backend = await openBackend({
     dbPath,
     keepWarm: config.keepWarm,
@@ -73,10 +75,19 @@ async function main(): Promise<void> {
   app.log.info({ llm: config.llm.mode, rerankTransport: backend.llm.rerankTransport }, "llm mode");
   logExposure(app, config);
 
+  const stopRetrying = opened.locked
+    ? retryJobStore(queueFile, (store) => {
+        jobStore = store;
+        app.ctx.jobs.adoptStore(store);
+        app.log.warn("The job queue file came free. Jobs now persist, and its waiting jobs have joined this queue.");
+      }, (message) => app.log.warn(message))
+    : () => {};
+
   let closing = false;
   const shutdown = async (signal: string): Promise<void> => {
     if (closing) return;
     closing = true;
+    stopRetrying();
     app.log.info({ signal, pendingJobs: app.ctx.jobs.pending }, "shutting down");
     try {
       await app.close();

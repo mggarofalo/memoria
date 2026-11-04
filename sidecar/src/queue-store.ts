@@ -1,4 +1,5 @@
 import { existsSync, readdirSync, renameSync, rmSync } from "node:fs";
+import { isBusy } from "./sqlite-busy.ts";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { Job, JobStore, PersistedJob } from "./jobs.ts";
@@ -217,10 +218,12 @@ export class SqliteJobStore implements JobStore {
 }
 
 export interface OpenedJobStore {
-  /** Null when no file could be used, so jobs live in memory this run. */
+  /** Null when no file could be used, so jobs live in memory for now. */
   store: SqliteJobStore | null;
   /** Where a corrupt file was moved, if one was. */
   movedTo: string | null;
+  /** Another process holds the file, which may change. See `retryJobStore`. */
+  locked: boolean;
 }
 
 const SQLITE_CORRUPT = 11;
@@ -269,8 +272,43 @@ function pruneCorruptFiles(file: string): void {
 }
 
 function inMemory(warn: (message: string) => void, err: unknown): OpenedJobStore {
-  warn(`Running with jobs in memory only, so they will not survive a restart: ${err instanceof Error ? err.message : "unknown error"}`);
-  return { store: null, movedTo: null };
+  const locked = isBusy(err);
+  warn(`Running with jobs in memory only, so they will not survive a restart${locked ? " unless the file comes free" : ""}: ${err instanceof Error ? err.message : "unknown error"}`);
+  return { store: null, movedTo: null, locked };
+}
+
+/** How often a sidecar shut out of its queue file tries again. */
+const LOCK_RETRY_MS = 30_000;
+
+export interface LockRetryOptions {
+  everyMs?: number;
+  setTimer?: (run: () => void, ms: number) => { unref?: () => unknown };
+  clearTimer?: (timer: unknown) => void;
+}
+
+/**
+ * A new sidecar can start while the old one still holds the file, as in a rolling
+ * restart. Keep trying, so it does not run in memory for its whole life. Calls
+ * `onOpened` once, and stops by itself if the file turns out unusable for another reason.
+ */
+export function retryJobStore(file: string, onOpened: (store: SqliteJobStore) => void, warn: (message: string) => void, options: LockRetryOptions = {}): () => void {
+  const everyMs = options.everyMs ?? LOCK_RETRY_MS;
+  const setTimer = options.setTimer ?? setTimeout;
+  const quiet = (message: string): void => {
+    if (!message.includes("unless the file comes free")) warn(message);
+  };
+  let timer: { unref?: () => unknown } | undefined;
+  const attempt = (): void => {
+    const opened = openJobStore(file, quiet);
+    if (opened.store) onOpened(opened.store);
+    else if (opened.locked) arm();
+  };
+  const arm = (): void => {
+    timer = setTimer(attempt, everyMs);
+    timer.unref?.();
+  };
+  arm();
+  return () => (options.clearTimer ?? ((t) => clearTimeout(t as NodeJS.Timeout)))(timer);
 }
 
 /**
@@ -281,7 +319,7 @@ function inMemory(warn: (message: string) => void, err: unknown): OpenedJobStore
  */
 export function openJobStore(file: string, warn: (message: string) => void, now: () => number = Date.now): OpenedJobStore {
   try {
-    return { store: tryOpen(file), movedTo: null };
+    return { store: tryOpen(file), movedTo: null, locked: false };
   } catch (err) {
     if (!isCorruption(err)) return inMemory(warn, err);
     warn(`The job queue at ${file} is corrupt: ${err instanceof Error ? err.message : "unknown error"}`);
@@ -290,7 +328,7 @@ export function openJobStore(file: string, warn: (message: string) => void, now:
     const movedTo = moveAside(file, now());
     warn(`Moved the unreadable job queue to ${movedTo}. Jobs it held will not run.`);
     pruneCorruptFiles(file);
-    return { store: tryOpen(file), movedTo };
+    return { store: tryOpen(file), movedTo, locked: false };
   } catch (err) {
     return inMemory(warn, err);
   }

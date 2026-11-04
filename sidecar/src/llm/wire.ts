@@ -49,8 +49,18 @@ const CACHE_SWEEP_MS = 60 * 60 * 1000;
 const DEFAULT_EMBED_BATCH_BYTES = 256 * 1024;
 const EMBED_BATCH_CHUNKS = 32;
 
-/** Beside QMD's tables, not part of them. Keyed by content, so a changed document is tried afresh. */
-const DEAD_LETTER_TABLE = "CREATE TABLE IF NOT EXISTS memoria_dead_letters (hash TEXT PRIMARY KEY, path TEXT NOT NULL, reason TEXT NOT NULL, at TEXT NOT NULL)";
+/**
+ * Beside QMD's tables, not part of them. Keyed by content and path, because the path can
+ * reach the text a worker sees, through the title. So changed content, or the same
+ * content under a new name, is tried afresh.
+ */
+const DEAD_LETTER_TABLE = "CREATE TABLE IF NOT EXISTS memoria_dead_letters (hash TEXT NOT NULL, path TEXT NOT NULL, reason TEXT NOT NULL, at TEXT NOT NULL, worker_set TEXT NOT NULL, PRIMARY KEY (hash, path))";
+
+/** A refusal can be the worker's doing. So it holds only for this set of workers, and not for long. */
+const DEAD_LETTER_RETRY_MS = 24 * 60 * 60 * 1000;
+
+/** Holds for this worker set, this model, and under a day. A time ahead of now is from a clock moved back, so it says nothing. */
+const LETTER_HOLDS = "l.worker_set = ? AND l.at > ? AND l.at <= ?";
 
 /**
  * Mirrors the SDK's private getPendingEmbeddingDocs, plus a force job's stale documents
@@ -59,6 +69,7 @@ const DEAD_LETTER_TABLE = "CREATE TABLE IF NOT EXISTS memoria_dead_letters (hash
  * redone. The surface test pins this.
  */
 const PENDING_DOCS = `
+  SELECT g.hash, g.path, g.bytes FROM (
   SELECT d.hash, MIN(d.path) as path, length(CAST(c.doc AS BLOB)) as bytes
   FROM documents d
   JOIN content c ON d.hash = c.hash
@@ -70,10 +81,11 @@ const PENDING_DOCS = `
   ) v ON d.hash = v.hash
   WHERE d.active = 1
     AND (v.hash IS NULL OR v.chunk_count < v.expected_chunks OR (? IS NOT NULL AND (v.last_embedded < ? OR v.last_embedded > ?)))
-    AND (? IS NOT NULL OR d.hash NOT IN (SELECT hash FROM memoria_dead_letters))
     AND (? IS NULL OR d.collection = ?)
   GROUP BY d.hash
-  ORDER BY MIN(d.path)
+  ) g
+  WHERE ? IS NOT NULL OR NOT EXISTS (SELECT 1 FROM memoria_dead_letters l WHERE l.hash = g.hash AND l.path = g.path AND ${LETTER_HOLDS})
+  ORDER BY g.path
 `;
 
 /** Length of the vectors the index holds, or null if it has no vector table. */
@@ -184,9 +196,18 @@ function removeOrphanVectors(db: SdkDb): void {
     inTransaction(db, () => {
       const orphans = db.prepare("SELECT DISTINCT hash FROM content_vectors WHERE hash NOT IN (SELECT hash FROM documents WHERE active = 1)").all() as Array<{ hash: string }>;
       for (const { hash } of orphans) deleteVectors(db, hash);
-      db.prepare("DELETE FROM memoria_dead_letters WHERE hash NOT IN (SELECT hash FROM documents WHERE active = 1)").run();
     }),
   );
+}
+
+/** What a set-aside holds for: a change of worker, address or model is a new chance. */
+function workerSetOf(llm: RemoteLlm, fingerprint: string): string {
+  return `${fingerprint}:${llm.pool.cacheIdentity("embed")}`;
+}
+
+function letterParams(llm: RemoteLlm, fingerprint: string): [string, string, string] {
+  const now = Date.now();
+  return [workerSetOf(llm, fingerprint), new Date(now - DEAD_LETTER_RETRY_MS).toISOString(), new Date(now).toISOString()];
 }
 
 function farmDeps(handles: SdkHandles, llm: RemoteLlm, model: string, fingerprint: string): FarmDeps {
@@ -195,11 +216,12 @@ function farmDeps(handles: SdkHandles, llm: RemoteLlm, model: string, fingerprin
     politeWrite(db, () => {
       handles.migrateVectors(model);
       db.exec(DEAD_LETTER_TABLE);
+      db.prepare("DELETE FROM memoria_dead_letters WHERE NOT EXISTS (SELECT 1 FROM documents d WHERE d.hash = memoria_dead_letters.hash AND d.path = memoria_dead_letters.path AND d.active = 1)").run();
     });
     const c = collection ?? null;
     const before = redoBefore ?? null;
     // Prepared here, after the migration: on an older index these columns do not exist before it.
-    return db.prepare(PENDING_DOCS).all(model, fingerprint, before, before, new Date().toISOString(), before, c, c) as PendingDoc[];
+    return db.prepare(PENDING_DOCS).all(model, fingerprint, before, before, new Date().toISOString(), c, c, before, ...letterParams(llm, fingerprint)) as PendingDoc[];
   };
   return {
     canEmbed: () => llm.canServe("embed", "background"),
@@ -213,8 +235,17 @@ function farmDeps(handles: SdkHandles, llm: RemoteLlm, model: string, fingerprin
     resetVectors: () => politeWrite(db, handles.clearVectors),
     replaceDocument: (hash, chunks, total) => replaceDocumentVectors(handles, model, fingerprint, hash, chunks, total),
     deadLetter: (hash, path, reason) => {
-      politeWrite(db, () => db.prepare("INSERT OR REPLACE INTO memoria_dead_letters (hash, path, reason, at) VALUES (?, ?, ?, ?)").run(hash, path, reason, new Date().toISOString()));
+      politeWrite(db, () =>
+        inTransaction(db, () => {
+          // During a force job this document may hold vectors from the worker being replaced.
+          deleteVectors(db, hash);
+          db.prepare("INSERT OR REPLACE INTO memoria_dead_letters (hash, path, reason, at, worker_set) VALUES (?, ?, ?, ?, ?)").run(hash, path, reason, new Date().toISOString(), workerSetOf(llm, fingerprint));
+        }),
+      );
     },
+    setAsideCount: () => (db.prepare(`SELECT COUNT(*) AS n FROM memoria_dead_letters l WHERE ${LETTER_HOLDS}`).get(...letterParams(llm, fingerprint)) as { n: number }).n,
+    documentCount: () => (db.prepare("SELECT COUNT(DISTINCT hash) AS n FROM documents WHERE active = 1").get() as { n: number }).n,
+    recentFailures: new Set(),
     removeOrphans: () => removeOrphanVectors(db),
     embed: (texts) => llm.embedDocuments(texts),
     sleep: (ms) =>
@@ -276,7 +307,7 @@ export function wireRemote(handles: SdkHandles, config: RemoteLlmConfig, options
         maxBatchChunks: EMBED_BATCH_CHUNKS,
       }),
     search: (run, o) => searchDegradable(llm, handles.validators, run, o),
-    deadLetters: () => (hasDeadLetterTable(db) ? (db.prepare("SELECT hash, path, reason, at FROM memoria_dead_letters ORDER BY at").all() as DeadLetter[]) : []),
+    deadLetters: () => (hasDeadLetterTable(db) ? (db.prepare(`SELECT l.hash, l.path, l.reason, l.at FROM memoria_dead_letters l WHERE ${LETTER_HOLDS} ORDER BY l.at`).all(...letterParams(llm, fingerprint)) as DeadLetter[]) : []),
     clearDeadLetters: () => (hasDeadLetterTable(db) ? Number(db.prepare("DELETE FROM memoria_dead_letters").run().changes) : 0),
     close: () => {
       clearInterval(sweep);

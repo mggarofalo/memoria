@@ -215,7 +215,7 @@
                   },
                   "docsDeadLettered": {
                     "type": "integer",
-                    "description": "Of those, how many were set aside for good. Later jobs skip them: see `GET /queue/dead-letters`."
+                    "description": "Of those, how many were set aside for good. Later jobs skip them until a retry is due: see `GET /queue/dead-letters`."
                   }
                 }
               },
@@ -453,10 +453,11 @@
                             "enum": [
                               "embed",
                               "rerank",
-                              "generate"
+                              "generate",
+                              "documents"
                             ]
                           },
-                          "description": "Roles no worker can serve right now."
+                          "description": "Roles no worker can serve right now. `documents` means document embedding is out while query vectors still work."
                         },
                         "workersUp": {
                           "type": "integer"
@@ -470,6 +471,10 @@
                             "type": "string"
                           },
                           "description": "Workers that embedded the same text differently. Reported only: nothing acts on it. Empty until two workers have been compared."
+                        },
+                        "documentsSetAside": {
+                          "type": "integer",
+                          "description": "Documents out of vector search because a worker refused them. Retried by themselves within a day, or at once by `POST /queue/dead-letters:clear`."
                         }
                       }
                     },
@@ -716,10 +721,11 @@
                             "enum": [
                               "embed",
                               "rerank",
-                              "generate"
+                              "generate",
+                              "documents"
                             ]
                           },
-                          "description": "Roles no worker can serve right now."
+                          "description": "Roles no worker can serve right now. `documents` means document embedding is out while query vectors still work."
                         },
                         "workersUp": {
                           "type": "integer"
@@ -733,6 +739,10 @@
                             "type": "string"
                           },
                           "description": "Workers that embedded the same text differently. Reported only: nothing acts on it. Empty until two workers have been compared."
+                        },
+                        "documentsSetAside": {
+                          "type": "integer",
+                          "description": "Documents out of vector search because a worker refused them. Retried by themselves within a day, or at once by `POST /queue/dead-letters:clear`."
                         }
                       }
                     },
@@ -2496,7 +2506,7 @@
         "tags": [
           "index"
         ],
-        "description": "Documents a worker refused or could not embed while it could embed a known-good text. They are recorded once and later jobs skip them, so they stay out of vector search until cleared. A changed document is tried afresh, and a force job retries them. They can still be found lexically.",
+        "description": "Documents a worker definitely refused (400 or 413) while it could embed a known-good text. Later jobs skip them, so they are out of vector search, but can still be found lexically. They are tried again when their content or path changes, when the workers or model change, after 24 hours, by a force job, or when cleared.",
         "responses": {
           "200": {
             "description": "Default Response",

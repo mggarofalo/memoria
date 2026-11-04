@@ -290,9 +290,10 @@ function holdsVectors(db: { prepare(sql: string): { get(...a: unknown[]): unknow
   return db.prepare("SELECT 1 FROM content_vectors LIMIT 1").get() !== undefined;
 }
 
-function remoteHealth(remote: RemoteLlm): LlmHealth {
+function remoteHealth(remote: RemoteLlm, documentsSetAside: number): LlmHealth {
   const status = remote.status();
-  const unavailable = (["embed", "rerank", "generate"] as const).filter((role) => !status[role]);
+  const unavailable: LlmHealth["unavailable"] = (["embed", "rerank", "generate"] as const).filter((role) => !status[role]);
+  if (status.embed && !remote.pool.documentsUp()) unavailable.push("documents");
   const workers = remote.pool.workers();
   return {
     mode: "remote",
@@ -301,6 +302,7 @@ function remoteHealth(remote: RemoteLlm): LlmHealth {
     workersUp: workers.filter((w) => w.state === "up" || w.state === "busy").length,
     workersTotal: workers.length,
     embedDisagreement: [...remote.pool.disagreeing],
+    documentsSetAside,
   };
 }
 
@@ -416,7 +418,7 @@ export async function openBackend(options: OpenBackendOptions): Promise<OpenedBa
     return { hits: outcome.hits, degradedReasons: [...outcome.degradedReasons, "no_vectors"] };
   };
 
-  const llmHealth = (): LlmHealth => (remote ? remoteHealth(remote) : { mode: "local", degraded: false, unavailable: [], workersUp: 0, workersTotal: 0, embedDisagreement: [] });
+  const llmHealth = (): LlmHealth => (remote ? remoteHealth(remote, wired?.deadLetters().length ?? 0) : { mode: "local", degraded: false, unavailable: [], workersUp: 0, workersTotal: 0, embedDisagreement: [], documentsSetAside: 0 });
 
   return {
     dbPath: store.dbPath,

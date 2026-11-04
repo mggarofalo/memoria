@@ -54,7 +54,7 @@ export interface EmbedSummary {
   durationMs: number;
   /** Documents this run could not finish, including any it set aside. */
   docsPending?: number;
-  /** Of those, how many were set aside for good. Later jobs skip them: see `GET /queue/dead-letters`. */
+  /** Of those, how many a worker refused and were set aside. Later jobs skip them until a retry is due. */
   docsDeadLettered?: number;
 }
 
@@ -208,7 +208,7 @@ export class JobQueue {
   readonly #debounceMs: number;
   readonly #maxWaitMs: number;
   readonly #scheduler: JobScheduler;
-  readonly #store: JobStore | undefined;
+  #store: JobStore | undefined;
   readonly #maxCrashes: number;
   readonly #deferBaseMs: number;
   readonly #deferMaxMs: number;
@@ -230,6 +230,7 @@ export class JobQueue {
   #idleWaiters: Array<() => void> = [];
   #storeHealthy = true;
   #suspended = false;
+  // Replaced at most once: see `adoptStore`.
 
   constructor(runner: JobRunner, options: JobQueueOptions = {}) {
     this.#runner = runner;
@@ -278,6 +279,27 @@ export class JobQueue {
 
   persistence(): QueuePersistence {
     return { enabled: this.#store !== undefined, healthy: this.#store !== undefined && this.#storeHealthy };
+  }
+
+  /**
+   * A store became available after starting without one, because another sidecar held
+   * the file and has now gone. Its jobs join these, and these reach its file.
+   */
+  adoptStore(store: JobStore): void {
+    if (this.#store || this.#suspended) return;
+    this.#store = store;
+    const here = [...this.#entries.values()];
+    this.#restore();
+    // Filed after the file's own, which are older, and given numbers it has not used.
+    for (const entry of here) {
+      entry.seq = ++this.#seq;
+      this.#dirty.add(entry.job.id);
+    }
+    const seqOf = (job: Job): number => this.#entries.get(job.id)?.seq ?? 0;
+    this.#jobs.sort((a, b) => seqOf(a) - seqOf(b));
+    this.#flush(store);
+    this.#trim();
+    this.#schedulePump();
   }
 
   // --- restart ---------------------------------------------------------------
@@ -362,6 +384,10 @@ export class JobQueue {
   #enqueueImmediate(request: ReindexRequest): Job {
     const duplicate = this.#waitingMatch((j) => sameTarget(j.request, request));
     if (duplicate) {
+      // A force job skips what it redid since it was accepted. Someone asking again now
+      // means everything since now, which may well be what a bad worker wrote.
+      if (request.force) duplicate.createdAt = new Date().toISOString();
+      this.#persist(duplicate);
       this.#release(duplicate);
       return duplicate;
     }

@@ -594,6 +594,11 @@ export class WorkerPool {
     return { embed: up("embed"), rerank: up("rerank"), generate: up("generate") };
   }
 
+  /** Can any worker take document embedding? Query vectors have their own circuit, so this can differ. */
+  documentsUp(): boolean {
+    return this.#entries.some((e) => e.reachable === true && e.breakers.documents.state === "closed" && this.#servesRole(e, "embed") && e.health?.models.embed === true);
+  }
+
   #state(entry: Entry): WorkerView["state"] {
     if (entry.reachable === false) return "down";
     if (entry.config.capabilities.some((role) => entry.breakers[role].state !== "closed")) return "circuit_open";

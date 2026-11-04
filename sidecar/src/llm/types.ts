@@ -148,10 +148,12 @@ export interface DeadLetter {
 export interface LlmHealth {
   mode: "local" | "remote";
   degraded: boolean;
-  /** Roles no worker can serve right now. */
-  unavailable: Capability[];
+  /** Roles no worker can serve right now. `documents` is listed when only document embedding is out. */
+  unavailable: Array<Capability | "documents">;
   workersUp: number;
   workersTotal: number;
   /** Workers that embedded the same text differently. Reported only: nothing acts on it. */
   embedDisagreement: string[];
+  /** Documents out of vector search because a worker refused them. Retried by themselves within a day. */
+  documentsSetAside: number;
 }

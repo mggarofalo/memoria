@@ -12,11 +12,17 @@ import { WorkerError } from "./client.ts";
  * stand until a new set is ready for that document. The index stays the record of
  * progress, so a re-run asks what is still pending and carries on.
  *
- * **One bad chunk costs one document, once.** A failed batch is retried with a short
- * backoff, in case the failure was brief. Then a known-good text decides what failed.
- * If no worker can embed that, it is an outage and the job waits. If one can, the
- * batch is at fault: it is split until what cannot be embedded is alone, and that
- * document is dead-lettered so it stops failing every later job.
+ * **One bad chunk costs one document.** A failed batch is retried with a short backoff,
+ * in case the failure was brief. Then a known-good text decides: if no worker can embed
+ * that, it is an outage and the job waits. If one can, the batch is split until what
+ * fails is alone.
+ *
+ * **Only a definite refusal sets a document aside.** That means a 400 or 413 for that
+ * text. A 5xx or a timeout says nothing lasting about the document, so it stays pending.
+ * The known-good text is short, so it passing proves little about real text: a worker
+ * with too small a context refuses everything else. So refusals are only recorded when
+ * the run ends, and if there are too many the worker is blamed, the job waits and
+ * nothing is set aside. See `setAsideLimit`.
  */
 
 export interface PendingDoc {
@@ -58,10 +64,16 @@ export interface FarmDeps {
   resetVectors(): void;
   /** Replace all of one document's vectors, atomically. This and the other writes throw `IndexBusy`. */
   replaceDocument(hash: string, chunks: FarmChunk[], totalChunks: number): void;
-  /** Set a document aside, so later jobs skip it until an operator clears it. */
+  /** Set a document aside and drop any vectors it has, so it is not searched by a stale vector. */
   deadLetter(hash: string, path: string, reason: string): void;
+  /** Documents set aside now, whose retry is not yet due. */
+  setAsideCount(): number;
+  /** Documents in the index, for judging how many refusals are believable. */
+  documentCount(): number;
   /** Remove vectors of documents no longer in the index. */
   removeOrphans(): void;
+  /** Documents that failed lately. They go last, so they cannot keep starving the rest. */
+  recentFailures: Set<string>;
   embed(texts: string[]): Promise<{ vectors: number[][]; worker: string }>;
   sleep(ms: number): Promise<void>;
 }
@@ -98,8 +110,28 @@ interface DocState {
   failed: boolean;
 }
 
-/** Codes for a call that no worker saw. */
-const NEVER_ASKED: ReadonlySet<string> = new Set(["no_worker", "saturated"]);
+/**
+ * How many documents a worker may refuse before the worker is what looks wrong. The
+ * chunker sizes chunks by tokens, so a well-configured worker should rarely refuse any.
+ * A few is believable at any size. Past that, refusals must stay under a quarter of this
+ * run, which catches a small job on a large index, and the total set aside must stay
+ * under 1% of the index, which stops many small jobs adding up.
+ */
+const FEW_REFUSALS = 3;
+const MAX_REFUSED_SHARE_OF_RUN = 0.25;
+const MAX_SET_ASIDE_SHARE_OF_INDEX = 0.01;
+
+export function setAsideLimit(runDocs: number, indexDocs: number, alreadySetAside: number): number {
+  const byRun = Math.max(FEW_REFUSALS, Math.floor(runDocs * MAX_REFUSED_SHARE_OF_RUN));
+  const byIndex = Math.max(FEW_REFUSALS, Math.floor(indexDocs * MAX_SET_ASIDE_SHARE_OF_INDEX)) - alreadySetAside;
+  return Math.max(0, Math.min(byRun, byIndex));
+}
+
+/** More than a lone bad document, and failing more than succeeding: it is the worker. */
+const FEW_TRANSIENT_FAILURES = 5;
+
+const TOO_MANY_REFUSED = "Workers refused too many documents to believe the documents are at fault, so none were set aside. Check the worker's context size and model. This job will retry.";
+const TOO_MANY_FAILED = "Workers keep failing on real documents while answering a short test text. The documents stay pending and this job will retry.";
 const NO_WORKER = "No worker can embed right now; the documents stay pending and this job will retry.";
 const DEFAULT_RETRIES = 3;
 const DEFAULT_RETRY_BASE_MS = 500;
@@ -114,6 +146,10 @@ class Farm {
   #docsWritten = 0;
   #docsSkipped = 0;
   #docsDeadLettered = 0;
+  #docsFailed = 0;
+  readonly #refused: Array<{ doc: DocState; reason: string }> = [];
+  #refusalLimit = 0;
+  #fault: string | null = null;
   #outage = false;
   #busy = false;
   #reset = false;
@@ -126,12 +162,13 @@ class Farm {
   }
 
   get #stopping(): boolean {
-    return this.#options.signal.aborted || this.#outage || this.#busy;
+    return this.#options.signal.aborted || this.#outage || this.#busy || this.#fault !== null;
   }
 
   async run(docs: PendingDoc[]): Promise<EmbedSummary> {
     const now = this.#options.now ?? Date.now;
     const started = now();
+    this.#refusalLimit = setAsideLimit(docs.length, this.#deps.documentCount(), this.#deps.setAsideCount());
     const source = this.#batches(docs);
     const lanes = Array.from({ length: Math.max(1, this.#deps.capacity()) }, () => this.#lane(source));
     // Every lane stops before this returns, so nothing writes after the job has
@@ -141,6 +178,7 @@ class Farm {
     const failure = outcomes.find((o) => o.status === "rejected");
     if (failure) throw failure.reason;
     this.#throwIfStopped();
+    this.#settleRefusals();
     const docsPending = docs.length - this.#docsWritten - this.#docsSkipped;
     return { docsProcessed: docs.length, chunksEmbedded: this.#chunksEmbedded, errors: this.#errors, durationMs: now() - started, docsPending, docsDeadLettered: this.#docsDeadLettered };
   }
@@ -149,6 +187,15 @@ class Farm {
     if (this.#options.signal.aborted) throw new JobCancelled();
     if (this.#busy) throw new JobDeferred(new IndexBusy().message);
     if (this.#outage) throw new JobDeferred(NO_WORKER);
+    if (this.#fault !== null) throw new JobDeferred(this.#fault);
+  }
+
+  /** Only a run that finished can say how many refusals there really were. */
+  #settleRefusals(): void {
+    for (const { doc, reason } of this.#refused) {
+      this.#deps.deadLetter(doc.hash, doc.path, reason);
+      this.#docsDeadLettered++;
+    }
   }
 
   /** Chunking runs one document at a time and pauses whenever no lane wants a batch. */
@@ -246,18 +293,24 @@ class Farm {
     return this.#embed(items, items.length === 1 ? this.#retries : 1);
   }
 
-  /**
-   * Workers can embed, and this could not be. An error that never reached a worker
-   * proves nothing about the document, such as another lane having opened the circuit
-   * just now, so that document only stays pending.
-   */
+  /** Workers can embed, and this could not be. What that means depends on how it failed. */
   #setAside(doc: DocState, err: WorkerError): void {
     if (doc.failed) return;
     this.#errors++;
     this.#failDoc(doc);
-    if (NEVER_ASKED.has(err.code)) return;
-    this.#deps.deadLetter(doc.hash, doc.path, err.message);
-    this.#docsDeadLettered++;
+    this.#deps.recentFailures.add(doc.hash);
+    if (err.code === "rejected") this.#noteRefusal(doc, err);
+    else this.#noteFailure();
+  }
+
+  #noteRefusal(doc: DocState, err: WorkerError): void {
+    this.#refused.push({ doc, reason: err.message });
+    if (this.#refused.length > this.#refusalLimit) this.#fault = TOO_MANY_REFUSED;
+  }
+
+  #noteFailure(): void {
+    this.#docsFailed++;
+    if (this.#docsFailed >= FEW_TRANSIENT_FAILURES && this.#docsFailed > this.#docsWritten) this.#fault = TOO_MANY_FAILED;
   }
 
   #failDoc(doc: DocState): void {
@@ -279,6 +332,7 @@ class Farm {
     this.#deps.replaceDocument(doc.hash, doc.chunks, doc.total);
     this.#chunksEmbedded += doc.chunks.length;
     this.#docsWritten++;
+    this.#deps.recentFailures.delete(doc.hash);
     doc.chunks = [];
     this.#options.onProgress?.();
   }
@@ -310,10 +364,12 @@ async function embedPending(deps: FarmDeps, options: FarmOptions, docs: PendingD
 export async function runEmbedFarm(deps: FarmDeps, options: FarmOptions): Promise<EmbedSummary> {
   const redoBefore = options.force ? (options.forceSince ?? new Date().toISOString()) : undefined;
   try {
-    const summary = await embedPending(deps, options, deps.pendingDocs(options.collection, redoBefore));
-    // Only a force job over everything has looked at all of them.
-    if (options.force && options.collection === undefined && !summary.docsPending) deps.removeOrphans();
-    return summary;
+    const pending = deps.pendingDocs(options.collection, redoBefore);
+    // Before the work, so it holds whatever becomes of the run. The vectors of a deleted
+    // document are not searched, but would come back to life if its content returned.
+    if (options.force && options.collection === undefined) deps.removeOrphans();
+    const lastFailed = (doc: PendingDoc): number => (deps.recentFailures.has(doc.hash) ? 1 : 0);
+    return await embedPending(deps, options, pending.sort((a, b) => lastFailed(a) - lastFailed(b)));
   } catch (err) {
     if (err instanceof IndexBusy) throw new JobDeferred(err.message);
     throw err;

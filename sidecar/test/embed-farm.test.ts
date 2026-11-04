@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { JobCancelled, JobDeferred } from "../src/jobs.ts";
 import { WorkerError } from "../src/llm/client.ts";
-import { IndexBusy, runEmbedFarm, type FarmDeps, type FarmOptions } from "../src/llm/embed-farm.ts";
+import { IndexBusy, runEmbedFarm, setAsideLimit, type FarmDeps, type FarmOptions } from "../src/llm/embed-farm.ts";
 
 /** Documents here are lists of chunk texts. The vector store is a map, so results can be inspected. */
 interface World {
@@ -37,6 +37,9 @@ function world(docs: Record<string, string[]>, over: Partial<FarmDeps> = {}): Wo
     replaceDocument: (hash, chunks) => void w.written.set(hash, { chunks: chunks.map((c) => c.seq).sort((a, b) => a - b) }),
     deadLetter: (hash) => void w.deadLetters.push(hash),
     removeOrphans: () => void w.orphanSweeps++,
+    setAsideCount: () => w.deadLetters.length,
+    documentCount: () => w.docs.size,
+    recentFailures: new Set(),
     embed: async (texts) => {
       w.batches.push(texts);
       w.inFlight.now++;
@@ -188,11 +191,11 @@ test("a chunk that keeps failing with workers up ends up isolated and counted", 
   assert.deepEqual([...w.written.keys()], ["a"]);
   assert.equal(out.docsPending, 1);
   assert.equal(out.errors, 1);
-  assert.deepEqual(w.deadLetters, ["b"]);
-  assert.equal(out.docsDeadLettered, 1);
+  assert.deepEqual(w.deadLetters, [], "a 503 says nothing lasting about the document");
+  assert.equal(out.docsDeadLettered, 0);
 });
 
-test("a 502 chunk is isolated by the split even though it would open the circuit", async () => {
+test("a 502 chunk is isolated by the split even though it would open the circuit, and stays pending", async () => {
   // The real pool stops answering once the circuit opens, until a known-good call clears it.
   let open = false;
   let failures = 0;
@@ -214,7 +217,7 @@ test("a 502 chunk is isolated by the split even though it would open the circuit
   });
   const out = await runEmbedFarm(w.deps, opts());
   assert.deepEqual([...w.written.keys()].sort(), ["b", "c"]);
-  assert.deepEqual(w.deadLetters, ["a"], "recorded, and only the document at fault");
+  assert.deepEqual(w.deadLetters, []);
   assert.equal(out.docsPending, 1);
 });
 
@@ -235,7 +238,7 @@ test("one batch's failures are not an outage until a known-good call says so", a
   const out = await runEmbedFarm(w.deps, opts());
   assert.ok(confirmed > 0);
   assert.deepEqual([...w.written.keys()], ["b"], "the circuit reading closed or open made no difference");
-  assert.equal(out.docsDeadLettered, 1);
+  assert.equal(out.docsPending, 1);
 });
 
 test("an open circuit left by the last job does not stop the next one, if workers answer", async () => {
@@ -302,17 +305,22 @@ test("a busy index stops the run: nothing more is asked of the workers", async (
 
 // --- old rows after a force --------------------------------------------------------------
 
-test("only a finished force job over everything removes rows of documents gone from the index", async () => {
+test("a force job over everything removes rows of documents gone from the index, however it ends", async () => {
   const sweeps = async (options: Partial<FarmOptions>, over: Partial<FarmDeps> = {}) => {
     const w = world({ a: ["a0"] }, over);
     await runEmbedFarm(w.deps, opts(options));
     return w.orphanSweeps;
   };
+  // A job that waits for a worker has swept already, so a restored document starts clean.
+  const waiting = world({ a: ["a0"] }, { canEmbed: () => false, confirmWorkers: async () => false });
+  await assert.rejects(runEmbedFarm(waiting.deps, opts({ force: true })), JobDeferred);
+  assert.equal(waiting.orphanSweeps, 1);
   assert.equal(await sweeps({ force: true }), 1);
   assert.equal(await sweeps({ force: true }, { pendingDocs: () => [] }), 1, "with nothing to redo as well");
   assert.equal(await sweeps({ force: false }), 0);
   assert.equal(await sweeps({ force: true, collection: "one" }), 0, "it has not seen the rest");
-  assert.equal(await sweeps({ force: true }, { embed: async () => { throw refused(); } }), 0, "something is unfinished");
+  assert.equal(await sweeps({ force: true }, { embed: async () => { throw refused(); } }), 1, "even when something stays unfinished");
+  await assert.rejects(sweeps({ force: true }, { canEmbed: () => false, confirmWorkers: async () => false }), JobDeferred);
 });
 
 // --- atomic documents ---------------------------------------------------------------
@@ -488,4 +496,135 @@ test("a new vector length replaces the old ones only for a force job, and only w
   const down = world({ a: ["a0"] }, { vectorDimensions: () => 768, embed: async () => { throw refused(); } });
   await runEmbedFarm(down.deps, opts({ force: true }));
   assert.equal(down.resets, 0, "no vector in hand, so nothing is dropped");
+});
+
+// --- what may set a document aside: the reviewer's scenarios --------------------------------
+
+/** Many one-chunk documents and a clock that only moves when the farm spends time. */
+function timed(count: number, failure: (now: number, texts: string[]) => WorkerError | null) {
+  const docs: Record<string, string[]> = {};
+  for (let i = 0; i < count; i++) docs[`d${String(i).padStart(4, "0")}`] = [`real text ${i}`];
+  const clock = { now: 0, calls: 0 };
+  const w = world(docs, {
+    capacity: () => 2,
+    sleep: async (ms) => void (clock.now += ms),
+    embed: async (texts) => {
+      clock.now += 50;
+      clock.calls++;
+      const err = failure(clock.now, texts);
+      if (err) throw err;
+      return vectors(texts);
+    },
+  });
+  return { w, clock };
+}
+
+/** Run as the queue would: a deferred job tries again after a doubling wait, a finished one is done. */
+async function untilSettled(w: World, clock: { now: number }, runs = 30): Promise<{ deferrals: number; docsPending: number | undefined }> {
+  let deferrals = 0;
+  for (let run = 0; run < runs; run++) {
+    try {
+      const out = await runEmbedFarm(w.deps, opts({ maxBatchChunks: 1 }));
+      return { deferrals, docsPending: out.docsPending };
+    } catch (err) {
+      if (!(err instanceof JobDeferred)) throw err;
+      clock.now += Math.min(30_000 * 2 ** deferrals, 300_000);
+      deferrals++;
+    }
+  }
+  throw new Error("never settled");
+}
+
+const bad = (status: number) => new WorkerError(status === 400 ? "rejected" : "unavailable", "embed", "a", `HTTP ${status}`, status);
+
+for (const windowMs of [5_000, 30_000]) {
+  test(`a ${windowMs / 1000} s window of 502s on real text sets nothing aside, and every document embeds once it heals`, async () => {
+    const { w, clock } = timed(100, (now) => (now < windowMs ? bad(502) : null));
+    const out = await untilSettled(w, clock);
+    assert.deepEqual(w.deadLetters, []);
+    // A job that ends partial is picked up by the next one: nothing is lost either way.
+    if (out.docsPending) assert.equal((await runEmbedFarm(w.deps, opts({ maxBatchChunks: 1 }))).docsPending, 0);
+    assert.equal(w.written.size, 100);
+  });
+}
+
+test("502 on all real text: the job waits, stops early, and sets nothing aside", async () => {
+  const { w, clock } = timed(200, () => bad(502));
+  await assert.rejects(runEmbedFarm(w.deps, opts({ maxBatchChunks: 1 })), (e) => e instanceof JobDeferred && /keep failing on real documents/.test(e.message));
+  assert.deepEqual(w.deadLetters, []);
+  assert.ok(clock.calls < 60, `${clock.calls} calls`);
+});
+
+test("400 on all real text, as from too small a context: the job waits and condemns nothing", async () => {
+  const { w, clock } = timed(200, () => bad(400));
+  await assert.rejects(runEmbedFarm(w.deps, opts({ maxBatchChunks: 1 })), (e) => e instanceof JobDeferred && /refused too many/.test(e.message));
+  assert.deepEqual(w.deadLetters, []);
+  assert.equal(w.written.size, 0);
+  assert.ok(clock.calls < 80, `stops once the verdict is in, after ${clock.calls} calls`);
+});
+
+test("a run cut short records no refusals: only a finished run can say how many there were", async () => {
+  const abort = new AbortController();
+  const w = world({ a: ["BAD"], b: ["b0"] }, {
+    capacity: () => 1,
+    embed: async (texts) => {
+      if (texts.includes("BAD")) throw refused();
+      abort.abort();
+      return vectors(texts);
+    },
+  });
+  await assert.rejects(runEmbedFarm(w.deps, opts({ signal: abort.signal, maxBatchChunks: 1 })), JobCancelled);
+  assert.deepEqual(w.deadLetters, []);
+});
+
+test("one slow chunk stays pending, costs only itself, and is tried again", async () => {
+  const timeout = new WorkerError("timeout", "embed", "a", "no response before the deadline");
+  let slow = true;
+  const { w } = timed(10, (_, texts) => (slow && texts.includes("real text 3") ? timeout : null));
+  const first = await runEmbedFarm(w.deps, opts({ maxBatchChunks: 1 }));
+  assert.equal(first.docsPending, 1);
+  assert.deepEqual(w.deadLetters, []);
+  assert.equal(w.written.size, 9);
+  slow = false;
+  assert.equal((await runEmbedFarm(w.deps, opts({ maxBatchChunks: 1 }))).docsPending, 0);
+  assert.equal(w.written.size, 10);
+});
+
+test("documents that keep failing cannot starve the ones behind them", async () => {
+  const failing = new Set(["real text 0", "real text 1", "real text 2", "real text 3", "real text 4", "real text 5"]);
+  const { w, clock } = timed(20, (_, texts) => (texts.some((t) => failing.has(t)) ? bad(502) : null));
+  w.deps.capacity = () => 1;
+  await untilSettled(w, clock);
+  assert.equal(w.written.size, 14, "everything else got its turn");
+  assert.deepEqual(w.deadLetters, []);
+});
+
+test("a few real refusals are set aside, once the run is over", async () => {
+  const seenWhenWritten: number[] = [];
+  const { w } = timed(10, (_, texts) => (texts.includes("real text 3") || texts.includes("real text 7") ? bad(400) : null));
+  const original = w.deps.deadLetter;
+  w.deps.deadLetter = (...args) => {
+    seenWhenWritten.push(w.written.size);
+    original(...args);
+  };
+  const out = await runEmbedFarm(w.deps, opts({ maxBatchChunks: 1 }));
+  assert.deepEqual(w.deadLetters.sort(), ["d0003", "d0007"]);
+  assert.equal(out.docsDeadLettered, 2);
+  assert.deepEqual(seenWhenWritten, [8, 8], "after the run finished");
+});
+
+test("refusals building up over many small jobs are also caught", async () => {
+  const w = world({ a: ["BAD"] }, { embed: async () => { throw refused(); }, setAsideCount: () => 3 });
+  await assert.rejects(runEmbedFarm(w.deps, opts()), /refused too many/);
+  assert.deepEqual(w.deadLetters, []);
+});
+
+test("the limit: a few at any size, under a quarter of a run, under 1% of the index", () => {
+  assert.equal(setAsideLimit(1, 1, 0), 3);
+  assert.equal(setAsideLimit(200, 200, 0), 3, "all of a small corpus is not believable");
+  assert.equal(setAsideLimit(200, 10_000, 0), 50);
+  assert.equal(setAsideLimit(1_000, 10_000, 0), 100);
+  assert.equal(setAsideLimit(1, 10_000, 99), 1);
+  assert.equal(setAsideLimit(20, 10_000, 100), 0, "the index's share is used up");
+  assert.equal(setAsideLimit(1, 10, 5), 0);
 });
