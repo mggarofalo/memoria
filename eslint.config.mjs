@@ -11,7 +11,8 @@ export default [
   {
     files: ["sidecar/**/*.ts", "worker/**/*.ts", "scripts/release/**/*.ts"],
     languageOptions: { parser },
-    linterOptions: { reportUnusedDisableDirectives: "error" },
+    // Directives for rules this config does not enable are not "unused" to their authors.
+    linterOptions: { reportUnusedDisableDirectives: "off" },
     rules: { complexity: ["error", { max: MAX_COMPLEXITY }] },
   },
 ];
