@@ -13,6 +13,15 @@ export interface TempRepo {
   tag: (name: string, ref?: string) => void;
 }
 
+/**
+ * Git sets these while running a hook. Inherited, they point every `git` here at the
+ * real repository rather than the temp one: a pre-commit run once set core.bare and this
+ * file's test identity in the real config, which broke every worktree.
+ */
+for (const name of Object.keys(process.env)) {
+  if (name.toUpperCase().startsWith("GIT_")) delete process.env[name];
+}
+
 export function tempDir(t: TestContext): string {
   const dir = mkdtempSync(path.join(tmpdir(), "memoria-release-"));
   t.after(() => rmSync(dir, { recursive: true, force: true, maxRetries: 5 }));
