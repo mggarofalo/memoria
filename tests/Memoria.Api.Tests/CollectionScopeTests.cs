@@ -169,6 +169,9 @@ public sealed class CollectionScopeTests(AuthApiFactory factory) : IClassFixture
 	[InlineData("a1b2c3", "/docs/a1b2c3")]
 	[InlineData("CODEX-SESSIONS/secret-plans.md", "/docs/CODEX-SESSIONS/secret-plans.md")]
 	[InlineData("qmd://codex-sessions/secret-plans.md", "/docs/qmd%3A//codex-sessions/secret-plans.md")]
+	[InlineData("codex-sessions%2Fsecret-plans.md", "/docs/codex-sessions/secret-plans.md")]
+	[InlineData("codex-sessions%2fsecret-plans.md", "/docs/codex-sessions/secret-plans.md")]
+	[InlineData("qmd%3A%2F%2Fcodex-sessions%2Fsecret-plans.md", "/docs/qmd%3A//codex-sessions/secret-plans.md")]
 	public async Task GetDocument_ResolvingOutsideTheScope_Is404_ExactlyLikeAMiss(string reference, string sidecarPath)
 	{
 		factory.Sidecar.Requests.Clear();
@@ -196,6 +199,19 @@ public sealed class CollectionScopeTests(AuthApiFactory factory) : IClassFixture
 		Document document = (await reader.GetFromJsonAsync<Document>("/v1/docs/f6feba", Json))!;
 
 		Assert.Equal(Allowed, document.Collection);
+	}
+
+	// A client generated from the spec encodes the slash in collection/path.md.
+	[Theory]
+	[InlineData("claude-sessions/a.md")]
+	[InlineData("claude-sessions%2Fa.md")]
+	[InlineData("claude-sessions%2fa.md")]
+	public async Task GetDocument_SlashesMayBeEncoded(string reference)
+	{
+		factory.Sidecar.On("GET", "/docs/claude-sessions/a.md", HttpStatusCode.OK, SidecarFixtures.Document);
+		HttpClient reader = await factory.ReaderOfAsync(Allowed);
+
+		Assert.Equal(HttpStatusCode.OK, (await reader.GetAsync($"/v1/docs/{reference}")).StatusCode);
 	}
 
 	[Fact]
