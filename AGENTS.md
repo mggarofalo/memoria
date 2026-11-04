@@ -112,7 +112,7 @@ clients (Claude Code / CLI / scripts)
 - **API keys are scoped to collections.** Never issue an all-collections key by default; the corpus mixes sensitivity levels.
 - **The markdown corpus is the durable artifact.** `index.sqlite` is derived and may be deleted and rebuilt at any time. Never treat it as a source of truth.
 - **Every request is traceable.** `Memoria.Api` returns `X-Trace-Id`, logs one structured line per request, and forwards the same id to the sidecar as `request-id` (its pino `reqId`) plus W3C `traceparent`. Problem-details responses carry `traceId`. Keep new endpoints inside the `/v1` group so they inherit this and the scope metadata.
-- **Reindexing is serialized.** Concurrent `qmd update`/`qmd embed` runs contend over the model and the database. Ingest enqueues; a single worker drains (`POST /reindex` and `POST /documents` on the sidecar share one queue).
+- **Reindexing is serialized.** Concurrent `qmd update`/`qmd embed` runs contend over the model and the database. Ingest enqueues; a single worker drains (`POST /reindex`, `POST /documents` and `DELETE /documents` on the sidecar share one queue). Document writes are debounced so a burst costs one scan; the debounce clock is injected (`JobScheduler`), so tests never sleep.
 
 ## Coding Standards
 

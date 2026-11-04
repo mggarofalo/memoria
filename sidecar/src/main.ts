@@ -43,6 +43,11 @@ async function main(): Promise<void> {
     app.log.info({ signal, pendingJobs: app.ctx.jobs.pending }, "shutting down");
     try {
       await app.close();
+      // Index what was accepted in the debounce window. A timeout loses nothing
+      // durable: the files are on disk and the next scan picks them up.
+      if (!(await app.ctx.jobs.drain(config.shutdownDrainMs))) {
+        app.log.warn({ pendingJobs: app.ctx.jobs.pending, timeoutMs: config.shutdownDrainMs }, "reindex jobs still pending at shutdown");
+      }
       await backend.close();
       process.exit(0);
     } catch (err) {

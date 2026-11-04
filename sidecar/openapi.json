@@ -1322,7 +1322,7 @@
         "tags": [
           "documents"
         ],
-        "description": "Batch fetch by glob (`claude-sessions/2026-05*.md`), by a list of references (paths or docids), or both. Documents larger than `maxBytes` are listed under `skipped` rather than returned.",
+        "description": "Batch fetch by glob (`claude-sessions/2026-05*.md`), by a list of references (paths or docids), or both. Each selector resolves on its own and the results merge, one entry per file; a selector that matches nothing adds a line to `errors` without failing the others. Documents larger than `maxBytes` are listed under `skipped` rather than returned.",
         "requestBody": {
           "required": true,
           "content": {
@@ -1334,7 +1334,7 @@
                   "pattern": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Glob or comma-separated references, as QMD's multi_get accepts."
+                    "description": "Glob, comma-separated references, or a comma-separated mix of both."
                   },
                   "ids": {
                     "type": "array",
@@ -1476,7 +1476,7 @@
         "tags": [
           "documents"
         ],
-        "description": "Write markdown into a collection's directory on the sidecar host and queue an index update for that collection. The file on disk is the durable artifact; the index is rebuilt from it. Returns 202 with the job that will make the document searchable. Redaction is the caller's responsibility and must happen before this call.",
+        "description": "Write markdown into a collection's directory on the sidecar host and queue an index update for that collection. The file on disk is the durable artifact; the index is rebuilt from it. Returns 202 with the job that will make the document searchable. The job is debounced: a burst of documents for one collection shares a single job, which stays `queued` until writes go quiet. Redaction is the caller's responsibility and must happen before this call.",
         "requestBody": {
           "required": true,
           "content": {
@@ -1560,6 +1560,122 @@
                           "type": "null"
                         }
                       ]
+                    },
+                    "job": {
+                      "$ref": "#/components/schemas/Job"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Delete a document",
+        "tags": [
+          "documents"
+        ],
+        "description": "Remove a document's file from its collection's directory and queue an index update. Paths are validated exactly as `POST /documents` validates them. Idempotent: a path with no file returns 202 with `deleted: false` and still queues the update, so a delete that was interrupted before reindexing can be retried. The document stays searchable until the index is updated. The returned job is debounced like an ingest; when that wait matters, `POST /reindex` for the collection updates the index without it.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "in": "query",
+            "name": "collection",
+            "required": true
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
+            },
+            "in": "query",
+            "name": "path",
+            "required": true,
+            "description": "Relative to the collection root; must match the collection's glob."
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "collection",
+                    "path",
+                    "file",
+                    "deleted",
+                    "job"
+                  ],
+                  "properties": {
+                    "collection": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "file": {
+                      "type": "string"
+                    },
+                    "deleted": {
+                      "type": "boolean",
+                      "description": "False when no file existed at the path."
                     },
                     "job": {
                       "$ref": "#/components/schemas/Job"
@@ -1756,7 +1872,7 @@
         "tags": [
           "index"
         ],
-        "description": "Rescan the collections' directories (`qmd update`) and, by default, embed what changed (`qmd embed`). Jobs run one at a time behind a single worker; an identical job already waiting is returned instead of duplicated.",
+        "description": "Rescan the collections' directories (`qmd update`) and, by default, embed what changed (`qmd embed`). Jobs run one at a time behind a single worker; an identical job already waiting is returned instead of duplicated, and starts as soon as the worker is free even if it was waiting on the document debounce.",
         "requestBody": {
           "required": true,
           "content": {
@@ -2071,7 +2187,7 @@
     },
     {
       "name": "documents",
-      "description": "Read documents and ingest new ones by value."
+      "description": "Read documents, and ingest or delete them by value."
     },
     {
       "name": "collections",
@@ -2079,7 +2195,7 @@
     },
     {
       "name": "index",
-      "description": "Serialized reindex jobs."
+      "description": "Serialized, coalesced reindex jobs."
     }
   ]
 }

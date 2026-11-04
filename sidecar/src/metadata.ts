@@ -230,6 +230,11 @@ export class MetadataIndex {
     return meta;
   }
 
+  /** Forget one entry without a full rescan (used after a delete). */
+  delete(displayPath: string): void {
+    this.#entries.delete(displayPath);
+  }
+
   get size(): number {
     return this.#entries.size;
   }

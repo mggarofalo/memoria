@@ -2,9 +2,10 @@ import type { FastifyInstance } from "fastify";
 import type { AppContext } from "./app.ts";
 import { SIDECAR_VERSION } from "./app.ts";
 import { HttpError } from "./errors.ts";
-import { resolveTarget, writeDocument } from "./ingest.ts";
+import { removeDocument, resolveTarget, writeDocument } from "./ingest.ts";
 import { parseLineRange } from "./line-range.ts";
 import { hasFilters, matchesFilters, parseBound, type DocumentMetadata, type SearchFilters } from "./metadata.ts";
+import { resolveMultiGet } from "./multi-get.ts";
 import { errorResponses, metadataOrNull } from "./schemas.ts";
 import type { DocumentInfo, DocumentLookupError, QmdBackend, SearchQuery } from "./store.ts";
 
@@ -127,6 +128,11 @@ interface IngestBody {
   content: string;
   embed: boolean;
   overwrite: boolean;
+}
+
+interface DeleteQuery {
+  collection: string;
+  path: string;
 }
 
 interface ReindexBody {
@@ -479,12 +485,14 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         summary: "Get several documents",
         description:
           "Batch fetch by glob (`claude-sessions/2026-05*.md`), by a list of references (paths or docids), or both. " +
-          "Documents larger than `maxBytes` are listed under `skipped` rather than returned.",
+          "Each selector resolves on its own and the results merge, one entry per file; a selector that matches nothing " +
+          "adds a line to `errors` without failing the others. Documents larger than `maxBytes` are listed under " +
+          "`skipped` rather than returned.",
         body: {
           type: "object",
           additionalProperties: false,
           properties: {
-            pattern: { type: "string", minLength: 1, description: "Glob or comma-separated references, as QMD's multi_get accepts." },
+            pattern: { type: "string", minLength: 1, description: "Glob, comma-separated references, or a comma-separated mix of both." },
             ids: { type: "array", items: { type: "string", minLength: 1 }, minItems: 1, maxItems: 200, description: "Paths or docids." },
             maxBytes: { type: "integer", minimum: 1, default: 65536 },
             maxLines: { type: "integer", minimum: 1, description: "Truncate each body to this many lines." },
@@ -514,8 +522,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       if (!pattern && (!ids || ids.length === 0)) {
         throw new HttpError(400, "validation", "Provide `pattern`, `ids`, or both");
       }
-      const parts = [...(pattern ? [pattern] : []), ...(ids ?? [])];
-      const { docs, errors } = await backend.multiGet(parts.join(","), { includeBody: request.body.includeBody, maxBytes: request.body.maxBytes });
+      const { docs, errors } = await resolveMultiGet(backend, pattern, ids, { includeBody: request.body.includeBody, maxBytes: request.body.maxBytes });
       const out = [];
       const skipped = [];
       for (const entry of docs) {
@@ -548,8 +555,9 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         description:
           "Write markdown into a collection's directory on the sidecar host and queue an index update for that " +
           "collection. The file on disk is the durable artifact; the index is rebuilt from it. Returns 202 with the " +
-          "job that will make the document searchable. Redaction is the caller's responsibility and must happen " +
-          "before this call.",
+          "job that will make the document searchable. The job is debounced: a burst of documents for one collection " +
+          "shares a single job, which stays `queued` until writes go quiet. Redaction is the caller's responsibility " +
+          "and must happen before this call.",
         body: {
           type: "object",
           required: ["collection", "path", "content"],
@@ -588,9 +596,59 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       const written = await writeDocument(target, content, overwrite);
       const file = `${collection}/${target.relative}`;
       const metadata = ctx.metadata.set(file, content) ?? null;
-      const job = ctx.jobs.enqueue({ collections: [collection], embed, force: false, reason: `POST /documents ${file}` });
+      const job = ctx.jobs.enqueue({ collections: [collection], embed, force: false, reason: `POST /documents ${file}` }, { debounce: true });
       request.log.info({ file, bytes: written.bytes, created: written.created, jobId: job.id }, "document ingested");
       return reply.code(202).send({ collection, path: target.relative, file, bytes: written.bytes, created: written.created, metadata, job });
+    },
+  );
+
+  app.delete<{ Querystring: DeleteQuery }>(
+    "/documents",
+    {
+      schema: {
+        tags: ["documents"],
+        summary: "Delete a document",
+        description:
+          "Remove a document's file from its collection's directory and queue an index update. Paths are validated " +
+          "exactly as `POST /documents` validates them. Idempotent: a path with no file returns 202 with " +
+          "`deleted: false` and still queues the update, so a delete that was interrupted before reindexing can be " +
+          "retried. The document stays searchable until the index is updated. The returned job is debounced like an " +
+          "ingest; when that wait matters, `POST /reindex` for the collection updates the index without it.",
+        querystring: {
+          type: "object",
+          required: ["collection", "path"],
+          properties: {
+            collection: { type: "string", minLength: 1 },
+            path: { type: "string", minLength: 1, maxLength: 1024, description: "Relative to the collection root; must match the collection's glob." },
+          },
+        },
+        response: {
+          202: {
+            type: "object",
+            required: ["collection", "path", "file", "deleted", "job"],
+            properties: {
+              collection: { type: "string" },
+              path: { type: "string" },
+              file: { type: "string" },
+              deleted: { type: "boolean", description: "False when no file existed at the path." },
+              job: { $ref: "Job#" },
+            },
+          },
+          ...errorResponses,
+        },
+      },
+    },
+    async (request, reply) => {
+      const { collection, path } = request.query;
+      const row = (await backend.listCollections()).find((c) => c.name === collection);
+      if (!row) throw new HttpError(404, "unknown_collection", `Unknown collection: ${collection}`);
+      const target = resolveTarget(row.pwd, row.glob_pattern, path);
+      const deleted = await removeDocument(target);
+      const file = `${collection}/${target.relative}`;
+      ctx.metadata.delete(file);
+      const job = ctx.jobs.enqueue({ collections: [collection], embed: false, force: false, reason: `DELETE /documents ${file}` }, { debounce: true });
+      request.log.info({ file, deleted, jobId: job.id }, "document deleted");
+      return reply.code(202).send({ collection, path: target.relative, file, deleted, job });
     },
   );
 
@@ -662,7 +720,8 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         summary: "Queue a reindex",
         description:
           "Rescan the collections' directories (`qmd update`) and, by default, embed what changed (`qmd embed`). " +
-          "Jobs run one at a time behind a single worker; an identical job already waiting is returned instead of duplicated.",
+          "Jobs run one at a time behind a single worker; an identical job already waiting is returned instead of duplicated, " +
+          "and starts as soon as the worker is free even if it was waiting on the document debounce.",
         body: {
           type: "object",
           additionalProperties: false,

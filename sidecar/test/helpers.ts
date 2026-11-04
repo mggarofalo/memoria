@@ -3,13 +3,49 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { buildApp, type App } from "../src/app.ts";
 import { loadConfig, type SidecarConfig } from "../src/config.ts";
+import type { JobScheduler } from "../src/jobs.ts";
 import { FakeBackend, FRONTMATTER_DOC, type FakeDoc } from "./fake-backend.ts";
 
 export const TEST_SECRET = "test-secret-0123456789abcdef";
 
+/** Debounce off unless a test asks for it, so `jobs.idle()` never waits on a timer. */
 export function testConfig(overrides: Partial<SidecarConfig> = {}): SidecarConfig {
-  const base = loadConfig({ MEMORIA_QMD_SECRET: TEST_SECRET, MEMORIA_QMD_WARMUP: "0" });
+  const base = loadConfig({ MEMORIA_QMD_SECRET: TEST_SECRET, MEMORIA_QMD_WARMUP: "0", MEMORIA_QMD_REINDEX_DEBOUNCE_MS: "0" });
   return { ...base, ...overrides };
+}
+
+/** A clock that moves only when told to, so debounce tests never sleep. */
+export class ManualScheduler implements JobScheduler {
+  #now = 0;
+  #nextId = 1;
+  readonly #timers = new Map<number, { at: number; callback: () => void }>();
+
+  now(): number {
+    return this.#now;
+  }
+
+  setTimeout(callback: () => void, delayMs: number): unknown {
+    const id = this.#nextId++;
+    this.#timers.set(id, { at: this.#now + delayMs, callback });
+    return id;
+  }
+
+  clearTimeout(handle: unknown): void {
+    this.#timers.delete(handle as number);
+  }
+
+  /** Move the clock, firing whatever falls due, then let the worker start. */
+  async advance(ms: number): Promise<void> {
+    this.#now += ms;
+    for (const [id, timer] of [...this.#timers].sort((a, b) => a[1].at - b[1].at)) {
+      if (timer.at <= this.#now && this.#timers.delete(id)) timer.callback();
+    }
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  get pendingTimers(): number {
+    return this.#timers.size;
+  }
 }
 
 export const authHeaders = { authorization: `Bearer ${TEST_SECRET}` };
@@ -80,7 +116,7 @@ export interface TestApp {
   roots: { claude: string; codex: string };
 }
 
-export async function makeApp(options: { docs?: FakeDoc[]; config?: Partial<SidecarConfig>; modelsResident?: boolean } = {}): Promise<TestApp> {
+export async function makeApp(options: { docs?: FakeDoc[]; config?: Partial<SidecarConfig>; modelsResident?: boolean; scheduler?: JobScheduler } = {}): Promise<TestApp> {
   const claude = await tempDir("memoria-claude-");
   const codex = await tempDir("memoria-codex-");
   const backend = new FakeBackend({
@@ -91,7 +127,7 @@ export async function makeApp(options: { docs?: FakeDoc[]; config?: Partial<Side
     docs: options.docs ?? sampleDocs(),
     ...(options.modelsResident !== undefined ? { modelsResident: options.modelsResident } : {}),
   });
-  const app = await buildApp({ backend, config: testConfig(options.config), logger: false });
+  const app = await buildApp({ backend, config: testConfig(options.config), logger: false, ...(options.scheduler ? { scheduler: options.scheduler } : {}) });
   await app.ready();
   return { app, backend, roots: { claude, codex } };
 }
