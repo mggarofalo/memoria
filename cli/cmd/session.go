@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/mggarofalo/memoria/cli/internal/api"
@@ -19,6 +20,7 @@ import (
 // session is a resolved server, key and guarded client.
 type session struct {
 	base     *url.URL
+	keyID    string // The public id of the key in use, when it has the usual form.
 	profile  string
 	source   string
 	http     *http.Client
@@ -182,7 +184,17 @@ func (a *app) newSession(base *url.URL, key string) (*session, error) {
 	if err != nil {
 		return nil, fmt.Errorf("creating the API client: %w", err)
 	}
-	return &session{base: base, http: httpClient, client: client, endpoint: base.String()}, nil
+	return &session{base: base, keyID: publicKeyID(key), http: httpClient, client: client, endpoint: base.String()}, nil
+}
+
+// publicKeyID reads the id from mem_<id>_<secret>. The id is public by design. Any
+// other form has none, and the key stays opaque.
+func publicKeyID(key string) string {
+	parts := strings.Split(key, "_")
+	if len(parts) == 3 && parts[0] == "mem" {
+		return parts[1]
+	}
+	return ""
 }
 
 func (a *app) httpClient(base *url.URL, key string, timeout time.Duration) (*http.Client, error) {

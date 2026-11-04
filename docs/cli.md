@@ -145,6 +145,31 @@ memoria status
 
 **`--format json` is the server's response, byte for byte, and is not sanitized.** Treat it as data, and do not print it raw to a terminal. There is one exception: if a response contains the key in use, even JSON-escaped, or the secret half of it alone, that text is replaced with `[REDACTED]`, because the key never reaches stdout. This cannot catch a key that has been split across strings or transformed in some other way.
 
+## Manage keys
+
+These need a key with the `admin` scope. The first one comes from running the server with `--bootstrap-admin-key`; see [deployment](deployment.md#the-first-admin-key).
+
+```sh
+memoria keys create --label laptop --scope read --collection claude-sessions
+memoria keys create --label backup --scope read --all-collections
+memoria keys list
+memoria keys rotate <id>
+memoria keys revoke <id>
+```
+
+`create` and `rotate` write the new key's plaintext to stdout, once, and everything else to stderr, so you can capture it: `KEY=$(memoria keys create ...)`. It can't be recovered later. With `--format json`, stdout is the server's response, which includes the plaintext.
+
+A read or ingest key must name its collections. Reaching every collection, including any added later, takes `--all-collections`, and nothing falls back to it.
+
+**Scopes do not imply one another.** An admin key manages keys but can't search, by design: a day-to-day client should never carry key-management power. To search, issue a separate read key and log in with it under its own profile:
+
+```sh
+memoria keys create --label reader --scope read --collection claude-sessions
+memoria auth login --profile reader --api-url https://memoria.example.com
+```
+
+`revoke` refuses the key the command is using unless you pass `--force`, since that can lock you out. `rotate` on that key warns you to log in again with the new one.
+
 ## Exit codes
 
 | Code | Meaning |

@@ -289,7 +289,7 @@ func (a *app) verifyKey(ctx context.Context, s *session) error {
 		return apperr.FromTransport(err)
 	}
 	if resp.StatusCode() == http.StatusForbidden {
-		a.warn("the server accepted this key, but it has no read access")
+		a.warn("the server accepted this key, but it has no read access. That is normal for an admin key: it manages keys with 'memoria keys', and cannot search")
 		return nil
 	}
 	if err := checkResponse(resp.StatusCode(), resp.HTTPResponse.Header, resp.Body); err != nil {

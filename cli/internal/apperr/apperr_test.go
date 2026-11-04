@@ -65,6 +65,21 @@ func TestAuthAndForbiddenHaveDistinctMessagesAndTheSameExit(t *testing.T) {
 	}
 }
 
+func TestForbiddenHintFollowsTheMissingScope(t *testing.T) {
+	cases := map[string]string{
+		`{"detail":"This API key lacks the 'read' scope.","code":"insufficient_scope"}`:   "by design",
+		`{"detail":"This API key lacks the 'admin' scope.","code":"insufficient_scope"}`:  "--bootstrap-admin-key",
+		`{"detail":"This API key lacks the 'ingest' scope.","code":"insufficient_scope"}`: "lacks the scope or collection",
+		`{"detail":"Not in this key's collections.","code":"collection_forbidden"}`:       "lacks the scope or collection",
+		`{"detail":"lacks the 'read' scope","code":"something_else"}`:                     "lacks the scope or collection",
+	}
+	for body, want := range cases {
+		if e := FromResponse(403, problemHeader(), []byte(body)); !strings.Contains(e.Message, want) {
+			t.Errorf("%s: message = %q", body, e.Message)
+		}
+	}
+}
+
 func TestRawBodiesAreNeverQuoted(t *testing.T) {
 	const marker = "RAW-BODY-CONTENT"
 	for name, build := range map[string]func() (http.Header, []byte){

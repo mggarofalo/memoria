@@ -67,6 +67,7 @@ type rootFlags struct {
 
 var commandFactories = []func(*app) *cobra.Command{
 	newAuthCmd,
+	newKeysCmd,
 	newQueryCmd,
 	newGetCmd,
 	newMultiGetCmd,
