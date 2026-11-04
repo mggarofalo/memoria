@@ -153,13 +153,14 @@ A write goes to a hidden temp file in the target's directory, is flushed, and is
 
 #### Deleting
 
-`DELETE /documents` does not apply the glob, the ignore patterns, the excluded directories, the hidden-name rule, the segment limit or the name rules above, and an unsupported ignore pattern does not affect it. A document that stopped matching, sits under a rule added later, or has a name these rules would refuse today stays removable. This also means a delete can remove any file under the root, including one that was never a document, such as `.git/config`. The caller is authenticated, and the root should hold only the corpus.
+`DELETE /documents` does not apply the glob, the ignore patterns, the excluded directories, the segment limit or the name rules above, and an unsupported ignore pattern does not affect it. A document that stopped matching, sits under a rule added later, or has a name these rules would refuse today stays removable. This also means a delete can remove any file under the root that has no dot-prefixed segment, even one that was never a document, so the root should hold only the corpus.
 
 Still refused or not reached:
 
 | Path | Result | Why |
 |---|---|---|
 | Traversal, absolute paths, NUL, empty, `.` or `..` segments | 400 `invalid_path` | Safety, on every platform. Backslashes are separators everywhere, so `..\x` cannot be a way out. |
+| A dot-prefixed segment at any depth, such as `.git/config` or `.hidden.md` | 400 `hidden_path` | QMD's scan drops these whatever the collection's pattern, so they cannot be indexed documents. A real-SDK test confirms it. Remove a leftover `.memoria-*.tmp` on the host. |
 | A symlink or junction between the root and the file | 400 `invalid_path` | Containment. A link at the last segment is removed itself. |
 | A case or normalization alias of an existing entry | 409 `case_conflict` | The exact name works, and is what keeps the metadata key right. |
 | A name that is not a real directory entry, such as an 8.3 short name | 202, `deleted: false` | A directory listing does not show short names, so `hidden~1.md` cannot remove `.hidden.md`, but a file really called `notes~1.md` is removed. |

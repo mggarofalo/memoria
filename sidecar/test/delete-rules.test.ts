@@ -31,7 +31,7 @@ test("indexability rules do not stop a delete", async () => {
   const t = await makeApp();
   t.backend.collections[0]!.ignore = ["drafts", "**/private/**"];
   try {
-    for (const p of ["notes.txt", "no-longer-matches.markdown", "drafts/a.md", "x/private/b.md", "node_modules/x.md", "vendor/x.md", "dist/x.md", "build/x.md", "a/vendor/y.md", ".hidden.md", ".git/config", ".cache/x.md"]) {
+    for (const p of ["notes.txt", "no-longer-matches.markdown", "drafts/a.md", "x/private/b.md", "node_modules/x.md", "vendor/x.md", "dist/x.md", "build/x.md", "a/vendor/y.md"]) {
       await assertDeletes(t, p);
     }
   } finally {
@@ -93,9 +93,24 @@ test("a short name cannot delete the file it aliases, whether or not the volume 
     }
     assert.equal(await readFile(hidden, "utf8"), "leaked");
     assert.equal(await readFile(dir, "utf8"), "leaked");
-    // The real names work.
-    await assertDeletes(t, ".hidden.md");
-    await assertDeletes(t, ".obsidian/workspace.md");
+  } finally {
+    await t.app.close();
+  }
+});
+
+test("a dot path is refused and its file left alone, at any depth", async () => {
+  const t = await makeApp();
+  try {
+    for (const p of [".hidden.md", ".git/config", ".obsidian/workspace.md", ".cache/x.md", "a/.git/config", "a/b/.hidden.md", ".memoria-0123456789abcdef01234567.tmp", ".GIT/config"]) {
+      const file = await plant(t.roots.claude, p);
+      const r = await del(t.app, p);
+      assert.equal(r.statusCode, 400, p);
+      assert.equal(r.json().error, "hidden_path", p);
+      assert.equal(await readFile(file, "utf8"), "leaked", p);
+    }
+    assert.deepEqual(t.app.ctx.jobs.list(), [], "a refused delete queues nothing");
+    // A dot inside a name is not a dot path.
+    await assertDeletes(t, "a.b/c.d.md");
   } finally {
     await t.app.close();
   }
@@ -151,10 +166,11 @@ test("the lexical rules depend on what the platform would do with the name", () 
 
   for (const platform of ["win32", "linux", "darwin"] as const) {
     for (const p of ["", "/abs.md", "../x.md", "a/../../x.md", "a/./x.md", "a//x.md", "a/..", "with\0nul.md"]) refused(p, platform);
-    for (const p of ["x.md", "notes.txt", ".hidden.md", "node_modules/x.md", "hidden~1.md", "a\u202eb.md"]) accepted(p, platform);
+    for (const p of ["x.md", "notes.txt", "node_modules/x.md", "hidden~1.md", "a\u202eb.md"]) accepted(p, platform);
+    for (const p of [".hidden.md", ".git/config", "a/.x/y.md"]) assert.throws(() => resolveDeleteTarget(root, p, platform), (err: unknown) => err instanceof HttpError && err.code === "hidden_path", p);
   }
   // Only Windows reads these as something other than the name given.
-  for (const p of ["a:b.md", "x.md:stream", "CON.md", "nul/x.md", "com1.tar.md", "CON .md", ".. /x.md", "dir./x.md", "x.md ", "a?b.md", "a*b.md", "a<b.md", 'a"b.md', "a|b.md", "a\x01b.md"]) {
+  for (const p of ["a:b.md", "x.md:stream", "CON.md", "nul/x.md", "com1.tar.md", "CON .md", "dir./x.md", "x.md ", "a?b.md", "a*b.md", "a<b.md", 'a"b.md', "a|b.md", "a\x01b.md"]) {
     refused(p, "win32");
     // On a Windows host, this process's own path.resolve reads `a:` as a drive, whatever platform is passed.
     if (process.platform === "win32" && p.includes(":")) continue;

@@ -1626,7 +1626,7 @@
         "tags": [
           "documents"
         ],
-        "description": "Remove a document's file from its collection's directory and queue an index update. Only safety checks apply, unlike `POST /documents`: a file outside the collection's glob or under an ignore rule can still be removed. The path must stay inside the root, cross no link, and match the entry's exact name, so a case alias returns 409. Idempotent: a path with no file returns 202 with `deleted: false` and still queues the update, so a delete that was interrupted before reindexing can be retried. The document stays searchable until the index is updated. The returned job is debounced like an ingest; when that wait matters, `POST /reindex` for the collection updates the index without it.",
+        "description": "Remove a document's file from its collection's directory and queue an index update. Only safety checks apply, unlike `POST /documents`: a file outside the collection's glob or under an ignore rule can still be removed. The path must stay inside the root, cross no link, have no dot-prefixed segment, and match the entry's exact name, so a case alias returns 409. Idempotent: a path with no file returns 202 with `deleted: false` and still queues the update, so a delete that was interrupted before reindexing can be retried. The document stays searchable until the index is updated. The returned job is debounced like an ingest; when that wait matters, `POST /reindex` for the collection updates the index without it.",
         "parameters": [
           {
             "schema": {

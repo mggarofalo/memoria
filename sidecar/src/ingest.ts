@@ -73,10 +73,11 @@ function locate(collectionRoot: string, relative: string): ResolvedTarget {
 }
 
 /**
- * Validate a path for a delete. Only safety applies here. A document must stay
- * removable even when it no longer matches the collection's glob, sits under a
- * rule added later, or has a name these rules would refuse today, because
- * removing leaked content is part of what delete is for. `removeDocument` does the
+ * Validate a path for a delete. Only safety applies here, plus a refusal of dot
+ * paths, which can never be documents. A document must stay removable even when it
+ * no longer matches the collection's glob, sits under a rule added later, or has a
+ * name these rules would refuse today, because removing leaked content is part of
+ * what delete is for. `removeDocument` does the
  * checks that need the filesystem.
  */
 export function resolveDeleteTarget(collectionRoot: string, requestedPath: string, platform: NodeJS.Platform = process.platform): ResolvedTarget {
@@ -86,6 +87,11 @@ export function resolveDeleteTarget(collectionRoot: string, requestedPath: strin
   for (const segment of relative.split("/")) {
     const problem = deleteSegmentProblem(segment, platform);
     if (problem) throw invalidPath(problem);
+  }
+  // QMD's scan drops any path with a dot segment, whatever the collection's pattern,
+  // so nothing here can be indexed, and these are things like `.git/config`.
+  if (relative.split("/").some((s) => s.startsWith("."))) {
+    throw new HttpError(400, "hidden_path", "path has a segment starting with a dot; QMD never indexes these, so they are not documents this route can remove");
   }
   return locate(collectionRoot, relative);
 }

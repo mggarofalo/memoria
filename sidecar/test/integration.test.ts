@@ -16,6 +16,30 @@ import { authHeaders, tempDir, testConfig } from "./helpers.ts";
 
 const enabled = process.env.MEMORIA_QMD_INTEGRATION === "1";
 
+test("no collection pattern can put a dot path in the index, which is why DELETE can refuse them", { skip: enabled ? false : "set MEMORIA_QMD_INTEGRATION=1" }, async () => {
+  const root = await tempDir("memoria-qmd-it-");
+  const corpus = path.join(root, "dotted");
+  await mkdir(path.join(corpus, ".notes", "deep"), { recursive: true });
+  await mkdir(path.join(corpus, "sub", ".inner"), { recursive: true });
+  for (const f of [".hidden.md", ".notes/a.md", ".notes/deep/b.md", "sub/.inner/c.md", "sub/.d.md"]) await writeFile(path.join(corpus, f), `# ${f}\n\ndotmarker\n`, "utf8");
+  await writeFile(path.join(corpus, "plain.md"), "# Plain\n\nplainmarker\n", "utf8");
+
+  const qmd = await import("@tobilu/qmd");
+  // Patterns that name dot paths outright. The SDK takes no `dot` setting for a collection.
+  const patterns: Record<string, { path: string; pattern: string }> = {};
+  for (const [i, pattern] of ["**/*", "**/*.md", ".notes/**/*.md", ".*", ".*/**", "**/.*", "**/.inner/*.md", "{.notes,sub}/**/*.md"].entries()) patterns[`c${i}`] = { path: corpus, pattern };
+  const store = await qmd.createStore({ dbPath: path.join(root, "index.sqlite"), config: { collections: patterns } });
+  try {
+    await store.update();
+    const rows = (store as unknown as { internal: { db: { prepare(sql: string): { all(): Array<{ path: string }> } } } }).internal.db.prepare("SELECT DISTINCT path FROM documents").all();
+    assert.ok(rows.length > 0, "the wide patterns did index something");
+    assert.deepEqual(rows.filter((r) => r.path.split("/").some((s) => s.startsWith("."))), []);
+    assert.ok(rows.some((r) => r.path === "plain.md"));
+  } finally {
+    await store.close();
+  }
+});
+
 test("a document under a newly added ignore rule can be deleted, and leaves search after the reindex", { skip: enabled ? false : "set MEMORIA_QMD_INTEGRATION=1" }, async () => {
   const root = await tempDir("memoria-qmd-it-");
   const corpus = path.join(root, "sessions");
