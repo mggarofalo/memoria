@@ -82,6 +82,7 @@ await app.InitializeMemoriaAuthAsync();
 
 // First, so logs and the failed-authentication limit see the real client.
 app.UseMemoriaForwardedHeaders(app.Services.GetRequiredService<IOptions<MemoriaOptions>>().Value.Auth.TrustedProxies);
+app.UseMiddleware<ForwardedHeaderWarning>();
 app.UseMiddleware<RequestLoggingMiddleware>();
 app.UseExceptionHandler();
 app.UseStatusCodePages();

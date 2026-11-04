@@ -1460,6 +1460,16 @@
           },
           {
             "schema": {
+              "type": "boolean",
+              "default": true
+            },
+            "in": "query",
+            "name": "similarFiles",
+            "required": false,
+            "description": "false resolves the reference without QMD's scan of every path on a miss, and returns no suggestions. Memoria.Api always sends false."
+          },
+          {
+            "schema": {
               "type": "string"
             },
             "in": "path",
@@ -1577,6 +1587,18 @@
                     "maximum": 1048576,
                     "default": 65536
                   },
+                  "maxTotalBytes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 268435456,
+                    "default": 16777216,
+                    "description": "Budget for all bodies in this response. Documents that would pass it are listed under `skipped` and are not read."
+                  },
+                  "similarFiles": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "false resolves the reference without QMD's scan of every path on a miss, and returns no suggestions. Memoria.Api always sends false."
+                  },
                   "maxLines": {
                     "type": "integer",
                     "minimum": 1,
@@ -1605,7 +1627,8 @@
                   "required": [
                     "docs",
                     "skipped",
-                    "errors"
+                    "errors",
+                    "truncated"
                   ],
                   "properties": {
                     "docs": {
@@ -1637,6 +1660,10 @@
                       "items": {
                         "type": "string"
                       }
+                    },
+                    "truncated": {
+                      "type": "boolean",
+                      "description": "Globs matched more documents than one request may select; the rest were not looked at."
                     }
                   }
                 }

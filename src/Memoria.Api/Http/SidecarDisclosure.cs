@@ -35,9 +35,13 @@ public static class SidecarDisclosure
 				: new SidecarFailureView(exception.Code, "The search backend could not complete this request. Quote the trace id to the operator.", null, null);
 		}
 
-		if (restricted && exception.StatusCode == HttpStatusCode.NotFound)
+		if (exception.StatusCode == HttpStatusCode.NotFound)
 		{
-			return new SidecarFailureView("not_found", NotFoundMessage, null, null);
+			// No caller gets suggestions: the API does not ask for them, because producing
+			// them scans every path in the index. Details are dropped in case a sidecar sends them.
+			return restricted
+				? new SidecarFailureView("not_found", NotFoundMessage, null, null)
+				: new SidecarFailureView(exception.Code, exception.Message, upstream, null);
 		}
 
 		// A validation failure names only what the caller sent, which is in scope by now.

@@ -1428,7 +1428,8 @@
         "required": [
           "docs",
           "skipped",
-          "errors"
+          "errors",
+          "truncated"
         ],
         "type": "object",
         "properties": {
@@ -1449,6 +1450,9 @@
             "items": {
               "type": "string"
             }
+          },
+          "truncated": {
+            "type": "boolean"
           }
         }
       },

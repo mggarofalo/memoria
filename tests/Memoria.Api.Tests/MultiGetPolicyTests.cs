@@ -4,6 +4,7 @@ using System.Text.Json;
 using Memoria.Api.Http;
 using Memoria.Api.Search;
 using Memoria.Core.Contracts;
+using Microsoft.AspNetCore.Hosting;
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
 
@@ -167,7 +168,7 @@ public sealed class MultiGetBoundaryTests(AuthApiFactory factory) : IClassFixtur
 		await reader.PostAsJsonAsync("/v1/docs:multiGet", new MultiGetRequest(null, "*/*.md", null, null, null, null), Json);
 
 		FakeSidecar.RecordedRequest get = Assert.Single(factory.Sidecar.Requests, r => r.Method == "GET");
-		Assert.Equal("?collections=claude-sessions&collections=a%20b%2Fc", get.Uri.Query);
+		Assert.Equal("?collections=claude-sessions&collections=a%20b%2Fc&similarFiles=false", get.Uri.Query);
 		FakeSidecar.RecordedRequest post = Assert.Single(factory.Sidecar.Requests, r => r.Method == "POST");
 		using JsonDocument body = JsonDocument.Parse(post.Body!);
 		Assert.Equal(["claude-sessions", "a b/c"], body.RootElement.GetProperty("collections").EnumerateArray().Select(static e => e.GetString()!).ToArray());
@@ -184,9 +185,54 @@ public sealed class MultiGetBoundaryTests(AuthApiFactory factory) : IClassFixtur
 		await everything.GetAsync("/v1/docs/f6feba");
 		await everything.PostAsJsonAsync("/v1/docs:multiGet", new MultiGetRequest(null, "*/*.md", null, null, null, null), Json);
 
-		Assert.Equal(string.Empty, Assert.Single(factory.Sidecar.Requests, r => r.Method == "GET").Uri.Query);
+		Assert.Equal("?similarFiles=false", Assert.Single(factory.Sidecar.Requests, r => r.Method == "GET").Uri.Query);
 		using JsonDocument body = JsonDocument.Parse(Assert.Single(factory.Sidecar.Requests, r => r.Method == "POST").Body!);
 		Assert.False(body.RootElement.TryGetProperty("collections", out _));
+		Assert.False(body.RootElement.GetProperty("similarFiles").GetBoolean());
+		Assert.Equal(16 * 1024 * 1024, body.RootElement.GetProperty("maxTotalBytes").GetInt32());
+	}
+
+	[Fact]
+	public async Task ResponseBudget_IsHeldAtTheApi_EvenIfTheSidecarIgnoresIt_CountingBytesNotCharacters()
+	{
+		string multiByte = new('é', 6);
+		string json = $$"""
+			{
+			  "docs": [
+			    { "docid": "aaaaaa", "file": "c/one.md", "collection": "c", "path": "one.md", "title": "1", "context": null, "modifiedAt": "2026-02-11T12:00:00.000Z", "bodyLength": 6, "body": "{{multiByte}}", "metadata": null },
+			    { "docid": "bbbbbb", "file": "c/two.md", "collection": "c", "path": "two.md", "title": "2", "context": null, "modifiedAt": "2026-02-11T12:00:00.000Z", "bodyLength": 6, "body": "{{multiByte}}", "metadata": null },
+			    { "docid": "cccccc", "file": "c/none.md", "collection": "c", "path": "none.md", "title": "3", "context": null, "modifiedAt": "2026-02-11T12:00:00.000Z", "bodyLength": 0, "body": null, "metadata": null }
+			  ],
+			  "skipped": [],
+			  "errors": [],
+			  "truncated": true
+			}
+			""";
+		factory.Sidecar.On("POST", "/docs:multiGet", HttpStatusCode.OK, json);
+		using Microsoft.AspNetCore.Mvc.Testing.WebApplicationFactory<Program> small = factory.WithWebHostBuilder(builder => builder.UseSetting("Memoria:Search:MaxMultiGetBytes", "20"));
+		(_, string token) = await factory.IssueAsync([MemoriaScopes.Read], ["c"]);
+		HttpClient reader = AuthApiFactory.Authorized(small.CreateClient(), token);
+
+		HttpResponseMessage response = await reader.PostAsJsonAsync("/v1/docs:multiGet", new MultiGetRequest(null, "c/*.md", null, null, null, null), Json);
+
+		MultiGetResult result = (await response.Content.ReadFromJsonAsync<MultiGetResult>(Json))!;
+		Assert.Equal(["c/one.md", "c/none.md"], result.Docs.Select(static d => d.File).ToArray());
+		SkippedDocument skipped = Assert.Single(result.Skipped);
+		Assert.Equal("c/two.md", skipped.File);
+		Assert.Contains("budget", skipped.Reason);
+		Assert.True(result.Truncated);
+	}
+
+	[Theory]
+	[InlineData(0)]
+	[InlineData(268435457)]
+	public void MaxMultiGetBytes_OutOfRange_StopsTheHost(int value)
+	{
+		using Microsoft.AspNetCore.Mvc.Testing.WebApplicationFactory<Program> broken = factory.WithWebHostBuilder(builder => builder.UseSetting("Memoria:Search:MaxMultiGetBytes", value.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+
+		Exception failure = Assert.ThrowsAny<Exception>(() => broken.CreateClient());
+
+		Assert.Contains("MaxMultiGetBytes", failure.ToString());
 	}
 
 	[Fact]

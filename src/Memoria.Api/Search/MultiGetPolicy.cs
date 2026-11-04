@@ -33,47 +33,11 @@ public static partial class MultiGetPolicy
 	public static Dictionary<string, string[]> Validate(IReadOnlyList<string>? ids, string? pattern, int? maxBytes, int? maxLines)
 	{
 		Dictionary<string, string[]> errors = [];
-		bool hasIds = ids is { Count: > 0 };
-		bool hasPattern = !string.IsNullOrWhiteSpace(pattern);
+		ValidateIds(ids, pattern, errors);
 
-		if (!hasIds && !hasPattern)
-		{
-			errors["ids"] = ["Provide `ids`, `pattern`, or both."];
-		}
-
-		if (ids is { Count: > MaxReferencesPerRequest })
-		{
-			errors["ids"] = [$"At most {MaxReferencesPerRequest} ids per request."];
-		}
-		else if (ids is not null && ids.Any(static id => id is not null && id.Contains(',', StringComparison.Ordinal)))
-		{
-			errors["ids"] = ["An id may not contain a comma."];
-		}
-
-		IEnumerable<string> fromPattern = hasPattern ? pattern!.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries) : [];
-		IEnumerable<string> fromIds = ids?.Where(static id => !string.IsNullOrWhiteSpace(id)).Select(static id => id.Trim()) ?? [];
-		string[] selectors = fromPattern.Concat(fromIds).Distinct(StringComparer.Ordinal).ToArray();
-		string[] globs = selectors.Where(static s => GlobMeta().IsMatch(s)).ToArray();
-		string[] references = selectors.Where(static s => !GlobMeta().IsMatch(s)).ToArray();
-
-		string? violation = globs.Select(GlobViolation).FirstOrDefault(static v => v is not null);
-		if (violation is not null)
-		{
-			errors[hasPattern && !errors.ContainsKey("pattern") ? "pattern" : "ids"] = [violation];
-		}
-		else if (globs.Length > MaxGlobsPerRequest)
-		{
-			errors["pattern"] = [$"At most {MaxGlobsPerRequest} globs per request."];
-		}
-
-		if (references.Length > MaxReferencesPerRequest)
-		{
-			errors["pattern"] = [$"At most {MaxReferencesPerRequest} references per request."];
-		}
-		else if (references.Any(static r => r.Length > MaxReferenceLength))
-		{
-			errors["ids"] = [$"A reference may be at most {MaxReferenceLength} characters."];
-		}
+		string[] selectors = Selectors(ids, pattern);
+		ValidateGlobs(selectors.Where(static s => GlobMeta().IsMatch(s)).ToArray(), errors);
+		ValidateReferences(selectors.Where(static s => !GlobMeta().IsMatch(s)).ToArray(), errors);
 
 		if (maxBytes is < 1 or > MaxBytesCeiling)
 		{
@@ -86,6 +50,54 @@ public static partial class MultiGetPolicy
 		}
 
 		return errors;
+	}
+
+	private static void ValidateIds(IReadOnlyList<string>? ids, string? pattern, Dictionary<string, string[]> errors)
+	{
+		if (ids is not { Count: > 0 } && string.IsNullOrWhiteSpace(pattern))
+		{
+			errors["ids"] = ["Provide `ids`, `pattern`, or both."];
+		}
+		else if (ids is { Count: > MaxReferencesPerRequest })
+		{
+			errors["ids"] = [$"At most {MaxReferencesPerRequest} ids per request."];
+		}
+		else if (ids is not null && ids.Any(static id => id is not null && id.Contains(',', StringComparison.Ordinal)))
+		{
+			errors["ids"] = ["An id may not contain a comma."];
+		}
+	}
+
+	private static string[] Selectors(IReadOnlyList<string>? ids, string? pattern)
+	{
+		IEnumerable<string> fromPattern = (pattern ?? string.Empty).Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+		IEnumerable<string> fromIds = (ids ?? []).Where(static id => !string.IsNullOrWhiteSpace(id)).Select(static id => id.Trim());
+		return fromPattern.Concat(fromIds).Distinct(StringComparer.Ordinal).ToArray();
+	}
+
+	private static void ValidateGlobs(string[] globs, Dictionary<string, string[]> errors)
+	{
+		string? violation = globs.Select(GlobViolation).FirstOrDefault(static v => v is not null);
+		if (violation is not null)
+		{
+			errors["pattern"] = [violation];
+		}
+		else if (globs.Length > MaxGlobsPerRequest)
+		{
+			errors["pattern"] = [$"At most {MaxGlobsPerRequest} globs per request."];
+		}
+	}
+
+	private static void ValidateReferences(string[] references, Dictionary<string, string[]> errors)
+	{
+		if (references.Length > MaxReferencesPerRequest)
+		{
+			errors["pattern"] = [$"At most {MaxReferencesPerRequest} references per request."];
+		}
+		else if (references.Any(static r => r.Length > MaxReferenceLength))
+		{
+			errors["ids"] = [$"A reference may be at most {MaxReferenceLength} characters."];
+		}
 	}
 
 	/// <summary>Why a glob is refused, or null when it is within the grammar.</summary>

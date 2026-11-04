@@ -33,6 +33,9 @@ public sealed class SidecarException(
 	/// <summary>The sidecar returned a non-success status without a parseable error envelope.</summary>
 	public const string Malformed = "sidecar_malformed_response";
 
+	/// <summary>The sidecar sent more than the request's budget allows. Reading stopped.</summary>
+	public const string ResponseTooLarge = "sidecar_response_too_large";
+
 	/// <summary>True for failures where retrying later may succeed (unreachable, timeout, 5xx).</summary>
 	public bool IsTransient =>
 		StatusCode is null || (int)StatusCode.Value >= 500;

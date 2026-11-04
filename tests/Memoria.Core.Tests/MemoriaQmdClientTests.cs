@@ -103,6 +103,70 @@ public sealed class MemoriaQmdClientTests
 	}
 
 	[Fact]
+	public void DocumentPath_SendsSimilarFiles()
+	{
+		Assert.Equal("docs/a.md?similarFiles=false", MemoriaQmdClient.DocumentPath("a.md", new SidecarDocumentQuery(SimilarFiles: false)));
+		Assert.Equal("docs/a.md?similarFiles=true", MemoriaQmdClient.DocumentPath("a.md", new SidecarDocumentQuery(SimilarFiles: true)));
+	}
+
+	[Fact]
+	public async Task MultiGet_StopsReadingABodyPastTheBudget_InsteadOfBufferingIt()
+	{
+		(MemoriaQmdClient client, FakeHttpHandler handler) = Create();
+		int budget = 1024;
+		long limit = MemoriaQmdClient.MaxMultiGetWireBytes(new SidecarMultiGetRequest { MaxTotalBytes = budget });
+		handler.Respond(HttpStatusCode.OK, $$"""{"docs":[],"skipped":[{"file":"{{new string('x', (int)limit + 10)}}","reason":"r"}],"errors":[]}""");
+
+		SidecarException failure = await Assert.ThrowsAsync<SidecarException>(() => client.MultiGetAsync(new SidecarMultiGetRequest { Pattern = "a*", MaxTotalBytes = budget }));
+
+		Assert.Equal(SidecarException.ResponseTooLarge, failure.Code);
+	}
+
+	[Fact]
+	public void MultiGet_WireLimit_UsesTheDefaultBudgetWhenNoneIsSet()
+	{
+		Assert.Equal((16L * 1024 * 1024 * 6) + (16L * 1024 * 1024), MemoriaQmdClient.MaxMultiGetWireBytes(new SidecarMultiGetRequest()));
+	}
+
+	[Fact]
+	public async Task MultiGet_MapsErrorsAndBadBodies()
+	{
+		(MemoriaQmdClient client, FakeHttpHandler handler) = Create();
+		handler.Respond(HttpStatusCode.BadRequest, """{"error":"validation","message":"nope"}""");
+		handler.Respond(HttpStatusCode.OK, "not json");
+		handler.Respond(HttpStatusCode.OK, "null");
+		handler.Respond(HttpStatusCode.OK, """{"docs":[],"skipped":[],"errors":[],"truncated":true}""");
+		SidecarMultiGetRequest request = new() { Pattern = "a*" };
+
+		Assert.Equal("validation", (await Assert.ThrowsAsync<SidecarException>(() => client.MultiGetAsync(request))).Code);
+		Assert.Equal(SidecarException.Malformed, (await Assert.ThrowsAsync<SidecarException>(() => client.MultiGetAsync(request))).Code);
+		Assert.Equal(SidecarException.Malformed, (await Assert.ThrowsAsync<SidecarException>(() => client.MultiGetAsync(request))).Code);
+		Assert.True((await client.MultiGetAsync(request)).Truncated);
+	}
+
+	[Fact]
+	public async Task BoundedReadStream_PassesThrough_AndCountsEveryReadPath()
+	{
+		using BoundedReadStream stream = new(new MemoryStream(new byte[10]), 4);
+		byte[] buffer = new byte[2];
+
+		Assert.True(stream.CanRead);
+		Assert.False(stream.CanSeek);
+		Assert.False(stream.CanWrite);
+		Assert.Throws<NotSupportedException>(() => stream.Length);
+		Assert.Throws<NotSupportedException>(() => stream.Position);
+		Assert.Throws<NotSupportedException>(() => stream.Position = 0);
+		Assert.Throws<NotSupportedException>(() => stream.Seek(0, SeekOrigin.Begin));
+		Assert.Throws<NotSupportedException>(() => stream.SetLength(0));
+		Assert.Throws<NotSupportedException>(() => stream.Write(buffer, 0, 2));
+		stream.Flush();
+
+		Assert.Equal(2, stream.Read(buffer, 0, 2));
+		Assert.Equal(2, await stream.ReadAsync(buffer, 0, 2, CancellationToken.None));
+		Assert.Throws<SidecarException>(() => stream.Read(buffer, 0, 2));
+	}
+
+	[Fact]
 	public void DocumentPath_RepeatsCollections_Encoded()
 	{
 		string path = MemoriaQmdClient.DocumentPath("a.md", new SidecarDocumentQuery(Body: false, Collections: ["x y", "z/&"]));

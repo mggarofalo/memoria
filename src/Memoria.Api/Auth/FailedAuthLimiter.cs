@@ -9,8 +9,10 @@ namespace Memoria.Api.Auth;
 /// <summary>
 /// Per-address budget for failed authentication. Key-based limits cannot apply
 /// until a key is valid, so without this every bad token costs a control-database
-/// lookup. Only failures spend the budget. Once an address is over it, its requests
-/// with a credential are refused before any lookup until the window ends.
+/// lookup. Each attempt reserves a failure before it may reach the store and a valid
+/// one gets it back, so the limit holds under concurrency. Once an address is over
+/// budget its credentials are refused before any lookup until the window ends, except
+/// for a secret in <see cref="KnownGoodKeys"/>.
 /// <para>
 /// Memory is bounded by two generations of half the cap each: a full current
 /// generation replaces the previous one, in constant time. A flood of distinct
@@ -49,39 +51,16 @@ public sealed class FailedAuthLimiter
 		}
 	}
 
-	/// <summary>True when this address must be refused without a lookup, with how long until its window ends.</summary>
-	public bool IsBlocked(string address, DateTimeOffset now, out TimeSpan retryAfter)
-	{
-		retryAfter = TimeSpan.Zero;
-		if (!_options.Enabled)
-		{
-			return false;
-		}
-
-		lock (_lock)
-		{
-			if (Find(address) is not { } entry || entry.Count < _options.PermitLimit)
-			{
-				return false;
-			}
-
-			TimeSpan remaining = entry.WindowStart + _options.Window - now;
-			if (remaining <= TimeSpan.Zero)
-			{
-				return false;
-			}
-
-			retryAfter = remaining;
-			return true;
-		}
-	}
-
-	/// <summary>Spends one failure. True exactly when this one used up the budget, so the crossing is logged once.</summary>
-	public bool RecordFailure(string address, DateTimeOffset now)
+	/// <summary>
+	/// Atomically checks the budget and spends one failure. Admitted means the caller
+	/// may go on to the store, so concurrent callers cannot all pass the check before
+	/// any of them is counted. Crossed is true for the one that used the budget up.
+	/// </summary>
+	public FailedAuthDecision TryReserve(string address, DateTimeOffset now)
 	{
 		if (!_options.Enabled)
 		{
-			return false;
+			return new FailedAuthDecision(true, false, TimeSpan.Zero);
 		}
 
 		lock (_lock)
@@ -92,16 +71,26 @@ public sealed class FailedAuthLimiter
 				entry = new Entry(now);
 			}
 
-			entry.Count++;
-			_previous.Remove(address);
-			if (!_current.ContainsKey(address) && _current.Count >= _generationSize)
+			if (entry.Count >= _options.PermitLimit)
 			{
-				_previous = _current;
-				_current = new Dictionary<string, Entry>(StringComparer.Ordinal);
+				return new FailedAuthDecision(false, false, entry.WindowStart + _options.Window - now);
 			}
 
-			_current[address] = entry;
-			return entry.Count == _options.PermitLimit;
+			entry.Count++;
+			Store(address, entry);
+			return new FailedAuthDecision(true, entry.Count == _options.PermitLimit, TimeSpan.Zero);
+		}
+	}
+
+	/// <summary>Gives back a reservation whose credential turned out to be valid.</summary>
+	public void Refund(string address)
+	{
+		lock (_lock)
+		{
+			if (Find(address) is { Count: > 0 } entry)
+			{
+				entry.Count--;
+			}
 		}
 	}
 
@@ -131,6 +120,18 @@ public sealed class FailedAuthLimiter
 		return $"{new IPAddress(bytes)}/64";
 	}
 
+	private void Store(string address, Entry entry)
+	{
+		_previous.Remove(address);
+		if (!_current.ContainsKey(address) && _current.Count >= _generationSize)
+		{
+			_previous = _current;
+			_current = new Dictionary<string, Entry>(StringComparer.Ordinal);
+		}
+
+		_current[address] = entry;
+	}
+
 	private Entry? Find(string address)
 	{
 		return _current.TryGetValue(address, out Entry? entry) || _previous.TryGetValue(address, out entry) ? entry : null;
@@ -143,6 +144,9 @@ public sealed class FailedAuthLimiter
 		public int Count { get; set; }
 	}
 }
+
+/// <summary>The outcome of <see cref="FailedAuthLimiter.TryReserve"/>.</summary>
+public readonly record struct FailedAuthDecision(bool Admitted, bool Crossed, TimeSpan RetryAfter);
 
 /// <summary>Marks a request refused by <see cref="FailedAuthLimiter"/>, so the challenge can answer 429.</summary>
 public sealed record FailedAuthThrottled(TimeSpan RetryAfter);

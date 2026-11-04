@@ -27,6 +27,7 @@ public static partial class AuthHosting
 		services.AddSingleton<IApiKeyStore, SqliteApiKeyStore>();
 		services.AddSingleton<LastUsedThrottle>();
 		services.AddSingleton<FailedAuthLimiter>();
+		services.AddSingleton(new KnownGoodKeys());
 		services.AddScoped<ICallerScope, HttpCallerScope>();
 		services.AddScoped<IRequestAudit, HttpRequestAudit>();
 		services.AddSingleton<IAuthorizationHandler, MemoriaScopeHandler>();
@@ -80,7 +81,9 @@ public static partial class AuthHosting
 			return;
 		}
 
-		await app.Services.GetRequiredService<IApiKeyStore>().InitializeAsync();
+		IApiKeyStore store = app.Services.GetRequiredService<IApiKeyStore>();
+		await store.InitializeAsync();
+		await app.Services.GetRequiredService<KnownGoodKeys>().LoadAsync(store, app.Services.GetRequiredService<TimeProvider>().GetUtcNow());
 	}
 
 	private static void TryAddTimeProvider(this IServiceCollection services)

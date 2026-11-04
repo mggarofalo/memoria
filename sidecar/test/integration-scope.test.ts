@@ -70,6 +70,18 @@ test("allowlisted reads stay inside the allowlist on a real index", { skip: enab
     const unscoped = (await multi({ pattern: "*/copy.md" })).json();
     assert.deepEqual(unscoped.docs.map((d: { file: string }) => d.file).sort(), ["alpha/copy.md", "beta/copy.md"]);
 
+    // With no allowlist, the flag still keeps a miss out of the SDK's scan, and a hit still resolves.
+    const noScan = await app.inject({ method: "GET", url: "/docs/nowhere/at-all.md?similarFiles=false", headers: authHeaders });
+    assert.equal(noScan.statusCode, 404);
+    assert.deepEqual(noScan.json().details, { similarFiles: [] });
+    assert.equal((await app.inject({ method: "GET", url: "/docs/beta/secret-plans.md?similarFiles=false", headers: authHeaders })).statusCode, 200);
+
+    // The budget lists what does not fit, unread, on a real index.
+    const budgeted = (await multi({ pattern: "*/*.md", maxTotalBytes: 60, similarFiles: false })).json();
+    assert.ok(budgeted.docs.length > 0);
+    assert.ok(budgeted.skipped.length > 0);
+    assert.ok(budgeted.docs.reduce((n: number, d: { body: string }) => n + Buffer.byteLength(d.body), 0) <= 60);
+
     // These wedged the event loop for good when they reached the SDK's matcher.
     for (const pattern of ["+(*)Z", "*(*)Z", "(*)*(*)*(*)*Z", "@(*|*)+Z", `${"*?".repeat(20)}Z`]) {
       assert.equal((await multi({ pattern })).statusCode, 400, pattern);

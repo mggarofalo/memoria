@@ -27,6 +27,7 @@ never starts half-configured.
 |---|---|---|
 | `DefaultLimit` | `10` | Used when the caller omits `limit`. |
 | `MaxLimit` | `100` | Largest `limit` accepted; the sidecar caps at 100 regardless. |
+| `MaxMultiGetBytes` | `16777216` | Total bytes of document bodies in one `POST /v1/docs:multiGet` response (16 MiB). The sidecar stops reading at this budget and lists the rest under `skipped`. At most 256 MiB. |
 | `RerankByDefault` | `true` | Full reranked hybrid search unless the caller passes `rerank=false`. Reranked queries were benchmarked as viable on a GPU host. |
 | `DefaultCollections` | unset | Collections searched when the caller names none. Unset defers to QMD's default-included set. |
 
@@ -63,7 +64,7 @@ claude mcp add --transport http memoria http://<api-host>:8080/mcp \
 | `RateLimit:Window` | `00:01:00` | Length of the fixed window. |
 | `TrustedProxies` | empty | Proxies whose `X-Forwarded-For` is believed, as IPs or CIDR ranges. Empty means the socket address is the client and the header is ignored, and loopback is not trusted implicitly. A `/0` range or an unparseable entry stops the host. See [the reverse proxy section](deployment.md#reverse-proxy-and-tls): behind a proxy this must be set. |
 | `FailedAuth:Enabled` | `true` | Limit failed authentication per client address. |
-| `FailedAuth:PermitLimit` | `20` | Failed attempts one address may make per window. After that its requests with a credential get `429` and `Retry-After` with no database lookup, even with a valid key, until the window ends. Requests that authenticate spend nothing. An IPv6 client is counted by its /64. |
+| `FailedAuth:PermitLimit` | `20` | Failed attempts one address may make per window. Past it, a credential from that address gets `429` and `Retry-After` with no database lookup until the window ends, unless its secret matches a key this process already knows. Requests that authenticate spend nothing. An IPv6 client is counted by its /64. |
 | `FailedAuth:Window` | `00:01:00` | Length of the fixed window. |
 | `FailedAuth:MaxTrackedAddresses` | `10000` | Addresses held in memory. A flood of distinct addresses can make the limiter forget an address early, never grow past this. |
 | `Audit:IncludeQueries` | `false` | Also record search queries and document references in the audit log. Queries can be as sensitive as the corpus, so this is off unless you opt in. Document content is never recorded. |
@@ -129,8 +130,6 @@ For a collection-scoped key:
   list, with the same body as a real miss. The list goes to the sidecar, which
   resolves the reference only inside it: nothing outside is matched, scanned or read.
   A docid shared with a duplicate document elsewhere finds the key's own copy.
-  Resolution is narrower than for an all-collections key: docid, `qmd://` URI,
-  `collection/path`, bare path, or path-boundary suffix, but not an arbitrary fragment.
 - **`POST /v1/docs:multiGet`** matches and reads only inside the list, and filters
   `docs` and `skipped` per result again on the way out. `errors` is always empty, so
   a reference with no readable match is simply absent.
@@ -138,6 +137,19 @@ For a collection-scoped key:
   `totalDocuments` is their sum, and `needsEmbedding` is `null`, because QMD reports
   that backlog only for the whole index.
 - **Sidecar errors** carry no sidecar detail about documents.
+
+### Failed authentication and shared addresses
+
+Each attempt reserves a failure before it may reach the database, and a valid key gets
+it back, so the limit holds exactly under concurrency. A valid key is not locked out by
+an attacker at the same address: the API keeps the hashes of known keys in memory, from
+startup, key management and successful use, and a matching secret skips the budget. A
+match still goes to the database, which decides revocation and expiry. A wrong secret
+never matches, so a guesser gets no bypass.
+
+The tradeoff: a key this process has not seen waits out the window if its address is
+over budget. That only happens for a key created by another process since startup, such
+as a second bootstrap, or past 10,000 known keys. Restarting the API loads it.
 
 ### Batch selector limits
 
@@ -153,6 +165,13 @@ bounded time and never reach QMD.
 | Glob length and count | 256 characters, 10 globs per request. An entry in `ids` holding a wildcard counts as a glob. |
 | References | 200 per request, 1024 characters each, and no commas inside an `ids` entry. |
 | `maxBytes` | At most 1048576 (1 MiB) per document. Read longer documents a range at a time with `GET /v1/docs/{id}`. |
+| Response size | `Memoria:Search:MaxMultiGetBytes` for all bodies together. Documents past it are listed under `skipped` and are not read. |
+| Documents from globs | 1000 per request. Past that, `truncated` is `true` in the response and the rest are not looked at. |
+
+References resolve the same way for every key: docid, `qmd://` URI, `collection/path`,
+bare path, or path-boundary suffix, but not an arbitrary fragment. A miss returns no
+suggestions: producing them means comparing the reference with every path in the index,
+which blocks the sidecar.
 
 ### Anonymous routes
 

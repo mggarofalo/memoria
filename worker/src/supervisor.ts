@@ -114,6 +114,8 @@ class ManagedServer {
   #attempt = 0;
   #startedAt = 0;
   #failedChecks = 0;
+  /** Bumped on every exit, so a health probe still in flight can tell it is out of date. */
+  #generation = 0;
   #timer: NodeJS.Timeout | undefined;
   #stderrTail = "";
 
@@ -150,6 +152,7 @@ class ManagedServer {
     if (this.child === undefined) return;
     this.child = undefined;
     this.loaded = false;
+    this.#generation++;
     this.#clearTimer();
     if (this.#owner.stopping) {
       this.state = "stopped";
@@ -179,6 +182,7 @@ class ManagedServer {
 
   async #check(): Promise<void> {
     const t = this.#owner.timings;
+    const generation = this.#generation;
     let healthy = false;
     try {
       const response = await this.#owner.fetchFn(new URL("health", this.#owner.baseUrl(this.config)), { signal: AbortSignal.timeout(t.healthTimeoutMs) });
@@ -187,9 +191,10 @@ class ManagedServer {
     } catch {
       healthy = false;
     }
-    // The server may have exited while this check was in flight. Scheduling another
-    // check now would overwrite the timer that restarts it.
-    if (this.#owner.stopping || this.state === "backoff") return;
+    // The server may have exited while this check was in flight. Its answer describes
+    // a dead process: scheduling another check now would overwrite the timer that
+    // restarts it, and a late "healthy" would mark the next process ready too soon.
+    if (this.#owner.stopping || generation !== this.#generation) return;
     if (healthy) {
       if (this.state !== "ready") this.#owner.log.info({ role: this.config.role, startMs: Date.now() - this.#startedAt }, "llama-server ready");
       this.state = "ready";

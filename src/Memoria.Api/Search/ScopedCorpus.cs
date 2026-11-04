@@ -1,9 +1,12 @@
 using System.Net;
+using System.Text;
 using Memoria.Api.Auth;
+using Memoria.Api.Configuration;
 using Memoria.Api.Endpoints;
 using Memoria.Api.Http;
 using Memoria.Core.Contracts;
 using Memoria.Core.Sidecar;
+using Microsoft.Extensions.Options;
 
 namespace Memoria.Api.Search;
 
@@ -13,7 +16,7 @@ namespace Memoria.Api.Search;
 /// result is checked again on the way out even when the sidecar was asked for
 /// the right collections: the sidecar is not a security boundary.
 /// </summary>
-public sealed class ScopedCorpus(IMemoriaQmdClient sidecar, ICallerScope scope, IRequestAudit audit)
+public sealed class ScopedCorpus(IMemoriaQmdClient sidecar, ICallerScope scope, IRequestAudit audit, IOptions<MemoriaOptions> options)
 {
 	private bool ReadsNothing => scope.Collections is { Count: 0 };
 
@@ -65,8 +68,9 @@ public sealed class ScopedCorpus(IMemoriaQmdClient sidecar, ICallerScope scope, 
 		{
 			// The allowlist goes to the sidecar so it never looks outside it. A
 			// lookup it had to resolve globally would answer faster for a document
-			// that exists than for one that does not, and would read its body.
-			document = await sidecar.GetDocumentAsync(reference, query with { Collections = scope.Collections?.ToArray() }, cancellationToken);
+			// that exists than for one that does not, and would read its body. And no
+			// caller asks for similar files, whose scan of every path blocks the sidecar.
+			document = await sidecar.GetDocumentAsync(reference, query with { Collections = scope.Collections?.ToArray(), SimilarFiles = false }, cancellationToken);
 		}
 		catch (SidecarException ex) when (IsRestricted && ex.StatusCode == HttpStatusCode.NotFound)
 		{
@@ -97,16 +101,42 @@ public sealed class ScopedCorpus(IMemoriaQmdClient sidecar, ICallerScope scope, 
 		if (ReadsNothing)
 		{
 			audit.SetResult([], 0);
-			return new MultiGetResult([], [], []);
+			return new MultiGetResult([], [], [], false);
 		}
 
-		SidecarMultiGetResponse response = await sidecar.MultiGetAsync(request with { Collections = scope.Collections?.ToArray() }, cancellationToken);
-		SidecarDocument[] docs = response.Docs.Where(doc => scope.Allows(doc.Collection)).ToArray();
+		int budget = options.Value.Search.MaxMultiGetBytes;
+		SidecarMultiGetResponse response = await sidecar.MultiGetAsync(
+			request with { Collections = scope.Collections?.ToArray(), SimilarFiles = false, MaxTotalBytes = budget },
+			cancellationToken);
+		List<SkippedDocument> skipped = response.Skipped.Where(entry => scope.AllowsFile(entry.File)).Select(static entry => new SkippedDocument(entry.File, entry.Reason)).ToList();
+		SidecarDocument[] docs = WithinBudget(response.Docs.Where(doc => scope.Allows(doc.Collection)), budget, skipped);
 		audit.SetResult(docs.Select(static doc => doc.Collection), docs.Length);
 		return new MultiGetResult(
 			docs.Select(ContractMapping.ToContract).ToArray(),
-			response.Skipped.Where(skipped => scope.AllowsFile(skipped.File)).Select(static skipped => new SkippedDocument(skipped.File, skipped.Reason)).ToArray(),
-			IsRestricted ? [] : response.Errors);
+			skipped,
+			IsRestricted ? [] : response.Errors,
+			response.Truncated);
+	}
+
+	/// <summary>The sidecar stops reading at the budget; this holds the line again on what it sent, in bytes.</summary>
+	private static SidecarDocument[] WithinBudget(IEnumerable<SidecarDocument> docs, int budget, List<SkippedDocument> skipped)
+	{
+		List<SidecarDocument> kept = [];
+		long remaining = budget;
+		foreach (SidecarDocument doc in docs)
+		{
+			int bytes = doc.Body is null ? 0 : Encoding.UTF8.GetByteCount(doc.Body);
+			if (bytes > remaining)
+			{
+				skipped.Add(new SkippedDocument(doc.File, "Response size budget reached"));
+				continue;
+			}
+
+			remaining -= bytes;
+			kept.Add(doc);
+		}
+
+		return kept.ToArray();
 	}
 
 	public async Task<CollectionList> ListCollectionsAsync(CancellationToken cancellationToken)

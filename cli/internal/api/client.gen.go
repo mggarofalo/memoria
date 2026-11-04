@@ -135,9 +135,10 @@ type MultiGetRequest struct {
 
 // MultiGetResult defines model for MultiGetResult.
 type MultiGetResult struct {
-	Docs    []Document        `json:"docs"`
-	Errors  []string          `json:"errors"`
-	Skipped []SkippedDocument `json:"skipped"`
+	Docs      []Document        `json:"docs"`
+	Errors    []string          `json:"errors"`
+	Skipped   []SkippedDocument `json:"skipped"`
+	Truncated bool              `json:"truncated"`
 }
 
 // ProblemDetails defines model for ProblemDetails.

@@ -29,16 +29,37 @@ public sealed class FailedAuthLimiterTests
 	{
 		FailedAuthLimiter limiter = Limiter();
 
-		Assert.False(limiter.RecordFailure("a", Now));
-		Assert.False(limiter.RecordFailure("a", Now.AddSeconds(1)));
-		Assert.False(limiter.IsBlocked("a", Now.AddSeconds(1), out _));
-		Assert.True(limiter.RecordFailure("a", Now.AddSeconds(2)));
+		Assert.Equal(new FailedAuthDecision(true, false, TimeSpan.Zero), limiter.TryReserve("a", Now));
+		Assert.False(limiter.TryReserve("a", Now.AddSeconds(1)).Crossed);
+		Assert.Equal(new FailedAuthDecision(true, true, TimeSpan.Zero), limiter.TryReserve("a", Now.AddSeconds(2)));
 
-		Assert.True(limiter.IsBlocked("a", Now.AddSeconds(10), out TimeSpan retryAfter));
-		Assert.Equal(TimeSpan.FromSeconds(50), retryAfter);
-		Assert.False(limiter.RecordFailure("a", Now.AddSeconds(11)));
-		Assert.False(limiter.IsBlocked("b", Now.AddSeconds(10), out _));
-		Assert.False(limiter.IsBlocked("a", Now.AddMinutes(1), out _));
+		Assert.Equal(new FailedAuthDecision(false, false, TimeSpan.FromSeconds(50)), limiter.TryReserve("a", Now.AddSeconds(10)));
+		Assert.True(limiter.TryReserve("b", Now.AddSeconds(10)).Admitted);
+		Assert.True(limiter.TryReserve("a", Now.AddMinutes(1)).Admitted);
+	}
+
+	[Fact]
+	public async Task ConcurrentReservations_NeverPassTheLimit()
+	{
+		FailedAuthLimiter limiter = Limiter(permits: 20);
+
+		bool[] admitted = await Task.WhenAll(Enumerable.Range(0, 2000).Select(_ => Task.Run(() => limiter.TryReserve("a", Now).Admitted)));
+
+		Assert.Equal(20, admitted.Count(static a => a));
+	}
+
+	[Fact]
+	public void Refund_GivesAReservationBack_AndIgnoresAnAddressWithNothingSpent()
+	{
+		FailedAuthLimiter limiter = Limiter(permits: 1);
+		limiter.Refund("never-seen");
+
+		Assert.True(limiter.TryReserve("a", Now).Admitted);
+		limiter.Refund("a");
+		limiter.Refund("a");
+
+		Assert.True(limiter.TryReserve("a", Now).Admitted);
+		Assert.False(limiter.TryReserve("a", Now).Admitted);
 	}
 
 	[Fact]
@@ -46,9 +67,9 @@ public sealed class FailedAuthLimiterTests
 	{
 		FailedAuthLimiter limiter = Limiter(permits: 1, enabled: false);
 
-		limiter.RecordFailure("a", Now);
+		limiter.TryReserve("a", Now);
 
-		Assert.False(limiter.IsBlocked("a", Now, out _));
+		Assert.True(limiter.TryReserve("a", Now).Admitted);
 		Assert.Equal(0, limiter.TrackedAddresses);
 	}
 
@@ -59,7 +80,7 @@ public sealed class FailedAuthLimiterTests
 
 		for (int i = 0; i < 200_000; i++)
 		{
-			limiter.RecordFailure($"10.{i >> 16 & 255}.{i >> 8 & 255}.{i & 255}", Now);
+			limiter.TryReserve($"10.{i >> 16 & 255}.{i >> 8 & 255}.{i & 255}", Now);
 			Assert.True(limiter.TrackedAddresses <= 1000);
 		}
 	}
@@ -68,16 +89,16 @@ public sealed class FailedAuthLimiterTests
 	public void RecentlyActiveAddress_SurvivesARotation_WhileItKeepsFailing()
 	{
 		FailedAuthLimiter limiter = Limiter(permits: 3, maxTracked: 100);
-		limiter.RecordFailure("attacker", Now);
-		limiter.RecordFailure("attacker", Now);
-		limiter.RecordFailure("attacker", Now);
+		limiter.TryReserve("attacker", Now);
+		limiter.TryReserve("attacker", Now);
+		limiter.TryReserve("attacker", Now);
 
 		for (int i = 0; i < 60; i++)
 		{
-			limiter.RecordFailure($"other-{i}", Now);
+			limiter.TryReserve($"other-{i}", Now);
 		}
 
-		Assert.True(limiter.IsBlocked("attacker", Now, out _));
+		Assert.False(limiter.TryReserve("attacker", Now).Admitted);
 	}
 
 	[Theory]
@@ -281,6 +302,31 @@ public sealed class FailedAuthPipelineTests(AuthApiFactory factory) : IClassFixt
 	}
 
 	[Fact]
+	public void KnownGoodKeys_MatchesOnlyTheExactHash_ForgetsOnRequest_AndIsBounded()
+	{
+		KnownGoodKeys keys = new(capacity: 2);
+		byte[] hash = ApiKeyToken.Hash("a");
+		keys.Remember("a", hash);
+
+		Assert.True(keys.Matches("a", hash));
+		Assert.False(keys.Matches("a", ApiKeyToken.Hash("other")));
+		Assert.False(keys.Matches("missing", hash));
+
+		keys.Remember("b", hash);
+		keys.Remember("c", hash);
+		Assert.Equal(2, keys.Count);
+		Assert.False(keys.Matches("c", hash));
+
+		byte[] rotated = ApiKeyToken.Hash("rotated");
+		keys.Remember("a", rotated);
+		Assert.True(keys.Matches("a", rotated));
+		Assert.False(keys.Matches("a", hash));
+
+		keys.Forget("a");
+		Assert.False(keys.Matches("a", rotated));
+	}
+
+	[Fact]
 	public async Task ValidKeyRequests_DoNotSpendTheBudget()
 	{
 		string token = await ValidTokenAsync();
@@ -294,15 +340,208 @@ public sealed class FailedAuthPipelineTests(AuthApiFactory factory) : IClassFixt
 	}
 
 	[Fact]
-	public async Task ValidKey_FromAnAddressOverBudget_WaitsLikeAnyoneThere()
+	public async Task FiftyWorkerFlood_ReachesTheStoreExactlyTheLimit()
+	{
+		CountingStore counting = new(factory.Store);
+		using WebApplicationFactory<Program> limited = Limited(permits: 20, counting: counting);
+		HttpClient client = limited.CreateClient();
+		int unauthorized = 0;
+		int throttled = 0;
+
+		await Task.WhenAll(Enumerable.Range(0, 50).Select(async _ =>
+		{
+			for (int i = 0; i < 20; i++)
+			{
+				HttpStatusCode status = (await SendAsync(client, Attacker, BadToken())).StatusCode;
+				Interlocked.Increment(ref status == HttpStatusCode.Unauthorized ? ref unauthorized : ref throttled);
+			}
+		}));
+
+		Assert.Equal(20, unauthorized);
+		Assert.Equal(980, throttled);
+		Assert.Equal(20, counting.Lookups);
+	}
+
+	[Fact]
+	public async Task KnownValidKey_AtAnAddressOverBudget_KeepsWorking_WhileBadTokensThereDoNot()
 	{
 		string token = await ValidTokenAsync();
+		CountingStore counting = new(factory.Store);
+		using WebApplicationFactory<Program> limited = Limited(permits: 2, counting: counting);
+		HttpClient client = limited.CreateClient();
+		Assert.Equal(HttpStatusCode.OK, (await SendAsync(client, Victim, token)).StatusCode);
+
+		await SendAsync(client, Attacker, BadToken());
+		await SendAsync(client, Attacker, BadToken());
+		int lookups = counting.Lookups;
+
+		Assert.Equal(HttpStatusCode.TooManyRequests, (await SendAsync(client, Attacker, BadToken())).StatusCode);
+		Assert.Equal(lookups, counting.Lookups);
+		Assert.Equal(HttpStatusCode.OK, (await SendAsync(client, Attacker, token)).StatusCode);
+		Assert.Equal(lookups + 1, counting.Lookups);
+		Assert.Equal(HttpStatusCode.TooManyRequests, (await SendAsync(client, Attacker, BadToken())).StatusCode);
+	}
+
+	[Fact]
+	public async Task WrongSecretForAKnownId_GetsNoBypass()
+	{
+		factory.Sidecar.On("GET", "/collections", HttpStatusCode.OK, SidecarFixtures.Collections);
+		(ApiKeyRecord record, string token) = await factory.IssueAsync([MemoriaScopes.Read], allCollections: true);
+		CountingStore counting = new(factory.Store);
+		using WebApplicationFactory<Program> limited = Limited(permits: 2, counting: counting);
+		HttpClient client = limited.CreateClient();
+		await SendAsync(client, Victim, token);
+		await SendAsync(client, Attacker, ApiKeyToken.NewToken(record.Id));
+		await SendAsync(client, Attacker, ApiKeyToken.NewToken(record.Id));
+		int lookups = counting.Lookups;
+
+		Assert.Equal(HttpStatusCode.TooManyRequests, (await SendAsync(client, Attacker, ApiKeyToken.NewToken(record.Id))).StatusCode);
+		Assert.Equal(lookups, counting.Lookups);
+	}
+
+	[Fact]
+	public async Task RevokedKey_LosesTheBypass_AtItsNextRequest()
+	{
+		string token = await ValidTokenAsync();
+		ApiKeyToken.TryParseId(token, out string? id);
+		CountingStore counting = new(factory.Store);
+		using WebApplicationFactory<Program> limited = Limited(permits: 2, counting: counting);
+		HttpClient client = limited.CreateClient();
+		Assert.Equal(HttpStatusCode.OK, (await SendAsync(client, Victim, token)).StatusCode);
+		await SendAsync(client, Attacker, BadToken());
+		await SendAsync(client, Attacker, BadToken());
+		await factory.Store.RevokeAsync(id!, DateTimeOffset.UtcNow);
+		int lookups = counting.Lookups;
+
+		// The store still decides: one lookup finds it revoked, and after that it is like any bad token.
+		Assert.Equal(HttpStatusCode.TooManyRequests, (await SendAsync(client, Attacker, token)).StatusCode);
+		Assert.Equal(lookups + 1, counting.Lookups);
+		Assert.Equal(HttpStatusCode.TooManyRequests, (await SendAsync(client, Attacker, token)).StatusCode);
+		Assert.Equal(lookups + 1, counting.Lookups);
+	}
+
+	[Fact]
+	public async Task RevokedKey_AtAnAddressWithBudget_Is401AndSpendsAFailure()
+	{
+		string token = await ValidTokenAsync();
+		ApiKeyToken.TryParseId(token, out string? id);
+		using WebApplicationFactory<Program> limited = Limited(permits: 1);
+		HttpClient client = limited.CreateClient();
+		Assert.Equal(HttpStatusCode.OK, (await SendAsync(client, Victim, token)).StatusCode);
+		await factory.Store.RevokeAsync(id!, DateTimeOffset.UtcNow);
+
+		Assert.Equal(HttpStatusCode.Unauthorized, (await SendAsync(client, Victim, token)).StatusCode);
+		Assert.Equal(HttpStatusCode.TooManyRequests, (await SendAsync(client, Victim, token)).StatusCode);
+	}
+
+	[Fact]
+	public async Task KeyTheProcessHasNeverSeen_WaitsOutTheWindow_AtAnAddressOverBudget()
+	{
 		using WebApplicationFactory<Program> limited = Limited(permits: 2);
 		HttpClient client = limited.CreateClient();
 		await SendAsync(client, Attacker, BadToken());
 		await SendAsync(client, Attacker, BadToken());
+		string created = await ValidTokenAsync();
 
-		Assert.Equal(HttpStatusCode.TooManyRequests, (await SendAsync(client, Attacker, token)).StatusCode);
+		Assert.Equal(HttpStatusCode.TooManyRequests, (await SendAsync(client, Attacker, created)).StatusCode);
+		Assert.Equal(HttpStatusCode.OK, (await SendAsync(client, Victim, created)).StatusCode);
+		Assert.Equal(HttpStatusCode.OK, (await SendAsync(client, Attacker, created)).StatusCode);
+	}
+
+	[Fact]
+	public async Task KeysAlreadyInTheStore_AreKnownFromStartup()
+	{
+		string token = await ValidTokenAsync();
+		using WebApplicationFactory<Program> limited = Limited(permits: 1);
+		HttpClient client = limited.CreateClient();
+		await SendAsync(client, Attacker, BadToken());
+
+		Assert.Equal(HttpStatusCode.OK, (await SendAsync(client, Attacker, token)).StatusCode);
+	}
+
+	[Fact]
+	public async Task ValidUnknownKey_GetsItsReservationBack()
+	{
+		using WebApplicationFactory<Program> limited = Limited(permits: 1);
+		HttpClient client = limited.CreateClient();
+		string created = await ValidTokenAsync();
+
+		Assert.Equal(HttpStatusCode.OK, (await SendAsync(client, Victim, created)).StatusCode);
+		Assert.Equal(HttpStatusCode.Unauthorized, (await SendAsync(client, Victim, BadToken())).StatusCode);
+	}
+
+	[Fact]
+	public async Task MalformedCredentials_SpendTheBudget_WithoutALookup()
+	{
+		CountingStore counting = new(factory.Store);
+		using WebApplicationFactory<Program> limited = Limited(permits: 2, counting: counting);
+		HttpClient client = limited.CreateClient();
+		int before = counting.Lookups;
+
+		Assert.Equal(HttpStatusCode.Unauthorized, (await SendAsync(client, Attacker, "garbage")).StatusCode);
+		Assert.Equal(HttpStatusCode.Unauthorized, (await SendAsync(client, Attacker, "garbage")).StatusCode);
+		Assert.Equal(HttpStatusCode.TooManyRequests, (await SendAsync(client, Attacker, "garbage")).StatusCode);
+		Assert.Equal(before, counting.Lookups);
+	}
+
+	[Fact]
+	public async Task PrivatePeerWithForwardedFor_WarnsOncePerHour_AndTheHeaderIsNotBelieved()
+	{
+		string token = await ValidTokenAsync();
+		using WebApplicationFactory<Program> limited = Limited(permits: 1);
+		HttpClient client = limited.CreateClient();
+		factory.Logs.Clear();
+
+		await SendAsync(client, Proxy, BadToken(), Attacker);
+		await SendAsync(client, Proxy, BadToken(), Victim);
+
+		Assert.Single(factory.Logs, static l => l.EventId.Id == 3003 && l.Message.Contains(Proxy, StringComparison.Ordinal) && l.Message.Contains("TrustedProxies", StringComparison.Ordinal));
+		Assert.Equal(HttpStatusCode.TooManyRequests, (await SendAsync(client, Proxy, BadToken(), "192.0.2.1")).StatusCode);
+		Assert.Equal(HttpStatusCode.OK, (await SendAsync(client, Victim, token)).StatusCode);
+	}
+
+	[Theory]
+	[InlineData(Attacker, Attacker, null)]
+	[InlineData(Proxy, Attacker, Proxy)]
+	[InlineData(Proxy, null, null)]
+	public async Task NoWarning_ForAPublicPeer_ATrustedProxy_OrNoHeader(string peer, string? forwardedFor, string? trusted)
+	{
+		using WebApplicationFactory<Program> limited = Limited(trustedProxy: trusted);
+		HttpClient client = limited.CreateClient();
+		factory.Logs.Clear();
+
+		await SendAsync(client, peer, BadToken(), forwardedFor);
+
+		Assert.DoesNotContain(factory.Logs, static l => l.EventId.Id == 3003);
+	}
+
+	[Theory]
+	[InlineData("10.1.2.3", true)]
+	[InlineData("172.16.0.1", true)]
+	[InlineData("172.31.255.255", true)]
+	[InlineData("172.32.0.1", false)]
+	[InlineData("172.15.0.1", false)]
+	[InlineData("192.168.1.1", true)]
+	[InlineData("192.169.1.1", false)]
+	[InlineData("169.254.0.1", true)]
+	[InlineData("169.253.0.1", false)]
+	[InlineData("127.0.0.1", true)]
+	[InlineData("::1", true)]
+	[InlineData("::ffff:10.0.0.1", true)]
+	[InlineData("fe80::1", true)]
+	[InlineData("fd00::1", true)]
+	[InlineData("fc00::1", true)]
+	[InlineData("2001:db8::1", false)]
+	[InlineData("8.8.8.8", false)]
+	public void IsPrivate_RecognisesProxyLikeAddresses(string address, bool expected)
+	{
+		Assert.Equal(expected, ForwardedHeaderWarning.IsPrivate(IPAddress.Parse(address)));
+	}
+
+	[Fact]
+	public void IsPrivate_HandlesNoAddress()
+	{
+		Assert.False(ForwardedHeaderWarning.IsPrivate(null));
 	}
 
 	[Fact]

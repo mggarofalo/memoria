@@ -229,14 +229,15 @@ public sealed class CollectionScopeTests(AuthApiFactory factory) : IClassFixture
 	}
 
 	[Fact]
-	public async Task GetDocument_AllCollectionsKey_StillGetsSimilarFiles()
+	public async Task GetDocument_AllCollectionsKey_GetsNoSuggestions_EvenIfASidecarSendsThem()
 	{
 		factory.Sidecar.On("GET", "/docs/near-miss.md", HttpStatusCode.NotFound, """{"error":"not_found","message":"Document not found: near-miss.md","details":{"similarFiles":["codex-sessions/near-miss-2.md"]}}""");
 		HttpClient everything = await factory.ClientWithScopesAsync([MemoriaScopes.Read], allCollections: true);
 
 		string raw = await (await everything.GetAsync("/v1/docs/near-miss.md")).Content.ReadAsStringAsync();
 
-		Assert.Contains("near-miss-2.md", raw);
+		Assert.DoesNotContain("near-miss-2.md", raw);
+		Assert.DoesNotContain("similarFiles", raw);
 	}
 
 	[Theory]

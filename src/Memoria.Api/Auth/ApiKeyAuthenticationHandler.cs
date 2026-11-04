@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics.CodeAnalysis;
 using System.Security.Claims;
 using System.Text.Encodings.Web;
 using Memoria.Api.Http;
@@ -71,6 +72,7 @@ public sealed partial class ApiKeyAuthenticationHandler(
 	IApiKeyStore store,
 	LastUsedThrottle throttle,
 	FailedAuthLimiter failedAuth,
+	KnownGoodKeys knownGood,
 	TimeProvider timeProvider)
 	: AuthenticationHandler<AuthenticationSchemeOptions>(options, loggerFactory, encoder)
 {
@@ -90,45 +92,102 @@ public sealed partial class ApiKeyAuthenticationHandler(
 			return AuthenticateResult.NoResult();
 		}
 
-		// Spent budget means no lookup and no log line, so a flood costs almost nothing.
-		if (failedAuth.IsBlocked(ClientKey, timeProvider.GetUtcNow(), out TimeSpan retryAfter))
+		if (!TryReadToken(values, out string? token, out string? id))
 		{
-			Context.Features.Set(new FailedAuthThrottled(retryAfter));
-			return AuthenticateResult.Fail("throttled");
+			return SpendBudget() ?? Rejected("malformed", null);
 		}
 
-		string? header = values.Count == 1 ? values[0] : null;
-		if (header is null || !header.StartsWith(BearerPrefix, StringComparison.OrdinalIgnoreCase))
+		// A secret this process knows skips the address's budget, so a valid key is not
+		// locked out by an attacker sharing its address. Anything else reserves one
+		// failure before it may touch the store, which makes the limit hold under
+		// concurrency, and gets it back only if it turns out to be valid.
+		byte[] hash = ApiKeyToken.Hash(token);
+		bool known = knownGood.Matches(id, hash);
+		if (!known && SpendBudget() is { } throttled)
 		{
-			return Reject("malformed", null);
-		}
-
-		string token = header[BearerPrefix.Length..].Trim();
-		if (!ApiKeyToken.TryParseId(token, out string? id))
-		{
-			return Reject("malformed", null);
+			return throttled;
 		}
 
 		ApiKeyRecord? record = await store.FindAsync(id, Context.RequestAborted);
-		bool matches = ApiKeyToken.HashesMatch(ApiKeyToken.Hash(token), record?.Sha256Hash ?? PlaceholderHash);
-		if (record is null || !matches)
+		DateTimeOffset now = timeProvider.GetUtcNow();
+		if (WhyRejected(record, hash, now) is { } reason)
 		{
-			return Reject(record is null ? "unknown id" : "wrong secret", id);
+			return RejectedAfterLookup(reason, id, known);
 		}
 
-		DateTimeOffset now = timeProvider.GetUtcNow();
+		if (!known)
+		{
+			failedAuth.Refund(ClientKey);
+		}
+
+		knownGood.Remember(id, hash);
+		await TouchAsync(id, now);
+		return AuthenticateResult.Success(new AuthenticationTicket(BuildPrincipal(record!), Scheme.Name));
+	}
+
+	private static bool TryReadToken(StringValues values, [NotNullWhen(true)] out string? token, [NotNullWhen(true)] out string? id)
+	{
+		token = null;
+		id = null;
+		string? header = values.Count == 1 ? values[0] : null;
+		if (header is null || !header.StartsWith(BearerPrefix, StringComparison.OrdinalIgnoreCase))
+		{
+			return false;
+		}
+
+		token = header[BearerPrefix.Length..].Trim();
+		return ApiKeyToken.TryParseId(token, out id);
+	}
+
+	private static string? WhyRejected(ApiKeyRecord? record, byte[] hash, DateTimeOffset now)
+	{
+		bool matches = ApiKeyToken.HashesMatch(hash, record?.Sha256Hash ?? PlaceholderHash);
+		if (record is null)
+		{
+			return "unknown id";
+		}
+
+		if (!matches)
+		{
+			return "wrong secret";
+		}
+
 		if (record.IsRevoked)
 		{
-			return Reject("revoked", id);
+			return "revoked";
 		}
 
-		if (record.IsExpired(now))
+		return record.IsExpired(now) ? "expired" : null;
+	}
+
+	/// <summary>Reserves one failure. Null when there was budget; otherwise the throttled result, with no log line, so a flood costs almost nothing.</summary>
+	private AuthenticateResult? SpendBudget()
+	{
+		FailedAuthDecision decision = failedAuth.TryReserve(ClientKey, timeProvider.GetUtcNow());
+		if (decision.Crossed)
 		{
-			return Reject("expired", id);
+			LogAddressThrottled(_log, ClientKey);
 		}
 
-		await TouchAsync(id, now);
-		return AuthenticateResult.Success(new AuthenticationTicket(BuildPrincipal(record), Scheme.Name));
+		if (decision.Admitted)
+		{
+			return null;
+		}
+
+		Context.Features.Set(new FailedAuthThrottled(decision.RetryAfter));
+		return AuthenticateResult.Fail("throttled");
+	}
+
+	/// <summary>A known key that failed was revoked, expired or rotated elsewhere: it stops being known, and pays like any other failure.</summary>
+	private AuthenticateResult RejectedAfterLookup(string reason, string id, bool known)
+	{
+		if (known)
+		{
+			knownGood.Forget(id);
+			_ = SpendBudget();
+		}
+
+		return Rejected(reason, id);
 	}
 
 	protected override async Task HandleChallengeAsync(AuthenticationProperties properties)
@@ -185,14 +244,9 @@ public sealed partial class ApiKeyAuthenticationHandler(
 		}
 	}
 
-	private AuthenticateResult Reject(string reason, string? keyId)
+	private AuthenticateResult Rejected(string reason, string? keyId)
 	{
 		LogRejected(_log, reason, keyId);
-		if (failedAuth.RecordFailure(ClientKey, timeProvider.GetUtcNow()))
-		{
-			LogAddressThrottled(_log, ClientKey);
-		}
-
 		return AuthenticateResult.Fail(reason);
 	}
 

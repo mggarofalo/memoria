@@ -85,6 +85,7 @@ public static partial class AdminKeyEndpoints
 		HttpContext context,
 		ILoggerFactory loggerFactory,
 		IRequestAudit audit,
+		KnownGoodKeys knownGood,
 		CancellationToken cancellationToken)
 	{
 		DateTimeOffset now = timeProvider.GetUtcNow();
@@ -99,6 +100,7 @@ public static partial class AdminKeyEndpoints
 		(ApiKeyRecord record, string token) = ApiKeyRecord.Issue(request.Label!.Trim(), scopes, collections, request.AllCollections == true, request.ExpiresAt, now);
 		await store.InsertAsync(record, cancellationToken);
 
+		knownGood.Remember(record.Id, record.Sha256Hash);
 		audit.SetTarget(ToAuditTarget(record));
 		LogIssued(loggerFactory.CreateLogger(typeof(AdminKeyEndpoints).FullName!), record.Id, Actor(context));
 		context.Response.Headers[HeaderNames.CacheControl] = "no-store";
@@ -118,6 +120,7 @@ public static partial class AdminKeyEndpoints
 		HttpContext context,
 		ILoggerFactory loggerFactory,
 		IRequestAudit audit,
+		KnownGoodKeys knownGood,
 		CancellationToken cancellationToken)
 	{
 		if (!await store.RevokeAsync(id, timeProvider.GetUtcNow(), cancellationToken))
@@ -125,6 +128,7 @@ public static partial class AdminKeyEndpoints
 			return UnknownKey();
 		}
 
+		knownGood.Forget(id);
 		if (await store.FindAsync(id, cancellationToken) is { } revoked)
 		{
 			audit.SetTarget(ToAuditTarget(revoked));
@@ -141,6 +145,7 @@ public static partial class AdminKeyEndpoints
 		HttpContext context,
 		ILoggerFactory loggerFactory,
 		IRequestAudit audit,
+		KnownGoodKeys knownGood,
 		CancellationToken cancellationToken)
 	{
 		ApiKeyRecord? record = await store.FindAsync(id, cancellationToken);
@@ -161,6 +166,7 @@ public static partial class AdminKeyEndpoints
 			return InactiveKey();
 		}
 
+		knownGood.Remember(id, hash);
 		audit.SetTarget(ToAuditTarget(record));
 		LogRotated(loggerFactory.CreateLogger(typeof(AdminKeyEndpoints).FullName!), id, Actor(context));
 		context.Response.Headers[HeaderNames.CacheControl] = "no-store";
@@ -185,31 +191,9 @@ public static partial class AdminKeyEndpoints
 			errors["scopes"] = ["Scopes must be read, ingest, or admin, in lower case."];
 		}
 
-		bool adminOnly = request.Scopes is { Count: > 0 } && request.Scopes.All(static scope => scope == MemoriaScopes.Admin);
-		bool allCollections = request.AllCollections == true;
-
-		if (allCollections && request.Collections is not null)
+		if (CollectionsProblem(request) is { } problem)
 		{
-			errors["collections"] = ["Set allCollections or list collections, not both."];
-		}
-		else if (request.Collections is null)
-		{
-			if (!allCollections && !adminOnly)
-			{
-				errors["collections"] = ["List the collections this key may read, or set allCollections to true to request every collection."];
-			}
-		}
-		else if (request.Collections.Count == 0)
-		{
-			errors["collections"] = ["An empty list is not allowed. List the collections this key may read, or set allCollections to true to request every collection."];
-		}
-		else if (request.Collections.Count > MaxCollectionsPerKey)
-		{
-			errors["collections"] = [$"At most {MaxCollectionsPerKey} collections per key."];
-		}
-		else if (request.Collections.Any(static name => !IsValidCollectionName(name)))
-		{
-			errors["collections"] = [$"Collection names must be 1 to {MaxCollectionNameLength} characters with no slash or surrounding whitespace. They are case-sensitive."];
+			errors["collections"] = [problem];
 		}
 
 		if (request.ExpiresAt is { } expiresAt && expiresAt <= now)
@@ -218,6 +202,38 @@ public static partial class AdminKeyEndpoints
 		}
 
 		return errors;
+	}
+
+	private static string? CollectionsProblem(CreateApiKeyRequest request)
+	{
+		bool allCollections = request.AllCollections == true;
+		if (request.Collections is not { } collections)
+		{
+			bool adminOnly = request.Scopes is { Count: > 0 } && request.Scopes.All(static scope => scope == MemoriaScopes.Admin);
+			return allCollections || adminOnly ? null : "List the collections this key may read, or set allCollections to true to request every collection.";
+		}
+
+		if (allCollections)
+		{
+			return "Set allCollections or list collections, not both.";
+		}
+
+		return ListProblem(collections);
+	}
+
+	private static string? ListProblem(IReadOnlyList<string> collections)
+	{
+		if (collections.Count == 0)
+		{
+			return "An empty list is not allowed. List the collections this key may read, or set allCollections to true to request every collection.";
+		}
+
+		if (collections.Count > MaxCollectionsPerKey)
+		{
+			return $"At most {MaxCollectionsPerKey} collections per key.";
+		}
+
+		return collections.All(IsValidCollectionName) ? null : $"Collection names must be 1 to {MaxCollectionNameLength} characters with no slash or surrounding whitespace. They are case-sensitive.";
 	}
 
 	private static bool IsValidCollectionName(string? name)

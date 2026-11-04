@@ -105,7 +105,7 @@ public sealed class McpEndpointTests(MemoriaApiFactory factory) : IClassFixture<
 		Assert.Equal("f6feba", result.StructuredContent!.Value.GetProperty("docid").GetString());
 		Assert.Equal("# Receipts\n\nhello", result.StructuredContent.Value.GetProperty("body").GetString());
 		FakeSidecar.RecordedRequest sent = Assert.Single(factory.Sidecar.Requests, r => r.Uri.AbsolutePath.StartsWith("/docs/", StringComparison.Ordinal));
-		Assert.Equal("?fromLine=40&maxLines=5", sent.Uri.Query);
+		Assert.Equal("?fromLine=40&maxLines=5&similarFiles=false", sent.Uri.Query);
 	}
 
 	[Fact]

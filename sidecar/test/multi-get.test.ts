@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { Worker } from "node:worker_threads";
 import picomatch from "picomatch";
 import { HttpError } from "../src/errors.ts";
-import { globViolation, MAX_BYTES_CEILING, matchGlob, parseSelectors, resolveReference } from "../src/multi-get.ts";
+import { globViolation, MAX_BYTES_CEILING, MAX_GLOB_DOCUMENTS, MAX_SCANNING_REFERENCES, MAX_TOTAL_BYTES_CEILING, matchGlob, parseSelectors, ReferenceIndex, resolveMultiGet, resolveReference } from "../src/multi-get.ts";
 import type { DocumentRef } from "../src/store.ts";
 import { authHeaders, makeApp, type TestApp } from "./helpers.ts";
 
@@ -97,7 +97,7 @@ test("globs never reach the SDK: it only receives the exact URIs that matched", 
   await withApp(async (app, backend) => {
     const response = await app.inject({ method: "POST", url: "/docs:multiGet", headers: authHeaders, payload: { pattern: "claude-sessions/2026-03*.md" } });
     assert.equal(response.statusCode, 200);
-    assert.deepEqual(backend.calls.filter((c) => c.method === "multiGet").map((c) => c.args[0]), ["qmd://claude-sessions/2026-03-05_beta.md,"]);
+    assert.deepEqual([...new Set(backend.calls.filter((c) => c.method === "multiGet").map((c) => c.args[0]))], ["qmd://claude-sessions/2026-03-05_beta.md,"]);
   });
 });
 
@@ -184,6 +184,170 @@ test("POST /docs:multiGet with collections sees only them, in globs, ids and err
     assert.deepEqual(ids.docs.map((d: { path: string }) => d.path), ["2026-02-11_alpha.md"]);
     assert.deepEqual(ids.errors, ["File not found: codex-sessions/2026-08-31_gamma.md"]);
   });
+});
+
+test("similarFiles=false never asks the SDK about a miss, for a caller with no allowlist", async () => {
+  await withApp(async (app, backend) => {
+    backend.calls.length = 0;
+    const get = await app.inject({ method: "GET", url: "/docs/nowhere/at-all.md?similarFiles=false", headers: authHeaders });
+    assert.equal(get.statusCode, 404);
+    assert.deepEqual(get.json().details, { similarFiles: [] });
+    assert.deepEqual(backend.calls.map((c) => c.method), ["listDocumentRefs"]);
+
+    backend.calls.length = 0;
+    const ids = Array.from({ length: 200 }, (_, i) => `nowhere/${i}.md`);
+    const multi = await app.inject({ method: "POST", url: "/docs:multiGet", headers: authHeaders, payload: { ids, similarFiles: false } });
+    assert.equal(multi.statusCode, 200);
+    assert.equal(multi.json().errors.length, 200);
+    assert.deepEqual(backend.calls.map((c) => c.method), ["listDocumentRefs"]);
+
+    const hit = await app.inject({ method: "GET", url: "/docs/codex-sessions/2026-08-31_gamma.md?similarFiles=false", headers: authHeaders });
+    assert.equal(hit.statusCode, 200);
+    assert.equal(hit.json().collection, "codex-sessions");
+  });
+});
+
+test("without the flag, a miss still goes to the SDK and may carry suggestions", async () => {
+  await withApp(async (app, backend) => {
+    backend.calls.length = 0;
+    const response = await app.inject({ method: "GET", url: "/docs/claude-sessions/2026-nothing.md", headers: authHeaders });
+    assert.equal(response.statusCode, 404);
+    assert.ok(backend.calls.some((c) => c.method === "get"));
+  });
+});
+
+test("references that would reach the scanning path are capped per request", async () => {
+  await withApp(async (app, backend) => {
+    const ids = (n: number) => Array.from({ length: n }, (_, i) => `nowhere/${i}.md`);
+    backend.calls.length = 0;
+    const over = await app.inject({ method: "POST", url: "/docs:multiGet", headers: authHeaders, payload: { ids: ids(MAX_SCANNING_REFERENCES + 1) } });
+    assert.equal(over.statusCode, 400);
+    assert.deepEqual(backend.calls.filter((c) => c.method === "multiGet"), []);
+    const at = await app.inject({ method: "POST", url: "/docs:multiGet", headers: authHeaders, payload: { ids: ids(MAX_SCANNING_REFERENCES) } });
+    assert.equal(at.statusCode, 200);
+  });
+});
+
+test("a body that will not fit the response budget is listed as skipped and never read", async () => {
+  const docs = Array.from({ length: 40 }, (_, i) => ({ collection: "claude-sessions", path: `big-${String(i).padStart(2, "0")}.md`, body: "x".repeat(10_000) }));
+  const { app, backend } = await makeApp({ docs });
+  try {
+    const response = await app.inject({ method: "POST", url: "/docs:multiGet", headers: authHeaders, payload: { pattern: "claude-sessions/*.md", maxTotalBytes: 25_000, similarFiles: false } });
+    assert.equal(response.statusCode, 200, response.body);
+    const body = response.json();
+    assert.equal(body.docs.length, 2);
+    assert.equal(body.skipped.length, 38);
+    assert.ok(body.skipped.every((s: { reason: string }) => /budget/.test(s.reason)));
+    assert.equal(body.truncated, false);
+    const bodyReads = backend.calls.filter((c) => c.method === "multiGet" && (c.args[1] as { includeBody: boolean }).includeBody);
+    assert.equal(bodyReads.length, 2, "documents past the budget must not be read");
+  } finally {
+    await app.close();
+  }
+});
+
+test("the budget counts bytes: a document that passes on characters can still be dropped once read", async () => {
+  const docs = [
+    { collection: "c", path: "wide.md", body: "é".repeat(100) },
+    { collection: "c", path: "z-small.md", body: "ok" },
+  ];
+  const { app, backend } = await makeApp({ docs });
+  const lengthInCharacters = backend.multiGet.bind(backend);
+  backend.multiGet = async (pattern, options) => {
+    const result = await lengthInCharacters(pattern, options);
+    for (const entry of result.docs) {
+      if (!entry.skipped && entry.doc.displayPath === "c/wide.md") entry.doc.bodyLength = 100;
+    }
+    return result;
+  };
+  try {
+    const body = (await app.inject({ method: "POST", url: "/docs:multiGet", headers: authHeaders, payload: { pattern: "c/*.md", maxTotalBytes: 150 } })).json();
+    assert.deepEqual(body.docs.map((d: { path: string }) => d.path), ["z-small.md"]);
+    assert.deepEqual(body.skipped.map((s: { file: string }) => s.file), ["c/wide.md"]);
+  } finally {
+    await app.close();
+  }
+});
+
+test("oversized and over-budget documents are both reported, and metadata-only reads ignore the budget", async () => {
+  const docs = [
+    { collection: "c", path: "a.md", body: "x".repeat(50) },
+    { collection: "c", path: "b.md", body: "x".repeat(50) },
+    { collection: "c", path: "huge.md", body: "x".repeat(500) },
+  ];
+  const { app, backend } = await makeApp({ docs });
+  try {
+    const multi = (payload: object) => app.inject({ method: "POST", url: "/docs:multiGet", headers: authHeaders, payload: { pattern: "c/*.md", ...payload } });
+    const both = (await multi({ maxBytes: 100, maxTotalBytes: 60 })).json();
+    assert.deepEqual(both.docs.map((d: { path: string }) => d.path), ["a.md"]);
+    assert.deepEqual(both.skipped.map((s: { file: string }) => s.file).sort(), ["c/b.md", "c/huge.md"]);
+
+    backend.calls.length = 0;
+    const metadata = (await multi({ includeBody: false, maxTotalBytes: 1 })).json();
+    assert.equal(metadata.docs.length, 3);
+    assert.ok(backend.calls.every((c) => c.method !== "multiGet" || (c.args[1] as { includeBody: boolean }).includeBody === false));
+  } finally {
+    await app.close();
+  }
+});
+
+test("a document that vanishes between sizing and reading is simply absent", async () => {
+  const { app, backend } = await makeApp({ docs: [{ collection: "c", path: "gone.md", body: "x" }] });
+  const real = backend.multiGet.bind(backend);
+  backend.multiGet = async (pattern, options) => (options.includeBody ? { docs: [], errors: [] } : real(pattern, options));
+  try {
+    const body = (await app.inject({ method: "POST", url: "/docs:multiGet", headers: authHeaders, payload: { pattern: "c/*.md" } })).json();
+    assert.deepEqual(body.docs, []);
+    assert.deepEqual(body.skipped, []);
+  } finally {
+    await app.close();
+  }
+});
+
+test("a glob selects at most MAX_GLOB_DOCUMENTS across the request and says it stopped", async () => {
+  const docs = Array.from({ length: MAX_GLOB_DOCUMENTS + 500 }, (_, i) => ({ collection: "large", path: `d-${i}.md`, body: "x" }));
+  const { app } = await makeApp({ docs });
+  try {
+    const multi = (payload: object) => app.inject({ method: "POST", url: "/docs:multiGet", headers: authHeaders, payload: { includeBody: false, ...payload } });
+    const capped = (await multi({ pattern: "large/*.md" })).json();
+    assert.equal(capped.docs.length, MAX_GLOB_DOCUMENTS);
+    assert.equal(capped.truncated, true);
+    const split = (await multi({ pattern: "large/d-1*.md,large/d-2*.md,large/*.md" })).json();
+    assert.equal(split.docs.length, MAX_GLOB_DOCUMENTS);
+    assert.equal(split.truncated, true);
+    const small = (await multi({ pattern: "large/d-1.md,large/d-2?.md" })).json();
+    assert.equal(small.truncated, false);
+  } finally {
+    await app.close();
+  }
+});
+
+test("POST /docs:multiGet refuses maxTotalBytes above its ceiling", async () => {
+  await withApp(async (app) => {
+    const over = await app.inject({ method: "POST", url: "/docs:multiGet", headers: authHeaders, payload: { pattern: "*/*.md", maxTotalBytes: MAX_TOTAL_BYTES_CEILING + 1 } });
+    assert.equal(over.statusCode, 400);
+  });
+});
+
+test("200 misses against a large index cost little more than one", HANG_LIMIT, () => {
+  const rows = Array.from({ length: 50_000 }, (_, i) => ref("c", `dir/doc-${i}.md`, i.toString(16).padStart(12, "0")));
+  const started = performance.now();
+  const index = new ReferenceIndex(rows);
+  for (let i = 0; i < 200; i++) assert.deepEqual(index.resolve(`nowhere/missing-${i}.md`), []);
+  assert.ok(performance.now() - started < 10_000);
+  const spelled = new ReferenceIndex([ref("c", "Work.md"), ref("c", "work.md")]);
+  assert.deepEqual(spelled.resolve("work.md").map((r) => r.path), ["work.md"]);
+  assert.deepEqual(spelled.resolve("WORK.md").map((r) => r.path), ["Work.md", "work.md"]);
+});
+
+test("an ambiguous path among the rows is reported, and a shared docid is not", async () => {
+  const shared = "ffffffffffff";
+  const backend = {
+    listDocumentRefs: async () => [ref("a", "same.md", shared), ref("b", "same.md", shared)],
+    multiGet: async () => ({ docs: [], errors: [] }),
+  };
+  const result = await resolveMultiGet(backend, undefined, ["same.md", "ffffff"], { includeBody: false, maxBytes: 100, maxTotalBytes: 100, similarFiles: false });
+  assert.deepEqual(result.errors, ["Ambiguous path same.md: qmd://a/same.md, qmd://b/same.md"]);
 });
 
 test("an empty collections list means nothing, never everything", async () => {

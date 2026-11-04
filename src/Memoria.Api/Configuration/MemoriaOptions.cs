@@ -142,4 +142,7 @@ public sealed class SearchOptions
 
 	/// <summary>Collections searched when the caller names none. Null defers to QMD's default-included set.</summary>
 	public string[]? DefaultCollections { get; set; }
+
+	/// <summary>Total bytes of document bodies in one batch response. Documents past it are listed under <c>skipped</c> and are not read.</summary>
+	public int MaxMultiGetBytes { get; set; } = 16 * 1024 * 1024;
 }

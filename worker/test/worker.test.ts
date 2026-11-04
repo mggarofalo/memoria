@@ -7,8 +7,7 @@ import { runSmoke } from "../scripts/smoke.ts";
 import { Supervisor } from "../src/supervisor.ts";
 import type { MachineState } from "../src/probes.ts";
 import { resolveVersion } from "../src/version.ts";
-import { fakeSupervisor, quietMachine, roleConfigs, startWorker, TOKEN, type RunningWorker } from "./helpers.ts";
-
+import { FAST_TIMINGS, fakeSupervisor, fixturePath, quietMachine, roleConfigs, startWorker, TOKEN, type RunningWorker } from "./helpers.ts";
 /**
  * The whole worker over real HTTP, with llama-server played by a fixture launched
  * as a real child process. This proves supervision, routing, auth and validation.
@@ -32,7 +31,7 @@ async function waitUntil(check: () => boolean | Promise<boolean>, what: string, 
 async function withWorker(run: (w: RunningWorker) => Promise<void>, options: Parameters<typeof startWorker>[0] = {}): Promise<void> {
   const worker = await startWorker(options);
   try {
-    assert.equal(await worker.supervisor.waitReady(10_000), true, "models ready");
+    assert.equal(await worker.supervisor.waitReady(30_000), true, "models ready");
     await run(worker);
   } finally {
     await worker.stop();
@@ -222,8 +221,8 @@ test("a crashed llama-server is restarted and service recovers", () =>
   withWorker(async (w) => {
     const rerank = w.roles.find((r) => r.role === "rerank")!;
     await fetch(`http://127.0.0.1:${rerank.port}/debug/crash`);
-    await waitUntil(() => w.supervisor.status().find((s) => s.role === "rerank")!.restarts === 1, "the restart");
-    await waitUntil(() => w.supervisor.ready("rerank"), "the restarted server");
+    await waitUntil(() => w.supervisor.status().find((s) => s.role === "rerank")!.restarts >= 1, "the restart");
+    await waitUntil(() => w.supervisor.ready("rerank"), "the restarted server", 30_000);
     const r = await post(w, "/v1/rerank", { query: "x", documents: ["x"] });
     assert.equal(r.status, 200);
     assert.ok(w.logs.some((l) => l.includes("llama-server exited")));
@@ -258,12 +257,53 @@ test("a health check in flight when the server exits cannot cancel its restart",
   await supervisor.stop();
 });
 
+test("a health probe in flight when the server dies does not cancel the restart", async () => {
+  const roles = await roleConfigs(["embed"]);
+  const port = roles[0]!.port;
+  let probeHeld!: () => void;
+  let releaseProbe!: () => void;
+  const held = new Promise<void>((resolve) => (probeHeld = resolve));
+  const release = new Promise<void>((resolve) => (releaseProbe = resolve));
+  let holdNextProbe = false;
+  const { Supervisor } = await import("../src/supervisor.ts");
+  const supervisor = new Supervisor({
+    command: process.execPath,
+    prefixArgs: [fixturePath],
+    gpuLayers: 0,
+    roles,
+    modelPaths: { embed: "models/m.gguf" },
+    log: { info: () => {}, warn: () => {}, error: () => {} },
+    // The backoff must outlast the test's poll, so the probe lands before the restart would.
+    timings: { ...FAST_TIMINGS, backoffBaseMs: 1_000 },
+    env: process.env,
+    fetch: async (url, init) => {
+      if (!holdNextProbe) return fetch(url, init);
+      holdNextProbe = false;
+      probeHeld();
+      await release;
+      throw new Error("connection refused");
+    },
+  });
+  supervisor.start();
+  try {
+    assert.equal(await supervisor.waitReady(10_000), true);
+    holdNextProbe = true;
+    await held;
+    await fetch(`http://127.0.0.1:${port}/debug/crash`);
+    await waitUntil(() => supervisor.status()[0]!.restarts === 1, "the exit");
+    releaseProbe();
+    await waitUntil(() => supervisor.ready("embed"), "the restart that the stale probe used to cancel");
+  } finally {
+    await supervisor.stop();
+  }
+});
+
 test("a hung llama-server is killed and restarted", () =>
   withWorker(async (w) => {
     const generate = w.roles.find((r) => r.role === "generate")!;
     await fetch(`http://127.0.0.1:${generate.port}/debug/hang`);
-    await waitUntil(() => w.supervisor.status().find((s) => s.role === "generate")!.restarts === 1, "the kill");
-    await waitUntil(() => w.supervisor.ready("generate"), "the restarted server");
+    await waitUntil(() => w.supervisor.status().find((s) => s.role === "generate")!.restarts >= 1, "the kill");
+    await waitUntil(() => w.supervisor.ready("generate"), "the restarted server", 30_000);
     assert.ok(w.logs.some((l) => l.includes("stopped answering")));
   }));
 

@@ -120,7 +120,8 @@ public sealed record SidecarDocumentQuery(
 	int? MaxLines = null,
 	bool? LineNumbers = null,
 	bool? Body = null,
-	IReadOnlyList<string>? Collections = null);
+	IReadOnlyList<string>? Collections = null,
+	bool? SimilarFiles = null);
 
 public sealed record SidecarDocument(
 	string Docid,
@@ -145,6 +146,12 @@ public sealed record SidecarMultiGetRequest
 	/// <summary>Match and read only inside these collections. Empty means nothing, not everything.</summary>
 	public IReadOnlyList<string>? Collections { get; init; }
 
+	/// <summary>False skips QMD's scan of every path on a miss, and any suggestions.</summary>
+	public bool? SimilarFiles { get; init; }
+
+	/// <summary>Budget for all bodies in the response. The sidecar stops reading at it.</summary>
+	public int? MaxTotalBytes { get; init; }
+
 	public int? MaxBytes { get; init; }
 	public int? MaxLines { get; init; }
 	public bool? LineNumbers { get; init; }
@@ -154,7 +161,8 @@ public sealed record SidecarMultiGetRequest
 public sealed record SidecarMultiGetResponse(
 	IReadOnlyList<SidecarDocument> Docs,
 	IReadOnlyList<SidecarSkippedDocument> Skipped,
-	IReadOnlyList<string> Errors);
+	IReadOnlyList<string> Errors,
+	bool Truncated = false);
 
 public sealed record SidecarSkippedDocument(string File, string Reason);
 

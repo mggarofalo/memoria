@@ -267,10 +267,12 @@ the path. Do not log the `Authorization` header in the proxy's access log.
 
 **This is required once the proxy host exists.** Failed authentication is limited
 per client address. With `Memoria:Auth:TrustedProxies` empty the API treats the
-socket peer as the client, and behind a proxy that peer is the proxy, so every
-caller shares one budget: 20 bad tokens from anyone would lock out everyone, valid
-keys included, for the rest of the minute. The API logs a warning naming the address
-when a budget runs out; if that address is the proxy's, this setting is missing.
+socket peer as the client, and behind a proxy that peer is the proxy, so every caller
+shares one budget: 20 bad tokens from anyone would refuse every credential the API
+does not already know, for the rest of the minute. Keys it knows keep working, but a
+new client's first request can be refused. Two warnings point at this: one at most
+hourly when a private address sends `X-Forwarded-For` it is not trusted to send, and
+one naming the address when a budget runs out. Neither trusts the header.
 
 1. Find the address the API sees. Give nginx-proxy-manager a fixed address on a
    user-defined Docker network and use that, or use the network's whole subnet if
