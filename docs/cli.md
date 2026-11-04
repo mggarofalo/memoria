@@ -1,0 +1,178 @@
+# The memoria CLI
+
+`memoria` is the command-line client for a Memoria server. It searches the corpus, fetches documents, and bridges MCP clients that can only start a local process.
+
+The corpus holds agent transcripts, which routinely contain credentials, so an API key is worth protecting. This page says what the CLI protects and what it does not.
+
+## Install
+
+Install scripts verify the archive's SHA-256 against the release's `checksums.txt` before unpacking anything. Download the script from a tagged release, read it, then run it. Do not pipe it to a shell: a script you have not read could do anything, and a dropped connection can run half of one.
+
+Linux and macOS:
+
+```sh
+curl --proto '=https' -fsSLO https://raw.githubusercontent.com/mggarofalo/memoria/v1.2.3/install.sh
+less install.sh
+sh install.sh --version v1.2.3
+```
+
+Windows:
+
+```powershell
+Invoke-WebRequest https://raw.githubusercontent.com/mggarofalo/memoria/v1.2.3/install.ps1 -OutFile install.ps1
+Get-Content install.ps1
+pwsh -File install.ps1 -Version v1.2.3
+```
+
+Replace `v1.2.3` with the release you want. The options are `--prefix DIR` and `-InstallDir DIR`. On Windows, `-NoPathUpdate` leaves your PATH alone.
+
+### Without a script
+
+Each release has these assets:
+
+- `memoria_<version>_<os>_<arch>.tar.gz`, or `.zip` on Windows, where `<os>` is `linux`, `darwin` or `windows`, and `<arch>` is `amd64` or `arm64`.
+- `checksums.txt`, in `sha256sum` format.
+
+```sh
+sha256sum --check --ignore-missing checksums.txt
+gh attestation verify memoria_1.2.3_linux_amd64.tar.gz --repo mggarofalo/memoria
+```
+
+The checksum comes from the same release as the archive, so it catches corruption and a replaced asset, but not a compromised release. The build provenance attestation is the independent check: it ties the archive to the workflow run that built it. Neither the scripts nor `self-update` verify it, because that needs tooling the CLI does not carry.
+
+## Update
+
+```sh
+memoria self-update --check            # report only
+memoria self-update                    # newest stable release
+memoria self-update --version v1.2.3   # a specific release
+```
+
+`self-update` downloads over https only, redirects included. It verifies the checksum before changing anything on disk, swaps the binary, then runs the new binary's `version` command. If that fails, the previous binary is put back.
+
+It refuses three things unless you ask:
+
+| Refusal | Flag |
+|---|---|
+| Replacing a development build (`dev`) | `--force` |
+| Installing an older version | `--allow-downgrade` |
+| Installing a prerelease | `--prerelease` |
+
+On Windows a running binary can be renamed but not deleted, so the old copy stays as a hidden `.memoria.exe.old` until the next update removes it.
+
+## Log in
+
+```sh
+memoria auth login --api-url https://memoria.example.com
+```
+
+The key is read from a prompt with echo off, or from stdin when stdin is not a terminal. It is checked against the server and then stored. The server URL is saved in the profile.
+
+```sh
+memoria auth status    # where the key comes from, and whether the server accepts it
+memoria auth logout    # remove the stored key; it stays valid on the server until revoked
+```
+
+Status output never shows any part of the key, not even a masked form.
+
+### Where the key comes from
+
+The first of these that has a key wins:
+
+| Order | Source | Risk |
+|---|---|---|
+| 1 | `--api-key` | Lands in shell history, and is visible in process listings while the command runs. The CLI warns every time. |
+| 2 | `MEMORIA_API_KEY` | Inherited by every child process. Readable by anything running as you. The CLI warns at a terminal. |
+| 3 | OS keyring | Encrypted at rest by the OS. Any process running as you may still be able to ask for it, depending on the keyring. |
+| 4 | Credentials file | Unencrypted on disk. See below. |
+
+The config file (`config.json`) never holds a key. It records the active profile, the server URL and which store the key is in. If you add a key to it by hand, the CLI ignores the key, warns you, and removes it on the next save.
+
+The server URL comes from `--api-url`, then `MEMORIA_URL`, then the profile.
+
+A key from the keyring or file is sent only to the server it was saved for. If `--api-url` or `MEMORIA_URL` names another origin, the command refuses rather than handing the stored key to it. Use a separate `--profile` for a second server.
+
+### The file backend
+
+For a host with no keyring, such as CI:
+
+```sh
+printf '%s' "$KEY" | memoria auth login --api-url https://memoria.example.com --backend file
+```
+
+A machine with no keyring does not fall back to the file on its own. You choose it, and you get a warning when you do.
+
+**This is weaker than a keyring.** The key sits unencrypted in `credentials.json`, beside the config. There is no passphrase, because a passphrase stored next to the file protects nothing and a prompt cannot work unattended.
+
+- **On Linux and macOS,** the file is mode 0600 in a 0700 directory. The CLI refuses to read a file that is group or world accessible, owned by someone else, or a symlink.
+- **On Windows,** file modes mean nothing, so the CLI sets an explicit access list on both the file and the directory that grants only your account and does not inherit from the parent. It refuses a file that grants anyone else access, other than SYSTEM and Administrators.
+- **Not protected, anywhere:** processes running as you, administrators and root, backups, and anyone with the disk.
+
+The config directory is `$XDG_CONFIG_HOME/memoria`, or `~/.config/memoria`.
+
+## Use it
+
+```sh
+memoria query "api key rotation" --collection claude-sessions --limit 5
+memoria query retries --project Receipts --since 2026-01-01 --no-rerank
+memoria get claude-sessions/2026-05-01.md --from-line 40 --max-lines 20
+memoria multi-get f6feba claude-sessions/b.md
+memoria multi-get --pattern 'claude-sessions/2026-05*.md' --format json
+memoria collections
+memoria status
+```
+
+`--format` takes `json`, `table` or `markdown`. `query`, `collections` and `status` default to a table; `get` and `multi-get` default to markdown.
+
+**Table and markdown output is sanitized.** Document text comes from transcripts, which can hold terminal escape sequences that write your clipboard or rewrite your screen. The CLI strips control characters, escape sequences, carriage returns and bidirectional overrides from these formats, whether or not stdout is a terminal.
+
+**`--format json` is the server's response, byte for byte, and is not sanitized.** Treat it as data, and do not print it raw to a terminal. There is one exception: if a response contains the exact key in use, that key is replaced with `[REDACTED]`, because the key never reaches stdout.
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | Success |
+| 1 | Other failure |
+| 2 | Bad usage, including a 400 from the server |
+| 3 | No usable key, or the server said 401 or 403 |
+| 4 | Not found, including a `multi-get` where any reference failed |
+| 5 | Server unavailable: 502, 503, 504, a timeout, or no connection |
+| 6 | Rate limited (429). The message includes `Retry-After` when the server sends it |
+| 7 | Refused for transport safety: plain http to a public address, a cross-origin redirect, or a stored key aimed at another server |
+
+## Plain http
+
+A bearer key sent over plain http can be read by anyone on the path.
+
+| Server address | Behavior |
+|---|---|
+| https | Allowed. TLS 1.2 or later |
+| Loopback | Allowed quietly |
+| Private (RFC 1918, ULA) | Allowed with a warning |
+| Hostname over http | Warns, and refuses at connect time unless it resolves to loopback or a private address |
+| Anything else over http | Refused, unless you pass `--allow-insecure-http` or set `MEMORIA_ALLOW_INSECURE_HTTP=1` |
+
+Link-local addresses count as public, including `169.254.169.254`, the cloud metadata address. Plain http never goes through a configured proxy, which would otherwise see the key.
+
+A redirect to a different origin is never followed. A different origin includes a subdomain, another port, and a move from https to http. Go's HTTP client keeps the `Authorization` header in the subdomain and downgrade cases, so the CLI attaches the header itself, only to requests for the configured origin.
+
+## MCP bridge
+
+```sh
+memoria mcp
+```
+
+For MCP clients that can only start a local process. It reads JSON-RPC from stdin, one message per line, forwards each to the server's `/mcp` endpoint with the stored key, and writes replies to stdout. Stdout carries protocol frames and nothing else; logs go to stderr.
+
+Missing credentials and upstream failures come back as JSON-RPC errors rather than the process exiting, so the client can show why. The error's `data` has `kind`, `status`, `retryAfterSeconds` and `traceId`.
+
+Messages from the client are limited to 4 MiB (`--max-message-bytes`), and frames from the server to 32 MiB (`--max-response-bytes`).
+
+## Development
+
+Commands live in `cli/cmd`, one file each, as a `newXCmd(*app)` factory listed in `commandFactories`. New commands get credentials, the guarded HTTP client, output formats and exit codes from `app`. `internal/transport` is the only code that puts a key on the wire.
+
+macOS release builds must use `CGO_ENABLED=1`. The keyring library's Keychain backend is compiled only with cgo, so a cgo-free build has no keyring on macOS at all. Linux and Windows builds do not need cgo. Stamp the version with `-ldflags "-X github.com/mggarofalo/memoria/cli/cmd.Version=<version>"`.
+
+`go test ./...` covers the install scripts when `sh` and `pwsh` are available, and skips them otherwise. `MEMORIA_TEST_REAL_KEYRING=1 go test ./internal/auth` also exercises the real OS keyring, under a test-only service name and with a throwaway value.
