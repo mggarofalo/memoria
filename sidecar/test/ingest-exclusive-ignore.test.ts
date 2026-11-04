@@ -146,7 +146,7 @@ test("a crash between link and unlink stops blocking an overwrite once the temp 
 
 // --- ignore patterns ---------------------------------------------------------------
 
-test("ignored paths return 400 from both routes, write nothing, and queue nothing", async () => {
+test("ignored paths return 400 from POST, write nothing, and queue nothing", async () => {
   const { app, backend, roots } = await makeApp();
   backend.collections[0]!.ignore = ["drafts", "**/private/**", "**/*.secret.md"];
   try {
@@ -154,8 +154,6 @@ test("ignored paths return 400 from both routes, write nothing, and queue nothin
       const created = await app.inject({ method: "POST", url: "/documents", headers: authHeaders, payload: { collection: "claude-sessions", path: p, content: "# x\n" } });
       assert.equal(created.statusCode, 400, p);
       assert.equal(created.json().error, "ignored_path", p);
-      const deleted = await app.inject({ method: "DELETE", url: `/documents?collection=claude-sessions&path=${encodeURIComponent(p)}`, headers: authHeaders });
-      assert.equal(deleted.statusCode, 400, p);
     }
     assert.deepEqual(await readdir(roots.claude), []);
     assert.deepEqual(app.ctx.jobs.list(), []);

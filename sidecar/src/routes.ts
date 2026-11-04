@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import type { AppContext } from "./app.ts";
 import { SIDECAR_VERSION } from "./app.ts";
 import { HttpError } from "./errors.ts";
-import { removeDocument, resolveTarget, writeDocument } from "./ingest.ts";
+import { removeDocument, resolveDeleteTarget, resolveTarget, writeDocument } from "./ingest.ts";
 import { parseLineRange } from "./line-range.ts";
 import { hasFilters, matchesFilters, parseBound, type DocumentMetadata, type SearchFilters } from "./metadata.ts";
 import { resolveMultiGet } from "./multi-get.ts";
@@ -609,8 +609,10 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         tags: ["documents"],
         summary: "Delete a document",
         description:
-          "Remove a document's file from its collection's directory and queue an index update. Paths are validated " +
-          "exactly as `POST /documents` validates them. Idempotent: a path with no file returns 202 with " +
+          "Remove a document's file from its collection's directory and queue an index update. Only safety checks " +
+          "apply, unlike `POST /documents`: a file outside the collection's glob or under an ignore rule can still be " +
+          "removed. The path must stay inside the root, cross no link, and match the entry's exact name, so a case " +
+          "alias returns 409. Idempotent: a path with no file returns 202 with " +
           "`deleted: false` and still queues the update, so a delete that was interrupted before reindexing can be " +
           "retried. The document stays searchable until the index is updated. The returned job is debounced like an " +
           "ingest; when that wait matters, `POST /reindex` for the collection updates the index without it.",
@@ -619,7 +621,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
           required: ["collection", "path"],
           properties: {
             collection: { type: "string", minLength: 1 },
-            path: { type: "string", minLength: 1, maxLength: 1024, description: "Relative to the collection root; must match the collection's glob." },
+            path: { type: "string", minLength: 1, maxLength: 1024, description: "Relative to the collection root. Need not match the collection's glob." },
           },
         },
         response: {
@@ -642,7 +644,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       const { collection, path } = request.query;
       const row = (await backend.listCollections()).find((c) => c.name === collection);
       if (!row) throw new HttpError(404, "unknown_collection", `Unknown collection: ${collection}`);
-      const target = resolveTarget(row.pwd, row.glob_pattern, path, backend.ignorePatterns(collection));
+      const target = resolveDeleteTarget(row.pwd, path);
       const deleted = await removeDocument(target);
       const file = `${collection}/${target.relative}`;
       ctx.metadata.delete(file);

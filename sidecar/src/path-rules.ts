@@ -106,6 +106,27 @@ export function matchesIgnorePattern(segments: readonly string[], patterns: read
   });
 }
 
+/**
+ * Why a delete cannot name this segment, or undefined. Much narrower than
+ * `segmentProblem`: a file written before those rules, or by something else, must
+ * stay removable, because removing leaked content is part of what delete is for.
+ * What stays refused can never name a real file on this platform, or would make
+ * the OS reach something other than the name given: on Windows a trailing dot or
+ * space is stripped (so `.. ` is `..`), a colon addresses an alternate data
+ * stream, and a device name opens the device. `removeDocument` covers aliases such
+ * as 8.3 short names, by requiring each segment to be a real directory entry.
+ */
+export function deleteSegmentProblem(segment: string, platform: NodeJS.Platform): string | undefined {
+  if (segment === "" || segment === "." || segment === "..") return "path must not contain empty, '.' or '..' segments";
+  if (segment.includes("\0")) return "path must not contain NUL";
+  if (platform !== "win32") return undefined;
+  if (/[. ]$/.test(segment)) return "Windows cannot address a name ending in a dot or space";
+  // eslint-disable-next-line no-control-regex
+  if (/[<>:"|?*\x00-\x1f]/.test(segment)) return "Windows cannot address a name containing this character";
+  if (isReservedName(segment)) return "Windows reserves this device name";
+  return undefined;
+}
+
 const EXCLUDED_FOLDED = new Set(QMD_EXCLUDED_DIRS.map(foldName));
 
 /**

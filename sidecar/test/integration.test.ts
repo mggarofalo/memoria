@@ -6,7 +6,7 @@
  * Opt in with MEMORIA_QMD_INTEGRATION=1 (CI sets it; `npm test` does not).
  */
 import assert from "node:assert/strict";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
 import { buildApp } from "../src/app.ts";
@@ -15,6 +15,47 @@ import { FRONTMATTER_DOC } from "./fake-backend.ts";
 import { authHeaders, tempDir, testConfig } from "./helpers.ts";
 
 const enabled = process.env.MEMORIA_QMD_INTEGRATION === "1";
+
+test("a document under a newly added ignore rule can be deleted, and leaves search after the reindex", { skip: enabled ? false : "set MEMORIA_QMD_INTEGRATION=1" }, async () => {
+  const root = await tempDir("memoria-qmd-it-");
+  const corpus = path.join(root, "sessions");
+  await mkdir(path.join(corpus, "drafts"), { recursive: true });
+  const dbPath = path.join(root, "index.sqlite");
+  const leaked = path.join(corpus, "drafts", "leaked.md");
+  await writeFile(leaked, FRONTMATTER_DOC({ project: "Leak" }, "# Leak\n\nleakedcredentialmarker\n"), "utf8");
+  await writeFile(path.join(corpus, "other.md"), "# Other\n\nothermarker\n", "utf8");
+
+  const qmd = await import("@tobilu/qmd");
+  const first = await qmd.createStore({ dbPath, config: { collections: { sessions: { path: corpus, pattern: "**/*.md" } } } });
+  assert.equal((await first.update()).indexed, 2);
+  await first.close();
+  // The rule arrives after the document was indexed, and with no scan since.
+  const second = await qmd.createStore({ dbPath, config: { collections: { sessions: { path: corpus, pattern: "**/*.md", ignore: ["drafts", "+(a|aa)"] } } } });
+  await second.close();
+
+  const backend = await openBackend({ dbPath, keepWarm: false });
+  const app = await buildApp({ backend, config: testConfig({ reindexDebounceMs: 0 }), logger: false });
+  try {
+    await app.ready();
+    assert.deepEqual(backend.ignorePatterns("sessions"), ["drafts", "+(a|aa)"], "the rule reached the store");
+    const search = (query: string) => app.inject({ method: "POST", url: "/search", headers: authHeaders, payload: { searches: [{ type: "lex", query }], rerank: false } });
+    assert.equal((await search("leakedcredentialmarker")).json().total, 1, "still searchable until something changes");
+
+    // Neither the ignore rule nor the unsupported pattern beside it stops this.
+    const deleted = await app.inject({ method: "DELETE", url: "/documents?collection=sessions&path=drafts/leaked.md", headers: authHeaders });
+    assert.equal(deleted.statusCode, 202, deleted.body);
+    assert.equal(deleted.json().deleted, true);
+    await assert.rejects(stat(leaked), /ENOENT/);
+    await app.ctx.jobs.idle();
+    assert.equal((await search("leakedcredentialmarker")).json().total, 0, "gone from search after the reindex");
+    assert.equal((await app.inject({ method: "GET", url: "/docs/sessions/drafts/leaked.md", headers: authHeaders })).statusCode, 404);
+    assert.equal(app.ctx.metadata.get("sessions/drafts/leaked.md"), undefined);
+    assert.equal((await search("othermarker")).json().total, 1, "the rest of the collection is untouched");
+  } finally {
+    await app.close();
+    await backend.close();
+  }
+});
 
 test("the real SDK skips temp files and ignored paths, and the sidecar agrees with its scan", { skip: enabled ? false : "set MEMORIA_QMD_INTEGRATION=1" }, async () => {
   const root = await tempDir("memoria-qmd-it-");

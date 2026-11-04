@@ -334,7 +334,7 @@ test("retryTransient retries sharing errors, gives up eventually, and passes oth
 const post = (app: Awaited<ReturnType<typeof makeApp>>["app"], p: string, content = "# x\n") =>
   app.inject({ method: "POST", url: "/documents", headers: authHeaders, payload: { collection: "claude-sessions", path: p, content } });
 
-test("bad names return 400 from both routes and create nothing", async () => {
+test("bad names return 400 from POST and create nothing", async () => {
   const { app, roots } = await makeApp();
   try {
     const names = ["hidden~1.md", "obsidi~1/workspace.md", "NUL/x.md", "CON.md", "com1.tar.md", "a<b.md", 'a"b.md', "a|b.md", "a?b.md", "a*b.md", "a\x01b.md", "a‮b.md", "node_modules/x.md", "vendor/x.md", "dist/x.md", "build/x.md", "x/vendor/y.md", " lead.md", `${"a".repeat(300)}.md`];
@@ -342,8 +342,6 @@ test("bad names return 400 from both routes and create nothing", async () => {
       const created = await post(app, p);
       assert.equal(created.statusCode, 400, JSON.stringify(p));
       assert.equal(created.json().error, "invalid_path", JSON.stringify(p));
-      const deleted = await app.inject({ method: "DELETE", url: `/documents?collection=claude-sessions&path=${encodeURIComponent(p)}`, headers: authHeaders });
-      assert.equal(deleted.statusCode, 400, JSON.stringify(p));
     }
     assert.deepEqual(await readdir(roots.claude), []);
     assert.deepEqual(app.ctx.jobs.list(), []);

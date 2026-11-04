@@ -126,7 +126,9 @@ A frontmatter block that does not close within the first 8192 characters has no 
 
 ### Document paths
 
-`POST /documents` and `DELETE /documents` refuse these with 400 `invalid_path`:
+The two routes follow different rules. A write has to produce a document QMD can index, under a name that means the same thing on every platform. A delete has to be able to remove whatever is there, including leaked content, so only safety applies to it. See [Deleting](#deleting).
+
+`POST /documents` refuses these with 400 `invalid_path`:
 
 - Empty, `.` or `..` segments, absolute paths, and any path that resolves outside the root.
 - Segments that end in a dot, or start or end with whitespace. Windows strips some of these when it opens a file, so `.. /` would reach the filesystem as `../`.
@@ -149,14 +151,36 @@ These return 409:
 
 A write goes to a hidden temp file in the target's directory, is flushed, and is renamed over the target after containment has been checked again. A reader never sees half a document, and a hard link or symlink at the target is replaced rather than written through. An overwrite keeps the old file's POSIX permission bits. On Windows the new file takes its ACL from the directory, so an ACL set on the old file alone is lost. A delete renames the file aside and checks again before unlinking it.
 
+#### Deleting
+
+`DELETE /documents` does not apply the glob, the ignore patterns, the excluded directories, the hidden-name rule, the segment limit or the name rules above, and an unsupported ignore pattern does not affect it. A document that stopped matching, sits under a rule added later, or has a name these rules would refuse today stays removable. This also means a delete can remove any file under the root, including one that was never a document, such as `.git/config`. The caller is authenticated, and the root should hold only the corpus.
+
+Still refused or not reached:
+
+| Path | Result | Why |
+|---|---|---|
+| Traversal, absolute paths, NUL, empty, `.` or `..` segments | 400 `invalid_path` | Safety, on every platform. Backslashes are separators everywhere, so `..\x` cannot be a way out. |
+| A symlink or junction between the root and the file | 400 `invalid_path` | Containment. A link at the last segment is removed itself. |
+| A case or normalization alias of an existing entry | 409 `case_conflict` | The exact name works, and is what keeps the metadata key right. |
+| A name that is not a real directory entry, such as an 8.3 short name | 202, `deleted: false` | A directory listing does not show short names, so `hidden~1.md` cannot remove `.hidden.md`, but a file really called `notes~1.md` is removed. |
+
+Names a delete cannot address, and what to do instead:
+
+| Class | Why | Instead |
+|---|---|---|
+| On Windows: a name with `< > : " \| ? *` or a control character, ending in a dot or space, or a device name such as `NUL` or `CON.md`, returns 400 | Windows would read it as something else: `.. ` as `..`, a colon as a data stream, `NUL` as the device | Normally these cannot exist on NTFS. One made through a `\\?\` path can be removed the same way: `Remove-Item -LiteralPath "\\?\D:\corpus\NUL\x.md"` |
+| On POSIX: a name with a literal backslash returns 202 with `deleted: false` | Backslashes are treated as separators, so `a\b.md` means `a/b.md` | Remove it with `rm`, then `POST /reindex` for the collection |
+| A name that is not valid Unicode, on POSIX, returns 202 with `deleted: false` | Node cannot represent those bytes in a string | Remove it with `rm`, then `POST /reindex` |
+| A path over 1024 characters returns 400 from the schema | The route's limit | Remove it on the host, then `POST /reindex` |
+
 Remaining limits:
 
-- Node has no `openat` or `renameat`, so each call resolves its path afresh. A local user with write access to the collection root can still win the gap inside the rename itself, between the kernel resolving the source and the destination. Swapping a directory at any earlier point makes the temp file's name unresolvable, and the write fails. A swap after the rename is reported as an error but cannot be undone. A swap at the moment the temp file is created can leave an empty file outside the root. A delete's rename aside can land on a file outside the root: it is put back when the swap is still in place, and otherwise stays under a `.memoria-*.tmp` name beside its old one. It is never unlinked, and a flip test reproduces this outcome. Restrict write access to collection roots to the service account.
+- Node has no `openat` or `renameat`, so each call resolves its path afresh. A local user with write access to the collection root can still win the gap inside the rename itself, between the kernel resolving the source and the destination. Swapping a directory at any earlier point makes the temp file's name unresolvable, and the write fails. A swap after the rename is reported as an error but cannot be undone. A swap at the moment the temp file is created can leave an empty file outside the root. A delete's rename aside can land on a file outside the root: it is put back when the swap is still in place, and otherwise stays under a `.memoria-*.tmp` name beside its old one, and a flip test reproduces this outcome. Restrict write access to collection roots to the service account.
 - These are accepted limits: [`docs/deployment.md`](../docs/deployment.md#collection-root-permissions) states the boundary.
 
 `overwrite: false` publishes with a hard link, which fails if the name is taken, so of several simultaneous creates exactly one succeeds and the rest get 409 `exists`. On a filesystem without hard links it returns 500 `exclusive_create_failed` rather than giving up exclusivity. `overwrite: true` does not need them.
 
-Paths matching the collection's `ignore` patterns in QMD's configuration return 400 `ignored_path`, including a path below an ignored directory, as QMD's scan treats it. Patterns are read only from that configuration. Each compiles to a regex that runs on a request's path, so a pattern with an extglob, a leading `!`, or more than three wildcards returns 500 `unsupported_ignore_pattern` for the whole collection until it is simplified. It is neither run nor skipped.
+Paths matching the collection's `ignore` patterns in QMD's configuration return 400 `ignored_path`, including a path below an ignored directory, as QMD's scan treats it. Patterns are read only from that configuration. Each compiles to a regex that runs on a request's path, so a pattern with an extglob, a leading `!`, or more than three wildcards makes every `POST` to that collection return 500 `unsupported_ignore_pattern` until it is simplified. It is neither run nor skipped. `DELETE` runs no pattern and is not affected.
 
 A temp file is never indexed: QMD's scan skips hidden names whatever the collection's pattern, so a crash mid-write cannot put a partial document in search, `GET /docs` or multi-get. A write removes any `.memoria-*.tmp` over an hour old from its own directory, so a directory no write reaches keeps its leftovers. They are harmless and safe to delete. A crash in the moment between linking and unlinking leaves the document looking hard-linked, so overwriting it returns 409 `hard_link` until that sweep runs.
 

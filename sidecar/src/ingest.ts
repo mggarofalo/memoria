@@ -4,7 +4,7 @@ import { link, lstat, mkdir, open, readdir, realpath, rename, unlink } from "nod
 import path from "node:path";
 import picomatch from "picomatch";
 import { HttpError } from "./errors.ts";
-import { MAX_PATH_SEGMENTS, foldName, matchesIgnorePattern, segmentProblem, unindexableProblem, unsupportedIgnorePattern } from "./path-rules.ts";
+import { MAX_PATH_SEGMENTS, deleteSegmentProblem, foldName, matchesIgnorePattern, segmentProblem, unindexableProblem, unsupportedIgnorePattern } from "./path-rules.ts";
 
 /**
  * Ingest and delete by value: the caller names a path, the sidecar changes the
@@ -62,25 +62,48 @@ function normalizeRelative(requestedPath: string): string {
   return relative;
 }
 
+function locate(collectionRoot: string, relative: string): ResolvedTarget {
+  const root = path.resolve(collectionRoot);
+  const absolute = path.resolve(root, ...relative.split("/"));
+  const rel = path.relative(root, absolute);
+  if (rel === "" || rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
+    throw invalidPath("path resolves outside the collection root");
+  }
+  return { relative, absolute, root };
+}
+
 /**
- * Validate a caller-supplied relative path against a collection root and
- * glob pattern. Rejects anything that could escape the root, that a supported
+ * Validate a path for a delete. Only safety applies here. A document must stay
+ * removable even when it no longer matches the collection's glob, sits under a
+ * rule added later, or has a name these rules would refuse today, because
+ * removing leaked content is part of what delete is for. `removeDocument` does the
+ * checks that need the filesystem.
+ */
+export function resolveDeleteTarget(collectionRoot: string, requestedPath: string, platform: NodeJS.Platform = process.platform): ResolvedTarget {
+  if (requestedPath === "") throw invalidPath("path must not be empty");
+  const relative = requestedPath.replace(/\\/g, "/").replace(/^\.\//, "");
+  if (relative.startsWith("/")) throw invalidPath("path must be relative to the collection root");
+  for (const segment of relative.split("/")) {
+    const problem = deleteSegmentProblem(segment, platform);
+    if (problem) throw invalidPath(problem);
+  }
+  return locate(collectionRoot, relative);
+}
+
+/**
+ * Validate a caller-supplied relative path for a write, against a collection root
+ * and glob pattern. Rejects anything that could escape the root, that a supported
  * filesystem would treat as a different name, or that QMD would never index (a
  * file QMD ignores is a file that silently never becomes searchable).
  *
  * This is lexical and gives the same answer on every platform. `assertSafePath`
- * covers what only the filesystem knows, and runs before any write or delete.
+ * covers what only the filesystem knows, and runs before any write.
  * `ignore` is the collection's own ignore list from QMD's configuration.
  */
 export function resolveTarget(collectionRoot: string, pattern: string, requestedPath: string, ignore: readonly string[] = []): ResolvedTarget {
   const relative = normalizeRelative(requestedPath);
   const segments = relative.split("/");
-  const root = path.resolve(collectionRoot);
-  const absolute = path.resolve(root, ...segments);
-  const rel = path.relative(root, absolute);
-  if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) {
-    throw invalidPath("path resolves outside the collection root");
-  }
+  const { root, absolute } = locate(collectionRoot, relative);
   const matcher = picomatch(pattern || "**/*.md", { dot: false });
   if (!matcher(relative)) {
     throw new HttpError(400, "pattern_mismatch", `path does not match the collection pattern "${pattern}"`);
@@ -107,7 +130,8 @@ function codeOf(err: unknown): string | undefined {
 
 function isMissing(err: unknown): boolean {
   const code = codeOf(err);
-  return code === "ENOENT" || code === "ENOTDIR";
+  // A name too long for this filesystem cannot be on it.
+  return code === "ENOENT" || code === "ENOTDIR" || code === "ENAMETOOLONG";
 }
 
 async function lstatIfPresent(file: string): Promise<Stats | undefined> {
@@ -133,21 +157,27 @@ async function namesIn(dir: string): Promise<string[] | undefined> {
  * disk. On NTFS and APFS it would reach the existing file under a name QMD and
  * the metadata index do not know. The rule applies on case-sensitive hosts too,
  * so a corpus never holds names that collide when it moves.
+ *
+ * Returns whether every segment is a real directory entry under exactly this name.
+ * A directory listing shows no 8.3 short names, so a delete that requires this
+ * cannot reach `.hidden.md` by way of `hidden~1.md`, while a file that really is
+ * called `notes~1.md` stays removable.
  */
-async function assertNoCaseAlias(target: ResolvedTarget): Promise<void> {
+async function assertNoCaseAlias(target: ResolvedTarget): Promise<boolean> {
   let dir = target.root;
   for (const segment of target.relative.split("/")) {
     const names = await namesIn(dir);
-    if (names === undefined) return;
+    if (names === undefined) return false;
     if (!names.includes(segment)) {
       const folded = foldName(segment);
       if (names.some((name) => foldName(name) === folded)) {
         throw new HttpError(409, "case_conflict", "path differs only in case or normalization from an existing entry; use the existing name");
       }
-      return;
+      return false;
     }
     dir = path.join(dir, segment);
   }
+  return true;
 }
 
 /**
@@ -396,7 +426,8 @@ export async function writeDocument(target: ResolvedTarget, content: string, ove
  * unlink could not.
  */
 export async function removeDocument(target: ResolvedTarget, hooks: IngestHooks = {}): Promise<boolean> {
-  await assertSafePath(target);
+  await assertContained(target);
+  if (!(await assertNoCaseAlias(target))) return false;
   const stats = await lstatIfPresent(target.absolute);
   if (stats === undefined) return false;
   if (stats.isDirectory()) throw new HttpError(409, "is_directory", "path refers to a directory");
