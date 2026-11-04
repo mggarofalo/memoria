@@ -16,7 +16,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Include="Sessions\Fixtures\cases.json;Sessions\Fixtures\inputs\**;Sessions\Fixtures\goldens\**" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Sessions\Fixtures\cases.json;Sessions\Fixtures\inputs\**;Sessions\Fixtures\goldens\**;Sessions\Fixtures\head\**" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

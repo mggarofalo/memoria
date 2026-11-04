@@ -93,6 +93,12 @@ public sealed class SessionReadReport
 	/// <summary>Metadata values cut to the field limit, because frontmatter must fit the sidecar's metadata head.</summary>
 	public long ClippedFields { get; internal set; }
 
+	/// <summary>Touched files cut so the frontmatter closes inside the sidecar's window, as <c>files_touched_truncated</c> records.</summary>
+	public long FilesTruncated { get; internal set; }
+
+	/// <summary>Codex turn ids cut so the frontmatter closes inside the sidecar's window, as <c>turn_ids_truncated</c> records.</summary>
+	public long TurnIdsTruncated { get; internal set; }
+
 	public long Messages { get; internal set; }
 
 	/// <summary>Messages dropped once <see cref="SessionRenderOptions.MaxRetainedChars"/> was reached.</summary>
@@ -103,7 +109,7 @@ public sealed class SessionReadReport
 
 	/// <summary>True when input was lost: anything other than routine, unrendered record types.</summary>
 	public bool HasSkippedContent =>
-		MalformedLines + NonObjectLines + OversizedLines + UnterminatedLines + InvalidKeys + MessagesOverLimit + FilesOverLimit > 0;
+		MalformedLines + NonObjectLines + OversizedLines + UnterminatedLines + InvalidKeys + MessagesOverLimit + FilesOverLimit + FilesTruncated + TurnIdsTruncated > 0;
 }
 
 /// <summary>One part of a rendered session. It must go through redaction before it can be stored.</summary>

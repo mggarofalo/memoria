@@ -23,9 +23,9 @@ public sealed record DocumentEnvelope(
 	string? Project = null,
 	IReadOnlyList<string>? Tags = null)
 {
-	private const int MaxFieldChars = 512;
+	private const int MaxFieldBytes = SessionFrontmatter.MaxFieldBytes;
 	private const int MaxTags = 32;
-	private const int MaxTagChars = 64;
+	private const int MaxTagBytes = 64;
 
 	/// <summary>Renders frontmatter followed by the body. The result still needs redaction, as both parts may hold secrets.</summary>
 	/// <exception cref="ArgumentException">The source or source id is blank.</exception>
@@ -59,7 +59,7 @@ public sealed record DocumentEnvelope(
 		string? trimmed = value?.Trim();
 		if (!string.IsNullOrEmpty(trimmed))
 		{
-			SessionFrontmatter.Scalar(output, key, SessionFrontmatter.Clip(trimmed, maxChars: MaxFieldChars));
+			SessionFrontmatter.Scalar(output, key, SessionFrontmatter.Clip(trimmed, maxBytes: MaxFieldBytes));
 		}
 	}
 
@@ -67,7 +67,7 @@ public sealed record DocumentEnvelope(
 	{
 		return (Tags ?? [])
 			.Where(static tag => !string.IsNullOrWhiteSpace(tag))
-			.Select(static tag => SessionFrontmatter.Clip(tag.Trim(), maxChars: MaxTagChars))
+			.Select(static tag => SessionFrontmatter.Clip(tag.Trim(), maxBytes: MaxTagBytes))
 			.Take(MaxTags)
 			.ToList();
 	}

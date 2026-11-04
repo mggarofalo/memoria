@@ -171,11 +171,24 @@ internal sealed partial class CodexTranscript : SessionTranscript
 		SessionFrontmatter.Number(output, "message_end", part.MessageStart + part.Messages.Count - 1);
 		SessionFrontmatter.Number(output, "message_count", part.Messages.Count);
 		SessionFrontmatter.Scalar(output, "message_sha256", Digest(part.Messages));
-		SessionFrontmatter.FlowSequence(output, "turn_ids", part.Messages.Select(static message => message.TurnId!).Distinct(StringComparer.Ordinal));
+		AppendTurnIds(output, part);
 		output.Append("---\n");
 
 		SessionFrontmatter.Body(output, Title(part.FirstUserMessage), part.Messages);
 		return output.ToString();
+	}
+
+	/// <summary>Everything filterable is already written, so only this list can run out of room.</summary>
+	private void AppendTurnIds(StringBuilder output, SessionPart part)
+	{
+		List<string> turnIds = part.Messages.Select(static message => message.TurnId!).Distinct(StringComparer.Ordinal).ToList();
+		int kept = SessionFrontmatter.CountFitting(output, turnIds, ", ".Length);
+		if (kept < turnIds.Count)
+		{
+			SessionFrontmatter.Number(output, "turn_ids_truncated", turnIds.Count - kept);
+			Report.TurnIdsTruncated += turnIds.Count - kept;
+		}
+		SessionFrontmatter.FlowSequence(output, "turn_ids", turnIds.Take(kept));
 	}
 
 	private static string? Title(SessionMessage? firstUser)

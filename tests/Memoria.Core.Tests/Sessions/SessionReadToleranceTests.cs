@@ -44,6 +44,8 @@ public sealed class SessionReadToleranceTests
 	[InlineData("invalidkey")]
 	[InlineData("messagelimit")]
 	[InlineData("filelimit")]
+	[InlineData("filestruncated")]
+	[InlineData("turnstruncated")]
 	public void HasSkippedContent_is_set_by_each_loss_on_its_own(string kind)
 	{
 		SessionReadReport report = new();
@@ -55,6 +57,8 @@ public sealed class SessionReadToleranceTests
 			case "unterminated": report.UnterminatedLines = 1; break;
 			case "invalidkey": report.InvalidKeys = 1; break;
 			case "messagelimit": report.MessagesOverLimit = 1; break;
+			case "filestruncated": report.FilesTruncated = 1; break;
+			case "turnstruncated": report.TurnIdsTruncated = 1; break;
 			default: report.FilesOverLimit = 1; break;
 		}
 		Assert.True(report.HasSkippedContent);

@@ -45,9 +45,9 @@ internal sealed class ClaudeTranscript(SessionSource source, SessionRenderOption
 	{
 		string shortId = SessionPaths.ClaudeShortId(Source.SessionId);
 		string sessionId = Clip(Source.SessionId);
-		string project = _cwd.Length > 0
+		string project = Clip(_cwd.Length > 0
 			? SessionProject.FromClaudeCwd(_cwd, Source.HomeDirectory)
-			: SessionProject.FromClaudeDirectory(Source.ProjectDirectory, Source.HomeDirectory);
+			: SessionProject.FromClaudeDirectory(Source.ProjectDirectory, Source.HomeDirectory));
 		List<ArraySegment<SessionMessage>> segments = SplitIntoParts();
 		List<string>[] filesByPart = BucketFiles(segments);
 		List<UnredactedSessionDocument> documents = BuildDocuments(
@@ -164,8 +164,16 @@ internal sealed class ClaudeTranscript(SessionSource source, SessionRenderOption
 		SessionFrontmatter.Number(output, "chunk_index", part.Number);
 		SessionFrontmatter.Number(output, "message_start", part.MessageStart);
 		SessionFrontmatter.Number(output, "message_count", part.Messages.Count);
-		SessionFrontmatter.Sequence(output, "files_touched", files);
 		SessionFrontmatter.Sequence(output, "tags", Tags(project));
+
+		// Everything filterable is already written, so only this list can run out of room.
+		int kept = SessionFrontmatter.CountFitting(output, files, "  - \n".Length);
+		if (kept < files.Count)
+		{
+			SessionFrontmatter.Number(output, "files_touched_truncated", files.Count - kept);
+			Report.FilesTruncated += files.Count - kept;
+		}
+		SessionFrontmatter.Sequence(output, "files_touched", files[..kept]);
 		output.Append("---\n");
 
 		SessionFrontmatter.Body(output, Title(part.FirstUserMessage), part.Messages);

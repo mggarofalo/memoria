@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Regenerate the session fixtures and goldens from the Python exporters.
 
-Every input here is synthetic. The goldens are what the exporters themselves produce, so a
-passing SessionGoldenTests means the C# port matches them byte for byte. Run this only when
-the exporters change or a case is added:
+Every input here is synthetic. The goldens are what the exporters themselves produce, with one
+deliberate change applied here in move_tags_before_files: the port writes tags before files_touched,
+so that a long list cannot push a filterable field out of the sidecar's metadata head. Nothing else
+differs, so a passing SessionGoldenTests means the C# port matches the exporters byte for byte apart
+from that order. Run this only when the exporters change or a case is added:
 
     python -I -B generate_goldens.py \
         --claude-exporter <agent-skills>/skills/recall/export_sessions.py \
@@ -19,6 +21,7 @@ import argparse
 import importlib.util
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -210,6 +213,11 @@ CASES = [
 ]
 
 
+def move_tags_before_files(text: str) -> str:
+    match = re.search(r'^(files_touched:(?: \[\]\n|\n(?:  - .*\n)*))(tags:\n(?:  - .*\n)*)', text, re.M)
+    return text[:match.start()] + match.group(2) + match.group(1) + text[match.end():]
+
+
 def render_claude(module, source: Path, session_id: str, project_dir: str):
     with tempfile.TemporaryDirectory() as temporary:
         copy = Path(temporary) / f"{session_id}.jsonl"
@@ -221,7 +229,7 @@ def render_claude(module, source: Path, session_id: str, project_dir: str):
         documents, message_start = [], 0
         for index, messages in enumerate(module.chunk_messages(state["messages"]), 1):
             name = module.chunk_filename(start.strftime("%Y-%m-%d"), state["session_id"][:8], index)
-            documents.append((name, module.render_chunk(state, start, messages, index, message_start)))
+            documents.append((name, move_tags_before_files(module.render_chunk(state, start, messages, index, message_start))))
             message_start += len(messages)
     return documents, stats["malformed_lines"]
 

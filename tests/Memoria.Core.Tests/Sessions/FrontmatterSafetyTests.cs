@@ -118,7 +118,7 @@ public sealed class FrontmatterSafetyTests
 		Assert.Equal(value, frontmatter.Scalar("slug"));
 		Assert.Equal("f/" + value.Replace('\\', '/'), Assert.Single(frontmatter.Sequence("files_touched")));
 		Assert.Equal(
-			["session_id", "slug", "date", "start_time", "end_time", "project", "git_branch", "chunk_index", "message_start", "message_count", "files_touched", "tags"],
+			["session_id", "slug", "date", "start_time", "end_time", "project", "git_branch", "chunk_index", "message_start", "message_count", "tags", "files_touched"],
 			frontmatter.Keys());
 	}
 
@@ -176,8 +176,8 @@ public sealed class FrontmatterSafetyTests
 		string text = session.Documents[0].Text();
 
 		Assert.Equal(3, session.Report.ClippedFields);
-		Assert.Equal(1024, Frontmatter(text).Scalar("git_branch").Length);
-		Assert.Equal(1024, Frontmatter(text).Scalar("slug").Length);
+		Assert.Equal(512, Frontmatter(text).Scalar("git_branch").Length);
+		Assert.Equal(512, Frontmatter(text).Scalar("slug").Length);
 		Assert.False(session.Report.HasSkippedContent);
 	}
 
@@ -186,10 +186,11 @@ public sealed class FrontmatterSafetyTests
 	{
 		string value = new string('a', 3) + "\U0001F680";
 
-		Assert.Equal("aaa", SessionFrontmatter.Clip(value, maxChars: 4));
-		Assert.Equal(value, SessionFrontmatter.Clip(value, maxChars: 5));
-		Assert.Equal("aaa\U0001F680", SessionFrontmatter.Clip(value + "b", maxChars: 5));
-		Assert.Equal("aa", SessionFrontmatter.Clip(value, maxChars: 2));
+		// The rocket is four bytes.
+		Assert.Equal("aaa", SessionFrontmatter.Clip(value, maxBytes: 6));
+		Assert.Equal(value, SessionFrontmatter.Clip(value, maxBytes: 7));
+		Assert.Equal("aaa\U0001F680", SessionFrontmatter.Clip(value + "b", maxBytes: 7));
+		Assert.Equal("aa", SessionFrontmatter.Clip(value, maxBytes: 2));
 	}
 
 	[Fact]
@@ -197,10 +198,10 @@ public sealed class FrontmatterSafetyTests
 	{
 		SessionReadReport report = new();
 
-		SessionFrontmatter.Clip(new string('a', SessionFrontmatter.MaxFieldChars), report);
+		SessionFrontmatter.Clip(new string('a', SessionFrontmatter.MaxFieldBytes), report);
 		Assert.Equal(0, report.ClippedFields);
 
-		SessionFrontmatter.Clip(new string('a', SessionFrontmatter.MaxFieldChars + 1), report);
+		SessionFrontmatter.Clip(new string('a', SessionFrontmatter.MaxFieldBytes + 1), report);
 		Assert.Equal(1, report.ClippedFields);
 	}
 }
