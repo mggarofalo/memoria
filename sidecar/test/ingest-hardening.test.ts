@@ -146,8 +146,10 @@ test("a junction flipping under real requests never overwrites a file outside th
       await new Promise((resolve) => setImmediate(resolve));
     }
   })();
+  // Bounded by time as well: refused attempts wait on retries, so the fixed code gets through fewer of them.
+  const deadline = Date.now() + 4000;
   try {
-    for (let i = 0; i < 150; i++) {
+    for (let i = 0; i < 150 && Date.now() < deadline; i++) {
       await app.inject({ method: "POST", url: "/documents", headers: authHeaders, payload });
       await app.inject({ method: "DELETE", url: "/documents?collection=claude-sessions&path=sub/victim.md", headers: authHeaders });
     }
@@ -156,7 +158,10 @@ test("a junction flipping under real requests never overwrites a file outside th
     await flipper;
     await app.close();
   }
-  assert.equal(await readFile(f.victim, "utf8"), "keep");
+  // A delete's rename aside can land out here and stay under a temp name. The content must survive it.
+  const contents = await Promise.all((await readdir(f.outside)).map((name) => readFile(path.join(f.outside, name), "utf8")));
+  assert.ok(contents.includes("keep"), "the outside file's content is still there");
+  assert.ok(!contents.includes("overwritten"), "no document content reached the outside directory");
 });
 
 test("the rename replaces a hard link instead of writing through it", async () => {

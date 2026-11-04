@@ -151,7 +151,7 @@ A write goes to a hidden temp file in the target's directory, is flushed, and is
 
 Remaining limits:
 
-- Node has no `openat` or `renameat`, so each call resolves its path afresh. A local user with write access to the collection root can still win the gap inside the rename itself, between the kernel resolving the source and the destination. Swapping a directory at any earlier point makes the temp file's name unresolvable, and the write fails. A swap after the rename is reported as an error but cannot be undone. Restrict write access to collection roots to the service account.
+- Node has no `openat` or `renameat`, so each call resolves its path afresh. A local user with write access to the collection root can still win the gap inside the rename itself, between the kernel resolving the source and the destination. Swapping a directory at any earlier point makes the temp file's name unresolvable, and the write fails. A swap after the rename is reported as an error but cannot be undone. A swap at the moment the temp file is created can leave an empty file outside the root. A delete's rename aside can land on a file outside the root: it is put back when the swap is still in place, and otherwise stays under a `.memoria-*.tmp` name beside its old one. It is never unlinked, and a flip test reproduces this outcome. Restrict write access to collection roots to the service account.
 - Two simultaneous `POST`s of the same new path with `overwrite: false` can both succeed, and the later rename wins.
 - Per-collection `ignore` patterns in QMD's configuration are not checked, so a path they match still returns 202 and is never indexed.
 
