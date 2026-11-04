@@ -587,6 +587,33 @@ func TestSelfUpdateFailures(t *testing.T) {
 	})
 }
 
+func TestSelfUpdateProvenanceFailureRefusesAndNamesTheFlag(t *testing.T) {
+	withVersion(t, "1.0.0")
+	h := newHarness(t)
+	h.updater = &fakeUpdater{candidate: candidate("v1.1.0"), install: fmt.Errorf("installing: %w", selfupdate.ErrAttestation)}
+	if code := h.run("self-update"); code != apperr.ExitGeneric {
+		t.Fatalf("code = %d", code)
+	}
+	if !strings.Contains(h.stderr.String(), "--checksum-only") || !strings.Contains(h.stderr.String(), "nothing was installed") {
+		t.Fatalf("stderr = %q", h.stderr.String())
+	}
+	if h.updateOptions.ChecksumOnly {
+		t.Fatal("provenance must be on by default")
+	}
+}
+
+func TestSelfUpdateChecksumOnlyIsExplicitAndWarns(t *testing.T) {
+	withVersion(t, "1.0.0")
+	h := newHarness(t)
+	h.updater = &fakeUpdater{candidate: candidate("v1.1.0")}
+	if code := h.run("self-update", "--checksum-only"); code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, h.stderr.String())
+	}
+	if !h.updateOptions.ChecksumOnly || !strings.Contains(h.stderr.String(), "not verifying build provenance") {
+		t.Fatalf("options = %+v, stderr = %q", h.updateOptions, h.stderr.String())
+	}
+}
+
 func TestStoredKeyWithNoRecordedServerIsRefused(t *testing.T) {
 	h := newHarness(t)
 	h.keyring.values[auth.KeyName(auth.DefaultProfile)] = testKey

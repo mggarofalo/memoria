@@ -44,6 +44,10 @@ type Options struct {
 	Prerelease bool
 	// Verify runs the installed binary. Nil runs "<exe> version".
 	Verify func(ctx context.Context, exe, expected string) error
+	// Attester checks provenance. Nil uses GitHub attestations through Sigstore.
+	Attester Attester
+	// ChecksumOnly skips provenance and trusts checksums.txt alone.
+	ChecksumOnly bool
 }
 
 // Candidate is a release chosen for this platform.
@@ -68,13 +72,33 @@ func newUpdater(src *source, opts Options) *Updater {
 	if opts.Verify == nil {
 		opts.Verify = RunVersion
 	}
+	if opts.Attester == nil {
+		opts.Attester = newSigstoreAttester(src)
+	}
 	return &Updater{source: src, opts: opts}
 }
 
-func (u *Updater) library(oldSavePath string) (*lib.Updater, error) {
+func checksumValidator() *lib.ChecksumValidator {
+	return &lib.ChecksumValidator{UniqueFilename: checksumsAsset}
+}
+
+// installValidator is the checksum, plus provenance unless told otherwise.
+func (u *Updater) installValidator(ctx context.Context, tag string) lib.Validator {
+	if u.opts.ChecksumOnly {
+		return checksumValidator()
+	}
+	return &attestedValidator{
+		ChecksumValidator: checksumValidator(),
+		attest: func(digest []byte) error {
+			return u.opts.Attester.Verify(ctx, digest, tag)
+		},
+	}
+}
+
+func (u *Updater) library(validator lib.Validator, oldSavePath string) (*lib.Updater, error) {
 	return lib.NewUpdater(lib.Config{
 		Source:      u.source,
-		Validator:   &lib.ChecksumValidator{UniqueFilename: checksumsAsset},
+		Validator:   validator,
 		OS:          u.opts.OS,
 		Arch:        u.opts.Arch,
 		Prerelease:  u.opts.Prerelease,
@@ -85,7 +109,7 @@ func (u *Updater) library(oldSavePath string) (*lib.Updater, error) {
 // Find returns the newest release, or the one tagged tag when tag is not empty.
 // A release with no build for this platform, or no checksums.txt, is an error.
 func (u *Updater) Find(ctx context.Context, tag string) (*Candidate, error) {
-	library, err := u.library("")
+	library, err := u.library(checksumValidator(), "")
 	if err != nil {
 		return nil, fmt.Errorf("creating the updater: %w", err)
 	}
@@ -98,13 +122,15 @@ func (u *Updater) Find(ctx context.Context, tag string) (*Candidate, error) {
 		return nil, fmt.Errorf("%w: %s for %s/%s", ErrNoRelease, describeTag(tag), u.platformOS(), u.platformArch())
 	}
 	return &Candidate{
-		Tag:        "v" + rel.Version(),
+		Tag:        tagOf(rel.Version()),
 		Version:    rel.Version(),
 		Asset:      rel.AssetName,
 		Prerelease: rel.Prerelease,
 		release:    rel,
 	}, nil
 }
+
+func tagOf(version string) string { return "v" + version }
 
 func describeTag(tag string) string {
 	if tag == "" {
@@ -128,8 +154,8 @@ func (u *Updater) platformArch() string {
 }
 
 // Install replaces exe with the candidate. In order: download, verify the
-// checksum, unpack, swap the files, run the new binary, and on failure swap back.
-// Nothing on disk changes until the checksum and the archive are both good.
+// checksum, verify provenance, unpack, swap the files, run the new binary, and on
+// failure swap back. Nothing on disk changes until all of those checks pass.
 //
 // The running binary's file can be renamed on every supported platform, Windows
 // included, which only forbids overwriting or deleting it. So the swap is two
@@ -143,7 +169,7 @@ func (u *Updater) Install(ctx context.Context, candidate *Candidate, exe string)
 	backup := backupPath(resolved)
 	removeStale(backup)
 
-	library, err := u.library(backup)
+	library, err := u.library(u.installValidator(ctx, candidate.Tag), backup)
 	if err != nil {
 		return fmt.Errorf("creating the updater: %w", err)
 	}

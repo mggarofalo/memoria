@@ -36,6 +36,7 @@ type selfUpdateOptions struct {
 	force         bool
 	prerelease    bool
 	allowDowngrad bool
+	checksumOnly  bool
 }
 
 func newSelfUpdateCmd(a *app) *cobra.Command {
@@ -44,13 +45,13 @@ func newSelfUpdateCmd(a *app) *cobra.Command {
 		Use:   "self-update",
 		Short: "Replace this binary with a GitHub release",
 		Long: `Download a release over https, verify its SHA-256 against the release's
-checksums.txt, swap it in, and run the new binary's 'version' command. If that
-fails, the previous binary is restored.
+checksums.txt, verify its build provenance with Sigstore, swap it in, and run the
+new binary's 'version' command. If that fails, the previous binary is restored.
 
-The checksum comes from the same release as the archive, so it catches
-corruption and a tampered asset, not a compromised release. For an independent
-check, each release has a build provenance attestation:
-  gh attestation verify <archive> --repo mggarofalo/memoria
+Provenance must be signed by this repository's release workflow for that exact
+tag. If it cannot be verified, nothing is installed. --checksum-only skips it and
+trusts checksums.txt alone, which comes from the same release as the archive and
+so cannot catch a compromised release.
 
 Development builds refuse to update unless --force is given.`,
 		Example: `  memoria self-update --check
@@ -66,6 +67,7 @@ Development builds refuse to update unless --force is given.`,
 	f.BoolVar(&o.force, "force", false, "Allow replacing a development build")
 	f.BoolVar(&o.prerelease, "prerelease", false, "Allow installing a prerelease")
 	f.BoolVar(&o.allowDowngrad, "allow-downgrade", false, "Allow installing an older version")
+	f.BoolVar(&o.checksumOnly, "checksum-only", false, "Skip provenance verification and trust checksums.txt alone. Weaker: it cannot catch a compromised release")
 	return cmd
 }
 
@@ -73,7 +75,7 @@ func (a *app) runSelfUpdate(ctx context.Context, o selfUpdateOptions) error {
 	if o.version != "" && !selfupdate.ValidTag(o.version) {
 		return apperr.New(apperr.KindUsage, "--version must look like v1.2.3")
 	}
-	updater := a.selfUpdate.newUpdater(selfupdate.Options{Prerelease: o.prerelease})
+	updater := a.selfUpdate.newUpdater(selfupdate.Options{Prerelease: o.prerelease, ChecksumOnly: o.checksumOnly})
 	candidate, err := updater.Find(ctx, o.version)
 	if err != nil {
 		return classifyFindError(err)
@@ -93,6 +95,9 @@ func (a *app) runSelfUpdate(ctx context.Context, o selfUpdateOptions) error {
 	case selfupdate.ActionUpToDate:
 		a.info("Already up to date (" + Version + ").")
 		return nil
+	}
+	if o.checksumOnly {
+		a.warn("--checksum-only: not verifying build provenance. checksums.txt comes from the same release, so a compromised release would not be caught")
 	}
 	return a.installRelease(ctx, updater, candidate)
 }
@@ -125,10 +130,17 @@ func (a *app) installRelease(ctx context.Context, updater releaseUpdater, candid
 	}
 	a.info("Installing " + candidate.Tag + " from " + candidate.Asset + "...")
 	if err := updater.Install(ctx, candidate, exe); err != nil {
-		return err
+		return explainInstallFailure(err)
 	}
 	a.info("Updated to " + candidate.Tag + ".")
 	return nil
+}
+
+func explainInstallFailure(err error) error {
+	if errors.Is(err, selfupdate.ErrAttestation) {
+		return fmt.Errorf("%w; nothing was installed. Only if you accept the risk, --checksum-only skips this check", err)
+	}
+	return err
 }
 
 func newVersionCmd(a *app) *cobra.Command {

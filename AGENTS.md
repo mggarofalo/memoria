@@ -9,7 +9,7 @@ dotnet restore Memoria.slnx     # .NET packages
 (cd cli && go mod download)     # Go CLI dependencies
 ```
 
-Requires **.NET 10 SDK**, **Go 1.26+**, and **Node 22.18+** (for `sidecar/`). A running instance additionally needs QMD (`npm i -g @tobilu/qmd`), its models, and an index on the sidecar host.
+Requires **.NET 10 SDK**, **Go 1.27.3+**, and **Node 22.18+** (for `sidecar/`). A running instance additionally needs QMD (`npm i -g @tobilu/qmd`), its models, and an index on the sidecar host.
 
 ```bash
 (cd sidecar && npm ci)          # memoria-qmd sidecar dependencies

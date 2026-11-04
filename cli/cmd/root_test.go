@@ -59,17 +59,18 @@ func (m *memoryKeyring) Delete(name string) error {
 
 // harness runs the real command tree with captured output.
 type harness struct {
-	t        *testing.T
-	stdin    *strings.Reader
-	stdout   bytes.Buffer
-	stderr   bytes.Buffer
-	env      map[string]string
-	keyring  *memoryKeyring
-	noRing   bool
-	terminal bool
-	password string
-	updater  releaseUpdater
-	config   string
+	t             *testing.T
+	stdin         *strings.Reader
+	stdout        bytes.Buffer
+	stderr        bytes.Buffer
+	env           map[string]string
+	keyring       *memoryKeyring
+	noRing        bool
+	terminal      bool
+	password      string
+	updater       releaseUpdater
+	updateOptions selfupdate.Options
+	config        string
 }
 
 func newHarness(t *testing.T) *harness {
@@ -96,7 +97,10 @@ func (h *harness) app() *app {
 		}
 		return h.keyring, nil
 	}
-	a.selfUpdate.newUpdater = func(selfupdate.Options) releaseUpdater { return h.updater }
+	a.selfUpdate.newUpdater = func(o selfupdate.Options) releaseUpdater {
+		h.updateOptions = o
+		return h.updater
+	}
 	a.selfUpdate.executable = func() (string, error) { return "memoria-test-exe", nil }
 	return a
 }

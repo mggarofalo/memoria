@@ -189,10 +189,17 @@ func (f *fakeServer) addRelease(t *testing.T, mux *http.ServeMux, r *fakeRelease
 
 func noVerify(context.Context, string, string) error { return nil }
 
+type passingAttester struct{}
+
+func (passingAttester) Verify(context.Context, []byte, string) error { return nil }
+
 func updaterFor(f *fakeServer, opts Options) *Updater {
 	opts.OS, opts.Arch = testPlatform()
 	if opts.Verify == nil {
 		opts.Verify = noVerify
+	}
+	if opts.Attester == nil && !opts.ChecksumOnly {
+		opts.Attester = passingAttester{}
 	}
 	return newUpdater(newSourceWith(f.URL, f.Client()), opts)
 }
@@ -596,7 +603,7 @@ func TestReplacesARunningBinary(t *testing.T) {
 
 	goos, arch := runtime.GOOS, runtime.GOARCH
 	fake := serveFake(t, goos, arch, fakeRelease{tag: "v1.2.0", payload: payload})
-	u := newUpdater(newSourceWith(fake.URL, fake.Client()), Options{OS: goos, Arch: arch})
+	u := newUpdater(newSourceWith(fake.URL, fake.Client()), Options{OS: goos, Arch: arch, Attester: passingAttester{}})
 	c, err := u.Find(context.Background(), "")
 	if err != nil {
 		t.Fatal(err)

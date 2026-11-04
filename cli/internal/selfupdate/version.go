@@ -3,10 +3,10 @@
 // memoria_<version>_<os>_<arch>.tar.gz (.zip on Windows) with a checksums.txt on
 // the same release.
 //
-// The checksum is verified before anything on disk changes, but it comes from
-// the same release as the archive. It catches corruption and a tampered asset,
-// not a compromised release. Each release also has a build provenance
-// attestation, which 'gh attestation verify' can check independently.
+// The checksum comes from the same release as the archive, so alone it only
+// catches corruption. Each release also has a build provenance attestation, which
+// is verified with Sigstore against this repository's release workflow identity.
+// Both are checked before anything on disk changes.
 package selfupdate
 
 import (
