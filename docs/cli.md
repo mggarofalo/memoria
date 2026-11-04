@@ -38,7 +38,7 @@ sha256sum --check --ignore-missing checksums.txt
 gh attestation verify memoria_1.2.3_linux_amd64.tar.gz --repo mggarofalo/memoria
 ```
 
-The checksum comes from the same release as the archive, so it catches corruption and a replaced asset, but not a compromised release. The build provenance attestation is the independent check: it ties the archive to the workflow run that built it. Neither the scripts nor `self-update` verify it, because that needs tooling the CLI does not carry.
+The checksum comes from the same release as the archive, so it catches corruption but not someone who can replace both files. The build provenance attestation is the independent check: it ties the archive to the workflow run that built it. `self-update` verifies it for you. The install scripts do not, so run `gh attestation verify` yourself on a first install.
 
 ## Update
 
@@ -48,15 +48,18 @@ memoria self-update                    # newest stable release
 memoria self-update --version v1.2.3   # a specific release
 ```
 
-`self-update` downloads over https only, redirects included. It verifies the checksum before changing anything on disk, swaps the binary, then runs the new binary's `version` command. If that fails, the previous binary is put back.
+`self-update` downloads over https only, redirects included. Before changing anything on disk it verifies the checksum and the build provenance. Then it swaps the binary and runs the new binary's `version` command. If that fails, the previous binary is put back.
 
-It refuses three things unless you ask:
+Provenance is a GitHub attestation, verified with Sigstore. It must be signed by this repository's `release.yml` workflow for that exact tag, so an attacker who replaces both the archive and `checksums.txt` is caught, and an old signed build cannot pass as a newer release. It does not defend against a compromised release workflow, which can sign whatever it builds. Verifying it needs to reach GitHub and Sigstore's trust root at `tuf-repo-cdn.sigstore.dev`.
+
+It refuses these unless you ask:
 
 | Refusal | Flag |
 |---|---|
 | Replacing a development build (`dev`) | `--force` |
 | Installing an older version | `--allow-downgrade` |
 | Installing a prerelease | `--prerelease` |
+| Installing without verified provenance (trusts `checksums.txt` alone) | `--checksum-only` |
 
 On Windows a running binary can be renamed but not deleted, so the old copy stays as a hidden `.memoria.exe.old` until the next update removes it.
 
@@ -85,6 +88,8 @@ The first of these that has a key wins:
 | 2 | `MEMORIA_API_KEY` | Inherited by every child process. Readable by anything running as you. The CLI warns at a terminal. |
 | 3 | OS keyring | Encrypted at rest by the OS. Any process running as you may still be able to ask for it, depending on the keyring. |
 | 4 | Credentials file | Unencrypted on disk. See below. |
+
+On macOS the keyring is the login Keychain, reached through `/usr/bin/security` so that the binary needs no cgo. The key goes to that tool on stdin, never as a process argument. The entry trusts `/usr/bin/security`, so any process running as you can read the key through that tool without a prompt. The Keychain still encrypts it at rest and locks it with your login keychain. From an SSH session a locked Keychain cannot prompt; run `security unlock-keychain` first.
 
 The config file (`config.json`) never holds a key. It records the active profile, the server URL and which store the key is in. If you add a key to it by hand, the CLI ignores the key, warns you, and removes it on the next save.
 
@@ -173,6 +178,6 @@ Messages from the client are limited to 4 MiB (`--max-message-bytes`), and frame
 
 Commands live in `cli/cmd`, one file each, as a `newXCmd(*app)` factory listed in `commandFactories`. New commands get credentials, the guarded HTTP client, output formats and exit codes from `app`. `internal/transport` is the only code that puts a key on the wire.
 
-macOS release builds must use `CGO_ENABLED=1`. The keyring library's Keychain backend is compiled only with cgo, so a cgo-free build has no keyring on macOS at all. Linux and Windows builds do not need cgo. Stamp the version with `-ldflags "-X github.com/mggarofalo/memoria/cli/cmd.Version=<version>"`.
+Release builds are cgo-free on every platform. Stamp the version with `-ldflags "-X github.com/mggarofalo/memoria/cli/cmd.Version=<version>"`.
 
 `go test ./...` covers the install scripts when `sh` and `pwsh` are available, and skips them otherwise. `MEMORIA_TEST_REAL_KEYRING=1 go test ./internal/auth` also exercises the real OS keyring, under a test-only service name and with a throwaway value.

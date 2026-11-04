@@ -189,7 +189,7 @@ func newApp(stdin io.Reader, stdout, stderr io.Writer) *app {
 		getenv:          os.Getenv,
 		stdinIsTerminal: func() bool { return term.IsTerminal(int(os.Stdin.Fd())) },
 		readPassword:    func() ([]byte, error) { return term.ReadPassword(int(os.Stdin.Fd())) },
-		openKeyring:     func() (auth.SecretStore, error) { return auth.NewKeyringStore() },
+		openKeyring:     auth.NewKeyringStore,
 		selfUpdate:      defaultSelfUpdateDeps(),
 	}
 }

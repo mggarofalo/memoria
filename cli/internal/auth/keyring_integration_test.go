@@ -54,12 +54,12 @@ func TestOpenFailuresBecomeUnavailable(t *testing.T) {
 	t.Cleanup(func() { openRing = previous })
 	for _, cause := range []error{keyring.ErrNoAvailImpl, errors.New("no session bus")} {
 		openRing = func(keyring.Config) (keyring.Keyring, error) { return nil, cause }
-		if _, err := NewKeyringStore(); !errors.Is(err, ErrKeyringUnavailable) {
+		if _, err := newKeyringStoreNamed("memoria-cli-test"); !errors.Is(err, ErrKeyringUnavailable) {
 			t.Errorf("cause %v: err = %v", cause, err)
 		}
 	}
 	openRing = func(keyring.Config) (keyring.Keyring, error) { return keyring.NewArrayKeyring(nil), nil }
-	if _, err := NewKeyringStore(); err != nil {
+	if _, err := newKeyringStoreNamed("memoria-cli-test"); err != nil {
 		t.Errorf("err = %v", err)
 	}
 }
@@ -106,7 +106,7 @@ func TestRealKeyringRoundTrip(t *testing.T) {
 	if os.Getenv("MEMORIA_TEST_REAL_KEYRING") != "1" {
 		t.Skip("set MEMORIA_TEST_REAL_KEYRING=1 to test against the real OS keyring")
 	}
-	store, err := newKeyringStoreNamed("memoria-cli-test")
+	store, err := openPlatformKeyring("memoria-cli-test")
 	if err != nil {
 		t.Fatal(err)
 	}

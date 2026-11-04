@@ -34,12 +34,13 @@ type KeyringStore struct {
 	ring keyring.Keyring
 }
 
-// NewKeyringStore opens the OS keyring.
-func NewKeyringStore() (*KeyringStore, error) {
-	return newKeyringStoreNamed(keyringServiceName)
+// NewKeyringStore opens the OS keyring. On macOS that goes through the security
+// tool (SecurityStore), and elsewhere through the keyring library (KeyringStore).
+func NewKeyringStore() (SecretStore, error) {
+	return openPlatformKeyring(keyringServiceName)
 }
 
-func newKeyringStoreNamed(service string) (*KeyringStore, error) {
+func newKeyringStoreNamed(service string) (SecretStore, error) {
 	ring, err := openRing(keyring.Config{
 		ServiceName: service,
 		// Real OS keyrings only. The library's file backend prompts for a
@@ -48,17 +49,13 @@ func newKeyringStoreNamed(service string) (*KeyringStore, error) {
 		// session.
 		AllowedBackends: []keyring.BackendType{
 			keyring.WinCredBackend,
-			keyring.KeychainBackend,
 			keyring.SecretServiceBackend,
 			keyring.KWalletBackend,
 		},
-		WinCredPrefix:                  service,
-		KeychainSynchronizable:         false,
-		KeychainAccessibleWhenUnlocked: true,
-		KeychainTrustApplication:       true,
-		LibSecretCollectionName:        service,
-		KWalletAppID:                   service,
-		KWalletFolder:                  service,
+		WinCredPrefix:           service,
+		LibSecretCollectionName: service,
+		KWalletAppID:            service,
+		KWalletFolder:           service,
 	})
 	if err != nil {
 		if errors.Is(err, keyring.ErrNoAvailImpl) {
