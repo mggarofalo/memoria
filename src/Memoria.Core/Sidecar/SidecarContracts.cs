@@ -166,11 +166,11 @@ public sealed record SidecarCollection(
 	bool IncludeByDefault,
 	string? Context);
 
-/// <summary>Body of <c>POST /documents</c>. <see cref="Content"/> must already be redacted.</summary>
+/// <summary>Body of <c>POST /documents</c>. <see cref="Content"/> can only come from the redactor, so unredacted text cannot be sent.</summary>
 public sealed record SidecarIngestRequest(
 	string Collection,
 	string Path,
-	string Content,
+	Memoria.Core.Redaction.RedactedMarkdown Content,
 	bool? Embed = null,
 	bool? Overwrite = null);
 

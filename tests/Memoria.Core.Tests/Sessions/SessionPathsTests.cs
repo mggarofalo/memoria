@@ -43,7 +43,7 @@ public sealed class SessionPathsTests
 	[MemberData(nameof(HostileIds))]
 	public async Task A_hostile_claude_id_yields_a_valid_flat_path(string id)
 	{
-		UnredactedSession session = await Claude(ClaudeLine("user", "x"), sessionId: id);
+		RedactedSession session = await Claude(ClaudeLine("user", "x"), sessionId: id);
 
 		AssertValid(session);
 	}
@@ -52,8 +52,8 @@ public sealed class SessionPathsTests
 	[MemberData(nameof(HostileIds))]
 	public async Task A_hostile_codex_id_yields_a_valid_flat_path(string id)
 	{
-		UnredactedSession fromFileName = await Codex(CodexMessage("user", "x"), sessionId: id);
-		UnredactedSession fromMetadata = await Codex(CodexMeta(id) + CodexMessage("user", "x"));
+		RedactedSession fromFileName = await Codex(CodexMessage("user", "x"), sessionId: id);
+		RedactedSession fromMetadata = await Codex(CodexMeta(id) + CodexMessage("user", "x"));
 
 		AssertValid(fromFileName);
 		AssertValid(fromMetadata);
@@ -77,9 +77,9 @@ public sealed class SessionPathsTests
 	[InlineData("a:b")]
 	public async Task A_hostile_project_name_never_reaches_a_path(string name)
 	{
-		UnredactedSession fromCwd = await Claude(ClaudeLine("user", "x", cwd: "/x/" + name));
+		RedactedSession fromCwd = await Claude(ClaudeLine("user", "x", cwd: "/x/" + name));
 		SessionSource source = new(SessionFormat.ClaudeCode, ClaudeId) { ProjectDirectory = name };
-		UnredactedSession fromDirectory = await Render(ClaudeLine("user", "x", cwd: null), source);
+		RedactedSession fromDirectory = await Render(ClaudeLine("user", "x", cwd: null), source);
 
 		Assert.Equal("2026-10-01_abcdef12.md", fromCwd.Documents[0].Path);
 		Assert.Equal("2026-10-01_abcdef12.md", fromDirectory.Documents[0].Path);
@@ -132,7 +132,7 @@ public sealed class SessionPathsTests
 		SessionRenderOptions options = new() { MaxPartChars = 40 };
 		string one = ClaudeLine("user", new string('a', 30));
 
-		UnredactedSession session = await Claude(one + ClaudeLine("assistant", new string('b', 30)), options);
+		RedactedSession session = await Claude(one + ClaudeLine("assistant", new string('b', 30)), options);
 
 		Assert.Equal(2, session.Documents.Count);
 		Assert.False(session.IsSupersededPath("2026-10-01_abcdef12.md"));
@@ -151,7 +151,7 @@ public sealed class SessionPathsTests
 	[Fact]
 	public async Task A_shrunken_codex_session_marks_its_old_parts_as_superseded()
 	{
-		UnredactedSession session = await Codex(CodexMeta() + CodexMessage("user", "x"));
+		RedactedSession session = await Codex(CodexMeta() + CodexMessage("user", "x"));
 
 		Assert.False(session.IsSupersededPath($"2026-09-09_codex_{CodexId}_chunk-00001.md"));
 		Assert.True(session.IsSupersededPath($"2026-09-09_codex_{CodexId}_chunk-00002.md"));
@@ -164,7 +164,7 @@ public sealed class SessionPathsTests
 	[Fact]
 	public async Task A_session_emptied_entirely_supersedes_everything_it_had()
 	{
-		UnredactedSession session = await Claude("{\"type\":\"progress\"}\n");
+		RedactedSession session = await Claude("{\"type\":\"progress\"}\n");
 
 		Assert.True(session.IsSupersededPath("2026-10-01_abcdef12.md"));
 	}
@@ -175,8 +175,8 @@ public sealed class SessionPathsTests
 		SessionRenderOptions options = new() { MaxPartChars = 40 };
 		string jsonl = ClaudeLine("user", new string('a', 30)) + ClaudeLine("assistant", new string('b', 30));
 
-		UnredactedSession first = await Claude(jsonl, options);
-		UnredactedSession second = await Claude(jsonl, options);
+		RedactedSession first = await Claude(jsonl, options);
+		RedactedSession second = await Claude(jsonl, options);
 
 		Assert.Equal(first.Documents.Select(static d => d.Path), second.Documents.Select(static d => d.Path));
 		Assert.Equal(first.Documents.Select(static d => d.Text()), second.Documents.Select(static d => d.Text()));
@@ -188,8 +188,8 @@ public sealed class SessionPathsTests
 		SessionRenderOptions options = new() { MaxPartChars = 80 };
 		string jsonl = ClaudeLine("user", new string('a', 30)) + ClaudeLine("assistant", new string('b', 30));
 
-		UnredactedSession before = await Claude(jsonl, options);
-		UnredactedSession after = await Claude(jsonl + ClaudeLine("user", "c"), options);
+		RedactedSession before = await Claude(jsonl, options);
+		RedactedSession after = await Claude(jsonl + ClaudeLine("user", "c"), options);
 
 		Assert.Equal(before.Documents[0].Text(), after.Documents[0].Text());
 		Assert.NotEqual(before.Documents[1].Text(), after.Documents[1].Text());
@@ -220,12 +220,12 @@ public sealed class SessionPathsTests
 	{
 		string text = new('a', 500);
 
-		UnredactedSession session = await Claude(ClaudeLine("user", text), new SessionRenderOptions { MaxPartChars = 10 });
+		RedactedSession session = await Claude(ClaudeLine("user", text), new SessionRenderOptions { MaxPartChars = 10 });
 
 		Assert.Contains(text, Assert.Single(session.Documents).Text());
 	}
 
-	private static void AssertValid(UnredactedSession session)
+	private static void AssertValid(RedactedSession session)
 	{
 		string path = Assert.Single(session.Documents).Path;
 		Assert.Null(SidecarRefusal(path));

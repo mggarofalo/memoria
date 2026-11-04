@@ -47,19 +47,21 @@ internal sealed partial class CodexTranscript : SessionTranscript
 		}
 	}
 
-	public override UnredactedSession Render()
+	public override RedactedSession Render()
 	{
+		RedactMessages();
 		string safeId = SessionPaths.SafeSegment(_sessionId);
 		string project = SessionProject.FromCodexCwd(_cwd, Source.HomeDirectory);
-		List<UnredactedSessionDocument> documents = BuildDocuments(
+		List<RedactedSessionDocument> documents = BuildDocuments(
 			SplitIntoParts(),
 			part => RenderPart(project, part),
 			(date, part) => SessionPaths.CodexPart(date, safeId, part));
-		return new UnredactedSession(
+		return new RedactedSession(
 			SessionFormat.Codex,
 			_sessionId,
 			documents,
 			Report,
+			CountsByRule,
 			path => SessionPaths.IsCodexFamily(path, safeId));
 	}
 
@@ -174,7 +176,7 @@ internal sealed partial class CodexTranscript : SessionTranscript
 		AppendTurnIds(output, part);
 		output.Append("---\n");
 
-		SessionFrontmatter.Body(output, Title(part.FirstUserMessage), part.Messages);
+		SessionFrontmatter.Body(output, RedactTitle(Title(part.FirstUserMessage)), part.Messages);
 		return output.ToString();
 	}
 
@@ -201,6 +203,11 @@ internal sealed partial class CodexTranscript : SessionTranscript
 		return PythonText.Strip(prefix.Replace("#", "", StringComparison.Ordinal));
 	}
 
+	/// <summary>
+	/// Over redacted text, because messages are redacted before this runs. A digest of the raw text would
+	/// survive into the corpus and let anyone confirm a guess at a short message or a secret in it. It
+	/// therefore equals the Python exporter's only for a part in which nothing was redacted.
+	/// </summary>
 	private static string Digest(ArraySegment<SessionMessage> messages)
 	{
 		using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);

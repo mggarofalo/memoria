@@ -1,3 +1,5 @@
+using Memoria.Core.Redaction;
+
 namespace Memoria.Core.Sessions;
 
 /// <summary>The transcript format of a raw session payload.</summary>
@@ -112,35 +114,37 @@ public sealed class SessionReadReport
 		MalformedLines + NonObjectLines + OversizedLines + UnterminatedLines + InvalidKeys + MessagesOverLimit + FilesOverLimit + FilesTruncated + TurnIdsTruncated > 0;
 }
 
-/// <summary>One part of a rendered session. It must go through redaction before it can be stored.</summary>
+/// <summary>One part of a rendered session, redacted and ready to store.</summary>
 /// <param name="Path">The collection-relative path. Deterministic, and valid for the sidecar's ingest route.</param>
 /// <param name="Part">The 1-based part number.</param>
 /// <param name="MessageStart">The 0-based index of the part's first message within the session.</param>
 /// <param name="MessageCount">The number of messages in the part.</param>
-/// <param name="Content">The rendered markdown, unredacted.</param>
-public sealed record UnredactedSessionDocument(
+/// <param name="Content">The rendered markdown, redacted, having passed the check on the finished document.</param>
+public sealed record RedactedSessionDocument(
 	string Path,
 	int Part,
 	int MessageStart,
 	int MessageCount,
-	UnredactedMarkdown Content);
+	RedactedMarkdown Content);
 
 /// <summary>A rendered session: every part, in order, with what was skipped along the way.</summary>
-public sealed class UnredactedSession
+public sealed class RedactedSession
 {
 	private readonly Func<string, bool> _isInSessionFamily;
 
-	internal UnredactedSession(
+	internal RedactedSession(
 		SessionFormat format,
 		string sessionId,
-		IReadOnlyList<UnredactedSessionDocument> documents,
+		IReadOnlyList<RedactedSessionDocument> documents,
 		SessionReadReport report,
+		IReadOnlyDictionary<string, int> countsByRule,
 		Func<string, bool> isInSessionFamily)
 	{
 		Format = format;
 		SessionId = sessionId;
 		Documents = documents;
 		Report = report;
+		CountsByRule = countsByRule;
 		_isInSessionFamily = isInSessionFamily;
 	}
 
@@ -149,9 +153,12 @@ public sealed class UnredactedSession
 	public string SessionId { get; }
 
 	/// <summary>The parts in order. Empty when the session has no user or assistant text yet.</summary>
-	public IReadOnlyList<UnredactedSessionDocument> Documents { get; }
+	public IReadOnlyList<RedactedSessionDocument> Documents { get; }
 
 	public SessionReadReport Report { get; }
+
+	/// <summary>Replacements across the whole session, by rule name, for a redaction report. Never holds a matched value.</summary>
+	public IReadOnlyDictionary<string, int> CountsByRule { get; }
 
 	/// <summary>
 	/// True when an existing corpus path belongs to this session but is no longer among its parts.

@@ -67,7 +67,7 @@ public sealed partial class SessionHeadBudgetTests
 	[Fact]
 	public async Task Ten_thousand_touched_files_are_cut_and_counted_and_keep_every_filter_field()
 	{
-		UnredactedSession session = await RenderClaudeWithFilesAsync(TouchedFiles);
+		RedactedSession session = await RenderClaudeWithFilesAsync(TouchedFiles);
 		YamlMappingNode frontmatter = Frontmatter(session.Documents[0].Text());
 
 		Assert.Equal(ClaudeId, frontmatter.Scalar("session_id"));
@@ -98,7 +98,7 @@ public sealed partial class SessionHeadBudgetTests
 	[Fact]
 	public async Task A_short_file_list_is_not_cut_and_comes_after_the_tags()
 	{
-		UnredactedSession session = await RenderClaudeWithFilesAsync(3);
+		RedactedSession session = await RenderClaudeWithFilesAsync(3);
 		string text = session.Documents[0].Text();
 
 		Assert.Equal(0, session.Report.FilesTruncated);
@@ -112,7 +112,7 @@ public sealed partial class SessionHeadBudgetTests
 	[Fact]
 	public async Task Many_turn_ids_are_cut_and_counted_without_losing_the_fence()
 	{
-		UnredactedSession session = await RenderManyTurnsAsync();
+		RedactedSession session = await RenderManyTurnsAsync();
 		YamlMappingNode frontmatter = Frontmatter(session.Documents[0].Text());
 
 		int kept = frontmatter.Sequence("turn_ids").Length;
@@ -128,7 +128,7 @@ public sealed partial class SessionHeadBudgetTests
 	[Fact]
 	public async Task A_few_turn_ids_are_not_cut()
 	{
-		UnredactedSession session = await Codex(CodexMessage("user", "x", "t1"));
+		RedactedSession session = await Codex(CodexMessage("user", "x", "t1"));
 
 		Assert.Equal(0, session.Report.TurnIdsTruncated);
 		Assert.DoesNotContain("turn_ids_truncated", session.Documents[0].Text());
@@ -162,7 +162,7 @@ public sealed partial class SessionHeadBudgetTests
 	{
 		SessionSource source = new(SessionFormat.ClaudeCode, ClaudeId) { ProjectDirectory = new string('\u0001', 5000) };
 
-		UnredactedSession session = await Render(ClaudeLine("user", "x", cwd: null), source);
+		RedactedSession session = await Render(ClaudeLine("user", "x", cwd: null), source);
 
 		Assert.Equal(1, session.Report.ClippedFields);
 		Assert.Equal(85, Frontmatter(session.Documents[0].Text()).Scalar("project").Length);
@@ -180,21 +180,21 @@ public sealed partial class SessionHeadBudgetTests
 		};
 	}
 
-	private static Task<UnredactedSession> RenderClaudeWithFilesAsync(int count)
+	private static Task<RedactedSession> RenderClaudeWithFilesAsync(int count)
 	{
 		string jsonl = ClaudeLine("user", s_longRequest, cwd: "/Users/synth/Source/demo-app", branch: "feature/parity")
 			+ Snapshot(Enumerable.Range(0, count).Select(static i => $"f/{i:D5}.cs"));
 		return Claude(jsonl);
 	}
 
-	private static Task<UnredactedSession> RenderHostileClaudeAsync()
+	private static Task<RedactedSession> RenderHostileClaudeAsync()
 	{
 		string jsonl = ClaudeLine("user", s_longRequest, cwd: "/srv/" + s_hostile, branch: s_hostile, slug: s_hostile)
 			+ Snapshot(Enumerable.Range(0, TouchedFiles).Select(static i => $"日日/{i:D5}"));
 		return Claude(jsonl, sessionId: s_hostile);
 	}
 
-	private static Task<UnredactedSession> RenderManyTurnsAsync()
+	private static Task<RedactedSession> RenderManyTurnsAsync()
 	{
 		StringBuilder jsonl = new(CodexMeta(cwd: "/Users/synth/Source/demo-app"));
 		for (int i = 0; i < 2500; i++)
@@ -204,7 +204,7 @@ public sealed partial class SessionHeadBudgetTests
 		return Codex(jsonl.ToString());
 	}
 
-	private static Task<UnredactedSession> RenderHostileCodexAsync()
+	private static Task<RedactedSession> RenderHostileCodexAsync()
 	{
 		string meta = CodexRecord("session_meta", new Dictionary<string, object>
 		{

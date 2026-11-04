@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
@@ -8,6 +8,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="Memoria.Core.Tests" />
+    <InternalsVisibleTo Include="RedactionCheck" />
   </ItemGroup>
 
 </Project>

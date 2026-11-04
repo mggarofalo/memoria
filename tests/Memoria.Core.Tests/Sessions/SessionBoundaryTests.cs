@@ -11,7 +11,7 @@ public sealed class SessionBoundaryTests
 	{
 		string snapshot = "{\"type\":\"file-history-snapshot\",\"snapshot\":{\"trackedFileBackups\":{\"a.txt\":{}}}}\n";
 
-		UnredactedSession session = await Claude(ClaudeLine("user", "x") + snapshot);
+		RedactedSession session = await Claude(ClaudeLine("user", "x") + snapshot);
 
 		Assert.Equal(0, session.Report.FilesOverLimit);
 		Assert.False(session.Report.HasSkippedContent);

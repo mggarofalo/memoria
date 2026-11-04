@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Memoria.Core.Redaction;
 
 namespace Memoria.Core.Sessions;
 
@@ -6,12 +7,16 @@ namespace Memoria.Core.Sessions;
 /// Turns a raw session transcript into the markdown corpus's documents. Pure: it reads the
 /// stream and nothing else, not the clock, the host's home directory, or the filesystem, so
 /// the same input always yields the same paths and bytes and re-ingest overwrites.
+/// Redaction is part of rendering and cannot be skipped: every metadata string and all the message
+/// text are redacted before anything is derived from them, and each finished part must then pass
+/// a second check or the whole session is refused.
 /// </summary>
 public static class SessionRenderer
 {
 	/// <summary>Renders one session. The stream is read to its end and is not disposed.</summary>
 	/// <exception cref="ArgumentException">The session id is blank or an option is out of range.</exception>
-	public static async Task<UnredactedSession> RenderAsync(
+	/// <exception cref="RedactionException">Redaction failed or a finished part still held a credential. Refuse the session.</exception>
+	public static async Task<RedactedSession> RenderAsync(
 		Stream payload,
 		SessionSource source,
 		SessionRenderOptions? options = null,
@@ -52,6 +57,7 @@ internal abstract class SessionTranscript(SessionSource source, SessionRenderOpt
 	/// <summary>Per-entry overhead charged to the budget, so many tiny entries cannot evade it.</summary>
 	protected const int EntryOverhead = 64;
 
+	private readonly Dictionary<string, string> _redactedMetadata = new(StringComparer.Ordinal);
 	private long _retained;
 	private bool _overBudget;
 
@@ -67,7 +73,10 @@ internal abstract class SessionTranscript(SessionSource source, SessionRenderOpt
 
 	public abstract void Add(JsonElement record);
 
-	public abstract UnredactedSession Render();
+	/// <summary>Replacements made so far, by rule name, across metadata and messages.</summary>
+	protected Dictionary<string, int> CountsByRule { get; } = [];
+
+	public abstract RedactedSession Render();
 
 	/// <summary>The first record's offset is kept on a tie, as the exporter does, because the date comes from it.</summary>
 	protected void NoteTime(SessionTimestamp? time)
@@ -114,9 +123,67 @@ internal abstract class SessionTranscript(SessionSource source, SessionRenderOpt
 		return true;
 	}
 
+	/// <summary>Redacts, then cuts. In the other order a cut token's head would be too short for any rule to recognize.</summary>
 	protected string Clip(string value)
 	{
-		return SessionFrontmatter.Clip(value, Report);
+		return SessionFrontmatter.Clip(RedactMetadata(value), Report);
+	}
+
+	/// <summary>Redacts one metadata string. The same few values repeat on every record, so each is judged once.</summary>
+	protected string RedactMetadata(string value)
+	{
+		if (_redactedMetadata.TryGetValue(value, out string? known))
+		{
+			return known;
+		}
+		RedactionResult result = Redactor.Shared.RedactFragment(value);
+		AddCounts(result);
+		_redactedMetadata[value] = result.Text;
+		return result.Text;
+	}
+
+	/// <summary>A title is cut from redacted text, and the cut can change how the remainder reads, so it is judged again.</summary>
+	protected string? RedactTitle(string? title)
+	{
+		return title is null ? null : RedactMetadata(title);
+	}
+
+	/// <summary>
+	/// Redacts all message text as one string, so a key spread across messages is one key. Runs before
+	/// the title, digest, sizing, and split, which therefore only ever see redacted text.
+	/// </summary>
+	protected void RedactMessages()
+	{
+		string joined = string.Join(Redactor.MessageSeparator, Messages.Select(RepairBoundary));
+		RedactionResult result = Redactor.Shared.RedactFragment(joined);
+		AddCounts(result);
+		string[] texts = result.Text.Split(Redactor.MessageSeparator);
+		if (texts.Length != Math.Max(Messages.Count, 1))
+		{
+			throw new RedactionException(RedactionException.WholeDocument, RedactionFailure.RuleFailed);
+		}
+		for (int i = 0; i < Messages.Count; i++)
+		{
+			Messages[i] = Messages[i] with { Text = texts[i], CodePoints = PythonText.CodePointLength(texts[i]) };
+		}
+	}
+
+	private string RepairBoundary(SessionMessage message)
+	{
+		if (!message.Text.Contains(Redactor.MessageBoundary))
+		{
+			return message.Text;
+		}
+		Report.RepairedStrings++;
+		return message.Text.Replace(Redactor.MessageBoundary, '�');
+	}
+
+	private void AddCounts(RedactionResult result)
+	{
+		foreach ((string rule, int count) in result.CountsByRule)
+		{
+			CountsByRule[rule] = CountsByRule.GetValueOrDefault(rule) + count;
+		}
 	}
 
 	/// <summary>Greedy and prefix-stable: appending to a session only changes its last part.</summary>
@@ -144,23 +211,23 @@ internal abstract class SessionTranscript(SessionSource source, SessionRenderOpt
 		return parts;
 	}
 
-	protected List<UnredactedSessionDocument> BuildDocuments(
+	protected List<RedactedSessionDocument> BuildDocuments(
 		List<ArraySegment<SessionMessage>> segments,
 		Func<SessionPart, string> render,
 		Func<string, int, string> path)
 	{
 		SessionTimestamp start = First ?? SessionTimestamp.FromFallback(Source.FallbackStart);
-		List<UnredactedSessionDocument> documents = new(segments.Count);
+		List<RedactedSessionDocument> documents = new(segments.Count);
 		int messageStart = 0;
 		for (int i = 0; i < segments.Count; i++)
 		{
 			SessionPart part = new(segments[i], i + 1, messageStart, start);
-			documents.Add(new UnredactedSessionDocument(
+			documents.Add(new RedactedSessionDocument(
 				path(start.DateText, part.Number),
 				part.Number,
 				messageStart,
 				segments[i].Count,
-				new UnredactedMarkdown(render(part))));
+				Redactor.Shared.Seal(render(part))));
 			messageStart += segments[i].Count;
 		}
 		return documents;

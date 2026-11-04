@@ -41,24 +41,26 @@ internal sealed class ClaudeTranscript(SessionSource source, SessionRenderOption
 		}
 	}
 
-	public override UnredactedSession Render()
+	public override RedactedSession Render()
 	{
-		string shortId = SessionPaths.ClaudeShortId(Source.SessionId);
+		RedactMessages();
+		string shortId = SessionPaths.ClaudeShortId(RedactMetadata(Source.SessionId));
 		string sessionId = Clip(Source.SessionId);
 		string project = Clip(_cwd.Length > 0
 			? SessionProject.FromClaudeCwd(_cwd, Source.HomeDirectory)
 			: SessionProject.FromClaudeDirectory(Source.ProjectDirectory, Source.HomeDirectory));
 		List<ArraySegment<SessionMessage>> segments = SplitIntoParts();
 		List<string>[] filesByPart = BucketFiles(segments);
-		List<UnredactedSessionDocument> documents = BuildDocuments(
+		List<RedactedSessionDocument> documents = BuildDocuments(
 			segments,
 			part => RenderPart(sessionId, project, part, filesByPart[part.Number - 1]),
 			(date, part) => SessionPaths.ClaudePart(date, shortId, part));
-		return new UnredactedSession(
+		return new RedactedSession(
 			SessionFormat.ClaudeCode,
 			sessionId,
 			documents,
 			Report,
+			CountsByRule,
 			path => SessionPaths.IsClaudeFamily(path, shortId));
 	}
 
@@ -176,7 +178,7 @@ internal sealed class ClaudeTranscript(SessionSource source, SessionRenderOption
 		SessionFrontmatter.Sequence(output, "files_touched", files[..kept]);
 		output.Append("---\n");
 
-		SessionFrontmatter.Body(output, Title(part.FirstUserMessage), part.Messages);
+		SessionFrontmatter.Body(output, RedactTitle(Title(part.FirstUserMessage)), part.Messages);
 		return output.ToString();
 	}
 
