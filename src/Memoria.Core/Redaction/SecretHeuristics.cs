@@ -230,13 +230,13 @@ internal static class SecretHeuristics
 	/// <summary><c>curl -u user:password</c>. The flag is common, so the line must be a curl command.</summary>
 	public static bool IsCurlUserPassword(SecretCandidate candidate)
 	{
-		return CommandLines.IsCommand(candidate.Input, candidate.Match.Index, "curl") && IsUrlPassword(candidate.JudgedValue) && !ValueShapes.IsCodeReference(candidate.JudgedValue);
+		return IsUrlPassword(candidate.JudgedValue) && !ValueShapes.IsCodeReference(candidate.JudgedValue) && CommandLines.IsCommand(candidate.Input, candidate.Match.Index, "curl");
 	}
 
 	/// <summary><c>-b</c> and <c>--cookie</c> with a value of <c>name=value</c>. A file name has no equals sign.</summary>
 	public static bool IsCurlCookie(SecretCandidate candidate)
 	{
-		return CommandLines.IsCommand(candidate.Input, candidate.Match.Index, "curl") && IsSessionCookie(candidate.JudgedValue);
+		return IsSessionCookie(candidate.JudgedValue) && CommandLines.IsCommand(candidate.Input, candidate.Match.Index, "curl");
 	}
 
 	/// <summary><c>mysql -pSECRET</c>. A flag with the value attached, so the line must be a MySQL client.</summary>

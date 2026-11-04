@@ -85,6 +85,8 @@ public sealed class ReviewRoundThreeTests
 	[Theory]
 	[InlineData(" -pa ", 400_000)]
 	[InlineData("cu" + "rl -u a:password ", 150_000)]
+	[InlineData("cu" + "rl -u a:Hunter2x9 ", 150_000)]
+	[InlineData("x -u a:Hunter2x9 ", 200_000)]
 	public void Repeated_flags_on_one_line_stay_linear(string unit, int repeats)
 	{
 		string input = new StringBuilder(unit.Length * repeats).Insert(0, unit, repeats).ToString();
