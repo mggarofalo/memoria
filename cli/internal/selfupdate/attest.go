@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/golang/snappy"
+	intoto "github.com/in-toto/attestation/go/v1"
 	"github.com/sigstore/sigstore-go/pkg/bundle"
 	"github.com/sigstore/sigstore-go/pkg/root"
 	"github.com/sigstore/sigstore-go/pkg/tuf"
@@ -27,10 +29,16 @@ const (
 // ErrAttestation means an archive has no provenance this CLI can verify.
 var ErrAttestation = errors.New("provenance attestation check failed")
 
-// Attester decides whether an archive with this digest was built by the release
-// workflow for this tag.
+// Subject is what an attestation must vouch for.
+type Subject struct {
+	Digest []byte
+	Tag    string
+	Asset  string
+}
+
+// Attester decides whether an archive was built by the release workflow for its tag.
 type Attester interface {
-	Verify(ctx context.Context, digest []byte, tag string) error
+	Verify(ctx context.Context, subject Subject) error
 }
 
 // sigstoreAttester checks GitHub artifact attestations, which is what stops an
@@ -40,19 +48,31 @@ type Attester interface {
 type sigstoreAttester struct {
 	source   *source
 	repo     string
+	repoURI  string
 	trusted  func() (root.TrustedMaterial, error)
 	identity func(tag string) (verify.CertificateIdentity, error)
 }
 
 func newSigstoreAttester(src *source) *sigstoreAttester {
-	return &sigstoreAttester{source: src, repo: repoSlug, trusted: fetchTrustedRoot, identity: releaseCertificateIdentity}
+	return &sigstoreAttester{
+		source:   src,
+		repo:     repoSlug,
+		repoURI:  "https://github.com/" + repoSlug,
+		trusted:  fetchTrustedRoot,
+		identity: releaseCertificateIdentity,
+	}
+}
+
+// trustedRootOptions keep the trust root out of ~/.sigstore: a cache there is state
+// another process could change, and a fresh fetch is signed anyway.
+func trustedRootOptions() *tuf.Options {
+	return tuf.DefaultOptions().WithDisableLocalCache()
 }
 
 // fetchTrustedRoot gets Sigstore's current keys through TUF, whose own root ships
-// inside sigstore-go, so that key rotation does not need a new CLI. Nothing is
-// cached on disk.
+// inside sigstore-go, so that key rotation does not need a new CLI.
 func fetchTrustedRoot() (root.TrustedMaterial, error) {
-	return root.FetchTrustedRootWithOptions(tuf.DefaultOptions().WithDisableLocalCache())
+	return root.FetchTrustedRootWithOptions(trustedRootOptions())
 }
 
 // releaseCertificateIdentity requires the exact tag, so an old signed build
@@ -62,16 +82,16 @@ func releaseCertificateIdentity(tag string) (verify.CertificateIdentity, error) 
 }
 
 // Verify implements Attester.
-func (a *sigstoreAttester) Verify(ctx context.Context, digest []byte, tag string) error {
-	bundles, err := a.fetchBundles(ctx, digest)
+func (a *sigstoreAttester) Verify(ctx context.Context, subject Subject) error {
+	bundles, err := a.fetchBundles(ctx, subject.Digest)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrAttestation, err)
 	}
-	trusted, err := a.trusted()
+	trusted, err := a.trustedWithin(ctx)
 	if err != nil {
 		return fmt.Errorf("%w: cannot get the Sigstore trust root: %v", ErrAttestation, err)
 	}
-	identity, err := a.identity(tag)
+	identity, err := a.identity(subject.Tag)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrAttestation, err)
 	}
@@ -79,10 +99,31 @@ func (a *sigstoreAttester) Verify(ctx context.Context, digest []byte, tag string
 	for _, b := range bundles {
 		entities = append(entities, b)
 	}
-	if err := verifyEntities(entities, digest, trusted, identity, publicGoodOptions()...); err != nil {
+	want := expectation{subject: subject, repoURI: a.repoURI}
+	if err := verifyEntities(entities, want, trusted, identity, publicGoodOptions()...); err != nil {
 		return fmt.Errorf("%w: %v", ErrAttestation, err)
 	}
 	return nil
+}
+
+// trustedWithin keeps Ctrl-C working: the TUF client takes no context, and can
+// retry for up to a minute.
+func (a *sigstoreAttester) trustedWithin(ctx context.Context) (root.TrustedMaterial, error) {
+	type outcome struct {
+		trusted root.TrustedMaterial
+		err     error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		trusted, err := a.trusted()
+		done <- outcome{trusted, err}
+	}()
+	select {
+	case result := <-done:
+		return result.trusted, result.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // publicGoodOptions are what an attestation from a public GitHub repository must
@@ -95,28 +136,68 @@ func publicGoodOptions() []verify.VerifierOption {
 	}
 }
 
-// verifyEntities passes if any one entity is valid SLSA provenance for digest
+// expectation is what a verified attestation must also say.
+type expectation struct {
+	subject Subject
+	// repoURI is the certificate's source repository. Only tests leave it empty,
+	// because the test CA's certificates have no such extension.
+	repoURI string
+}
+
+// verifyEntities passes if any one entity is valid SLSA provenance for the subject
 // from identity. A digest can have several attestations, such as an SBOM too.
-func verifyEntities(entities []verify.SignedEntity, digest []byte, trusted root.TrustedMaterial, identity verify.CertificateIdentity, options ...verify.VerifierOption) error {
+func verifyEntities(entities []verify.SignedEntity, want expectation, trusted root.TrustedMaterial, identity verify.CertificateIdentity, options ...verify.VerifierOption) error {
 	verifier, err := verify.NewVerifier(trusted, options...)
 	if err != nil {
 		return err
 	}
-	policy := verify.NewPolicy(verify.WithArtifactDigest("sha256", digest), verify.WithCertificateIdentity(identity))
+	policy := verify.NewPolicy(verify.WithArtifactDigest("sha256", want.subject.Digest), verify.WithCertificateIdentity(identity))
 	lastErr := errors.New("no attestation exists for this archive")
 	for _, entity := range entities {
 		result, err := verifier.Verify(entity, policy)
-		if err != nil {
-			lastErr = err
-			continue
+		if err == nil {
+			err = want.check(result)
 		}
-		if result.Statement == nil || result.Statement.PredicateType != slsaProvenance {
-			lastErr = errors.New("the attestation is not SLSA provenance")
-			continue
+		if err == nil {
+			return nil
 		}
-		return nil
+		lastErr = err
 	}
 	return lastErr
+}
+
+// check covers what the signature policy does not: that this is provenance, that it
+// names this archive and not only its digest, and that it comes from this repository.
+func (w expectation) check(result *verify.VerificationResult) error {
+	statement := result.Statement
+	if statement == nil || statement.PredicateType != slsaProvenance {
+		return errors.New("the attestation is not SLSA provenance")
+	}
+	if statement.Predicate == nil || len(statement.Predicate.GetFields()) == 0 {
+		return errors.New("the attestation has an empty predicate")
+	}
+	if !namesAsset(statement.Subject, w.subject) {
+		return errors.New("the attestation does not name this archive")
+	}
+	return w.checkRepository(result)
+}
+
+func (w expectation) checkRepository(result *verify.VerificationResult) error {
+	if w.repoURI == "" {
+		return nil
+	}
+	if result.Signature == nil || result.Signature.Certificate == nil ||
+		result.Signature.Certificate.SourceRepositoryURI != w.repoURI {
+		return errors.New("the attestation is not from this repository")
+	}
+	return nil
+}
+
+func namesAsset(subjects []*intoto.ResourceDescriptor, want Subject) bool {
+	digest := hex.EncodeToString(want.Digest)
+	return slices.ContainsFunc(subjects, func(subject *intoto.ResourceDescriptor) bool {
+		return subject.GetName() == want.Asset && subject.GetDigest()["sha256"] == digest
+	})
 }
 
 type attestationList struct {

@@ -15,7 +15,10 @@ import (
 	"time"
 )
 
-const verifyTimeout = 30 * time.Second
+const (
+	verifyTimeout   = 30 * time.Second
+	verifyWaitDelay = 3 * time.Second
+)
 
 var (
 	// ErrNoRelease means no release has a build for this platform.
@@ -210,15 +213,20 @@ var (
 		"/usr/bin/", "/bin/", "/usr/sbin/", "/sbin/", "/nix/store/", "/snap/", "/opt/homebrew/",
 		"/usr/local/Cellar/", "/home/linuxbrew/",
 	}
-	managedParts = []string{"/WinGet/Packages/", "/scoop/apps/", "/Program Files/", "/Program Files (x86)/", "/chocolatey/"}
+	// Compared in lower case: Windows paths are not case-sensitive.
+	managedParts = []string{
+		"/winget/packages/", "/scoop/apps/", "/program files/", "/program files (x86)/", "/chocolatey/",
+		"/.linuxbrew/", "/.asdf/", "/.local/share/mise/", "/.mise/",
+	}
 )
 
 func managedPath(path string) bool {
 	normalized := strings.ReplaceAll(path, `\`, "/")
+	lower := strings.ToLower(normalized)
 	return slices.ContainsFunc(managedPrefixes, func(prefix string) bool {
 		return strings.HasPrefix(normalized, prefix)
 	}) || slices.ContainsFunc(managedParts, func(part string) bool {
-		return strings.Contains(normalized, part)
+		return strings.Contains(lower, part)
 	})
 }
 
@@ -237,7 +245,7 @@ func (u *Updater) verifiedArchive(ctx context.Context, candidate *Candidate) ([]
 		return nil, err
 	}
 	if !u.opts.ChecksumOnly {
-		if err := u.opts.Attester.Verify(ctx, digest[:], candidate.Tag); err != nil {
+		if err := u.opts.Attester.Verify(ctx, Subject{Digest: digest[:], Tag: candidate.Tag, Asset: candidate.Asset}); err != nil {
 			return nil, err
 		}
 	}
@@ -334,6 +342,8 @@ func RunVersion(ctx context.Context, exe, expected string) error {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, exe, "version")
 	cmd.Env = scrubbedEnviron(os.Environ())
+	// A binary that leaves a child holding stdout must not block the rollback.
+	cmd.WaitDelay = verifyWaitDelay
 	out, err := cmd.Output()
 	if err != nil {
 		return fmt.Errorf("running version: %w", err)

@@ -66,9 +66,18 @@ function Add-ToUserPath([string]$Directory, [string]$Name) {
     } finally {
         $Key.Dispose()
     }
-    # Writing the registry directly tells nobody. Clearing an unused variable through
-    # this API broadcasts the change, so new terminals see the new value.
-    [Environment]::SetEnvironmentVariable('MEMORIA_INSTALL_REFRESH', $null, 'User')
+    # Writing the registry directly tells nobody. Setting a variable through this API
+    # broadcasts the change, so new terminals see the new value. PowerShell turns $null
+    # into an empty string here, which would leave the variable behind, so it is then
+    # deleted from the registry.
+    $RefreshName = 'MEMORIA_INSTALL_REFRESH'
+    [Environment]::SetEnvironmentVariable($RefreshName, '1', 'User')
+    $Key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')
+    try {
+        $Key.DeleteValue($RefreshName, $false)
+    } finally {
+        $Key.Dispose()
+    }
     Write-Info "Added $Directory to your user PATH. Restart your terminal to pick it up."
 }
 

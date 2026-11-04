@@ -610,6 +610,97 @@ func TestFramesThatDoNotAnswerGetAnError(t *testing.T) {
 	}
 }
 
+func TestMixedFramesAreNotRelayed(t *testing.T) {
+	for name, body := range map[string]string{
+		"method and result": `{"jsonrpc":"2.0","id":2,"method":"x","result":{"forged":true}}`,
+		"method and error":  `{"jsonrpc":"2.0","id":2,"method":"x","error":{"forged":true}}`,
+		"numeric method":    `{"jsonrpc":"2.0","id":1,"method":5,"result":{"forged":true}}`,
+		"empty method":      `{"jsonrpc":"2.0","id":1,"method":"","result":{"forged":true}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := runBridge(t, jsonUpstream(t, body), initialize)
+			if strings.Contains(r.stdout, "forged") {
+				t.Fatalf("stdout = %q", r.stdout)
+			}
+			if f := requireOne(t, r); f.Error == nil || string(f.ID) != "1" {
+				t.Fatalf("frame = %+v", f)
+			}
+		})
+	}
+}
+
+func TestInboundMixedMessagesAreRefused(t *testing.T) {
+	for _, line := range []string{
+		`{"jsonrpc":"2.0","id":1,"method":"x","result":{}}`,
+		`{"jsonrpc":"2.0","id":1,"method":5}`,
+		`{"jsonrpc":"2.0","id":1,"method":""}`,
+	} {
+		opts, _ := upstream(t, func(http.ResponseWriter, *http.Request) {
+			t.Error("this should not go upstream")
+		})
+		if f := requireOne(t, runBridge(t, opts, line)); f.Error == nil {
+			t.Fatalf("%s: frame = %+v", line, f)
+		}
+	}
+}
+
+// blockedWriter never returns, like a pipe whose reader stopped reading.
+type blockedWriter struct{ release chan struct{} }
+
+func (b blockedWriter) Write(p []byte) (int, error) {
+	<-b.release
+	return len(p), nil
+}
+
+// A write stuck on such a client once kept the process alive past SIGTERM.
+func TestSignalEndsRunEvenWithAWriteStuck(t *testing.T) {
+	writer := blockedWriter{release: make(chan struct{})}
+	defer close(writer.release)
+	opts := jsonUpstream(t, `{"jsonrpc":"2.0","id":1,"result":{}}`)
+	stdinR, stdinW := io.Pipe()
+	defer func() { _ = stdinW.Close() }()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- New(writer, opts).Run(ctx, stdinR) }()
+	_, _ = io.WriteString(stdinW, initialize+"\n")
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(shutdownGrace + 10*time.Second):
+		t.Fatal("the bridge outlived the signal")
+	}
+}
+
+func TestPendingBytesAreBudgeted(t *testing.T) {
+	var stdout bytes.Buffer
+	b := New(&stdout, Options{Endpoint: "https://unused.invalid", Client: http.DefaultClient})
+	b.pendingBytes.Store(maxPendingBytes)
+	var wg sync.WaitGroup
+	b.dispatch(context.Background(), []byte(`{"jsonrpc":"2.0","id":1,"method":"x"}`), &wg)
+	wg.Wait()
+	if !strings.Contains(stdout.String(), "too many") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+	if b.pending.Load() != 0 || b.pendingBytes.Load() != maxPendingBytes {
+		t.Fatalf("pending = %d, bytes = %d", b.pending.Load(), b.pendingBytes.Load())
+	}
+}
+
+func TestPendingBudgetIsReturned(t *testing.T) {
+	b := New(io.Discard, Options{})
+	if !b.admit(100) {
+		t.Fatal("expected room")
+	}
+	if b.pendingBytes.Load() != 100 {
+		t.Fatalf("bytes = %d", b.pendingBytes.Load())
+	}
+	b.release(100)
+	if b.pending.Load() != 0 || b.pendingBytes.Load() != 0 {
+		t.Fatal("budget not returned")
+	}
+}
+
 func TestErrorAnswerIsRelayed(t *testing.T) {
 	f := requireOne(t, runBridge(t, jsonUpstream(t, `{"jsonrpc":"2.0","id":1,"error":{"code":-1,"message":"from upstream"}}`), initialize))
 	if f.Error == nil || f.Error.Message != "from upstream" {

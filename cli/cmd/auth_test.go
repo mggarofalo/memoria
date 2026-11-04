@@ -572,6 +572,178 @@ func TestLoginShowsTheServerBeforeAskingForTheKey(t *testing.T) {
 	}
 }
 
+// poisonConfig points the config at a fresh directory naming the attacker's server.
+func (h *harness) poisonConfig(url, backend string) {
+	h.t.Helper()
+	h.t.Setenv("XDG_CONFIG_HOME", h.t.TempDir())
+	cfg, err := auth.LoadConfig()
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	cfg.Profiles[auth.DefaultProfile] = auth.Profile{APIURL: url, Backend: backend}
+	if err := cfg.Save(); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+// The review's proof of concept. The piped key went to the attacker and the real
+// keyring entry was deleted, because only the chosen store was compared.
+func TestPoisonedFileLoginCannotTakeTheKeyOrDeleteTheKeyring(t *testing.T) {
+	real := newFakeAPI(t, jsonReply(`{"collections":[]}`))
+	evil := newFakeAPI(t, jsonReply(`{"collections":[]}`))
+	h := newHarness(t)
+	h.login(real.URL)
+	want := h.keyring.values[auth.KeyName(auth.DefaultProfile)]
+
+	h.poisonConfig(evil.URL, auth.BackendFile)
+	h.stdin = strings.NewReader(testKey)
+	if code := h.run("auth", "login", "--backend", "file"); code != apperr.ExitInsecure {
+		t.Fatalf("code = %d, stderr = %q", code, h.stderr.String())
+	}
+	if len(evil.requests) != 0 {
+		t.Fatal("the attacker received the key")
+	}
+	if h.keyring.values[auth.KeyName(auth.DefaultProfile)] != want {
+		t.Fatal("the real keyring entry was changed")
+	}
+}
+
+func TestPoisonedLoginWithNoEntryAnywhereIsRefused(t *testing.T) {
+	evil := newFakeAPI(t, jsonReply(`{"collections":[]}`))
+	for _, backend := range []string{auth.BackendKeyring, auth.BackendFile} {
+		t.Run(backend, func(t *testing.T) {
+			h := newHarness(t)
+			h.poisonConfig(evil.URL, backend)
+			h.stdin = strings.NewReader(testKey)
+			if code := h.run("auth", "login", "--backend", backend); code != apperr.ExitInsecure {
+				t.Fatalf("code = %d, stderr = %q", code, h.stderr.String())
+			}
+			if len(evil.requests) != 0 {
+				t.Fatal("the attacker received the key")
+			}
+			if !strings.Contains(h.stderr.String(), "--api-url") {
+				t.Fatalf("stderr = %q", h.stderr.String())
+			}
+		})
+	}
+}
+
+// The credentials file sits in the attacker's directory, so it cannot vouch.
+func TestPoisonedCredentialsFileCannotVouchForTheConfig(t *testing.T) {
+	evil := newFakeAPI(t, jsonReply(`{"collections":[]}`))
+	h := newHarness(t)
+	h.poisonConfig(evil.URL, auth.BackendFile)
+	file, err := auth.NewFileStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Set(auth.KeyName(auth.DefaultProfile), h.entryFor(evil.URL)); err != nil {
+		t.Fatal(err)
+	}
+	evil.requests = nil
+	h.stdin = strings.NewReader(testKey)
+	if code := h.run("auth", "login", "--backend", "file"); code != apperr.ExitInsecure {
+		t.Fatalf("code = %d, stderr = %q", code, h.stderr.String())
+	}
+	if len(evil.requests) != 0 {
+		t.Fatal("the attacker received the key")
+	}
+}
+
+func TestConfigURLIsUsedWhenTheKeyringConfirmsIt(t *testing.T) {
+	api := newFakeAPI(t, jsonReply(`{"collections":[]}`))
+	h := newHarness(t)
+	h.login(api.URL)
+	h.stdin = strings.NewReader(testKey)
+	if code := h.run("auth", "login"); code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, h.stderr.String())
+	}
+	if len(api.requests) != 1 {
+		t.Fatalf("requests = %d", len(api.requests))
+	}
+}
+
+func TestSavedURLWithNoKeyringIsRefused(t *testing.T) {
+	api := newFakeAPI(t, jsonReply(`{"collections":[]}`))
+	h := newHarness(t)
+	h.noRing = true
+	h.poisonConfig(api.URL, auth.BackendFile)
+	h.stdin = strings.NewReader(testKey)
+	if code := h.run("auth", "login", "--backend", "file"); code != apperr.ExitInsecure {
+		t.Fatalf("code = %d, stderr = %q", code, h.stderr.String())
+	}
+}
+
+func TestLoginLeavesAnEntryForAnotherServerAlone(t *testing.T) {
+	first := newFakeAPI(t, jsonReply(`{"collections":[]}`))
+	second := newFakeAPI(t, jsonReply(`{"collections":[]}`))
+	h := newHarness(t)
+	h.stdin = strings.NewReader(testKey)
+	if code := h.run("auth", "login", "--api-url", first.URL, "--backend", "file"); code != 0 {
+		t.Fatalf("stderr = %q", h.stderr.String())
+	}
+	h.stdin = strings.NewReader(testKey)
+	if code := h.run("auth", "login", "--api-url", second.URL); code != 0 {
+		t.Fatalf("stderr = %q", h.stderr.String())
+	}
+	if _, err := os.Stat(h.credentialFile()); err != nil {
+		t.Fatalf("the file entry for the other server should stay: %v", err)
+	}
+}
+
+func TestFileLoginBesideAKeyringKeyForAnotherServerIsRefused(t *testing.T) {
+	real := newFakeAPI(t, jsonReply(`{"collections":[]}`))
+	other := newFakeAPI(t, jsonReply(`{"collections":[]}`))
+	h := newHarness(t)
+	h.login(real.URL)
+	h.stdin = strings.NewReader(testKey)
+	code := h.run("auth", "login", "--api-url", other.URL, "--backend", "file")
+	if code != apperr.ExitInsecure || !strings.Contains(h.stderr.String(), "auth logout") {
+		t.Fatalf("code = %d, stderr = %q", code, h.stderr.String())
+	}
+	if len(other.requests) != 0 || !h.storedKeyring(auth.DefaultProfile) {
+		t.Fatal("the login should have changed nothing")
+	}
+}
+
+// A poisoned directory with its own credentials: the attacker's key, for the
+// attacker's server. It would receive search text, so the keyring entry gives it away.
+func TestPoisonedFileBackendIsRefusedWhenTheKeyringDisagrees(t *testing.T) {
+	real := newFakeAPI(t, jsonReply(`{"collections":[]}`))
+	evil := newFakeAPI(t, jsonReply(`{"collections":[]}`))
+	h := newHarness(t)
+	h.login(real.URL)
+	h.poisonConfig(evil.URL, auth.BackendFile)
+	file, err := auth.NewFileStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Set(auth.KeyName(auth.DefaultProfile), h.entryFor(evil.URL)); err != nil {
+		t.Fatal(err)
+	}
+	if code := h.run("query", "private search text"); code != apperr.ExitInsecure {
+		t.Fatalf("code = %d, stderr = %q", code, h.stderr.String())
+	}
+	if len(evil.requests) != 0 {
+		t.Fatal("search text reached the attacker")
+	}
+}
+
+func TestFileBackendStatesTheServerInUse(t *testing.T) {
+	api := newFakeAPI(t, jsonReply(`{"collections":[]}`))
+	h := newHarness(t)
+	h.stdin = strings.NewReader(testKey)
+	if code := h.run("auth", "login", "--api-url", api.URL, "--backend", "file"); code != 0 {
+		t.Fatalf("stderr = %q", h.stderr.String())
+	}
+	if code := h.run("collections"); code != 0 {
+		t.Fatalf("stderr = %q", h.stderr.String())
+	}
+	if !strings.Contains(h.stderr.String(), "for http://127.0.0.1") {
+		t.Fatalf("stderr = %q", h.stderr.String())
+	}
+}
+
 // A proxy's login page is a 200 as well.
 func TestLoginDoesNotStoreAKeyOnAResponseItCannotRead(t *testing.T) {
 	for name, reply := range map[string]http.HandlerFunc{

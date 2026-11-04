@@ -80,6 +80,25 @@ func TestJSONMemberNamesDoNotCollapse(t *testing.T) {
 	}
 }
 
+func TestLiteralPlaceholderMembersDoNotCollide(t *testing.T) {
+	for _, raw := range []string{
+		`{"` + Placeholder + `-2":1,"` + jsonKey + `":2,"mem_0123456789abcdef_feedfacefeedface` + backslash + `u0020":3,"` + Placeholder + `":4}`,
+		`{"` + jsonKey + `":1,"` + Placeholder + `":2,"` + Placeholder + `-2":3,"` + Placeholder + `-3":4}`,
+	} {
+		got, err := newJSONRedactor().JSON([]byte(raw), "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var decoded map[string]int
+		if err := json.Unmarshal(got, &decoded); err != nil {
+			t.Fatal(err)
+		}
+		if len(decoded) != 4 {
+			t.Errorf("members collapsed: %s", got)
+		}
+	}
+}
+
 func TestJSONKeepsTheClientsOwnID(t *testing.T) {
 	raw := `{"id":"` + jsonKey + `","result":{"id":"` + jsonKey + `","text":"` + jsonKey + `"}}`
 	got, err := newJSONRedactor().JSON([]byte(raw), jsonKey)

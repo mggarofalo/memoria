@@ -36,7 +36,11 @@ func Text(s string) string {
 			i += n
 			continue
 		}
-		b.WriteString(replacement(s[i:i+size], r))
+		if isScriptJoiner(s, i, r, size) {
+			b.WriteString(s[i : i+size])
+		} else {
+			b.WriteString(replacement(s[i:i+size], r))
+		}
 		i += size
 	}
 	return b.String()
@@ -80,14 +84,39 @@ func replacement(raw string, r rune) string {
 	return raw
 }
 
+// joinerScripts need ZWNJ or ZWJ to spell words correctly, as in Persian and in
+// Indic conjuncts. Removing them changes what the text says.
+var joinerScripts = []*unicode.RangeTable{
+	unicode.Arabic, unicode.Devanagari, unicode.Bengali, unicode.Gurmukhi, unicode.Gujarati,
+	unicode.Oriya, unicode.Tamil, unicode.Telugu, unicode.Kannada, unicode.Malayalam, unicode.Sinhala,
+}
+
+// isScriptJoiner keeps a ZWNJ or ZWJ only where it sits between two letters or marks
+// of those scripts. Anywhere else it is an invisible character like the others.
+func isScriptJoiner(s string, i int, r rune, size int) bool {
+	if r != 0x200c && r != 0x200d {
+		return false
+	}
+	before, _ := utf8.DecodeLastRuneInString(s[:i])
+	after, _ := utf8.DecodeRuneInString(s[i+size:])
+	return unicode.In(before, joinerScripts...) && unicode.In(after, joinerScripts...)
+}
+
 // isStripped reports runes with no place in output: every control and format
 // character (category Cc and Cf, which covers bidirectional overrides, zero-width
-// characters and invisible tag characters) and variation selectors.
+// characters and invisible tag characters), variation selectors, and characters
+// that render as blank space while being letters or marks to Unicode.
 func isStripped(r rune) bool {
 	switch {
 	case unicode.Is(unicode.Cc, r), unicode.Is(unicode.Cf, r):
 		return true
 	case r >= 0xfe00 && r <= 0xfe0f, r >= 0xe0100 && r <= 0xe01ef:
+		return true
+	case r >= 0x180b && r <= 0x180f: // Mongolian selectors and vowel separator.
+		return true
+	case r == 0x115f, r == 0x1160, r == 0x3164, r == 0xffa0: // Hangul fillers.
+		return true
+	case r == 0x034f, r == 0x2800, r == 0x17b4, r == 0x17b5: // CGJ, braille blank, Khmer.
 		return true
 	}
 	return false

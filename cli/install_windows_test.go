@@ -5,6 +5,7 @@ package main
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"strings"
 	"testing"
 
@@ -38,6 +39,9 @@ func TestInstallPs1KeepsUnexpandedPathEntries(t *testing.T) {
 		t.Fatalf("%v: %s", r.err, r.output)
 	}
 	assertPathValue(t, key, name, `%SystemRoot%\memoria-test;C:\memoria-test-dir;`+dir)
+	if _, _, err := key.GetStringValue("MEMORIA_INSTALL_REFRESH"); !errors.Is(err, registry.ErrNotExist) {
+		t.Fatalf("the refresh variable was left behind: %v", err)
+	}
 
 	// Installing again adds nothing.
 	r = runInstallPsIn(t, good, sums, dir, "-Version", "v1.2.3", "-PathVariable", name)

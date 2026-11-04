@@ -116,14 +116,21 @@ func (w *jsonRewriter) object(depth int) error {
 	return w.closeDelim('}')
 }
 
-// memberName scrubs a member name, numbering any that would then collide.
+// memberName scrubs a member name, numbering any that would then collide. Names
+// already holding the placeholder are numbered too, so that a literal
+// "[REDACTED]-2" cannot collide with one made here.
 func (w *jsonRewriter) memberName(name string, seen map[string]int) string {
 	scrubbed := w.scrub(name)
-	seen[scrubbed]++
-	if count := seen[scrubbed]; count > 1 && strings.Contains(scrubbed, Placeholder) {
-		return fmt.Sprintf("%s-%d", scrubbed, count)
+	if !strings.Contains(scrubbed, Placeholder) {
+		return scrubbed
 	}
-	return scrubbed
+	candidate := scrubbed
+	for n := seen[scrubbed] + 1; seen[candidate] > 0; n++ {
+		candidate = fmt.Sprintf("%s-%d", scrubbed, n)
+	}
+	seen[scrubbed]++
+	seen[candidate]++
+	return candidate
 }
 
 func (w *jsonRewriter) array(depth int) error {

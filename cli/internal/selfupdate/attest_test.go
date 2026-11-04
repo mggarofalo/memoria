@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/golang/snappy"
 	"github.com/sigstore/sigstore-go/pkg/root"
@@ -34,8 +35,19 @@ func decodedDigest(t *testing.T, value string) []byte {
 	return digest
 }
 
+const testAsset = "memoria_1.2.0_linux_amd64.tar.gz"
+
 func statement(predicate, digest string) []byte {
-	return []byte(fmt.Sprintf(`{"_type":"https://in-toto.io/Statement/v1","subject":[{"name":"memoria.tar.gz","digest":{"sha256":%q}}],"predicateType":%q,"predicate":{}}`, digest, predicate))
+	return statementFor(predicate, digest, testAsset, `{"buildType":"x"}`)
+}
+
+func statementFor(predicate, digest, name, body string) []byte {
+	return []byte(fmt.Sprintf(`{"_type":"https://in-toto.io/Statement/v1","subject":[{"name":%q,"digest":{"sha256":%q}}],"predicateType":%q,"predicate":%s}`, name, digest, predicate, body))
+}
+
+func testExpectation(t *testing.T) expectation {
+	t.Helper()
+	return expectation{subject: Subject{Digest: decodedDigest(t, testDigest), Tag: "v1.2.0", Asset: testAsset}}
 }
 
 func signedBy(t *testing.T, signer *ca.VirtualSigstore, identity, issuer string, body []byte) verify.SignedEntity {
@@ -95,6 +107,12 @@ func TestVerifyEntities(t *testing.T) {
 		{"a different digest", func() verify.SignedEntity {
 			return signedBy(t, signer, testIdentity, githubOIDCIssuer, statement(slsaProvenance, otherDigest))
 		}, false},
+		{"another archive's name", func() verify.SignedEntity {
+			return signedBy(t, signer, testIdentity, githubOIDCIssuer, statementFor(slsaProvenance, testDigest, "other_1.2.0_linux_amd64.tar.gz", `{"buildType":"x"}`))
+		}, false},
+		{"an empty predicate", func() verify.SignedEntity {
+			return signedBy(t, signer, testIdentity, githubOIDCIssuer, statementFor(slsaProvenance, testDigest, testAsset, `{}`))
+		}, false},
 		{"not provenance", func() verify.SignedEntity {
 			return signedBy(t, signer, testIdentity, githubOIDCIssuer, statement("https://spdx.dev/Document/v2.3", testDigest))
 		}, false},
@@ -102,7 +120,7 @@ func TestVerifyEntities(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err := verifyEntities([]verify.SignedEntity{c.entity()}, decodedDigest(t, testDigest), signer, releaseIdentityFor(t, "v1.2.0"), virtualOptions()...)
+			err := verifyEntities([]verify.SignedEntity{c.entity()}, testExpectation(t), signer, releaseIdentityFor(t, "v1.2.0"), virtualOptions()...)
 			if (err == nil) != c.ok {
 				t.Fatalf("err = %v, want ok = %v", err, c.ok)
 			}
@@ -117,7 +135,7 @@ func TestVerifyEntitiesPassesIfAnyOneIsValid(t *testing.T) {
 	}
 	sbom := signedBy(t, signer, testIdentity, githubOIDCIssuer, statement("https://spdx.dev/Document/v2.3", testDigest))
 	provenance := signedBy(t, signer, testIdentity, githubOIDCIssuer, statement(slsaProvenance, testDigest))
-	err = verifyEntities([]verify.SignedEntity{sbom, provenance}, decodedDigest(t, testDigest), signer, releaseIdentityFor(t, "v1.2.0"), virtualOptions()...)
+	err = verifyEntities([]verify.SignedEntity{sbom, provenance}, testExpectation(t), signer, releaseIdentityFor(t, "v1.2.0"), virtualOptions()...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +147,7 @@ func TestProductionOptionsRequireACertificateTimestamp(t *testing.T) {
 		t.Fatal(err)
 	}
 	entity := signedBy(t, signer, testIdentity, githubOIDCIssuer, statement(slsaProvenance, testDigest))
-	err = verifyEntities([]verify.SignedEntity{entity}, decodedDigest(t, testDigest), signer, releaseIdentityFor(t, "v1.2.0"), publicGoodOptions()...)
+	err = verifyEntities([]verify.SignedEntity{entity}, testExpectation(t), signer, releaseIdentityFor(t, "v1.2.0"), publicGoodOptions()...)
 	if err == nil {
 		t.Fatal("expected a refusal")
 	}
@@ -141,7 +159,7 @@ func TestBadVerifierOptionsAreAnError(t *testing.T) {
 		t.Fatal(err)
 	}
 	// With no timestamps required, the verifier refuses to be built at all.
-	if err := verifyEntities(nil, decodedDigest(t, testDigest), signer, releaseIdentityFor(t, "v1.2.0")); err == nil {
+	if err := verifyEntities(nil, testExpectation(t), signer, releaseIdentityFor(t, "v1.2.0")); err == nil {
 		t.Fatal("expected an error")
 	}
 }
@@ -151,7 +169,7 @@ func TestVerifyEntitiesRefusesNone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = verifyEntities(nil, decodedDigest(t, testDigest), signer, releaseIdentityFor(t, "v1.2.0"), virtualOptions()...)
+	err = verifyEntities(nil, testExpectation(t), signer, releaseIdentityFor(t, "v1.2.0"), virtualOptions()...)
 	if err == nil || !strings.Contains(err.Error(), "no attestation") {
 		t.Fatalf("err = %v", err)
 	}
@@ -163,6 +181,12 @@ func TestVerifyEntitiesRefusesNone(t *testing.T) {
 type realFixture struct {
 	digest  []byte
 	trusted root.TrustedMaterial
+}
+
+const ghAsset = "gh_2.103.3_linux_amd64.tar.gz"
+
+func (f realFixture) subject(asset string) Subject {
+	return Subject{Digest: f.digest, Tag: "v2.103.3", Asset: asset}
 }
 
 func loadRealFixture(t *testing.T) realFixture {
@@ -209,6 +233,7 @@ func ghAttester(t *testing.T, server *httptest.Server, trusted root.TrustedMater
 	return &sigstoreAttester{
 		source:  newSourceWith(server.URL, server.Client()),
 		repo:    "cli/cli",
+		repoURI: "https://github.com/cli/cli",
 		trusted: func() (root.TrustedMaterial, error) { return trusted, nil },
 		identity: func(string) (verify.CertificateIdentity, error) {
 			return verify.NewShortCertificateIdentity(githubOIDCIssuer, "", "", sanRegex)
@@ -220,8 +245,69 @@ func TestRealAttestationVerifiesOffline(t *testing.T) {
 	fixture := loadRealFixture(t)
 	server := fixtureServer(t)
 	attester := ghAttester(t, server, fixture.trusted, `^https://github\.com/cli/cli/`)
-	if err := attester.Verify(context.Background(), fixture.digest, "v2.103.3"); err != nil {
+	if err := attester.Verify(context.Background(), fixture.subject(ghAsset)); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRealAttestationRefusesAnotherAssetName(t *testing.T) {
+	fixture := loadRealFixture(t)
+	server := fixtureServer(t)
+	attester := ghAttester(t, server, fixture.trusted, `^https://github\.com/cli/cli/`)
+	if err := attester.Verify(context.Background(), fixture.subject("memoria_1.2.0_linux_amd64.tar.gz")); !errors.Is(err, ErrAttestation) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// The certificate says cli/cli, so a verifier expecting this repository refuses it
+// even when the signer identity matches.
+func TestRealAttestationRefusesAnotherSourceRepository(t *testing.T) {
+	fixture := loadRealFixture(t)
+	server := fixtureServer(t)
+	attester := ghAttester(t, server, fixture.trusted, `^https://github\.com/cli/cli/`)
+	attester.repoURI = "https://github.com/" + repoSlug
+	err := attester.Verify(context.Background(), fixture.subject(ghAsset))
+	if !errors.Is(err, ErrAttestation) || !strings.Contains(err.Error(), "this repository") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestProductionAttesterExpectsThisRepository(t *testing.T) {
+	if got := newSigstoreAttester(newSource()).repoURI; got != "https://github.com/mggarofalo/memoria" {
+		t.Fatalf("repoURI = %q", got)
+	}
+}
+
+func TestTrustRootIsNotCachedOnDisk(t *testing.T) {
+	if !trustedRootOptions().DisableLocalCache {
+		t.Fatal("the local cache should be off")
+	}
+}
+
+func TestCtrlCDoesNotWaitForTheTrustRoot(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	attester := attesterAgainst(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"attestations":[]}`)
+	})
+	attester.trusted = func() (root.TrustedMaterial, error) {
+		<-release
+		return nil, errors.New("too late")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- attester.Verify(ctx, Subject{Digest: decodedDigest(t, testDigest), Tag: "v1.2.0", Asset: testAsset})
+	}()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrAttestation) || !strings.Contains(err.Error(), "canceled") {
+			t.Fatalf("err = %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("cancellation had to wait for the trust root")
 	}
 }
 
@@ -229,7 +315,7 @@ func TestRealAttestationRefusesOurIdentity(t *testing.T) {
 	fixture := loadRealFixture(t)
 	server := fixtureServer(t)
 	attester := ghAttester(t, server, fixture.trusted, `^https://github\.com/`+repoSlug+`/`)
-	if err := attester.Verify(context.Background(), fixture.digest, "v2.103.3"); !errors.Is(err, ErrAttestation) {
+	if err := attester.Verify(context.Background(), fixture.subject(ghAsset)); !errors.Is(err, ErrAttestation) {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -238,7 +324,7 @@ func TestRealAttestationRefusesAnotherDigest(t *testing.T) {
 	fixture := loadRealFixture(t)
 	server := fixtureServer(t)
 	attester := ghAttester(t, server, fixture.trusted, `^https://github\.com/cli/cli/`)
-	if err := attester.Verify(context.Background(), decodedDigest(t, testDigest), "v2.103.3"); !errors.Is(err, ErrAttestation) {
+	if err := attester.Verify(context.Background(), Subject{Digest: decodedDigest(t, testDigest), Tag: "v2.103.3", Asset: ghAsset}); !errors.Is(err, ErrAttestation) {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -256,7 +342,7 @@ func TestLiveTrustRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	attester := ghAttester(t, server, trusted, `^https://github\.com/cli/cli/`)
-	if err := attester.Verify(context.Background(), fixture.digest, "v2.103.3"); err != nil {
+	if err := attester.Verify(context.Background(), fixture.subject(ghAsset)); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -298,7 +384,7 @@ func TestAttesterRefusesBadResponses(t *testing.T) {
 	for name, handler := range cases {
 		t.Run(name, func(t *testing.T) {
 			attester := attesterAgainst(t, handler)
-			err := attester.Verify(context.Background(), decodedDigest(t, testDigest), "v1.2.0")
+			err := attester.Verify(context.Background(), Subject{Digest: decodedDigest(t, testDigest), Tag: "v1.2.0", Asset: testAsset})
 			if !errors.Is(err, ErrAttestation) {
 				t.Fatalf("err = %v", err)
 			}
@@ -311,7 +397,7 @@ func TestAttesterRefusesWithoutATrustRoot(t *testing.T) {
 		_, _ = io.WriteString(w, `{"attestations":[]}`)
 	})
 	attester.trusted = func() (root.TrustedMaterial, error) { return nil, errors.New("tuf is down") }
-	err := attester.Verify(context.Background(), decodedDigest(t, testDigest), "v1.2.0")
+	err := attester.Verify(context.Background(), Subject{Digest: decodedDigest(t, testDigest), Tag: "v1.2.0", Asset: testAsset})
 	if !errors.Is(err, ErrAttestation) || !strings.Contains(err.Error(), "tuf is down") {
 		t.Fatalf("err = %v", err)
 	}
@@ -324,7 +410,7 @@ func TestAttesterRefusesWithoutAnIdentity(t *testing.T) {
 	attester.identity = func(string) (verify.CertificateIdentity, error) {
 		return verify.CertificateIdentity{}, errors.New("no identity")
 	}
-	if err := attester.Verify(context.Background(), decodedDigest(t, testDigest), "v1.2.0"); !errors.Is(err, ErrAttestation) {
+	if err := attester.Verify(context.Background(), Subject{Digest: decodedDigest(t, testDigest), Tag: "v1.2.0", Asset: testAsset}); !errors.Is(err, ErrAttestation) {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -382,7 +468,7 @@ func TestInlineBundleIsUsedWithoutADownload(t *testing.T) {
 // failingAttester stands for any provenance failure.
 type failingAttester struct{ calls *int }
 
-func (f failingAttester) Verify(context.Context, []byte, string) error {
+func (f failingAttester) Verify(context.Context, Subject) error {
 	*f.calls++
 	return fmt.Errorf("%w: no signature", ErrAttestation)
 }
@@ -430,12 +516,11 @@ func TestChecksumFailureNeverReachesProvenance(t *testing.T) {
 
 // recordingAttester captures what the update asked it to verify.
 type recordingAttester struct {
-	digest []byte
-	tag    string
+	subject Subject
 }
 
-func (r *recordingAttester) Verify(_ context.Context, digest []byte, tag string) error {
-	r.digest, r.tag = digest, tag
+func (r *recordingAttester) Verify(_ context.Context, subject Subject) error {
+	r.subject = subject
 	return nil
 }
 
@@ -446,8 +531,9 @@ func TestProvenanceIsCheckedForTheDownloadedArchiveAndTag(t *testing.T) {
 	if err := install(t, fake, installedBinary(t), "", Options{Attester: recorder}); err != nil {
 		t.Fatal(err)
 	}
-	if hex.EncodeToString(recorder.digest) != sum(archive) || recorder.tag != "v1.2.0" {
-		t.Fatalf("digest = %x, tag = %q", recorder.digest, recorder.tag)
+	got := recorder.subject
+	if hex.EncodeToString(got.Digest) != sum(archive) || got.Tag != "v1.2.0" || got.Asset != assetName("1.2.0", testOS, testArch) {
+		t.Fatalf("subject = %+v", got)
 	}
 }
 

@@ -88,6 +88,35 @@ func TestDocumentBodiesAreFencedInMultiGet(t *testing.T) {
 	}
 }
 
+func TestUntrustedTextCannotBecomeMarkdown(t *testing.T) {
+	hostileName := "![i](http://evil/x) **b** <img src=x> [l](http://evil)"
+	list := &api.CollectionList{Collections: []api.CollectionInfo{{Name: hostileName}}}
+	status := &api.IndexStatus{Collections: []api.IndexCollectionStatus{{Name: hostileName}}}
+	result := &api.SearchResult{Results: []api.SearchHit{{Title: hostileName}}}
+	bare := api.Document{Title: hostileName, File: "a.md", ModifiedAt: hostileName}
+	for name, render := range map[string]func(*bytes.Buffer) error{
+		"search":      func(w *bytes.Buffer) error { return SearchMarkdown(w, result) },
+		"collections": func(w *bytes.Buffer) error { return CollectionsMarkdown(w, list) },
+		"status":      func(w *bytes.Buffer) error { return StatusMarkdown(w, status) },
+		"document":    func(w *bytes.Buffer) error { return DocumentMarkdown(w, &bare) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			var out bytes.Buffer
+			if err := render(&out); err != nil {
+				t.Fatal(err)
+			}
+			for _, live := range []string{"![i]", "](http", "**b**"} {
+				if strings.Contains(out.String(), live) {
+					t.Fatalf("%q is live markdown in %q", live, out.String())
+				}
+			}
+			if strings.Contains(strings.ReplaceAll(out.String(), `\<img`, ""), "<img") {
+				t.Fatalf("raw HTML is live in %q", out.String())
+			}
+		})
+	}
+}
+
 func TestStatusTableReportsAFailedTableWrite(t *testing.T) {
 	limited := &failAfterFirst{}
 	if err := StatusTable(limited, &api.IndexStatus{}); err == nil {

@@ -185,6 +185,9 @@ func (b *Bridge) relayFrame(msg *message, frame []byte) (bool, error) {
 	if err != nil || stringField(fields, "jsonrpc") != "2.0" {
 		return false, errInvalidFrame
 	}
+	if !wellFormedKind(fields, normalizeID(fields["id"])) {
+		return false, errInvalidFrame
+	}
 	if stringField(fields, "method") != "" {
 		return false, b.out.write(frame, "")
 	}

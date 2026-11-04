@@ -147,10 +147,22 @@ func parseMessage(raw []byte) (*message, *rejection) {
 		return nil, &rejection{code: codeInvalidRequest, message: "id must be a string or a number"}
 	}
 	method := stringField(fields, "method")
-	if method == "" && !isAnswer(fields, id) {
-		return nil, &rejection{id: id, code: codeInvalidRequest, message: "message has no method"}
+	if !wellFormedKind(fields, id) {
+		return nil, &rejection{id: id, code: codeInvalidRequest, message: "message must be a request, a notification or a response"}
 	}
 	return &message{raw: trimmed, id: id, method: method, params: fields["params"]}, nil
+}
+
+// wellFormedKind requires one of two shapes: a non-empty string method and neither
+// result nor error, or no method at all and a proper answer. A frame mixing them
+// could be read as a message or an answer depending on who parses it.
+func wellFormedKind(fields map[string]json.RawMessage, id json.RawMessage) bool {
+	if _, hasMethod := fields["method"]; !hasMethod {
+		return isAnswer(fields, id)
+	}
+	_, result := fields["result"]
+	_, failure := fields["error"]
+	return stringField(fields, "method") != "" && !result && !failure
 }
 
 // isAnswer reports exactly one of result or error, on a message with an id.

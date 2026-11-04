@@ -35,6 +35,11 @@ func TestText(t *testing.T) {
 		{"zero width joiner and space", "a" + string(rune(0x200d)) + "b" + string(rune(0x200b)) + "c", "abc"},
 		{"soft hyphen", "a" + string(rune(0xad)) + "b", "ab"},
 		{"byte order mark", string(rune(0xfeff)) + "a", "a"},
+		{"hangul fillers", "a" + string(rune(0x115f)) + string(rune(0x1160)) + string(rune(0x3164)) + string(rune(0xffa0)) + "b", "ab"},
+		{"grapheme joiner", "a" + string(rune(0x034f)) + "b", "ab"},
+		{"braille blank", "a" + string(rune(0x2800)) + "b", "ab"},
+		{"mongolian selectors", "a" + string(rune(0x180b)) + string(rune(0x180c)) + string(rune(0x180d)) + string(rune(0x180f)) + "b", "ab"},
+		{"khmer inherent vowels", "a" + string(rune(0x17b4)) + string(rune(0x17b5)) + "b", "ab"},
 		{"variation selectors", "a" + string(rune(0xfe0f)) + "b" + string(rune(0xe0100)) + "c", "abc"},
 	}
 	for _, c := range cases {
@@ -43,6 +48,32 @@ func TestText(t *testing.T) {
 				t.Fatalf("Text(%q) = %q, want %q", c.in, got, c.want)
 			}
 		})
+	}
+}
+
+// ZWNJ and ZWJ change how these words are spelled, so they stay between letters of
+// scripts that use them, and go everywhere else.
+func TestJoiners(t *testing.T) {
+	const zwnj, zwj = string(rune(0x200c)), string(rune(0x200d))
+	persian := string(rune(0x0645)) + string(rune(0x06cc)) + zwnj + string(rune(0x062e)) + string(rune(0x0648))
+	hindi := string(rune(0x0915)) + string(rune(0x094d)) + zwj + string(rune(0x0937))
+	for _, kept := range []string{persian, hindi} {
+		if got := Text(kept); got != kept {
+			t.Errorf("Text(%q) = %q", kept, got)
+		}
+	}
+	arabic := string(rune(0x0645))
+	for in, want := range map[string]string{
+		"pass" + zwj + "word": "password",
+		arabic + zwnj + "a":   arabic + "a",
+		"a" + zwnj + arabic:   "a" + arabic,
+		zwj + arabic:          arabic,
+		arabic + zwj:          arabic,
+		"👨" + zwj + "👩":       "👨👩",
+	} {
+		if got := Text(in); got != want {
+			t.Errorf("Text(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 
@@ -85,6 +116,9 @@ func FuzzTextHasNoControls(f *testing.F) {
 	f.Fuzz(func(t *testing.T, in string) {
 		out := Text(in)
 		for _, r := range out {
+			if r == 0x200c || r == 0x200d {
+				continue // Kept between letters of some scripts; see TestJoiners.
+			}
 			if r != '\n' && r != '\t' && (unicode.IsControl(r) || isStripped(r)) {
 				t.Fatalf("Text(%q) kept %U in %q", in, r, out)
 			}

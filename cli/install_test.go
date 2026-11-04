@@ -152,10 +152,23 @@ type shellScenario struct {
 	args           []string
 }
 
+func (s shellScenario) chosenPrefix(fresh string) string {
+	switch {
+	case s.relativePrefix:
+		return "relative/bin"
+	case s.prefix != "":
+		return s.prefix
+	}
+	return fresh
+}
+
 const shellArchiveName = "memoria_1.2.3_linux_amd64.tar.gz"
 
 func runInstallSh(t *testing.T, s shellScenario) shellRun {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("install.sh is for Linux and macOS, and needs POSIX paths")
+	}
 	shell, err := exec.LookPath("sh")
 	if err != nil {
 		t.Skip("sh is not available")
@@ -193,12 +206,7 @@ func runInstallSh(t *testing.T, s shellScenario) shellRun {
 		writeFile(t, filepath.Join(r.fixtures, "latest"), []byte(s.latest), 0o644)
 	}
 
-	if s.prefix != "" {
-		r.prefix = s.prefix
-	}
-	if s.relativePrefix {
-		r.prefix = "relative/bin"
-	}
+	r.prefix = s.chosenPrefix(r.prefix)
 	args := append([]string{script, "--prefix", r.prefix}, s.args...)
 	cmd := exec.Command(shell, args...)
 	cmd.Env = append(os.Environ(),
@@ -317,8 +325,72 @@ func TestInstallShRejectsARelativePrefix(t *testing.T) {
 	}
 }
 
+// A sparse member is tiny in the archive, so only its listed size gives it away.
+func TestInstallShRefusesASparseBomb(t *testing.T) {
+	r := runInstallSh(t, shellScenario{archive: sparseTarGz(t, 134217728+1), args: []string{"--version", "v1.2.3"}})
+	if r.err == nil || !strings.Contains(r.output, "size limit") {
+		t.Fatalf("err = %v, output = %s", r.err, r.output)
+	}
+	if r.installed() != "" {
+		t.Fatal("something was installed")
+	}
+}
+
+func sparseTarGz(t *testing.T, realSize int64) []byte {
+	t.Helper()
+	var pax strings.Builder
+	for _, record := range []string{"GNU.sparse.major=1", "GNU.sparse.minor=0", "GNU.sparse.name=memoria", fmt.Sprintf("GNU.sparse.realsize=%d", realSize)} {
+		size := len(record) + 3
+		for len(fmt.Sprintf("%d %s\n", size, record)) != size {
+			size++
+		}
+		fmt.Fprintf(&pax, "%d %s\n", size, record)
+	}
+	mapBlock := make([]byte, 512)
+	copy(mapBlock, "1\n0\n1\n")
+
+	var tarball bytes.Buffer
+	writeRawTarEntry(&tarball, "PaxHeaders/memoria", 'x', []byte(pax.String()))
+	writeRawTarEntry(&tarball, "GNUSparseFile.0/memoria", '0', append(mapBlock, 'x'))
+	tarball.Write(make([]byte, 1024))
+
+	var out bytes.Buffer
+	gz := gzip.NewWriter(&out)
+	if _, err := gz.Write(tarball.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return out.Bytes()
+}
+
+func writeRawTarEntry(w *bytes.Buffer, name string, typeflag byte, body []byte) {
+	header := make([]byte, 512)
+	copy(header, name)
+	copy(header[100:], "0000755\x00")
+	copy(header[108:], "0000000\x00")
+	copy(header[116:], "0000000\x00")
+	copy(header[124:], fmt.Sprintf("%011o\x00", len(body)))
+	copy(header[136:], "00000000000\x00")
+	header[156] = typeflag
+	copy(header[257:], "ustar\x0000")
+	copy(header[148:], "        ")
+	checksum := 0
+	for _, b := range header {
+		checksum += int(b)
+	}
+	copy(header[148:], fmt.Sprintf("%06o\x00 ", checksum))
+	w.Write(header)
+	w.Write(body)
+	if extra := len(body) % 512; extra != 0 {
+		w.Write(make([]byte, 512-extra))
+	}
+}
+
+// The padding is in another member, so only unpacking the stream reveals it.
 func TestInstallShRefusesADecompressionBomb(t *testing.T) {
-	bomb := tarGz(t, "memoria", make([]byte, 134217728+1))
+	bomb := tarGzEntries(t, tarMember{name: "pad", body: make([]byte, 134217728+1)}, tarMember{name: "memoria", body: []byte(fakeBinary)})
 	r := runInstallSh(t, shellScenario{archive: bomb, args: []string{"--version", "v1.2.3"}})
 	if r.err == nil || !strings.Contains(r.output, "size limit") {
 		t.Fatalf("err = %v, output = %s", r.err, r.output)

@@ -403,6 +403,30 @@ func TestMCPForwardsWithTheStoredKey(t *testing.T) {
 	}
 }
 
+// Through the real writers: a key used as the client's id comes back as sent, so the
+// client can match it, while the same key anywhere else in the frame is scrubbed.
+func TestMCPKeyAsAnIDSurvivesTheRealWriters(t *testing.T) {
+	api := newFakeAPI(t, jsonReply(`{"jsonrpc":"2.0","id":"`+testKey+`","result":{"text":"`+testKey+`"}}`))
+	h := newHarness(t)
+	h.login(api.URL)
+	h.stdin = strings.NewReader(`{"jsonrpc":"2.0","id":"` + testKey + `","method":"ping"}` + "\n")
+	if code := h.app().run(context.Background(), []string{"mcp"}); code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, h.stderr.String())
+	}
+	var frame struct {
+		ID     string `json:"id"`
+		Result struct {
+			Text string `json:"text"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(h.stdout.Bytes(), &frame); err != nil {
+		t.Fatalf("stdout = %q: %v", h.stdout.String(), err)
+	}
+	if frame.ID != testKey || frame.Result.Text != redact.Placeholder {
+		t.Fatalf("stdout = %q", h.stdout.String())
+	}
+}
+
 func TestMCPHonorsPathAndTimeoutFlags(t *testing.T) {
 	api := newFakeAPI(t, jsonReply(`{"jsonrpc":"2.0","id":1,"result":{}}`))
 	h := newHarness(t)

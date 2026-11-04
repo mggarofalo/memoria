@@ -130,10 +130,30 @@ func (a *app) resolveKey(resolver *auth.Resolver, profile string, base *url.URL)
 	if err := checkStoredKeyOrigin(resolved, profile, base); err != nil {
 		return auth.Resolved{}, err
 	}
+	if resolved.Source == auth.SourceFile {
+		if err := a.checkFileBackend(resolved, profile); err != nil {
+			return auth.Resolved{}, err
+		}
+	}
 	if resolved.Source == auth.SourceEnv && a.stdinIsTerminal() && !a.flags.quiet {
 		a.warn("using " + auth.EnvAPIKey + " from the environment; child processes inherit it. Consider 'memoria auth login'")
 	}
 	return resolved, nil
+}
+
+// checkFileBackend covers a poisoned config directory holding its own credentials
+// file: the attacker's key, for the attacker's server, would receive search text.
+// A keyring entry for another server gives that away. With no keyring entry nothing
+// can tell, so the origin in use is always stated.
+func (a *app) checkFileBackend(resolved auth.Resolved, profile string) error {
+	origin := a.keyringOrigin(profile)
+	if origin != "" && origin != resolved.Origin {
+		return apperr.New(apperr.KindInsecure,
+			"the credentials file for profile %q names %s, but the OS keyring holds a key for %s; check XDG_CONFIG_HOME and HOME, or run 'memoria auth logout'",
+			profile, resolved.Origin, origin)
+	}
+	a.info("Using the key from the credentials file, for " + resolved.Origin)
+	return nil
 }
 
 // checkStoredKeyOrigin holds a stored key to the origin recorded with it in the

@@ -39,11 +39,29 @@ func TestMain(m *testing.M) {
 	case "sleep":
 		time.Sleep(time.Minute)
 		os.Exit(0)
+	case "orphan":
+		fakeOrphan()
 	case "fail":
 		os.Exit(3)
 	}
 	versionEnvAllowlist = append(versionEnvAllowlist, "MEMORIA_TEST_FAKE")
 	os.Exit(m.Run())
+}
+
+// fakeOrphan reports the right version but leaves a child holding stdout.
+func fakeOrphan() {
+	self, err := os.Executable()
+	if err != nil {
+		os.Exit(4)
+	}
+	child := exec.Command(self)
+	child.Env = append(os.Environ(), "MEMORIA_TEST_FAKE=sleep")
+	child.Stdout = os.Stdout
+	if child.Start() != nil {
+		os.Exit(5)
+	}
+	fmt.Println("memoria 1.2.0")
+	os.Exit(0)
 }
 
 func fakeVersion() {
@@ -215,7 +233,7 @@ func noVerify(context.Context, string, string) error { return nil }
 
 type passingAttester struct{}
 
-func (passingAttester) Verify(context.Context, []byte, string) error { return nil }
+func (passingAttester) Verify(context.Context, Subject) error { return nil }
 
 func updaterFor(f *fakeServer, opts Options) *Updater {
 	opts.OS, opts.Arch = testOS, testArch
@@ -461,6 +479,112 @@ func TestDecompressionBombsAreRefused(t *testing.T) {
 	}
 }
 
+// sparseTarGz builds a PAX 1.0 sparse member by hand, since archive/tar will not
+// write one. It is a few hundred bytes and claims to expand to realSize.
+func sparseTarGz(t *testing.T, realSize int64) []byte {
+	t.Helper()
+	var pax strings.Builder
+	for _, record := range []string{"GNU.sparse.major=1", "GNU.sparse.minor=0", "GNU.sparse.name=memoria", fmt.Sprintf("GNU.sparse.realsize=%d", realSize)} {
+		pax.WriteString(paxRecord(record))
+	}
+	mapBlock := make([]byte, 512)
+	copy(mapBlock, "1\n0\n1\n")
+	body := append(mapBlock, 'x')
+
+	var tarball bytes.Buffer
+	writeRawEntry(&tarball, "PaxHeaders/memoria", 'x', []byte(pax.String()))
+	writeRawEntry(&tarball, "GNUSparseFile.0/memoria", '0', body)
+	tarball.Write(make([]byte, 1024))
+
+	var out bytes.Buffer
+	gz := gzip.NewWriter(&out)
+	if _, err := gz.Write(tarball.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return out.Bytes()
+}
+
+func paxRecord(record string) string {
+	size := len(record) + 3
+	for len(fmt.Sprintf("%d %s\n", size, record)) != size {
+		size++
+	}
+	return fmt.Sprintf("%d %s\n", size, record)
+}
+
+func writeRawEntry(w *bytes.Buffer, name string, typeflag byte, body []byte) {
+	header := make([]byte, 512)
+	copy(header, name)
+	copy(header[100:], "0000755\x00")
+	copy(header[108:], "0000000\x00")
+	copy(header[116:], "0000000\x00")
+	copy(header[124:], fmt.Sprintf("%011o\x00", len(body)))
+	copy(header[136:], "00000000000\x00")
+	header[156] = typeflag
+	copy(header[257:], "ustar\x0000")
+	copy(header[148:], "        ")
+	checksum := 0
+	for _, b := range header {
+		checksum += int(b)
+	}
+	copy(header[148:], fmt.Sprintf("%06o\x00 ", checksum))
+	w.Write(header)
+	w.Write(body)
+	if extra := len(body) % 512; extra != 0 {
+		w.Write(make([]byte, 512-extra))
+	}
+}
+
+// A sparse member expands while reading almost nothing, so the cap on the archive
+// side never trips. The review wrote 314 MB from 218 bytes.
+func TestSparseMemberIsRefusedOnItsHeader(t *testing.T) {
+	var out bytes.Buffer
+	err := extractBinary(sparseTarGz(t, maxUnpackedBytes+1), "linux", &out)
+	if !errors.Is(err, errTooLarge) {
+		t.Fatalf("err = %v", err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("wrote %d bytes before refusing", out.Len())
+	}
+}
+
+func TestSmallSparseMemberStillUnpacks(t *testing.T) {
+	var out bytes.Buffer
+	if err := extractBinary(sparseTarGz(t, 4096), "linux", &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Len() != 4096 {
+		t.Fatalf("len = %d", out.Len())
+	}
+}
+
+type endlessZeros struct{}
+
+func (endlessZeros) Read(p []byte) (int, error) {
+	clear(p)
+	return len(p), nil
+}
+
+func TestOutputIsCappedWhateverTheSource(t *testing.T) {
+	counter := &countingWriter{}
+	if err := copyCapped(counter, endlessZeros{}); !errors.Is(err, errTooLarge) {
+		t.Fatalf("err = %v", err)
+	}
+	if counter.total > maxUnpackedBytes+1 {
+		t.Fatalf("wrote %d", counter.total)
+	}
+}
+
+type countingWriter struct{ total int64 }
+
+func (c *countingWriter) Write(p []byte) (int, error) {
+	c.total += int64(len(p))
+	return len(p), nil
+}
+
 func TestZipEntryRules(t *testing.T) {
 	var out bytes.Buffer
 	if err := extractBinary(zipOf(t, zipEntry{"memoria.exe", []byte("good")}), "windows", &out); err != nil || out.String() != "good" {
@@ -556,6 +680,11 @@ func TestManagedPaths(t *testing.T) {
 		`C:\Program Files\memoria\memoria.exe`:                                    true,
 		`C:\Users\me\AppData\Local\Microsoft\WinGet\Packages\memoria\memoria.exe`: true,
 		`C:\Users\me\scoop\apps\memoria\current\memoria.exe`:                      true,
+		`C:\PROGRAM FILES\memoria\memoria.exe`:                                    true,
+		`c:\users\me\appdata\local\microsoft\winget\packages\memoria\memoria.exe`: true,
+		"/home/me/.linuxbrew/bin/memoria":                                         true,
+		"/home/me/.asdf/installs/memoria/1.0/bin/memoria":                         true,
+		"/home/me/.local/share/mise/installs/memoria/1/memoria":                   true,
 		"/usr/local/bin/memoria":                                                  false,
 		"/home/me/.local/bin/memoria":                                             false,
 		`C:\Users\me\AppData\Local\memoria\memoria.exe`:                           false,
@@ -874,6 +1003,25 @@ func TestRunVersion(t *testing.T) {
 	t.Setenv("MEMORIA_TEST_FAKE", "fail")
 	if err := RunVersion(context.Background(), exe, "1.2.0"); err == nil {
 		t.Fatal("a failing binary should fail")
+	}
+}
+
+// Waiting on a pipe a leftover child still holds once blocked the rollback.
+func TestLeftoverChildCannotBlockTheCheck(t *testing.T) {
+	// Not t.TempDir: the leftover child keeps the binary open past the test's end,
+	// and on Windows that makes the directory impossible to remove.
+	dir, err := os.MkdirTemp("", "memoria-orphan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	exe := copyOfThisBinary(t, dir, binaryName(runtime.GOOS))
+	t.Setenv("MEMORIA_TEST_FAKE", "orphan")
+	start := time.Now()
+	if err := RunVersion(context.Background(), exe, "1.2.0"); err == nil {
+		t.Fatal("a binary leaving a child behind should fail the check")
+	}
+	if elapsed := time.Since(start); elapsed > 20*time.Second {
+		t.Fatalf("took %s", elapsed)
 	}
 }
 

@@ -54,8 +54,13 @@ check_members() {
     count="$(tar -tzf "$1" | grep -c "^${BINARY}\$" || true)"
     [ "$count" != "0" ] || fail "the archive has no ${BINARY} binary"
     [ "$count" = "1" ] || fail "the archive names ${BINARY} more than once"
-    type_flag="$(tar -tvzf "$1" "$BINARY" | cut -c1)"
+    listing="$(tar -tvzf "$1" "$BINARY")"
+    type_flag="$(printf '%s\n' "$listing" | cut -c1)"
     [ "$type_flag" = "-" ] || fail "the archive's ${BINARY} is not a regular file"
+    # The listed size catches a sparse member, which expands from almost nothing.
+    # GNU tar lists "mode owner/group size", and BSD tar "mode links owner group size".
+    listed="$(printf '%s\n' "$listing" | awk '{ if ($2 ~ /\//) print $3; else print $5 }')"
+    [ "$listed" -le "$MAX_UNPACKED_BYTES" ] || fail "the archive unpacks to more than the size limit"
     unpacked="$(gzip -dc "$1" | head -c "$((MAX_UNPACKED_BYTES + 1))" | wc -c | tr -d ' ')"
     [ "$unpacked" -le "$MAX_UNPACKED_BYTES" ] || fail "the archive unpacks to more than the size limit"
 }

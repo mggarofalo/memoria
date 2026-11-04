@@ -72,12 +72,15 @@ func (a *app) login(ctx context.Context, o loginOptions) error {
 	if err != nil {
 		return err
 	}
-	raw, err := a.loginURL(store, cfg, profile)
+	raw, err := a.loginURL(cfg, profile)
 	if err != nil {
 		return err
 	}
 	base, err := a.parseURL(raw)
 	if err != nil {
+		return err
+	}
+	if err := a.checkBackendConflict(o.backend, profile, base); err != nil {
 		return err
 	}
 	// Say where the key is going before asking for it.
@@ -107,7 +110,7 @@ func (a *app) saveLogin(store auth.SecretStore, cfg *auth.Config, profile, backe
 	if err := store.Set(auth.KeyName(profile), entry); err != nil {
 		return err
 	}
-	a.removeFromOtherBackend(backend, profile)
+	a.removeFromOtherBackend(backend, profile, transport.Origin(base))
 
 	cfg.ActiveProfile = profile
 	cfg.Profiles[profile] = auth.Profile{APIURL: base.String(), Backend: backend}
@@ -152,12 +155,13 @@ func (a *app) openBackend(backend string) (auth.SecretStore, error) {
 	return nil, apperr.New(apperr.KindUsage, "unknown backend: use keyring or file")
 }
 
-// loginURL decides where a pasted key will be sent. Only --api-url can name a new
-// server for an existing entry. MEMORIA_URL is not consulted at all, because an
-// environment set by a project's .env must not be able to receive a key or rebind
-// a profile; and the config cannot override the store's own record of the origin,
-// because the config can be replaced by whoever sets XDG_CONFIG_HOME or HOME.
-func (a *app) loginURL(store auth.SecretStore, cfg *auth.Config, profile string) (string, error) {
+// loginURL decides where a key will be sent. --api-url is always explicit, and at a
+// terminal the person types the URL. Anything else comes from the environment or
+// the config, and whoever sets XDG_CONFIG_HOME, HOME or MEMORIA_URL can write those.
+// A piped login cannot even show a prompt to notice with. So a saved URL is used
+// only when the keyring already holds a key for that origin. The credentials file
+// cannot vouch, as it sits in the same directory as the config.
+func (a *app) loginURL(cfg *auth.Config, profile string) (string, error) {
 	if a.flags.apiURL != "" {
 		return a.flags.apiURL, nil
 	}
@@ -165,27 +169,48 @@ func (a *app) loginURL(store auth.SecretStore, cfg *auth.Config, profile string)
 		a.warn(auth.EnvURL + " is ignored by 'auth login'; pass --api-url to choose the server")
 	}
 	saved := cfg.Profile(profile).APIURL
-	if err := checkSavedOrigin(auth.StoredOrigin(store, profile), saved, profile); err != nil {
-		return "", err
+	if saved != "" {
+		return saved, a.confirmSavedOrigin(saved, profile)
 	}
-	if saved != "" || !a.stdinIsTerminal() {
-		return saved, nil
+	if !a.stdinIsTerminal() {
+		return "", nil
 	}
 	fmt.Fprint(a.stderr, "Memoria server URL: ")
 	line, _ := bufio.NewReader(a.stdin).ReadString('\n')
 	return strings.TrimSpace(line), nil
 }
 
-func checkSavedOrigin(stored, saved, profile string) error {
-	if stored == "" || saved == "" {
-		return nil
-	}
+func (a *app) confirmSavedOrigin(saved, profile string) error {
 	parsed, err := url.Parse(saved)
-	if err == nil && transport.Origin(parsed) == stored {
+	if err == nil && a.keyringOrigin(profile) == transport.Origin(parsed) {
 		return nil
 	}
 	return apperr.New(apperr.KindInsecure,
-		"the config names a different server than the key stored for profile %q (%s); pass --api-url to choose one explicitly", profile, stored)
+		"no key in the OS keyring confirms the server the config names for profile %q; pass --api-url to choose the server explicitly", profile)
+}
+
+// keyringOrigin returns the origin of the profile's keyring entry, if there is one.
+func (a *app) keyringOrigin(profile string) string {
+	ring, err := a.openKeyring()
+	if err != nil {
+		return ""
+	}
+	return auth.StoredOrigin(ring, profile)
+}
+
+// checkBackendConflict refuses a file login beside a keyring entry for another
+// server. Commands would refuse that pair anyway, since it is also what a poisoned
+// config directory looks like, so it is better to say so here.
+func (a *app) checkBackendConflict(backend, profile string, base *url.URL) error {
+	if backend != auth.BackendFile {
+		return nil
+	}
+	origin := a.keyringOrigin(profile)
+	if origin == "" || origin == transport.Origin(base) {
+		return nil
+	}
+	return apperr.New(apperr.KindInsecure,
+		"profile %q already has a key in the OS keyring for %s; run 'memoria auth logout' first, or use a separate --profile", profile, origin)
 }
 
 func (a *app) readKey() (string, error) {
@@ -252,9 +277,10 @@ func (a *app) verifyKey(ctx context.Context, s *session) error {
 	return requireShape(resp.JSON200 != nil && resp.JSON200.Collections != nil)
 }
 
-// removeFromOtherBackend deletes a copy left by an earlier login, so that the
-// precedence order can never select a stale key.
-func (a *app) removeFromOtherBackend(backend, profile string) {
+// removeFromOtherBackend deletes a copy left by an earlier login for the same
+// server, so that the precedence order can never select a stale key. An entry for
+// another server is not this login's to delete.
+func (a *app) removeFromOtherBackend(backend, profile, origin string) {
 	var other auth.SecretStore
 	var err error
 	if backend == auth.BackendFile {
@@ -262,7 +288,7 @@ func (a *app) removeFromOtherBackend(backend, profile string) {
 	} else {
 		other, err = auth.NewFileStore()
 	}
-	if err == nil {
+	if err == nil && auth.StoredOrigin(other, profile) == origin {
 		_ = other.Delete(auth.KeyName(profile))
 	}
 }

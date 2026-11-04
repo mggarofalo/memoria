@@ -31,9 +31,14 @@ const (
 	DefaultMaxOutboundBytes = 32 << 20
 	DefaultRequestTimeout   = 5 * time.Minute
 	maxConcurrent           = 16
-	// maxPending bounds requests waiting for a slot, so a client that floods the
-	// bridge is told so rather than growing it without limit.
-	maxPending = 1024
+	// maxPending and maxPendingBytes bound requests waiting for a slot, so a client
+	// that floods the bridge is told so rather than growing it without limit. The
+	// byte budget is the one that matters when each message is large.
+	maxPending      = 1024
+	maxPendingBytes = 64 << 20
+	// shutdownGrace is how long a signal waits for in-flight work. A client that
+	// stopped reading stdout can hold a write forever.
+	shutdownGrace = 2 * time.Second
 )
 
 // Options configures a Bridge.
@@ -60,10 +65,11 @@ type Options struct {
 
 // Bridge relays newline-delimited JSON-RPC between stdio and HTTP.
 type Bridge struct {
-	opts    Options
-	out     *frameWriter
-	slots   chan struct{}
-	pending atomic.Int64
+	opts         Options
+	out          *frameWriter
+	slots        chan struct{}
+	pending      atomic.Int64
+	pendingBytes atomic.Int64
 
 	mu       sync.Mutex
 	cancels  map[string]context.CancelFunc
@@ -117,7 +123,7 @@ func (b *Bridge) Run(ctx context.Context, stdin io.Reader) error {
 	go b.readLines(ctx, stdin, lines)
 
 	var wg sync.WaitGroup
-	defer wg.Wait()
+	defer drain(ctx, &wg)
 	for {
 		select {
 		case <-ctx.Done():
@@ -128,6 +134,25 @@ func (b *Bridge) Run(ctx context.Context, stdin io.Reader) error {
 				return readEndError(in.err)
 			}
 		}
+	}
+}
+
+// drain waits for in-flight exchanges, but a signal ends the wait after a grace
+// period: one blocked writing to a client that stopped reading never finishes.
+func drain(ctx context.Context, wg *sync.WaitGroup) {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return
+	case <-ctx.Done():
+	}
+	select {
+	case <-done:
+	case <-time.After(shutdownGrace):
 	}
 }
 
@@ -197,8 +222,8 @@ func (b *Bridge) dispatch(ctx context.Context, raw []byte, wg *sync.WaitGroup) {
 		b.fail(msg, b.opts.StartupErr)
 		return
 	}
-	if b.pending.Add(1) > maxPending {
-		b.pending.Add(-1)
+	size := int64(len(raw))
+	if !b.admit(size) {
 		b.fail(msg, errTooManyRequests)
 		return
 	}
@@ -206,10 +231,24 @@ func (b *Bridge) dispatch(ctx context.Context, raw []byte, wg *sync.WaitGroup) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		defer b.pending.Add(-1)
+		defer b.release(size)
 		defer b.untrack(msg, cancel)
 		b.runWhenFree(reqCtx, msg)
 	}()
+}
+
+func (b *Bridge) admit(size int64) bool {
+	count, total := b.pending.Add(1), b.pendingBytes.Add(size)
+	if count > maxPending || total > maxPendingBytes {
+		b.release(size)
+		return false
+	}
+	return true
+}
+
+func (b *Bridge) release(size int64) {
+	b.pending.Add(-1)
+	b.pendingBytes.Add(-size)
 }
 
 // runWhenFree waits for a slot. A request is cancellable while it waits, and one

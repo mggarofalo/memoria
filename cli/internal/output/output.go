@@ -72,6 +72,22 @@ func writeText(w io.Writer, b *strings.Builder) error {
 	return err
 }
 
+// markdownEscaper backslash-escapes what markdown would act on in running text. A
+// renderer would otherwise fetch the image in a title like ![i](http://evil/x).
+var markdownEscaper = func() *strings.Replacer {
+	const special = "\\`*_{}[]()<>#+-.!|~&"
+	pairs := make([]string, 0, 2*len(special))
+	for _, c := range special {
+		pairs = append(pairs, string(c), "\\"+string(c))
+	}
+	return strings.NewReplacer(pairs...)
+}()
+
+// inlineText sanitizes untrusted text for one line of markdown.
+func inlineText(s string) string {
+	return markdownEscaper.Replace(termsafe.Line(s))
+}
+
 // longestBacktickRun finds the longest run of backticks, which is what a code span
 // or fence has to outrun to contain the text.
 func longestBacktickRun(s string) int {
@@ -114,7 +130,7 @@ func SearchTable(w io.Writer, result *api.SearchResult) error {
 func SearchMarkdown(w io.Writer, result *api.SearchResult) error {
 	var b strings.Builder
 	for i, hit := range result.Results {
-		fmt.Fprintf(&b, "## %d. %s\n\n", i+1, termsafe.Line(hit.Title))
+		fmt.Fprintf(&b, "## %d. %s\n\n", i+1, inlineText(hit.Title))
 		location := fmt.Sprintf("%s:%d", termsafe.Line(hit.File), hit.Line)
 		fmt.Fprintf(&b, "%s (score %.2f, docid %s)\n\n", codeSpan(location), hit.Score, codeSpan(termsafe.Line(hit.Docid)))
 		b.WriteString(fenced(termsafe.Text(hit.Snippet)))
@@ -137,7 +153,7 @@ func DocumentTable(w io.Writer, docs []api.Document) error {
 func DocumentMarkdown(w io.Writer, doc *api.Document) error {
 	var b strings.Builder
 	if doc.Body == nil {
-		fmt.Fprintf(&b, "# %s\n\n%s, %d bytes, modified %s\n", termsafe.Line(doc.Title), termsafe.Line(doc.File), doc.BodyLength, termsafe.Line(doc.ModifiedAt))
+		fmt.Fprintf(&b, "# %s\n\n%s, %d bytes, modified %s\n", inlineText(doc.Title), codeSpan(termsafe.Line(doc.File)), doc.BodyLength, inlineText(doc.ModifiedAt))
 		return writeText(w, &b)
 	}
 	b.WriteString(termsafe.Text(*doc.Body))
@@ -171,7 +187,7 @@ func CollectionsTable(w io.Writer, list *api.CollectionList) error {
 func CollectionsMarkdown(w io.Writer, list *api.CollectionList) error {
 	var b strings.Builder
 	for _, c := range list.Collections {
-		fmt.Fprintf(&b, "- **%s**: %d documents\n", termsafe.Line(c.Name), c.Documents)
+		fmt.Fprintf(&b, "- **%s**: %d documents\n", inlineText(c.Name), c.Documents)
 	}
 	return writeText(w, &b)
 }
@@ -195,7 +211,7 @@ func StatusMarkdown(w io.Writer, status *api.IndexStatus) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "- documents: %d\n- needs embedding: %d\n- vector index: %t\n", status.TotalDocuments, status.NeedsEmbedding, status.HasVectorIndex)
 	for _, c := range status.Collections {
-		fmt.Fprintf(&b, "- %s: %d documents\n", termsafe.Line(c.Name), c.Documents)
+		fmt.Fprintf(&b, "- %s: %d documents\n", inlineText(c.Name), c.Documents)
 	}
 	return writeText(w, &b)
 }

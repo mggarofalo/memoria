@@ -61,5 +61,5 @@ func (a *app) mcp(cmd *cobra.Command, o mcpOptions) error {
 		options.Client = s.http
 		options.Endpoint = s.endpoint + "/" + strings.TrimPrefix(o.path, "/")
 	}
-	return mcpbridge.New(a.stdout, options).Run(cmd.Context(), a.stdin)
+	return mcpbridge.New(a.rawStdout, options).Run(cmd.Context(), a.stdin)
 }

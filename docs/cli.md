@@ -97,7 +97,11 @@ The server URL comes from `--api-url`, then `MEMORIA_URL`, then the profile.
 
 A key from the keyring or file is sent only to the server it was saved for. That origin is stored with the key, in the same secret, so replacing the config cannot redirect it. If `--api-url`, `MEMORIA_URL` or the config names another origin, the command refuses. Use a separate `--profile` for a second server.
 
-`auth login` shows the server before it asks for the key. It ignores `MEMORIA_URL`, so only `--api-url` can point a profile at a new server.
+`auth login` shows the server before it asks for the key. It ignores `MEMORIA_URL`, and it uses the URL saved in the config only when the keyring already holds a key for that server. Otherwise pass `--api-url`, or type the URL at the prompt. The credentials file cannot vouch for a URL, because it sits in the same directory as the config, so logging in again with the file backend needs `--api-url` each time.
+
+A command using the file backend says which server the key is for. It refuses if the keyring holds a key for a different server, since a poisoned config directory looks exactly like that. With no keyring entry to compare, a poisoned directory holding its own credentials can't be detected: the attacker's key would go to the attacker's server, along with your search text. So check that line.
+
+On Linux, the CLI talks to the Secret Service only over a session bus that is a `unix:path` socket owned by you, inside your runtime directory, and only if your own account holds the service's name. A `DBUS_SESSION_BUS_ADDRESS` naming anything else is refused, because whoever runs the bus would receive the key.
 
 The CLI refuses a `config.json` or credentials file that other accounts can reach, that is a symlink or has a second hard link, or whose directory other accounts can reach.
 
@@ -133,7 +137,7 @@ memoria status
 
 `--format` takes `json`, `table` or `markdown`. `query`, `collections` and `status` default to a table; `get` and `multi-get` default to markdown.
 
-**Table and markdown output is sanitized.** Document text comes from transcripts, which can hold terminal escape sequences that write your clipboard or rewrite your screen. The CLI strips control and format characters, escape sequences, carriage returns, bidirectional overrides and variation selectors from these formats, whether or not stdout is a terminal. In markdown, snippets and multi-get bodies are fenced so a document cannot forge a result heading. Stripping format characters also removes the zero-width joiners in some emoji.
+**Table and markdown output is sanitized.** Document text comes from transcripts, which can hold terminal escape sequences that write your clipboard or rewrite your screen. The CLI strips control and format characters, escape sequences, carriage returns, bidirectional overrides and variation selectors from these formats, whether or not stdout is a terminal. In markdown, snippets and multi-get bodies are fenced so a document cannot forge a result heading. Titles and names are escaped so they cannot become images or links. Zero-width joiners are kept between letters of scripts that need them, such as Persian and Hindi, and removed everywhere else, including in emoji.
 
 **`--format json` is the server's response, byte for byte, and is not sanitized.** Treat it as data, and do not print it raw to a terminal. There is one exception: if a response contains the key in use, even JSON-escaped, or the secret half of it alone, that text is replaced with `[REDACTED]`, because the key never reaches stdout. This cannot catch a key that has been split across strings or transformed in some other way.
 
@@ -148,7 +152,7 @@ memoria status
 | 4 | Not found, including a `multi-get` where any reference failed or nothing was returned |
 | 5 | Server unavailable: 502, 503, 504, a timeout, or no connection |
 | 6 | Rate limited (429). The message includes `Retry-After` when the server sends it |
-| 7 | Refused for transport safety: plain http to a public address, a cross-origin redirect, or a stored key aimed at another server |
+| 7 | Refused for transport safety: plain http to a hostname or public address, a cross-origin redirect, a stored key aimed at another server, or a login whose server nothing confirms |
 
 ## Plain http
 

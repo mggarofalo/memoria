@@ -68,7 +68,12 @@ func extractTarGz(archive []byte, name string, w io.Writer) error {
 		if header.Typeflag != tar.TypeReg {
 			return errBinaryNotFile
 		}
-		if _, err := io.Copy(w, reader); err != nil {
+		// A sparse member expands from almost nothing, so the limit on what is read
+		// from the archive does not cover it.
+		if header.Size > maxUnpackedBytes {
+			return errTooLarge
+		}
+		if err := copyCapped(w, reader); err != nil {
 			return unpackError(err)
 		}
 		found = true
@@ -107,8 +112,20 @@ func copyZipEntry(file *zip.File, w io.Writer) error {
 	defer func() { _ = body.Close() }()
 	// The declared size is the archive's claim; the limit is on what actually
 	// comes out.
-	if _, err := io.Copy(w, &limitedReader{r: body, remaining: maxUnpackedBytes}); err != nil {
+	if err := copyCapped(w, body); err != nil {
 		return unpackError(err)
+	}
+	return nil
+}
+
+// copyCapped limits what is written, whatever the source claims or read to make it.
+func copyCapped(w io.Writer, r io.Reader) error {
+	written, err := io.Copy(w, io.LimitReader(r, maxUnpackedBytes+1))
+	if err != nil {
+		return err
+	}
+	if written > maxUnpackedBytes {
+		return errTooLarge
 	}
 	return nil
 }

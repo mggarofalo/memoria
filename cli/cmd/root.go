@@ -39,7 +39,10 @@ const defaultTimeout = 2 * time.Minute
 type app struct {
 	stdin  io.Reader
 	stdout io.Writer // Scrubbed of the key.
-	stderr io.Writer // Scrubbed of the key and anything credential-shaped.
+	// rawStdout is for the MCP bridge alone. It scrubs each frame after decoding, and
+	// a byte-level pass here would undo the client's own id if it held the key.
+	rawStdout io.Writer
+	stderr    io.Writer // Scrubbed of the key and anything credential-shaped.
 
 	redactor        *redact.Redactor
 	getenv          func(string) string
@@ -213,6 +216,7 @@ func newApp(stdin io.Reader, stdout, stderr io.Writer) *app {
 	return &app{
 		stdin:           stdin,
 		stdout:          r.Writer(stdout),
+		rawStdout:       stdout,
 		stderr:          r.DiagnosticWriter(stderr),
 		redactor:        r,
 		getenv:          os.Getenv,
