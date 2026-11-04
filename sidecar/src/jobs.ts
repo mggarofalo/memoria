@@ -181,6 +181,8 @@ export interface JobQueueOptions {
   deferMaxMs?: number;
   /** Told about a store failure. The queue carries on regardless. */
   onStoreError?: (message: string) => void;
+  /** Told each time a job goes back to waiting, so that a job never waits in silence. */
+  onDeferred?: (job: Job, reason: string) => void;
 }
 
 export interface EnqueueOptions {
@@ -213,6 +215,7 @@ export class JobQueue {
   readonly #deferBaseMs: number;
   readonly #deferMaxMs: number;
   readonly #onStoreError: ((message: string) => void) | undefined;
+  readonly #onDeferred: ((job: Job, reason: string) => void) | undefined;
   readonly #entries = new Map<string, PersistedJob>();
   readonly #jobs: Job[] = [];
   /** Waiting jobs the worker may start, in release order. */
@@ -243,6 +246,7 @@ export class JobQueue {
     this.#deferBaseMs = options.deferBaseMs ?? 30_000;
     this.#deferMaxMs = options.deferMaxMs ?? 5 * 60_000;
     this.#onStoreError = options.onStoreError;
+    this.#onDeferred = options.onDeferred;
     this.#restore();
   }
 
@@ -275,6 +279,12 @@ export class JobQueue {
     } catch (err) {
       this.#storeFailed(err);
     }
+  }
+
+  /** A job waiting to try again, and why. Null when none is. */
+  stuck(): { reason: string; attempts: number } | null {
+    const job = this.#jobs.find((j) => this.#entries.get(j.id)?.deferred && j.error !== null);
+    return job ? { reason: job.error!, attempts: job.attempts } : null;
   }
 
   persistence(): QueuePersistence {
@@ -585,6 +595,7 @@ export class JobQueue {
     job.state = "queued";
     job.startedAt = null;
     job.error = reason;
+    this.#onDeferred?.(job, reason);
     this.#schedule(job, entry, this.#scheduler.now() + delay);
   }
 

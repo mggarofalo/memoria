@@ -15,6 +15,8 @@ const RERANK_TEMPLATE_OVERHEAD = 512;
 const EMBED_TOKEN_MARGIN = 4;
 const TOKENIZE_CONCURRENCY = 8;
 
+const REJECTED_INPUT: ReadonlySet<number> = new Set([400, 413, 422]);
+
 export class UpstreamError extends Error {
   readonly code: string;
   constructor(code: string, message: string) {
@@ -79,6 +81,8 @@ export class LlamaServers {
       throw new UpstreamError("upstream_unavailable", `llama-server for ${role} did not answer`);
     }
     const text = await response.text();
+    // llama-server saying the input is bad is a refusal of this text, not a broken server.
+    if (REJECTED_INPUT.has(response.status)) throw new InvalidRequest("upstream_rejected", `llama-server for ${role} rejected the input with HTTP ${response.status}`);
     if (!response.ok) throw new UpstreamError("upstream_error", `llama-server for ${role} returned HTTP ${response.status}`);
     try {
       return JSON.parse(text);

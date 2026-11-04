@@ -340,7 +340,7 @@ test("a force job failing partway keeps the old vectors of everything not yet re
     const before = await counts(o.dbPath);
     const healthy = o.mock.handlers.get("POST /v1/embed")!;
     o.mock.on("POST /v1/embed", (b, req) => ((b.texts as string[]).some((t) => t.includes("memoria worker identity probe")) ? healthy(b, req) : { status: 400, body: {} }));
-    await assert.rejects(o.backend.embed({ force: true }), /refused too many/);
+    await assert.rejects(o.backend.embed({ force: true }), /full-size test text/);
     assert.deepEqual(o.backend.deadLetters(), []);
     assert.deepEqual(await counts(o.dbPath), before, "not one vector lost");
   } finally {
@@ -1060,7 +1060,7 @@ test("a brief window of 502s on real text sets nothing aside on the real pool", 
 });
 
 test("400 on all real text condemns nothing on the real pool, and search keeps working", { skip }, async () => {
-  const { dbPath } = await fixture();
+  const { dbPath } = await fixture(corpus(8, 0));
   const mock = await new MockWorker(8).start();
   const backend = await openBackend({ dbPath, keepWarm: false, llm: remoteOptions([worker("only", mock)]) });
   try {
@@ -1268,5 +1268,184 @@ test("a force job waiting on an outage has already removed a deleted document's 
   } finally {
     await backend.close();
     await mock.stop();
+  }
+});
+
+// --- poison documents, through the real app ----------------------------------------------------------------------
+
+const POISON = "POISONTEXT";
+
+function corpus(good: number, poison: number): Record<string, string> {
+  const docs: Record<string, string> = {};
+  for (let i = 0; i < good; i++) docs[`good${i}.md`] = `# Good ${i}\n\nUnique ordinary text number ${i}.\n`;
+  for (let i = 0; i < poison; i++) docs[`bad${i}.md`] = `# Bad ${i}\n\n${POISON} number ${i}.\n`;
+  return docs;
+}
+
+async function poisonApp(docs: Record<string, string>, status = 400) {
+  const { dbPath, corpus: dir } = await fixture(docs);
+  const mock = await new MockWorker(8).start();
+  refuseText(mock, status, POISON);
+  const backend = await openBackend({ dbPath, keepWarm: false, llm: remoteOptions([worker("only", mock)], { embedBatchBytes: 300 }) });
+  const logs: string[] = [];
+  const app = await buildApp({ backend, config: testConfig(), logger: { level: "warn", stream: { write: (line: string) => void logs.push(line) } } });
+  const get = async (url: string) => (await app.inject({ method: "GET", url, headers: authHeaders })).json();
+  return {
+    dbPath, dir, mock, backend, app, get, logs,
+    /** Ask for a job, and wait until it has finished or gone back to waiting. */
+    job: async (payload: object = {}) => {
+      const { id } = (await app.inject({ method: "POST", url: "/reindex", headers: authHeaders, payload })).json().job;
+      for (let i = 0; i < 3000; i++) {
+        const { job } = await get(`/reindex/jobs/${id}`);
+        if (job.state === "succeeded" || job.state === "failed" || (job.state === "queued" && job.error !== null && job.attempts > 0 && app.ctx.jobs.stuck())) return job;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      throw new Error("the job never settled");
+    },
+    done: async () => {
+      await app.close();
+      await backend.close();
+      await mock.stop();
+    },
+  };
+}
+
+test("more poison than the old cap: 4 of 100 are set aside once, and the job after succeeds", { skip }, async () => {
+  const o = await poisonApp(corpus(96, 4));
+  try {
+    const first = await o.job();
+    assert.equal(first.state, "failed", "documents were left behind, and it says so");
+    assert.equal(first.result.embed.docsDeadLettered, 4);
+    assert.equal(first.result.embed.chunksEmbedded >= 96, true);
+    const second = await o.job();
+    assert.equal(second.state, "succeeded");
+    assert.equal(second.result.embed.docsProcessed, 0);
+    const status = await o.get("/status");
+    assert.equal(status.needsEmbedding, 0, "the number is true");
+    assert.equal(status.documentsSetAside, 4);
+    assert.equal((await o.get("/ready")).llm.documentsSetAside, 4);
+    assert.equal((await o.get("/queue")).deadLetters, 4);
+  } finally {
+    await o.done();
+  }
+});
+
+test("a worker too small for real text sets nothing aside, and says so", { skip }, async () => {
+  const docs = corpus(3, 0);
+  docs["long.md"] = `# Long\n\n${"A long run of ordinary words about nothing much. ".repeat(60)}\n`;
+  const { dbPath } = await fixture(docs);
+  const mock = await new MockWorker(8).start();
+  const healthy = mock.handlers.get("POST /v1/embed")!;
+  mock.on("POST /v1/embed", (b, req) => ((b.texts as string[]).some((t) => t.length > 800) ? { status: 400, body: {} } : healthy(b, req)));
+  const backend = await openBackend({ dbPath, keepWarm: false, llm: remoteOptions([worker("small", mock)], { embedBatchBytes: 4096 }) });
+  try {
+    await assert.rejects(backend.embed({ force: false }), /full-size test text/);
+    assert.deepEqual(backend.deadLetters(), []);
+    assert.ok((await backend.getStatus()).needsEmbedding >= 1);
+  } finally {
+    await backend.close();
+    await mock.stop();
+  }
+});
+
+test("at the old cap: one new poison document among good ones is set aside, and nothing waits", { skip }, async () => {
+  const o = await poisonApp(corpus(96, 4));
+  try {
+    await o.job();
+    await writeFile(path.join(o.dir, "newbad.md"), `# New\n\n${POISON} again.\n`);
+    await writeFile(path.join(o.dir, "newgood.md"), "# New good\n\nFine.\n");
+    const job = await o.job();
+    assert.equal(job.state, "failed");
+    assert.equal(job.result.embed.docsDeadLettered, 1);
+    assert.equal(job.result.embed.docsPending, 1);
+    assert.equal((await o.get("/status")).documentsSetAside, 5);
+  } finally {
+    await o.done();
+  }
+});
+
+test("a full force with documents already set aside finishes", { skip }, async () => {
+  const o = await poisonApp(corpus(97, 3));
+  try {
+    await o.job();
+    const force = await o.job({ force: true });
+    assert.equal(force.state, "failed", "they were refused again");
+    assert.equal(force.result.embed.docsProcessed, 100);
+    assert.equal(force.result.embed.docsDeadLettered, 3);
+    assert.equal(o.app.ctx.jobs.stuck(), null);
+  } finally {
+    await o.done();
+  }
+});
+
+test("after 24 hours, 5 set-aside documents retried alone are set aside again rather than waiting", { skip }, async () => {
+  const o = await poisonApp(corpus(95, 5));
+  try {
+    await o.job();
+    await setLetterTime(o.dbPath, new Date(Date.now() - 25 * 3_600_000).toISOString());
+    assert.equal((await o.get("/status")).documentsSetAside, 0);
+    assert.equal((await o.get("/status")).needsEmbedding, 5, "due again, so waiting again");
+    const job = await o.job();
+    assert.equal(job.result.embed.docsProcessed, 5);
+    assert.equal(job.result.embed.docsDeadLettered, 5);
+    assert.equal((await o.get("/status")).documentsSetAside, 5);
+  } finally {
+    await o.done();
+  }
+});
+
+for (const poison of [1, 5]) {
+  test(`${poison} document(s) returning 502 are set aside after repeated runs, and later jobs stop failing`, { skip }, async (t) => {
+    t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+    const o = await poisonApp(corpus(100 - poison, poison), 502);
+    try {
+      const first = await o.job();
+      assert.equal(first.state, "failed");
+      assert.equal(first.result.embed.docsPending, poison);
+      assert.equal(o.app.ctx.jobs.stuck(), null, "nothing waits");
+      assert.equal((await o.get("/status")).needsEmbedding, poison);
+
+      t.mock.timers.tick(10 * 60_000);
+      assert.equal((await o.job()).state, "failed");
+      assert.equal((await o.get("/status")).documentsSetAside, 0, "not on two runs");
+
+      t.mock.timers.tick(10 * 60_000);
+      const third = await o.job();
+      assert.equal(third.result.embed.docsDeadLettered, poison);
+      assert.match((await o.get("/queue/dead-letters")).documents[0].reason, /3 separate runs/);
+
+      const fourth = await o.job();
+      assert.equal(fourth.state, "succeeded");
+      assert.equal((await o.get("/status")).needsEmbedding, 0);
+    } finally {
+      await o.done();
+    }
+  });
+}
+
+test("/ready reads degraded with the reason while a job is stuck on a worker fault, and recovers", { skip }, async () => {
+  const o = await poisonApp(corpus(20, 0));
+  try {
+    const healthy = o.mock.handlers.get("POST /v1/embed")!;
+    await o.backend.llm.refreshWorkers();
+    o.mock.on("POST /v1/embed", (b, req) => (realText(b) ? { status: 400, body: {} } : healthy(b, req)));
+    const waiting = await o.job();
+    assert.equal(waiting.state, "queued");
+    const ready = await o.get("/ready");
+    assert.equal(ready.status, "degraded");
+    assert.deepEqual(ready.llm.unavailable, [], "every role answers, so this is the only signal");
+    assert.match(ready.jobs.stuck.reason, /refused too many/);
+    assert.ok(ready.jobs.stuck.attempts >= 1);
+    assert.equal(ready.index.needsEmbedding, 20);
+    assert.deepEqual(o.backend.deadLetters(), []);
+    assert.ok(o.logs.some((line) => line.includes("waiting to try again") && line.includes("refused too many")), "and each retry is logged");
+
+    o.mock.on("POST /v1/embed", healthy);
+    assert.equal((await o.job()).state, "succeeded");
+    const after = await o.get("/ready");
+    assert.equal(after.jobs.stuck, null);
+    assert.notEqual(after.status, "degraded");
+  } finally {
+    await o.done();
   }
 });

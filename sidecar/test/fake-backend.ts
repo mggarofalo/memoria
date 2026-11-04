@@ -330,6 +330,7 @@ export class FakeBackend implements QmdBackend {
     return {
       totalDocuments: this.docs.length,
       needsEmbedding: 0,
+      documentsSetAside: 0,
       hasVectorIndex: true,
       collections: this.collections.map((c) => ({
         name: c.name,

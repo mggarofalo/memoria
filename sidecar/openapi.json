@@ -424,7 +424,7 @@
                         "warming",
                         "degraded"
                       ],
-                      "description": "`degraded`: remote LLM mode with some model role no worker can serve."
+                      "description": "`degraded`: remote LLM mode with some model role no worker can serve, or a job waiting to try again: see `jobs.stuck`."
                     },
                     "llm": {
                       "type": "object",
@@ -610,6 +610,25 @@
                         "persistent": {
                           "type": "boolean",
                           "description": "False means jobs are in memory only and would not survive a restart."
+                        },
+                        "stuck": {
+                          "type": [
+                            "object",
+                            "null"
+                          ],
+                          "required": [
+                            "reason",
+                            "attempts"
+                          ],
+                          "description": "A job waiting to try again, and why. It retries by itself, for as long as it takes.",
+                          "properties": {
+                            "reason": {
+                              "type": "string"
+                            },
+                            "attempts": {
+                              "type": "integer"
+                            }
+                          }
                         }
                       }
                     }
@@ -692,7 +711,7 @@
                         "warming",
                         "degraded"
                       ],
-                      "description": "`degraded`: remote LLM mode with some model role no worker can serve."
+                      "description": "`degraded`: remote LLM mode with some model role no worker can serve, or a job waiting to try again: see `jobs.stuck`."
                     },
                     "llm": {
                       "type": "object",
@@ -878,6 +897,25 @@
                         "persistent": {
                           "type": "boolean",
                           "description": "False means jobs are in memory only and would not survive a restart."
+                        },
+                        "stuck": {
+                          "type": [
+                            "object",
+                            "null"
+                          ],
+                          "required": [
+                            "reason",
+                            "attempts"
+                          ],
+                          "description": "A job waiting to try again, and why. It retries by itself, for as long as it takes.",
+                          "properties": {
+                            "reason": {
+                              "type": "string"
+                            },
+                            "attempts": {
+                              "type": "integer"
+                            }
+                          }
                         }
                       }
                     }
@@ -914,7 +952,12 @@
                       "type": "integer"
                     },
                     "needsEmbedding": {
-                      "type": "integer"
+                      "type": "integer",
+                      "description": "Documents waiting to embed. Those set aside are counted in `documentsSetAside` instead."
+                    },
+                    "documentsSetAside": {
+                      "type": "integer",
+                      "description": "Documents a job will not try again until a retry is due: see `GET /queue/dead-letters`."
                     },
                     "hasVectorIndex": {
                       "type": "boolean"

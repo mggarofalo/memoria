@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { JobCancelled, JobDeferred } from "../src/jobs.ts";
 import { WorkerError } from "../src/llm/client.ts";
-import { IndexBusy, runEmbedFarm, setAsideLimit, type FarmDeps, type FarmOptions } from "../src/llm/embed-farm.ts";
+import { IndexBusy, runEmbedFarm, type FarmDeps, type FarmOptions } from "../src/llm/embed-farm.ts";
 
 /** Documents here are lists of chunk texts. The vector store is a map, so results can be inspected. */
 interface World {
@@ -23,6 +23,7 @@ function world(docs: Record<string, string[]>, over: Partial<FarmDeps> = {}): Wo
   w.deps = {
     canEmbed: () => true,
     confirmWorkers: async () => true,
+    acceptsFullChunk: async () => true,
     capacity: () => 2,
     // Pending means it has no vectors yet, or a force job has not redone it.
     pendingDocs: (_c, redoBefore) => [...w.docs.keys()].filter((hash) => redoBefore !== undefined || !w.written.has(hash)).map((hash) => ({ hash, path: `${hash}.md`, bytes: 1 })),
@@ -39,7 +40,7 @@ function world(docs: Record<string, string[]>, over: Partial<FarmDeps> = {}): Wo
     removeOrphans: () => void w.orphanSweeps++,
     setAsideCount: () => w.deadLetters.length,
     documentCount: () => w.docs.size,
-    recentFailures: new Set(),
+    recentFailures: new Map(),
     embed: async (texts) => {
       w.batches.push(texts);
       w.inFlight.now++;
@@ -613,18 +614,99 @@ test("a few real refusals are set aside, once the run is over", async () => {
   assert.deepEqual(seenWhenWritten, [8, 8], "after the run finished");
 });
 
-test("refusals building up over many small jobs are also caught", async () => {
-  const w = world({ a: ["BAD"] }, { embed: async () => { throw refused(); }, setAsideCount: () => 3 });
-  await assert.rejects(runEmbedFarm(w.deps, opts()), /refused too many/);
+test("a worker refusing a full-size text is too small: its refusals condemn nothing, and the error says so", async () => {
+  const { w } = timed(10, (_, texts) => (texts.includes("real text 3") ? bad(400) : null));
+  w.deps.acceptsFullChunk = async () => false;
+  await assert.rejects(runEmbedFarm(w.deps, opts({ maxBatchChunks: 1 })), (e) => e instanceof JobDeferred && /full-size test text/.test(e.message));
+  assert.deepEqual(w.deadLetters, []);
+  assert.equal(w.written.size, 9, "the rest still embed");
+});
+
+test("the full-size check is made only when something failed", async () => {
+  let asked = 0;
+  const w = world({ a: ["a0"] }, {
+    acceptsFullChunk: async () => {
+      asked++;
+      return true;
+    },
+  });
+  await runEmbedFarm(w.deps, opts());
+  assert.equal(asked, 0);
+});
+
+test("refusals are not capped when the worker takes a full-size text and most documents embed", async () => {
+  const poison = new Set(["real text 3", "real text 4", "real text 5", "real text 6", "real text 70", "real text 71", "real text 72"]);
+  const { w } = timed(100, (_, texts) => (texts.some((t) => poison.has(t)) ? bad(400) : null));
+  const out = await runEmbedFarm(w.deps, opts({ maxBatchChunks: 1 }));
+  assert.equal(out.docsDeadLettered, 7);
+  assert.equal(w.written.size, 93);
+});
+
+test("refusals that come first wait a run, then go last, and are believed once the rest embed", async () => {
+  const { w, clock } = timed(20, (_, texts) => (texts.some((t) => /^real text [0-5]$/.test(t)) ? bad(400) : null));
+  w.deps.capacity = () => 1;
+  await untilSettled(w, clock);
+  assert.equal(w.written.size, 14);
+  assert.equal(w.deadLetters.length, 6);
+});
+
+test("what has embedded already counts: refusals in a run of only those documents are believed", async () => {
+  const { w } = timed(5, () => bad(400));
+  w.deps.documentCount = () => 100;
+  assert.equal((await runEmbedFarm(w.deps, opts({ maxBatchChunks: 1 }))).docsDeadLettered, 5);
+});
+
+test("documents already set aside do not count as having embedded", async () => {
+  const { w } = timed(5, () => bad(400));
+  w.deps.documentCount = () => 10;
+  w.deps.setAsideCount = () => 5;
+  await assert.rejects(runEmbedFarm(w.deps, opts({ maxBatchChunks: 1 })), /refused too many/);
+});
+
+const repeatedly = (over: Partial<FarmDeps> = {}) => {
+  let now = 1_000_000_000;
+  const w = world({ a: ["BAD"], b: ["b0"] }, { capacity: () => 1, embed: async (texts) => { if (texts.includes("BAD")) throw unavailable(); return vectors(texts); }, ...over });
+  return { w, tick: (ms: number) => (now += ms), run: () => runEmbedFarm(w.deps, opts({ maxBatchChunks: 1, now: () => now })) };
+};
+const GAP = 10 * 60_000;
+
+test("a 5xx document is set aside after three runs well apart, and not sooner", async () => {
+  const { w, tick, run } = repeatedly();
+  assert.equal((await run()).docsPending, 1);
+  tick(GAP);
+  await run();
+  assert.deepEqual(w.deadLetters, [], "two runs");
+  tick(GAP);
+  const third = await run();
+  assert.deepEqual(w.deadLetters, ["a"]);
+  assert.equal(third.docsDeadLettered, 1);
+});
+
+test("runs close together count once, so a brief window cannot set a document aside", async () => {
+  const { w, tick, run } = repeatedly();
+  for (let i = 0; i < 6; i++) {
+    await run();
+    tick(GAP / 10);
+  }
   assert.deepEqual(w.deadLetters, []);
 });
 
-test("the limit: a few at any size, under a quarter of a run, under 1% of the index", () => {
-  assert.equal(setAsideLimit(1, 1, 0), 3);
-  assert.equal(setAsideLimit(200, 200, 0), 3, "all of a small corpus is not believable");
-  assert.equal(setAsideLimit(200, 10_000, 0), 50);
-  assert.equal(setAsideLimit(1_000, 10_000, 0), 100);
-  assert.equal(setAsideLimit(1, 10_000, 99), 1);
-  assert.equal(setAsideLimit(20, 10_000, 100), 0, "the index's share is used up");
-  assert.equal(setAsideLimit(1, 10, 5), 0);
+test("a run where the worker fails the full-size text does not count", async () => {
+  const { w, tick, run } = repeatedly({ acceptsFullChunk: async () => false });
+  for (let i = 0; i < 5; i++) {
+    await run();
+    tick(GAP);
+  }
+  assert.deepEqual(w.deadLetters, []);
+});
+
+test("a success wipes the count", async () => {
+  let failing = true;
+  const { w, tick, run } = repeatedly({ embed: async (texts) => { if (failing && texts.includes("BAD")) throw unavailable(); return vectors(texts); } });
+  await run();
+  tick(GAP);
+  await run();
+  failing = false;
+  await run();
+  assert.equal(w.deps.recentFailures.size, 0);
 });

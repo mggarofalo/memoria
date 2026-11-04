@@ -1498,3 +1498,29 @@ test("the document circuit reads as a role out in the pool's status, apart from 
     await a.stop();
   }
 });
+
+test("a job is stuck only while it waits: not while retrying, and not once it has ended", async () => {
+  const scheduler = new ManualScheduler();
+  const told: string[] = [];
+  let run = 0;
+  let open = (): void => {};
+  const gate = new Promise<void>((r) => (open = r));
+  const queue = new JobQueue(async () => {
+    run++;
+    if (run === 1) throw new JobDeferred("the worker is at fault");
+    await gate;
+    throw new Error("it ended badly");
+  }, { scheduler, onDeferred: (_, reason) => told.push(reason) });
+  assert.equal(queue.stuck(), null);
+  queue.enqueue(req());
+  await scheduler.advance(0);
+  assert.deepEqual(queue.stuck(), { reason: "the worker is at fault", attempts: 1 });
+  assert.deepEqual(told, ["the worker is at fault"]);
+
+  await scheduler.advance(30_000);
+  assert.equal(run, 2);
+  assert.equal(queue.stuck(), null, "it is trying again");
+  open();
+  await queue.idle();
+  assert.equal(queue.stuck(), null, "it has ended, and failed is a state of its own");
+});

@@ -17,12 +17,11 @@ import { WorkerError } from "./client.ts";
  * that, it is an outage and the job waits. If one can, the batch is split until what
  * fails is alone.
  *
- * **Only a definite refusal sets a document aside.** That means a 400 or 413 for that
- * text. A 5xx or a timeout says nothing lasting about the document, so it stays pending.
- * The known-good text is short, so it passing proves little about real text: a worker
- * with too small a context refuses everything else. So refusals are only recorded when
- * the run ends, and if there are too many the worker is blamed, the job waits and
- * nothing is set aside. See `setAsideLimit`.
+ * **A document is set aside only when the worker is shown to be fine.** Failures are
+ * judged when a run ends, by whether every worker accepts a known-good full-size chunk.
+ * If one does not, it is too small or broken, so a refusal says nothing about the
+ * document and the job waits. If all do, a refusal (400 or 413) is believed at once,
+ * and a 5xx or timeout only after it has repeated across runs: see `REPEATED_RUNS`.
  */
 
 export interface PendingDoc {
@@ -50,6 +49,8 @@ export interface FarmDeps {
   canEmbed(): boolean;
   /** Can a worker embed a known-good text? Proof, at the cost of a call. */
   confirmWorkers(): Promise<boolean>;
+  /** Does every worker accept a known-good text as long as the longest real chunk? */
+  acceptsFullChunk(): Promise<boolean>;
   /** Batches to run at once. */
   capacity(): number;
   /** With `redoBefore`, also documents last embedded before that time: a force job's list. */
@@ -68,14 +69,20 @@ export interface FarmDeps {
   deadLetter(hash: string, path: string, reason: string): void;
   /** Documents set aside now, whose retry is not yet due. */
   setAsideCount(): number;
-  /** Documents in the index, for judging how many refusals are believable. */
+  /** Documents in the index, for judging how many failures are believable. */
   documentCount(): number;
   /** Remove vectors of documents no longer in the index. */
   removeOrphans(): void;
   /** Documents that failed lately. They go last, so they cannot keep starving the rest. */
-  recentFailures: Set<string>;
+  recentFailures: Map<string, RepeatedFailure>;
   embed(texts: string[]): Promise<{ vectors: number[][]; worker: string }>;
   sleep(ms: number): Promise<void>;
+}
+
+/** Runs that have counted against a document, and when the last one did. */
+export interface RepeatedFailure {
+  runs: number;
+  lastAt: number;
 }
 
 export interface FarmOptions {
@@ -110,27 +117,20 @@ interface DocState {
   failed: boolean;
 }
 
+/** At least this many failures, outnumbering all that has embedded, and it is the worker. */
+const FEW_FAILURES = 5;
+
 /**
- * How many documents a worker may refuse before the worker is what looks wrong. The
- * chunker sizes chunks by tokens, so a well-configured worker should rarely refuse any.
- * A few is believable at any size. Past that, refusals must stay under a quarter of this
- * run, which catches a small job on a large index, and the total set aside must stay
- * under 1% of the index, which stops many small jobs adding up.
+ * A document failing with a 5xx or timeout is set aside only after this many runs, this
+ * far apart, each ending with the worker accepting a full-size text. A brief window of
+ * errors or a restart cannot span that, and a document that fails like this for half an
+ * hour would otherwise fail every later job.
  */
-const FEW_REFUSALS = 3;
-const MAX_REFUSED_SHARE_OF_RUN = 0.25;
-const MAX_SET_ASIDE_SHARE_OF_INDEX = 0.01;
+const REPEATED_RUNS = 3;
+const REPEATED_RUN_GAP_MS = 10 * 60_000;
 
-export function setAsideLimit(runDocs: number, indexDocs: number, alreadySetAside: number): number {
-  const byRun = Math.max(FEW_REFUSALS, Math.floor(runDocs * MAX_REFUSED_SHARE_OF_RUN));
-  const byIndex = Math.max(FEW_REFUSALS, Math.floor(indexDocs * MAX_SET_ASIDE_SHARE_OF_INDEX)) - alreadySetAside;
-  return Math.max(0, Math.min(byRun, byIndex));
-}
-
-/** More than a lone bad document, and failing more than succeeding: it is the worker. */
-const FEW_TRANSIENT_FAILURES = 5;
-
-const TOO_MANY_REFUSED = "Workers refused too many documents to believe the documents are at fault, so none were set aside. Check the worker's context size and model. This job will retry.";
+const TOO_SMALL = "A worker refused a full-size test text, so its refusals of real documents say nothing about them, and none were set aside. Check the worker's context size and model. This job will retry.";
+const TOO_MANY_REFUSED = "Workers refused too many documents, more than have ever embedded, so none were set aside. Check the worker's context size and model. This job will retry.";
 const TOO_MANY_FAILED = "Workers keep failing on real documents while answering a short test text. The documents stay pending and this job will retry.";
 const NO_WORKER = "No worker can embed right now; the documents stay pending and this job will retry.";
 const DEFAULT_RETRIES = 3;
@@ -146,9 +146,10 @@ class Farm {
   #docsWritten = 0;
   #docsSkipped = 0;
   #docsDeadLettered = 0;
-  #docsFailed = 0;
   readonly #refused: Array<{ doc: DocState; reason: string }> = [];
-  #refusalLimit = 0;
+  readonly #failed: Array<{ doc: DocState; reason: string }> = [];
+  /** Documents embedded before this run, not counting what it is about to redo. */
+  #embeddedBefore = 0;
   #fault: string | null = null;
   #outage = false;
   #busy = false;
@@ -168,7 +169,7 @@ class Farm {
   async run(docs: PendingDoc[]): Promise<EmbedSummary> {
     const now = this.#options.now ?? Date.now;
     const started = now();
-    this.#refusalLimit = setAsideLimit(docs.length, this.#deps.documentCount(), this.#deps.setAsideCount());
+    this.#embeddedBefore = Math.max(0, this.#deps.documentCount() - this.#deps.setAsideCount() - docs.length);
     const source = this.#batches(docs);
     const lanes = Array.from({ length: Math.max(1, this.#deps.capacity()) }, () => this.#lane(source));
     // Every lane stops before this returns, so nothing writes after the job has
@@ -178,7 +179,7 @@ class Farm {
     const failure = outcomes.find((o) => o.status === "rejected");
     if (failure) throw failure.reason;
     this.#throwIfStopped();
-    this.#settleRefusals();
+    await this.#settleFailures();
     const docsPending = docs.length - this.#docsWritten - this.#docsSkipped;
     return { docsProcessed: docs.length, chunksEmbedded: this.#chunksEmbedded, errors: this.#errors, durationMs: now() - started, docsPending, docsDeadLettered: this.#docsDeadLettered };
   }
@@ -190,12 +191,32 @@ class Farm {
     if (this.#fault !== null) throw new JobDeferred(this.#fault);
   }
 
-  /** Only a run that finished can say how many refusals there really were. */
-  #settleRefusals(): void {
-    for (const { doc, reason } of this.#refused) {
-      this.#deps.deadLetter(doc.hash, doc.path, reason);
-      this.#docsDeadLettered++;
+  /** Only a run that finished can say what its failures mean. */
+  async #settleFailures(): Promise<void> {
+    if (this.#refused.length + this.#failed.length === 0) return;
+    if (!(await this.#deps.acceptsFullChunk())) {
+      if (this.#refused.length > 0) throw new JobDeferred(TOO_SMALL);
+      return;
     }
+    for (const { doc, reason } of this.#refused) this.#setAside(doc, reason);
+    for (const { doc, reason } of this.#failed) {
+      if (this.#countRun(doc.hash) >= REPEATED_RUNS) this.#setAside(doc, `Failed in ${REPEATED_RUNS} separate runs: ${reason}`);
+    }
+  }
+
+  #setAside(doc: DocState, reason: string): void {
+    this.#deps.deadLetter(doc.hash, doc.path, reason);
+    this.#docsDeadLettered++;
+  }
+
+  #countRun(hash: string): number {
+    const seen = this.#deps.recentFailures.get(hash)!;
+    const now = (this.#options.now ?? Date.now)();
+    if (Math.abs(now - seen.lastAt) >= REPEATED_RUN_GAP_MS) {
+      seen.runs++;
+      seen.lastAt = now;
+    }
+    return seen.runs;
   }
 
   /** Chunking runs one document at a time and pauses whenever no lane wants a batch. */
@@ -232,7 +253,7 @@ class Farm {
       chunks = await this.#deps.chunk(body, doc.path, this.#options.signal);
     } catch (err) {
       if (!(err instanceof WorkerError)) throw err;
-      if (await this.#workersAlive()) this.#setAside(state, err);
+      if (await this.#workersAlive()) this.#noteFailed(state, err);
       return [];
     }
     state.total = chunks.length;
@@ -279,7 +300,7 @@ class Farm {
       await this.#embedPart(items.slice(middle));
       return;
     }
-    this.#setAside(items[0]!.doc, err);
+    this.#noteFailed(items[0]!.doc, err);
   }
 
   async #workersAlive(): Promise<boolean> {
@@ -293,24 +314,15 @@ class Farm {
     return this.#embed(items, items.length === 1 ? this.#retries : 1);
   }
 
-  /** Workers can embed, and this could not be. What that means depends on how it failed. */
-  #setAside(doc: DocState, err: WorkerError): void {
+  /** Workers can embed, and this could not be. What that means is settled when the run ends. */
+  #noteFailed(doc: DocState, err: WorkerError): void {
     if (doc.failed) return;
     this.#errors++;
     this.#failDoc(doc);
-    this.#deps.recentFailures.add(doc.hash);
-    if (err.code === "rejected") this.#noteRefusal(doc, err);
-    else this.#noteFailure();
-  }
-
-  #noteRefusal(doc: DocState, err: WorkerError): void {
-    this.#refused.push({ doc, reason: err.message });
-    if (this.#refused.length > this.#refusalLimit) this.#fault = TOO_MANY_REFUSED;
-  }
-
-  #noteFailure(): void {
-    this.#docsFailed++;
-    if (this.#docsFailed >= FEW_TRANSIENT_FAILURES && this.#docsFailed > this.#docsWritten) this.#fault = TOO_MANY_FAILED;
+    if (!this.#deps.recentFailures.has(doc.hash)) this.#deps.recentFailures.set(doc.hash, { runs: 0, lastAt: 0 });
+    const [list, fault] = err.code === "rejected" ? [this.#refused, TOO_MANY_REFUSED] : [this.#failed, TOO_MANY_FAILED];
+    list.push({ doc, reason: err.message });
+    if (list.length >= FEW_FAILURES && list.length > this.#docsWritten + this.#embeddedBefore) this.#fault = fault;
   }
 
   #failDoc(doc: DocState): void {

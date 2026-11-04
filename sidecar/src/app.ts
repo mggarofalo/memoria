@@ -3,7 +3,7 @@ import swagger from "@fastify/swagger";
 import { bearerMatches } from "./auth.ts";
 import type { SidecarConfig } from "./config.ts";
 import { HttpError } from "./errors.ts";
-import { JobCancelled, JobPartial, JobQueue, type EmbedSummary, type JobResult, type JobRunContext, type JobScheduler, type JobStore, type ReindexRequest } from "./jobs.ts";
+import { JobCancelled, JobPartial, JobQueue, type EmbedSummary, type JobResult, type JobRunContext, type JobScheduler, type JobStore, type ReindexRequest, type Job } from "./jobs.ts";
 import { MetadataIndex } from "./metadata.ts";
 import { registerRoutes } from "./routes.ts";
 import { documentSchema, errorSchema, jobSchema, metadataSchema } from "./schemas.ts";
@@ -91,6 +91,7 @@ export async function buildApp(options: BuildAppOptions): Promise<App> {
 
   // The queue never lets a store failure reach the caller; the logger arrives below.
   let logStoreError = (_message: string): void => {};
+  let logDeferred = (_job: Job, _reason: string): void => {};
 
   const ctx: AppContext = {
     backend,
@@ -102,6 +103,7 @@ export async function buildApp(options: BuildAppOptions): Promise<App> {
       ...(options.scheduler ? { scheduler: options.scheduler } : {}),
       ...(options.jobStore ? { store: options.jobStore } : {}),
       onStoreError: (message) => logStoreError(message),
+      onDeferred: (job, reason) => logDeferred(job, reason),
     }),
     startedAt: Date.now(),
     warmup: { requested: config.warmup, done: false, error: null, durationMs: null },
@@ -118,6 +120,7 @@ export async function buildApp(options: BuildAppOptions): Promise<App> {
   });
   const app = Object.assign(fastify, { ctx }) as App;
   logStoreError = (message) => app.log.warn({ error: message }, "job queue could not write to its database; carrying on in memory");
+  logDeferred = (job, reason) => app.log.warn({ jobId: job.id, attempts: job.attempts, reason }, "reindex job is waiting to try again");
 
   app.addSchema(errorSchema);
   app.addSchema(metadataSchema);
