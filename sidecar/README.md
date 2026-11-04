@@ -122,6 +122,69 @@ POST /search
 
 QMD has no notion of frontmatter, so the sidecar keeps a small in-memory index of each document's YAML header (`project`, `git_branch`, `date`, `start_time`, `end_time`, `tags`, `session_id`, `source`), built from the SQLite index at startup and refreshed after every reindex job. Filters are applied **after** retrieval: a filtered search asks QMD for `limit × MEMORIA_QMD_FILTER_OVERFETCH` candidates (default 4×, capped at 200), drops the ones that fail, and returns up to `limit`. A filtered result set can therefore be shorter than `limit` even when more matches exist deeper in the ranking. Documents with no frontmatter never match an active filter.
 
+A frontmatter block that does not close within the first 8192 characters has no metadata. `POST /documents` and a rescan read the same window, so they agree, and such a document does not match any filter.
+
+### Document paths
+
+The two routes follow different rules. A write has to produce a document QMD can index, under a name that means the same thing on every platform. A delete has to be able to remove whatever is there, including leaked content, so only safety applies to it. See [Deleting](#deleting).
+
+`POST /documents` refuses these with 400 `invalid_path`:
+
+- Empty, `.` or `..` segments, absolute paths, and any path that resolves outside the root.
+- Segments that end in a dot, or start or end with whitespace. Windows strips some of these when it opens a file, so `.. /` would reach the filesystem as `../`.
+- Windows reserved device names in any segment, in any case, with any extension: `CON`, `PRN`, `AUX`, `NUL`, `COM0`-`COM9`, `LPT0`-`LPT9`, the superscript forms, `CONIN$`, `CONOUT$`, `CLOCK$`.
+- Any of `< > : " | ? *`, control characters, Unicode format characters (which include bidi overrides and zero-width characters), and lone surrogates.
+- 8.3 short name shapes such as `hidden~1.md`, which on NTFS can be another name for `.hidden.md`. A `~` followed by anything other than digits and then a dot or the end of the segment is fine.
+- Text not in Unicode normalization form NFC. NTFS keeps NFC and NFD spellings as two files, while APFS treats them as one.
+- Segments over 255 bytes, and paths with more than 32 segments.
+- Paths QMD will never index, because they would return 202 and then never appear: `node_modules`, `.git`, `.cache`, `vendor`, `dist` or `build` at any depth and in any case, and hidden names. A test pins this list to the installed SDK.
+- A symlink or junction anywhere under the root, even one that points back inside it, since QMD's scan does not follow links.
+
+A pattern miss returns 400 `pattern_mismatch`. Blank content returns 400 `empty_content`, because QMD skips a blank file and the previous text would stay searchable.
+
+These return 409:
+
+- `case_conflict`: the path differs only in case or normalization from an existing entry at some level. Use the existing name. Otherwise `KEEP.md` would overwrite `keep.md` on NTFS and APFS while the metadata index recorded the wrong key. This applies on case-sensitive hosts too.
+- `hard_link`: overwriting a file with more than one hard link. Deleting one is allowed, because it removes that name only and leaves the file's other names alone.
+- `not_a_directory`, `is_directory`, `exists`: what they say.
+- `path_changed`: a directory on the path changed during the operation.
+
+A write goes to a hidden temp file in the target's directory, is flushed, and is renamed over the target after containment has been checked again. A reader never sees half a document, and a hard link or symlink at the target is replaced rather than written through. An overwrite keeps the old file's POSIX permission bits. On Windows the new file takes its ACL from the directory, so an ACL set on the old file alone is lost. A delete renames the file aside and checks again before unlinking it.
+
+#### Deleting
+
+`DELETE /documents` does not apply the glob, the ignore patterns, the excluded directories, the segment limit or the name rules above, and an unsupported ignore pattern does not affect it. A document that stopped matching, sits under a rule added later, or has a name these rules would refuse today stays removable. This also means a delete can remove any file under the root that has no dot-prefixed segment, even one that was never a document, so the root should hold only the corpus.
+
+Still refused or not reached:
+
+| Path | Result | Why |
+|---|---|---|
+| Traversal, absolute paths, NUL, empty, `.` or `..` segments | 400 `invalid_path` | Safety, on every platform. Backslashes are separators everywhere, so `..\x` cannot be a way out. |
+| A dot-prefixed segment at any depth, such as `.git/config` or `.hidden.md` | 400 `hidden_path` | QMD's scan drops these whatever the collection's pattern, so they cannot be indexed documents. A real-SDK test confirms it. Remove a leftover `.memoria-*.tmp` on the host. |
+| A symlink or junction between the root and the file | 400 `invalid_path` | Containment. A link at the last segment is removed itself. |
+| A case or normalization alias of an existing entry | 409 `case_conflict` | The exact name works, and is what keeps the metadata key right. |
+| A name that is not a real directory entry, such as an 8.3 short name | 202, `deleted: false` | A directory listing does not show short names, so `hidden~1.md` cannot remove `.hidden.md`, but a file really called `notes~1.md` is removed. |
+
+Names a delete cannot address, and what to do instead:
+
+| Class | Why | Instead |
+|---|---|---|
+| On Windows: a name with `< > : " \| ? *` or a control character, ending in a dot or space, or a device name such as `NUL` or `CON.md`, returns 400 | Windows would read it as something else: `.. ` as `..`, a colon as a data stream, `NUL` as the device | Normally these cannot exist on NTFS. One made through a `\\?\` path can be removed the same way: `Remove-Item -LiteralPath "\\?\D:\corpus\NUL\x.md"` |
+| On POSIX: a name with a literal backslash returns 202 with `deleted: false` | Backslashes are treated as separators, so `a\b.md` means `a/b.md` | Remove it with `rm`, then `POST /reindex` for the collection |
+| A name that is not valid Unicode, on POSIX, returns 202 with `deleted: false` | Node cannot represent those bytes in a string | Remove it with `rm`, then `POST /reindex` |
+| A path over 1024 characters returns 400 from the schema | The route's limit | Remove it on the host, then `POST /reindex` |
+
+Remaining limits:
+
+- Node has no `openat` or `renameat`, so each call resolves its path afresh. A local user with write access to the collection root can still win the gap inside the rename itself, between the kernel resolving the source and the destination. Swapping a directory at any earlier point makes the temp file's name unresolvable, and the write fails. A swap after the rename is reported as an error but cannot be undone. A swap at the moment the temp file is created can leave an empty file outside the root. A delete's rename aside can land on a file outside the root: it is put back when the swap is still in place, and otherwise stays under a `.memoria-*.tmp` name beside its old one, and a flip test reproduces this outcome. Restrict write access to collection roots to the service account.
+- These are accepted limits: [`docs/deployment.md`](../docs/deployment.md#collection-root-permissions) states the boundary.
+
+`overwrite: false` publishes with a hard link, which fails if the name is taken, so of several simultaneous creates exactly one succeeds and the rest get 409 `exists`. On a filesystem without hard links it returns 500 `exclusive_create_failed` rather than giving up exclusivity. `overwrite: true` does not need them.
+
+Paths matching the collection's `ignore` patterns in QMD's configuration return 400 `ignored_path`, including a path below an ignored directory, as QMD's scan treats it. Patterns are read only from that configuration. Each compiles to a regex that runs on a request's path, so a pattern with an extglob, a leading `!`, or more than three wildcards makes every `POST` to that collection return 500 `unsupported_ignore_pattern` until it is simplified. It is neither run nor skipped. `DELETE` runs no pattern and is not affected.
+
+A temp file is never indexed: QMD's scan skips hidden names whatever the collection's pattern, so a crash mid-write cannot put a partial document in search, `GET /docs` or multi-get. A write removes any `.memoria-*.tmp` over an hour old from its own directory, so a directory no write reaches keeps its leftovers. They are harmless and safe to delete. A crash in the moment between linking and unlinking leaves the document looking hard-linked, so overwriting it returns 409 `hard_link` until that sweep runs.
+
 ### Reindex scheduling
 
 One worker runs one job at a time. Document writes do not start a scan each: the file lands on disk at once and the update waits until writes for that collection have been quiet for `MEMORIA_QMD_REINDEX_DEBOUNCE_MS`, so N documents cost one scan. The wait never exceeds `MEMORIA_QMD_REINDEX_MAX_WAIT_MS` from the first write.
@@ -159,6 +222,7 @@ Layout:
 | `src/jobs.ts` | Single-worker reindex queue with an injectable debounce clock. |
 | `src/ingest.ts` | Path validation, file writes and deletes for `/documents`. |
 | `src/secret-file.ts` | Reads a secret from `<NAME>_FILE`. Kept identical to the worker's copy by a test. |
+| `src/path-rules.ts` | The names a document path may use, on every platform. |
 | `src/multi-get.ts` | Splits a multi-get into the separate calls QMD can read, and merges the results. |
 | `src/llm/` | Remote mode: `RemoteLlm`, the worker client, response validation and the rerank transport. Loaded only when `MEMORIA_QMD_LLM=remote`. |
 | `bench/` | The parity benchmark and its query set. |
@@ -168,7 +232,8 @@ Layout:
 ## Security notes
 
 - QMD has no authentication and the corpus contains credentials. The sidecar refuses to start on a non-loopback address without a secret, and compares bearer tokens in constant time.
-- `POST /documents` and `DELETE /documents` change files. Paths are normalised, must stay inside the collection root, and must match the collection's glob. Symlinks and junctions cannot be followed out of the root, and segments that Windows would silently rewrite (trailing dots and spaces, colons) are refused on every platform. Redaction is the caller's job and must happen before the call.
+- `POST /documents` and `DELETE /documents` change files. Redaction is the caller's job and must happen before the call. Paths must stay inside the collection root and match the collection's glob, and the name rules below apply on every platform, so a path valid on one host is valid on the others. See [Document paths](#document-paths).
+- Write access to a collection root is trust in that account. The checks below shrink what a local user can do by racing the sidecar, but do not remove it (see [Document paths](#document-paths)).
 - The sidecar is not a public surface. `Memoria.Api` is the only intended caller; expose nothing beyond the LAN.
 
 ## Dependency audit

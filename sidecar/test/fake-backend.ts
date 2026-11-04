@@ -33,6 +33,7 @@ export interface FakeCollection {
   name: string;
   root: string;
   pattern?: string;
+  ignore?: string[];
   context?: string;
   includeByDefault?: boolean;
 }
@@ -192,6 +193,10 @@ export class FakeBackend implements QmdBackend {
       out.push({ doc: options.includeBody ? { ...info, body: d.body } : info, skipped: false });
     }
     return { docs: out, errors };
+  }
+
+  ignorePatterns(collection: string): string[] {
+    return this.collections.find((c) => c.name === collection)?.ignore ?? [];
   }
 
   async listCollections(): Promise<CollectionRow[]> {

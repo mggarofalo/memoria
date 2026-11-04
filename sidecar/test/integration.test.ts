@@ -6,7 +6,7 @@
  * Opt in with MEMORIA_QMD_INTEGRATION=1 (CI sets it; `npm test` does not).
  */
 import assert from "node:assert/strict";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
 import { buildApp } from "../src/app.ts";
@@ -15,6 +15,128 @@ import { FRONTMATTER_DOC } from "./fake-backend.ts";
 import { authHeaders, tempDir, testConfig } from "./helpers.ts";
 
 const enabled = process.env.MEMORIA_QMD_INTEGRATION === "1";
+
+test("no collection pattern can put a dot path in the index, which is why DELETE can refuse them", { skip: enabled ? false : "set MEMORIA_QMD_INTEGRATION=1" }, async () => {
+  const root = await tempDir("memoria-qmd-it-");
+  const corpus = path.join(root, "dotted");
+  await mkdir(path.join(corpus, ".notes", "deep"), { recursive: true });
+  await mkdir(path.join(corpus, "sub", ".inner"), { recursive: true });
+  for (const f of [".hidden.md", ".notes/a.md", ".notes/deep/b.md", "sub/.inner/c.md", "sub/.d.md"]) await writeFile(path.join(corpus, f), `# ${f}\n\ndotmarker\n`, "utf8");
+  await writeFile(path.join(corpus, "plain.md"), "# Plain\n\nplainmarker\n", "utf8");
+
+  const qmd = await import("@tobilu/qmd");
+  // Patterns that name dot paths outright. The SDK takes no `dot` setting for a collection.
+  const patterns: Record<string, { path: string; pattern: string }> = {};
+  for (const [i, pattern] of ["**/*", "**/*.md", ".notes/**/*.md", ".*", ".*/**", "**/.*", "**/.inner/*.md", "{.notes,sub}/**/*.md"].entries()) patterns[`c${i}`] = { path: corpus, pattern };
+  const store = await qmd.createStore({ dbPath: path.join(root, "index.sqlite"), config: { collections: patterns } });
+  try {
+    await store.update();
+    const rows = (store as unknown as { internal: { db: { prepare(sql: string): { all(): Array<{ path: string }> } } } }).internal.db.prepare("SELECT DISTINCT path FROM documents").all();
+    assert.ok(rows.length > 0, "the wide patterns did index something");
+    assert.deepEqual(rows.filter((r) => r.path.split("/").some((s) => s.startsWith("."))), []);
+    assert.ok(rows.some((r) => r.path === "plain.md"));
+  } finally {
+    await store.close();
+  }
+});
+
+test("a document under a newly added ignore rule can be deleted, and leaves search after the reindex", { skip: enabled ? false : "set MEMORIA_QMD_INTEGRATION=1" }, async () => {
+  const root = await tempDir("memoria-qmd-it-");
+  const corpus = path.join(root, "sessions");
+  await mkdir(path.join(corpus, "drafts"), { recursive: true });
+  const dbPath = path.join(root, "index.sqlite");
+  const leaked = path.join(corpus, "drafts", "leaked.md");
+  await writeFile(leaked, FRONTMATTER_DOC({ project: "Leak" }, "# Leak\n\nleakedcredentialmarker\n"), "utf8");
+  await writeFile(path.join(corpus, "other.md"), "# Other\n\nothermarker\n", "utf8");
+
+  const qmd = await import("@tobilu/qmd");
+  const first = await qmd.createStore({ dbPath, config: { collections: { sessions: { path: corpus, pattern: "**/*.md" } } } });
+  assert.equal((await first.update()).indexed, 2);
+  await first.close();
+  // The rule arrives after the document was indexed, and with no scan since.
+  const second = await qmd.createStore({ dbPath, config: { collections: { sessions: { path: corpus, pattern: "**/*.md", ignore: ["drafts", "+(a|aa)"] } } } });
+  await second.close();
+
+  const backend = await openBackend({ dbPath, keepWarm: false });
+  const app = await buildApp({ backend, config: testConfig({ reindexDebounceMs: 0 }), logger: false });
+  try {
+    await app.ready();
+    assert.deepEqual(backend.ignorePatterns("sessions"), ["drafts", "+(a|aa)"], "the rule reached the store");
+    const search = (query: string) => app.inject({ method: "POST", url: "/search", headers: authHeaders, payload: { searches: [{ type: "lex", query }], rerank: false } });
+    assert.equal((await search("leakedcredentialmarker")).json().total, 1, "still searchable until something changes");
+
+    // Neither the ignore rule nor the unsupported pattern beside it stops this.
+    const deleted = await app.inject({ method: "DELETE", url: "/documents?collection=sessions&path=drafts/leaked.md", headers: authHeaders });
+    assert.equal(deleted.statusCode, 202, deleted.body);
+    assert.equal(deleted.json().deleted, true);
+    await assert.rejects(stat(leaked), /ENOENT/);
+    await app.ctx.jobs.idle();
+    assert.equal((await search("leakedcredentialmarker")).json().total, 0, "gone from search after the reindex");
+    assert.equal((await app.inject({ method: "GET", url: "/docs/sessions/drafts/leaked.md", headers: authHeaders })).statusCode, 404);
+    assert.equal(app.ctx.metadata.get("sessions/drafts/leaked.md"), undefined);
+    assert.equal((await search("othermarker")).json().total, 1, "the rest of the collection is untouched");
+  } finally {
+    await app.close();
+    await backend.close();
+  }
+});
+
+test("the real SDK skips temp files and ignored paths, and the sidecar agrees with its scan", { skip: enabled ? false : "set MEMORIA_QMD_INTEGRATION=1" }, async () => {
+  const root = await tempDir("memoria-qmd-it-");
+  // A pattern as wide as they come, so only the temp file's hidden name keeps it out.
+  const corpus = path.join(root, "loose");
+  await mkdir(corpus, { recursive: true });
+  const dbPath = path.join(root, "index.sqlite");
+  await writeFile(path.join(corpus, "keep.md"), "# Keep\n\nkeptmarker\n", "utf8");
+  // What a crash mid-write leaves, with a body worth finding.
+  const crashed = ".memoria-0123456789abcdef01234567.tmp";
+  await writeFile(path.join(corpus, crashed), "# Crashed\n\ncrashmarker partial\n", "utf8");
+  await mkdir(path.join(corpus, "drafts"));
+  await writeFile(path.join(corpus, "drafts", "planted.md"), "# Planted\n\nignoredmarker\n", "utf8");
+
+  const qmd = await import("@tobilu/qmd");
+  const ignore = ["drafts", "**/*.secret.md"];
+  const builder = await qmd.createStore({ dbPath, config: { collections: { loose: { path: corpus, pattern: "**/*", ignore } } } });
+  const built = await builder.update();
+  assert.equal(built.indexed, 1, "only keep.md");
+  await builder.close();
+
+  const backend = await openBackend({ dbPath, keepWarm: false });
+  const app = await buildApp({ backend, config: testConfig(), logger: false });
+  try {
+    await app.ready();
+    assert.deepEqual(backend.ignorePatterns("loose"), ignore);
+    assert.deepEqual(backend.ignorePatterns("no-such-collection"), []);
+
+    const search = (query: string) => app.inject({ method: "POST", url: "/search", headers: authHeaders, payload: { searches: [{ type: "lex", query }], rerank: false } });
+    assert.equal((await search("keptmarker")).json().total, 1);
+    assert.equal((await search("crashmarker")).json().total, 0, "a temp file is not searchable");
+    assert.equal((await search("ignoredmarker")).json().total, 0);
+
+    // Get and multi-get reach neither, by exact name or by glob.
+    assert.equal((await app.inject({ method: "GET", url: `/docs/loose/${crashed}`, headers: authHeaders })).statusCode, 404);
+    const multi = (payload: object) => app.inject({ method: "POST", url: "/docs:multiGet", headers: authHeaders, payload });
+    const everything = await multi({ pattern: "loose/**" });
+    assert.deepEqual(everything.json().docs.map((d: { path: string }) => d.path), ["keep.md"]);
+    assert.deepEqual((await multi({ pattern: "loose/.memoria-*" })).json().docs, []);
+    assert.deepEqual((await multi({ ids: [`loose/${crashed}`] })).json().docs, []);
+
+    // Ingest refuses what the scan would skip, and the rest does index.
+    for (const p of ["drafts/x.md", "a.secret.md"]) {
+      const refused = await app.inject({ method: "POST", url: "/documents", headers: authHeaders, payload: { collection: "loose", path: p, content: "# x\n", embed: false } });
+      assert.equal(refused.statusCode, 400, p);
+      assert.equal(refused.json().error, "ignored_path");
+    }
+    const accepted = await app.inject({ method: "POST", url: "/documents", headers: authHeaders, payload: { collection: "loose", path: "fresh.md", content: "# Fresh\n\nfreshmarker\n", embed: false, overwrite: false } });
+    assert.equal(accepted.statusCode, 202, accepted.body);
+    await app.ctx.jobs.idle();
+    assert.equal((await search("freshmarker")).json().total, 1);
+    assert.equal((await search("crashmarker")).json().total, 0, "still not after a rescan");
+  } finally {
+    await app.close();
+    await backend.close();
+  }
+});
 
 test("sidecar serves a real QMD index end to end", { skip: enabled ? false : "set MEMORIA_QMD_INTEGRATION=1" }, async () => {
   const root = await tempDir("memoria-qmd-it-");
@@ -147,6 +269,33 @@ test("sidecar serves a real QMD index end to end", { skip: enabled ? false : "se
     assert.equal(gone.json().total, 0);
     assert.equal((await app.inject({ method: "GET", url: "/docs/sessions/2026-10-31_gamma.md", headers: authHeaders })).statusCode, 404);
     assert.equal((await app.inject({ method: "GET", url: "/status", headers: authHeaders })).json().totalDocuments, 2);
+
+    // Frontmatter past the head window: POST and the real rescan must agree.
+    const padding = Array.from({ length: 600 }, (_, i) => `/some/long/path/number/${i}.md`);
+    const huge = FRONTMATTER_DOC({ project: "Big", files_touched: padding }, "# Big\n\noverrunmarker\n");
+    const hugePost = await app.inject({ method: "POST", url: "/documents", headers: authHeaders, payload: { collection: "sessions", path: "huge.md", content: huge, embed: false } });
+    assert.equal(hugePost.statusCode, 202, hugePost.body);
+    assert.equal(hugePost.json().metadata, null);
+    await app.ctx.jobs.idle();
+    const hugeDoc = await app.inject({ method: "GET", url: "/docs/sessions/huge.md", headers: authHeaders });
+    assert.equal(hugeDoc.statusCode, 200, hugeDoc.body);
+    assert.equal(hugeDoc.json().metadata, null);
+
+    // The window edge counted the same way by JavaScript and by SQLite's substr.
+    const astral = FRONTMATTER_DOC({ project: "Edge", note: "\u{1f600}".repeat(8100 / 2) }, "# Edge\n\nastralmarker\n");
+    const astralPost = await app.inject({ method: "POST", url: "/documents", headers: authHeaders, payload: { collection: "sessions", path: "astral.md", content: astral, embed: false } });
+    assert.equal(astralPost.json().metadata?.project, "Edge");
+    await app.ctx.jobs.idle();
+    const astralDoc = await app.inject({ method: "GET", url: "/docs/sessions/astral.md", headers: authHeaders });
+    assert.equal(astralDoc.json().metadata?.project, "Edge");
+
+    // A directory QMD excludes really is never indexed, which is why ingest refuses it.
+    await mkdir(path.join(corpus, "vendor"));
+    await writeFile(path.join(corpus, "vendor", "excluded.md"), "# Excluded\n\nvendormarker\n", "utf8");
+    await app.inject({ method: "POST", url: "/reindex", headers: authHeaders, payload: { collections: ["sessions"], embed: false } });
+    await app.ctx.jobs.idle();
+    const vendored = await app.inject({ method: "POST", url: "/search", headers: authHeaders, payload: { searches: [{ type: "lex", query: "vendormarker" }], rerank: false } });
+    assert.equal(vendored.json().total, 0);
 
     const escape = await app.inject({ method: "DELETE", url: `/documents?collection=sessions&path=${encodeURIComponent("../index.sqlite")}`, headers: authHeaders });
     assert.equal(escape.statusCode, 400);
