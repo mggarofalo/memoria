@@ -48,8 +48,18 @@
           "Health"
         ],
         "summary": "Readiness",
-        "description": "Probes the memoria-qmd sidecar. 200 when its index is open and, by default, its models are resident; 503 with the same body shape while it warms up or when it cannot be reached. Anonymous for orchestrators: without an admin key the body says only `ready` or `not_ready`, with `reason` and `sidecar` null. An admin key gets the full report.",
+        "description": "Probes the memoria-qmd sidecar. 200 whenever it answers, with `status` of `ready`, `warming` or `degraded`: losing GPU workers makes search rank worse, and must not take the API out of rotation. 503 only when the sidecar cannot be reached, unless `strict=true`, which also answers 503 for anything but `ready`. Anonymous for orchestrators: without an admin key the body carries only the status word, and `not_ready` for an unreachable sidecar, with `reason` and `sidecar` null. An admin key gets the full report, including stuck jobs and documents set aside.",
         "operationId": "ready",
+        "parameters": [
+          {
+            "name": "strict",
+            "in": "query",
+            "description": "Answer 503 unless the sidecar is fully ready, with no degradation.",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "OK",
@@ -80,7 +90,7 @@
           "Search"
         ],
         "summary": "Search the corpus",
-        "description": "Hybrid search over the indexed documents: BM25 and vector retrieval fused by reciprocal rank, then reranked by a cross-encoder unless `rerank=false`. Reranked queries take a few seconds; `rerank=false` returns fused results in well under a second. Frontmatter filters (`project`, `branch`, `since`, `until`, `tag`) are applied after retrieval, so a filtered result set can be shorter than `limit` even when more matches exist. Requires the `read` scope.",
+        "description": "Hybrid search over the indexed documents: BM25 and vector retrieval fused by reciprocal rank, then reranked by a cross-encoder unless `rerank=false`. Reranked queries take a few seconds; `rerank=false` returns fused results in well under a second. Frontmatter filters (`project`, `branch`, `since`, `until`, `tag`) are applied after retrieval, so a filtered result set can be shorter than `limit` even when more matches exist. `degraded` means the search ran without something a full search uses, such as the reranker: results are valid but may rank worse, and `degradedReasons` says what. Requires the `read` scope.",
         "operationId": "search",
         "parameters": [
           {
@@ -1343,7 +1353,8 @@
           "totalDocuments",
           "needsEmbedding",
           "hasVectorIndex",
-          "collections"
+          "collections",
+          "documentsSetAside"
         ],
         "type": "object",
         "properties": {
@@ -1364,6 +1375,11 @@
             "items": {
               "$ref": "#/components/schemas/IndexCollectionStatus"
             }
+          },
+          "documentsSetAside": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
           }
         }
       },
@@ -1603,7 +1619,9 @@
           "results",
           "total",
           "tookMs",
-          "query"
+          "query",
+          "degraded",
+          "degradedReasons"
         ],
         "type": "object",
         "properties": {
@@ -1623,6 +1641,15 @@
           },
           "query": {
             "$ref": "#/components/schemas/SearchQueryInfo"
+          },
+          "degraded": {
+            "type": "boolean"
+          },
+          "degradedReasons": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         }
       },
@@ -1660,6 +1687,62 @@
           "pending": {
             "type": "integer",
             "format": "int32"
+          },
+          "persistent": {
+            "type": "boolean",
+            "nullable": true
+          },
+          "stuck": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SidecarStuckJob"
+              }
+            ],
+            "nullable": true
+          }
+        }
+      },
+      "SidecarLlmInfo": {
+        "required": [
+          "mode",
+          "degraded",
+          "unavailable",
+          "workersUp",
+          "workersTotal"
+        ],
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string"
+          },
+          "degraded": {
+            "type": "boolean"
+          },
+          "unavailable": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "workersUp": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "workersTotal": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "embedDisagreement": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "nullable": true
+          },
+          "documentsSetAside": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
           }
         }
       },
@@ -1763,6 +1846,30 @@
           },
           "jobs": {
             "$ref": "#/components/schemas/SidecarJobsInfo"
+          },
+          "llm": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SidecarLlmInfo"
+              }
+            ],
+            "nullable": true
+          }
+        }
+      },
+      "SidecarStuckJob": {
+        "required": [
+          "reason",
+          "attempts"
+        ],
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": "string"
+          },
+          "attempts": {
+            "type": "integer",
+            "format": "int32"
           }
         }
       },

@@ -66,21 +66,21 @@ public sealed class HealthEndpointTests(MemoriaApiFactory factory) : IClassFixtu
 
 		FakeSidecar.RecordedRequest probe = factory.Sidecar.Single();
 		Assert.Equal("/ready", probe.Uri.AbsolutePath);
-		Assert.Equal("?requireModels=true", probe.Uri.Query);
+		Assert.Equal(string.Empty, probe.Uri.Query);
 		Assert.Equal("Bearer " + MemoriaApiFactory.SidecarSecret, probe.Headers["Authorization"]);
 	}
 
 	[Fact]
-	public async Task Ready_WhenSidecarWarming_Returns503WithReason()
+	public async Task Ready_WhenSidecarWarming_Is200WithReason()
 	{
-		factory.Sidecar.On("GET", "/ready", HttpStatusCode.ServiceUnavailable, SidecarFixtures.Readiness("warming", resident: false));
+		factory.Sidecar.On("GET", "/ready", HttpStatusCode.OK, SidecarFixtures.Readiness("warming", resident: false));
 		HttpClient client = factory.CreateClient();
 
 		HttpResponseMessage response = await client.GetAsync("/ready");
 
-		Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
 		ReadinessReport report = (await response.Content.ReadFromJsonAsync<ReadinessReport>(Json))!;
-		Assert.False(report.Ready);
+		Assert.True(report.Ready);
 		Assert.Equal(ReadinessStatus.Warming, report.Status);
 		Assert.Equal("models are still loading", report.Reason);
 		Assert.NotNull(report.Sidecar);
@@ -89,12 +89,12 @@ public sealed class HealthEndpointTests(MemoriaApiFactory factory) : IClassFixtu
 	[Fact]
 	public async Task Ready_WhenWarmupFailed_ReportsTheError()
 	{
-		factory.Sidecar.On("GET", "/ready", HttpStatusCode.ServiceUnavailable, SidecarFixtures.Readiness("warming", resident: false, warmupError: "CUDA out of memory"));
+		factory.Sidecar.On("GET", "/ready", HttpStatusCode.OK, SidecarFixtures.Readiness("warming", resident: false, warmupError: "CUDA out of memory"));
 		HttpClient client = factory.CreateClient();
 
 		HttpResponseMessage response = await client.GetAsync("/ready");
 
-		Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
 		ReadinessReport report = (await response.Content.ReadFromJsonAsync<ReadinessReport>(Json))!;
 		Assert.Equal("warmup failed: CUDA out of memory", report.Reason);
 	}

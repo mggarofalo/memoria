@@ -20,7 +20,15 @@ internal static class ContractMapping
 				response.Query.Rerank,
 				response.Query.Filtered,
 				response.Query.Fetched,
-				response.Query.Limit));
+				response.Query.Limit),
+			response.Degraded,
+			KnownReasons(response.DegradedReasons));
+	}
+
+	/// <summary>Only the tokens the contract names go out, so a reason can never carry backend detail.</summary>
+	public static string[] KnownReasons(IReadOnlyList<string>? reasons)
+	{
+		return (reasons ?? []).Where(DegradedReason.All.Contains).ToArray();
 	}
 
 	public static SearchHit ToContract(this SidecarSearchHit hit)

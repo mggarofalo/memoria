@@ -89,7 +89,7 @@ When no worker can serve a role, search skips the step that needs it rather than
 
 `/ready` reports `status: "degraded"` and an `llm` block listing the roles no worker can serve. Those follow recent outcomes, so a role whose circuit is open reads as down even while `/health` looks fine, and a role reads as down until a trial call has actually succeeded. `models.resident` and `warmup.done` follow the same state, not a stored flag, so neither reads as healthy with no worker up. `/ready?requireModels=true` returns 503 in that state.
 
-`Memoria.Api` does not pass `degraded` through to its own callers yet. Its `/ready` already follows `models.resident`, but its search responses do not carry the flag.
+`Memoria.Api` passes this on. Its search responses, REST and MCP, carry `degraded` and `degradedReasons`, and `memoria query` shows them. Its `/ready` answers 200 with `status: "degraded"`, so losing workers does not take the API out of rotation; `/ready?strict=true` answers 503 instead.
 
 `llm.embedDisagreement` names any workers that embedded the same text differently. That is reported only, and does not make `status` degraded.
 

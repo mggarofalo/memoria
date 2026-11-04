@@ -123,6 +123,52 @@ func TestQueryFormats(t *testing.T) {
 	}
 }
 
+func degradedSearchBody() string {
+	return strings.Replace(searchBody(), `"total":1,`, `"total":1,"degraded":true,"degradedReasons":["no_rerank","no_expansion"],`, 1)
+}
+
+func TestQueryShowsADegradedSearch(t *testing.T) {
+	for _, format := range []string{"table", "markdown"} {
+		t.Run(format, func(t *testing.T) {
+			api := newFakeAPI(t, jsonReply(degradedSearchBody()))
+			h := newHarness(t)
+			h.login(api.URL)
+			if code := h.run("query", "x", "--format", format); code != 0 {
+				t.Fatalf("code = %d", code)
+			}
+			out := h.stdout.String()
+			if !strings.Contains(out, "Degraded search") || !strings.Contains(out, "f6feba") {
+				t.Fatalf("stdout = %q", out)
+			}
+			assertNoEscapes(t, out)
+		})
+	}
+}
+
+func TestQueryJSONCarriesTheDegradedStateAsIs(t *testing.T) {
+	api := newFakeAPI(t, jsonReply(degradedSearchBody()))
+	h := newHarness(t)
+	h.login(api.URL)
+	if code := h.run("query", "x", "--format", "json"); code != 0 {
+		t.Fatalf("code = %d", code)
+	}
+	if out := h.stdout.String(); !strings.Contains(out, `"degraded":true`) || !strings.Contains(out, "no_rerank") {
+		t.Fatalf("stdout = %q", out)
+	}
+}
+
+func TestQueryHealthySearchHasNoNotice(t *testing.T) {
+	for _, format := range []string{"table", "markdown"} {
+		api := newFakeAPI(t, jsonReply(searchBody()))
+		h := newHarness(t)
+		h.login(api.URL)
+		h.run("query", "x", "--format", format)
+		if strings.Contains(h.stdout.String(), "Degraded") {
+			t.Fatalf("%s stdout = %q", format, h.stdout.String())
+		}
+	}
+}
+
 func TestFilteredShortResultExplainsItself(t *testing.T) {
 	api := newFakeAPI(t, jsonReply(searchBody()))
 	h := newHarness(t)

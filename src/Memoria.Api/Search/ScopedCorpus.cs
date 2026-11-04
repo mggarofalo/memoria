@@ -32,7 +32,7 @@ public sealed class ScopedCorpus(IMemoriaQmdClient sidecar, ICallerScope scope, 
 		if (ReadsNothing)
 		{
 			audit.SetResult([], 0);
-			return new SearchResult([], 0, 0, new SearchQueryInfo([], request.Rerank ?? false, request.Filters is not null, 0, request.Limit ?? 0));
+			return new SearchResult([], 0, 0, new SearchQueryInfo([], request.Rerank ?? false, request.Filters is not null, 0, request.Limit ?? 0), false, []);
 		}
 
 		SidecarSearchResponse response = await sidecar.SearchAsync(request, cancellationToken);
@@ -45,7 +45,9 @@ public sealed class ScopedCorpus(IMemoriaQmdClient sidecar, ICallerScope scope, 
 			hits,
 			response.Total - removed,
 			response.TookMs,
-			new SearchQueryInfo(collections, response.Query.Rerank, response.Query.Filtered, response.Query.Fetched - removed, response.Query.Limit));
+			new SearchQueryInfo(collections, response.Query.Rerank, response.Query.Filtered, response.Query.Fetched - removed, response.Query.Limit),
+			response.Degraded,
+			ContractMapping.KnownReasons(response.DegradedReasons));
 	}
 
 	/// <summary>
@@ -161,6 +163,7 @@ public sealed class ScopedCorpus(IMemoriaQmdClient sidecar, ICallerScope scope, 
 			IsRestricted ? collections.Sum(static collection => collection.Documents) : status.TotalDocuments,
 			IsRestricted ? null : status.NeedsEmbedding,
 			status.HasVectorIndex,
-			collections.Select(ContractMapping.ToContract).ToArray());
+			collections.Select(ContractMapping.ToContract).ToArray(),
+			scope.SeesBackendDetails ? status.DocumentsSetAside : null);
 	}
 }

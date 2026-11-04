@@ -261,8 +261,15 @@ public sealed class AdminKeyEndpointTests(AuthApiFactory factory) : IClassFixtur
 		using MemoryStream all = new();
 		foreach (string path in Directory.GetFiles(Path.GetDirectoryName(factory.DatabasePath)!))
 		{
-			await using FileStream stream = new(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-			await stream.CopyToAsync(all);
+			// SQLite removes the -wal file when the last connection closes, which can happen between listing and opening.
+			try
+			{
+				await using FileStream stream = new(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+				await stream.CopyToAsync(all);
+			}
+			catch (FileNotFoundException)
+			{
+			}
 		}
 
 		return all.ToArray();

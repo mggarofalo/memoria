@@ -23,7 +23,8 @@ public sealed record SidecarReadiness(
 	SidecarModelsInfo Models,
 	SidecarWarmupInfo Warmup,
 	SidecarMetadataIndexInfo Metadata,
-	SidecarJobsInfo Jobs);
+	SidecarJobsInfo Jobs,
+	SidecarLlmInfo? Llm = null);
 
 public sealed record SidecarIndexInfo(string DbPath, int TotalDocuments, int NeedsEmbedding, bool HasVectorIndex);
 
@@ -35,7 +36,20 @@ public sealed record SidecarWarmupInfo(bool Requested, bool Done, string? Error,
 
 public sealed record SidecarMetadataIndexInfo(int Documents, string? RefreshedAt);
 
-public sealed record SidecarJobsInfo(int Pending);
+public sealed record SidecarJobsInfo(int Pending, bool? Persistent = null, SidecarStuckJob? Stuck = null);
+
+/// <summary>A job waiting to try again, and why.</summary>
+public sealed record SidecarStuckJob(string Reason, int Attempts);
+
+/// <summary>Where model work runs and what is out. <see cref="Unavailable"/> names roles no worker can serve.</summary>
+public sealed record SidecarLlmInfo(
+	string Mode,
+	bool Degraded,
+	IReadOnlyList<string> Unavailable,
+	int WorkersUp,
+	int WorkersTotal,
+	IReadOnlyList<string>? EmbedDisagreement = null,
+	int? DocumentsSetAside = null);
 
 /// <summary>Readiness as the client reports it: <see cref="Ready"/> is the HTTP outcome, <see cref="Details"/> the body.</summary>
 public sealed record SidecarReadinessResult(bool Ready, SidecarReadiness Details);
@@ -45,7 +59,8 @@ public sealed record SidecarStatus(
 	int TotalDocuments,
 	int NeedsEmbedding,
 	bool HasVectorIndex,
-	IReadOnlyList<SidecarStatusCollection> Collections);
+	IReadOnlyList<SidecarStatusCollection> Collections,
+	int? DocumentsSetAside = null);
 
 public sealed record SidecarStatusCollection(string Name, string? Path, string? Pattern, int Documents, string LastUpdated);
 
@@ -93,7 +108,9 @@ public sealed record SidecarSearchResponse(
 	IReadOnlyList<SidecarSearchHit> Results,
 	int Total,
 	int TookMs,
-	SidecarSearchQueryInfo Query);
+	SidecarSearchQueryInfo Query,
+	bool Degraded = false,
+	IReadOnlyList<string>? DegradedReasons = null);
 
 public sealed record SidecarSearchHit(
 	string Docid,
