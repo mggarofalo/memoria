@@ -13,7 +13,12 @@ Requires **.NET 10 SDK**, **Go 1.26+**, and **Node 22.18+** (for `sidecar/`). A 
 
 ```bash
 (cd sidecar && npm ci)          # memoria-qmd sidecar dependencies
+(cd worker && npm ci)           # memoria-worker dev dependencies
+dotnet tool restore             # ReportGenerator and Stryker.NET
+npm ci                          # dev tooling at the root; also installs the git hooks
 ```
+
+`npm ci` at the root is the one command that installs the hooks. `npx lefthook uninstall` removes them. Nothing at the root ships.
 
 ## Workflow Rules
 
@@ -33,7 +38,9 @@ Single-trunk model: `main` is the only long-lived branch. Cut a short-lived
 If a PR looks like a blocker, report it and stop — do not close it.
 
 `main` is protected by the `main protection` ruleset: no direct pushes, no force
-pushes, no deletion, and all four CI checks must pass. `non_fast_forward` has no
+pushes, no deletion, and all four required CI checks must pass. Those job names
+must not change, and they must always report, so path filtering in `ci.yml`
+happens per job and never under `on:`. `non_fast_forward` has no
 API bypass — recovering from a bad merge means temporarily disabling "Block force
 pushes" in Settings → Rules → Rulesets, then re-enabling it.
 
@@ -52,15 +59,17 @@ npx --yes @stoplight/spectral-cli@6.17.0 lint --fail-severity warn src/Memoria.A
 
 cd cli
 go build ./...                                            # build CLI
-go test ./... -race                                       # test CLI
+go test ./... -race                                       # test CLI (-race needs cgo)
 gofmt -l .                                                # must print nothing
 go vet ./...
+go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0 run ./...   # complexity gate
 go mod tidy && git diff --exit-code go.mod go.sum         # tidy gate (CI parity)
 go generate ./... && git diff --exit-code internal/api    # regenerate the API client from src/Memoria.Api/openapi.json (CI parity)
 
 cd sidecar
 npm run typecheck                                         # tsc --noEmit
 npm test                                                  # unit tests (fake backend, no SDK load)
+npm run test:coverage                                     # unit tests with the branch coverage gate
 npm run openapi:check                                     # committed openapi.json matches routes
 npm run build                                             # emit dist/ for the service
 MEMORIA_QMD_INTEGRATION=1 npm run test:integration        # real SDK on a temp fixture index, mock worker
@@ -68,17 +77,45 @@ MEMORIA_QMD_WORKER_URL=... npm run test:live              # opt-in, against a re
 MEMORIA_QMD_WORKER_URL=... npm run bench:parity -- --db <index>   # opt-in, in-process versus worker
 ```
 
-The sidecar's `npm test` and `npm run typecheck` also cover `worker/` and `scripts/release/`, which is how CI reaches them.
+The sidecar's `npm test` and `npm run typecheck` also cover `worker/` and `scripts/release/`. The worker has its own `npm test`, `npm run test:coverage`, and `npm run typecheck`, and its own CI job.
 
 ```bash
 docker build -t memoria-api:local .                       # the image CI publishes to ghcr.io/mggarofalo/memoria
 ```
 
-Four gates are required status checks on `main`: `Build & Test`, `Code Formatting`, `CLI Build & Test`, `CLI Lint`. A fifth job, `Sidecar Build & Test`, runs the sidecar commands above, and `Docker Image` (`.github/workflows/docker.yml`) builds and verifies the image on every event, and a separate `Publish Image` job publishes it on pushes to `main` and release tags; neither `Sidecar Build & Test` nor `Docker Image` is in the ruleset's required list yet.
+Four gates are required status checks on `main`: `Build & Test`, `Code Formatting`, `CLI Build & Test`, `CLI Lint`. `Sidecar Build & Test` and `Worker Build & Test` run the Node commands above, and `Docker Image` (`.github/workflows/docker.yml`) builds and verifies the image on every event, and a separate `Publish Image` job publishes it on pushes to `main` and release tags; none of `Sidecar Build & Test`, `Worker Build & Test`, or `Docker Image` is in the ruleset's required list yet.
 
 ### Releases
 
 The only version in this repository is a `vX.Y.Z` tag, computed from Conventional Commits by `node scripts/release/release.ts next`. Never write a version number into a csproj, `package.json`, or Go file. Use the `release` skill (`.claude/skills/release/SKILL.md`) to cut one. **[docs/releasing.md](docs/releasing.md)** has the rules, what each component stamps, and the CLI asset contract.
+
+## Quality Gates
+
+| Gate | C# | TypeScript (sidecar, worker) | Go (cli) |
+|---|---|---|---|
+| Cyclomatic complexity, per function | CA1502, a build error. Limit in `CodeMetricsConfig.txt` | ESLint `complexity`. Limit in `eslint.config.mjs` | golangci-lint `gocyclo`. Limit in `cli/.golangci.yml` |
+| Coverage | **Branch**. `scripts/coverage-dotnet.sh` merges both test projects | **Branch**. `npm run test:coverage` in each package | **Statement**, not branch. `scripts/coverage-go.sh` |
+| Mutation (CI only) | Stryker.NET, `stryker/*.json` | StrykerJS, `stryker*.json` in each package | Gremlins, `cli/.gremlins.yaml` |
+
+- **Targets:** complexity 10 per function, and coverage 90 percent. Until the existing code is brought up to them, the limits in the files above are set to what `main` measures, so the gates stop things getting worse without breaking `main`. Never loosen a limit; tighten it when the code allows.
+- **Generated code is excluded,** and nothing else: `cli/internal/api/client.gen.go`, and source-generated C# (`coverage.runsettings`). Do not add `CompilerGeneratedAttribute` to the coverage exclusions: async methods compile to state machines that carry it, so it silently removes real code.
+- **The Node coverage figure has a blind spot.** It only counts files the tests load, so `sidecar/src/main.ts` is not measured at all, and a function that never runs barely registers (`sidecar/src/store.ts` reports 100 percent of branches and 53 percent of lines). Read the line column too.
+- **Go has no branch gate.** `gobco` is the only real option. It cannot run more than one package at a time, cannot exclude generated files, and has no threshold, so a gate would mean parsing its text output. The statement gate is what we enforce, and it should be read as that.
+- **The CA1502 config file must be named exactly `CodeMetricsConfig.txt`.** With any other name the rule passes without checking anything.
+
+### Git hooks
+
+`lefthook.yml` runs on pre-commit, scoped to the language you staged: format, lint, complexity, and tests with the coverage gate. Mutation testing never runs in a hook. `git commit --no-verify` exists for emergencies; CI runs the same gates.
+
+Hooks need `sh` and work wherever Git for Windows or a Unix shell is present. `-race` is left to CI because it needs cgo.
+
+### Mutation testing
+
+`.github/workflows/mutation.yml` is not a required check. On a pull request it mutates only what changed: `--since` for Stryker.NET, `--diff` for Gremlins, and `--mutate` with the changed files for StrykerJS. Nightly it mutates everything and uploads the reports as artifacts. Authentication, scoping, and redaction code has its own stricter config (`stryker/security.json`, `sidecar/stryker.security.json`). Run one by hand with `sh scripts/mutation-js.sh sidecar`, `sh scripts/mutation-dotnet.sh`, or `sh scripts/mutation-go.sh`.
+
+### Other CI
+
+`.github/workflows/audit.yml` runs `npm audit`, `govulncheck`, and `dotnet list package --vulnerable` daily and whenever a dependency file changes. `.github/workflows/security.yml` runs CodeQL and gitleaks. None of these is required, so a new advisory cannot block an unrelated pull request. Actions are pinned by commit SHA; Dependabot keeps the pins, and the dependencies, up to date in weekly grouped pull requests.
 
 ## Architecture
 

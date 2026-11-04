@@ -9,6 +9,9 @@
   "scripts": {
     "lint": "eslint sidecar worker"
   },
+  "allowScripts": {
+    "lefthook": true
+  },
   "devDependencies": {
     "@stryker-mutator/core": "10.1.1",
     "@stryker-mutator/tap-runner": "10.1.1",
