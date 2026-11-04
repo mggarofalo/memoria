@@ -1,14 +1,39 @@
 <#
 .SYNOPSIS
-    Stop and remove the memoria-qmd NSSM service. Requires an elevated shell.
+    Stop and remove the memoria-qmd service, its installed files and its secret.
+    Logs stay. Requires an elevated shell; -WhatIf prints the steps and changes
+    nothing.
+
+.DESCRIPTION
+    Pass the same data paths the install granted access to as -DataPath, so the
+    service account's permissions come off them while its name still resolves.
 #>
-[CmdletBinding()]
-param([string]$ServiceName = "memoria-qmd")
+[CmdletBinding(SupportsShouldProcess = $true)]
+param(
+    [string]$ServiceName = "memoria-qmd",
+    [string]$InstallDir = "",
+    [string]$StateDir = "",
+    [string[]]$DataPath = @()
+)
 
 $ErrorActionPreference = "Stop"
-if (-not (Get-Command nssm -ErrorAction SilentlyContinue)) {
-    throw "NSSM is not on PATH."
+$sidecar = Split-Path -Parent $PSScriptRoot
+Import-Module (Join-Path (Split-Path -Parent $sidecar) "deploy/windows/MemoriaService.psm1") -Force
+
+if ([string]::IsNullOrWhiteSpace($InstallDir)) { $InstallDir = Join-Path $env:ProgramFiles "Memoria\$ServiceName" }
+if ([string]::IsNullOrWhiteSpace($StateDir)) { $StateDir = Join-Path $env:ProgramData $ServiceName }
+
+$nssm = Join-Path $InstallDir "nssm.exe"
+if (-not $WhatIfPreference -and -not (Test-Path -LiteralPath $nssm)) {
+    $found = Get-Command nssm -ErrorAction SilentlyContinue
+    if (-not $found) { throw "NSSM was found neither in $InstallDir nor on PATH." }
+    $nssm = $found.Source
 }
-nssm stop $ServiceName confirm 2>$null | Out-Null
-nssm remove $ServiceName confirm
-Write-Host "Removed $ServiceName"
+
+$plan = New-MemoriaUninstallPlan -ServiceName $ServiceName -Nssm $nssm -InstallDir $InstallDir -SecretDir (Join-Path $StateDir "secret") -DataPaths $DataPath
+if ($WhatIfPreference) {
+    Show-MemoriaPlan -Plan $plan
+    return
+}
+Invoke-MemoriaPlan -Plan $plan
+Write-Host "Removed $ServiceName. Logs remain in $StateDir\logs."

@@ -1,7 +1,9 @@
 /**
  * Process configuration. Everything comes from environment variables so the
- * same build runs under NSSM, in a shell, or in CI.
+ * same build runs under NSSM, in a shell, or in CI. Secrets may instead come
+ * from a file named by `<NAME>_FILE`, which is what the installed service uses.
  */
+import { resolveSecret } from "./secret-file.ts";
 
 export interface SidecarConfig {
   /** Interface to bind. Loopback by default; set a LAN address to serve Memoria.Api. */
@@ -93,7 +95,7 @@ function loadLlmConfig(env: NodeJS.ProcessEnv): LlmConfig {
   if (url.username !== "" || url.password !== "") throw new Error("MEMORIA_QMD_WORKER_URL must not contain credentials; use MEMORIA_QMD_WORKER_TOKEN");
   if (url.search !== "" || url.hash !== "") throw new Error("MEMORIA_QMD_WORKER_URL must not contain a query or fragment");
 
-  const workerToken = env.MEMORIA_QMD_WORKER_TOKEN?.trim() || undefined;
+  const workerToken = resolveSecret(env, "MEMORIA_QMD_WORKER_TOKEN");
   if (workerToken === undefined && !isLoopbackHost(url.hostname.replace(/^\[|\]$/g, ""))) {
     throw new Error("MEMORIA_QMD_WORKER_TOKEN is required when the worker is not on loopback");
   }
@@ -110,7 +112,7 @@ function loadLlmConfig(env: NodeJS.ProcessEnv): LlmConfig {
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): SidecarConfig {
   const host = (env.MEMORIA_QMD_HOST ?? "127.0.0.1").trim();
   if (host === "") throw new Error("MEMORIA_QMD_HOST must not be empty");
-  const secret = env.MEMORIA_QMD_SECRET?.trim() || undefined;
+  const secret = resolveSecret(env, "MEMORIA_QMD_SECRET");
   if (secret === undefined && !isLoopbackHost(host)) {
     throw new Error(
       `MEMORIA_QMD_SECRET is required when binding to a non-loopback address (${host}). ` +

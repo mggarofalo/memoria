@@ -27,7 +27,7 @@ On the sidecar:
 |---|---|---|
 | `MEMORIA_QMD_LLM` | `local` | `remote` sends model work to a worker. |
 | `MEMORIA_QMD_WORKER_URL` | unset | Required in remote mode. Must not contain credentials. |
-| `MEMORIA_QMD_WORKER_TOKEN` | unset | Required unless the worker is on loopback. At least 16 characters. |
+| `MEMORIA_QMD_WORKER_TOKEN` | unset | Required unless the worker is on loopback. At least 16 characters. `MEMORIA_QMD_WORKER_TOKEN_FILE` reads it from a file instead, which is what a service should use. |
 | `MEMORIA_QMD_LLM_FALLBACK` | `1` | Tokenize and embed queries on this host's CPU when no worker answers. Needs the embedding model on this host. |
 | `MEMORIA_QMD_EMBED_DIMENSIONS` | `768` | Every embedding must have this length. `0` pins it to the first response. |
 
@@ -145,5 +145,5 @@ CI does not run it yet, since CI configuration is outside this change. Whoever w
 | llama-server accepts these flags and routes | **Not run.** From upstream documentation; the fixture only reflects that understanding. |
 | Scores match in-process QMD | **No evidence.** The in-process path was read, not measured. The benchmark has never run. |
 | GPU loading, on CUDA or Metal | **Not run.** |
-| The NSSM and launchd scripts work | **Not run.** Syntax checked only. |
+| The NSSM and launchd scripts work | **Not run for real.** Dry-run plans and ACL helpers are tested; see [what is unconfirmed](deployment.md#not-yet-confirmed). |
 | Windows VRAM and macOS thermal readings | Parsing tested against sample output, not against real tools. |
