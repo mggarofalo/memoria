@@ -27,7 +27,7 @@ never starts half-configured.
 |---|---|---|
 | `DefaultLimit` | `10` | Used when the caller omits `limit`. |
 | `MaxLimit` | `100` | Largest `limit` accepted; the sidecar caps at 100 regardless. |
-| `RerankByDefault` | `true` | Full reranked hybrid search unless the caller passes `rerank=false`. Decided in MEMORIA-1 once QMD moved to the desktop. |
+| `RerankByDefault` | `true` | Full reranked hybrid search unless the caller passes `rerank=false`. Reranked queries were benchmarked as viable on a GPU host. |
 | `DefaultCollections` | unset | Collections searched when the caller names none. Unset defers to QMD's default-included set. |
 
 ## `Memoria:Mcp` — the outward MCP server
@@ -49,13 +49,13 @@ Point Claude Code at it from any machine on the LAN:
 claude mcp add --transport http memoria http://<api-host>:8080/mcp
 ```
 
-Once API keys land (MEMORIA-3) the same command takes `--header "Authorization: Bearer <key>"`.
+Once API keys land the same command takes `--header "Authorization: Bearer <key>"`.
 
 ## Host settings outside `Memoria`
 
 | Key | Default | Purpose |
 |---|---|---|
-| `Urls` | `http://0.0.0.0:8080` | Kestrel bind address. `0.0.0.0` makes the API reachable on the LAN so the laptop can use it; nothing routes it beyond the LAN until MEMORIA-7 (homelab hardening) and MEMORIA-3 (API keys) land. Override with `ASPNETCORE_URLS` or `--urls`. |
+| `Urls` | `http://0.0.0.0:8080` | Kestrel bind address. `0.0.0.0` makes the API reachable on the LAN so the laptop can use it; nothing routes it beyond the LAN until homelab hardening and API keys land. Override with `ASPNETCORE_URLS` or `--urls`. |
 | `Logging:Console:FormatterName` | `json` | One JSON object per line, UTC timestamps, scopes included. `appsettings.Development.json` switches to `simple` for a readable terminal. |
 
 ## Local development
@@ -84,16 +84,16 @@ curl -s "http://localhost:8080/v1/search?query=api+key+auth&rerank=false&limit=3
 
 ## Reserved sections
 
-Later epics add siblings under `Memoria`. The shape is fixed now so
+Later work adds siblings under `Memoria`. The shape is fixed now so
 deployments do not have to be reorganised when they land:
 
-| Section | Epic | Contents |
-|---|---|---|
-| `Memoria:Auth` | MEMORIA-3 | API keys, their collection scopes and the `read` / `ingest` / `admin` scopes endpoints already declare through `MemoriaScopeAttribute`. |
-| `Memoria:Workers` | MEMORIA-12 / MEMORIA-18 | The inference pool: one entry per worker with `name`, `url`, a token *reference* (never the token), `capabilities` (`embed`, `rerank`, `generate`), `priority` and availability thresholds. |
-| `Memoria:Queue` | MEMORIA-17 / MEMORIA-18 | Queue policy: concurrency per worker, embedding batch byte budget, priority classes (interactive before background). |
+| Section | Contents |
+|---|---|
+| `Memoria:Auth` | API keys, their collection scopes and the `read` / `ingest` / `admin` scopes endpoints already declare through `MemoriaScopeAttribute`. |
+| `Memoria:Workers` | The inference pool: one entry per worker with `name`, `url`, a token *reference* (never the token), `capabilities` (`embed`, `rerank`, `generate`), `priority` and availability thresholds. |
+| `Memoria:Queue` | Queue policy: concurrency per worker, embedding batch byte budget, priority classes (interactive before background). |
 
 The sidecar keeps its own environment-variable configuration (see
-`sidecar/.env.example`). The control-plane issue (MEMORIA-18) decides how much
+`sidecar/.env.example`). The control-plane work decides how much
 of `Workers` and `Queue` the API pushes to the sidecar versus the sidecar
 reading directly; either way the keys above are where operators will find them.

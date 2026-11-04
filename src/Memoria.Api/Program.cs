@@ -24,7 +24,7 @@ LocalSettings.Insert(builder.Configuration, builder.Environment.ContentRootFileP
 
 // Bind the LAN by default so the laptop can reach this host; ASPNETCORE_URLS,
 // --urls or a Kestrel:Endpoints section take precedence. Nothing routes this
-// beyond the LAN until MEMORIA-7 and MEMORIA-3 land.
+// beyond the LAN until homelab hardening and API keys land.
 if (string.IsNullOrEmpty(builder.Configuration[WebHostDefaults.ServerUrlsKey]) && !builder.Configuration.GetSection("Kestrel:Endpoints").Exists())
 {
 	builder.WebHost.UseUrls("http://0.0.0.0:8080");
