@@ -195,7 +195,7 @@ export class QmdTokensRerank implements RerankBackend {
     const scores = new Array<number | undefined>(documents.length).fill(undefined);
     items.forEach((item: { index?: unknown; completion_probabilities?: Array<{ top_probs?: Array<{ id?: unknown; prob?: unknown }> }> }, position) => {
       const index = item.index ?? position;
-      if (typeof index !== "number" || !Number.isInteger(index) || index < 0 || index >= documents.length || scores[index] !== undefined) {
+      if (!isIndexWithin(index, documents.length) || scores[index] !== undefined) {
         throw new UpstreamError("upstream_invalid", "llama-server returned a bad rerank index");
       }
       const top = item.completion_probabilities?.[0]?.top_probs;
@@ -213,7 +213,7 @@ export class QmdTokensRerank implements RerankBackend {
  */
 function yesShare(top: Array<{ id?: unknown; prob?: unknown }>, yes: number, no: number): number {
   const probs = top.map((t) => t.prob);
-  if (!probs.every((p): p is number => typeof p === "number" && Number.isFinite(p) && p >= 0 && p <= 1)) {
+  if (!probs.every(isUnitInterval)) {
     throw new UpstreamError("rerank_score_out_of_range", "llama-server returned a probability outside 0 to 1");
   }
   const find = (id: number): number | undefined => {
@@ -227,6 +227,30 @@ function yesShare(top: Array<{ id?: unknown; prob?: unknown }>, yes: number, no:
   const a = y ?? floor;
   const b = n ?? floor;
   return a + b === 0 ? 0 : a / (a + b);
+}
+function isIndexWithin(index: unknown, length: number): index is number {
+  return typeof index === "number" && Number.isInteger(index) && index >= 0 && index < length;
+}
+
+function isUnitInterval(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
+}
+
+/** Each optional completion field, with llama-server's name for it. */
+const COMPLETE_FIELDS: ReadonlyArray<readonly [keyof CompleteRequest, string]> = [
+  ["grammar", "grammar"],
+  ["maxTokens", "max_tokens"],
+  ["temperature", "temperature"],
+  ["topK", "top_k"],
+  ["topP", "top_p"],
+  ["repeatLastN", "repeat_last_n"],
+  ["presencePenalty", "presence_penalty"],
+  ["minP", "min_p"],
+];
+
+function completeOptions(request: CompleteRequest): Record<string, unknown> {
+  const present = COMPLETE_FIELDS.filter(([field]) => request[field] !== undefined);
+  return Object.fromEntries(present.map(([field, wireName]) => [wireName, request[field]]));
 }
 
 export class Inference {
@@ -251,7 +275,7 @@ export class Inference {
     const vectors = new Array<number[] | undefined>(texts.length).fill(undefined);
     for (const item of raw.data as Array<{ index?: unknown; embedding?: unknown }>) {
       const { index, embedding } = item;
-      if (typeof index !== "number" || !Number.isInteger(index) || index < 0 || index >= texts.length || !Array.isArray(embedding)) {
+      if (!isIndexWithin(index, texts.length) || !Array.isArray(embedding)) {
         throw new UpstreamError("upstream_invalid", "llama-server returned a malformed embedding");
       }
       vectors[index] = embedding as number[];
@@ -292,14 +316,7 @@ export class Inference {
     const raw = (await this.#servers.post("generate", "v1/chat/completions", {
       messages: [...(request.system !== undefined ? [{ role: "system", content: request.system }] : []), { role: "user", content: request.prompt }],
       stream: false,
-      ...(request.grammar !== undefined ? { grammar: request.grammar } : {}),
-      ...(request.maxTokens !== undefined ? { max_tokens: request.maxTokens } : {}),
-      ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
-      ...(request.topK !== undefined ? { top_k: request.topK } : {}),
-      ...(request.topP !== undefined ? { top_p: request.topP } : {}),
-      ...(request.minP !== undefined ? { min_p: request.minP } : {}),
-      ...(request.repeatLastN !== undefined ? { repeat_last_n: request.repeatLastN } : {}),
-      ...(request.presencePenalty !== undefined ? { presence_penalty: request.presencePenalty } : {}),
+      ...completeOptions(request),
     })) as { choices?: Array<{ message?: { content?: unknown } }> };
     const content = raw.choices?.[0]?.message?.content;
     if (typeof content !== "string") throw new UpstreamError("upstream_invalid", "llama-server returned no completion text");

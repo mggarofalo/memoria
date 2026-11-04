@@ -8,8 +8,16 @@
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
-  <!-- The Docker build copies this file but not the metrics file, hence the condition. -->
-  <ItemGroup Condition="Exists('$(MSBuildThisFileDirectory)CodeMetricsConfig.txt')">
+  <!--
+    The limit is in CodeMetricsConfig.txt at the root. A project with its own copy
+    uses that instead, which is how Memoria.Api sits at its current highest until
+    it is refactored. The Docker build copies this file but not the root one,
+    hence the conditions.
+  -->
+  <ItemGroup Condition="Exists('$(MSBuildProjectDirectory)/CodeMetricsConfig.txt')">
+    <AdditionalFiles Include="$(MSBuildProjectDirectory)/CodeMetricsConfig.txt" />
+  </ItemGroup>
+  <ItemGroup Condition="!Exists('$(MSBuildProjectDirectory)/CodeMetricsConfig.txt') And Exists('$(MSBuildThisFileDirectory)CodeMetricsConfig.txt')">
     <AdditionalFiles Include="$(MSBuildThisFileDirectory)CodeMetricsConfig.txt" />
   </ItemGroup>
 </Project>

@@ -2,11 +2,14 @@
   "$schema": "../node_modules/@stryker-mutator/core/schema/stryker-schema.json",
   "testRunner": "tap",
   "tap": {
-    "testFiles": ["test/**/*.test.ts"],
+    "testFiles": ["worker/test/**/*.test.ts"],
     "nodeArgs": ["--test-reporter=tap", "-r", "{{hookFile}}", "{{testFile}}"]
   },
   "coverageAnalysis": "perTest",
-  "mutate": ["src/**/*.ts"],
+  "mutate": ["worker/src/**/*.ts"],
+  "ignorePatterns": ["/cli", "/src", "/tests", "/sidecar", "/docs", "/deploy", "/.claude", "**/bin", "**/obj"],
   "reporters": ["clear-text", "html", "json"],
-  "thresholds": { "high": 80, "low": 60, "break": null }
+  "htmlReporter": { "fileName": "worker/reports/mutation/mutation.html" },
+  "jsonReporter": { "fileName": "worker/reports/mutation/mutation.json" },
+  "thresholds": { "high": 80, "low": 70, "break": 70 }
 }

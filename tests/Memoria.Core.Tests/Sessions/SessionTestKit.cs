@@ -113,7 +113,11 @@ internal static partial class SessionTestKit
 		{
 			return "absolute";
 		}
-		string[] segments = relative.Split('/');
+		return SegmentRefusal(relative.Split('/')) ?? (relative.EndsWith(".md", StringComparison.Ordinal) ? null : "pattern mismatch");
+	}
+
+	private static string? SegmentRefusal(string[] segments)
+	{
 		if (segments.Any(static s => s is "" or "." or ".."))
 		{
 			return "traversal";
@@ -123,7 +127,7 @@ internal static partial class SessionTestKit
 			return "windows-unsafe segment";
 		}
 		// picomatch with dot:false refuses a leading dot, and the default pattern needs .md.
-		return segments.Any(static s => s.StartsWith('.')) || !relative.EndsWith(".md", StringComparison.Ordinal) ? "pattern mismatch" : null;
+		return segments.Any(static s => s.StartsWith('.')) ? "pattern mismatch" : null;
 	}
 
 	private static void AddIfPresent(Dictionary<string, object?> record, string key, string? value)

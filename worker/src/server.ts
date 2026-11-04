@@ -1,6 +1,6 @@
 import { refuseAtBoundary } from "./boundary.ts";
-import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { tokenMatches } from "./auth.ts";
 import type { Role } from "./config.ts";
 import { InvalidRequest, UpstreamError, type CompleteRequest, type Inference } from "./inference.ts";
 import type { Logger } from "./log.ts";
@@ -44,16 +44,6 @@ class HttpFailure extends Error {
     this.status = status;
     this.code = code;
   }
-}
-
-function tokenMatches(header: string | undefined, secret: string): boolean {
-  if (header === undefined) return false;
-  const match = /^bearer\s+(.+)$/i.exec(header.trim());
-  if (!match) return false;
-  // Hashing gives equal lengths, so comparison time reveals nothing about either.
-  const a = createHash("sha256").update(match[1]!).digest();
-  const b = createHash("sha256").update(secret).digest();
-  return timingSafeEqual(a, b);
 }
 
 /** Limits concurrent work on one llama-server and counts who is waiting. */

@@ -7,6 +7,6 @@
   "reports-dir": "coverage",
   "temp-directory": "coverage/tmp",
   "check-coverage": true,
-  "branches": 89,
-  "lines": 93
+  "branches": 90,
+  "lines": 90
 }

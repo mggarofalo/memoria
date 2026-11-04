@@ -1,3 +1,3 @@
 # CA1502 limit. The rule fires when a method's cyclomatic complexity exceeds it.
-# Generated code is exempt. See "Quality gates" in AGENTS.md.
-CA1502(Method): 21
+# Generated code is exempt. See "Quality Gates" in AGENTS.md.
+CA1502(Method): 10

@@ -65,7 +65,8 @@ jobs:
   node:
     name: Mutation (${{ matrix.package }})
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # A full worker run took longer than 45 minutes on a hosted runner.
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
