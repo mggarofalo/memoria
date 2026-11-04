@@ -10,4 +10,4 @@ useDefault = true
 description = "Go module checksums"
 targetRules = ["generic-api-key"]
 regexTarget = "match"
-regexes = ['''h1:[A-Za-z0-9+/]{43}=["'`]?$''']
+regexes = ['''h1:[A-Za-z0-9+/]{43}=[^A-Za-z0-9+/=]?$''']
