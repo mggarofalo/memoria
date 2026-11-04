@@ -3,6 +3,7 @@ package termsafe
 import (
 	"strings"
 	"testing"
+	"time"
 	"unicode"
 )
 
@@ -31,6 +32,10 @@ func TestText(t *testing.T) {
 		{"bidi override", "a" + string(rune(0x202e)) + "b" + string(rune(0x2066)) + "c", "abc"},
 		{"line separator", "a b", "a\nb"},
 		{"tag characters", "a\U000E0041b", "ab"},
+		{"zero width joiner and space", "a" + string(rune(0x200d)) + "b" + string(rune(0x200b)) + "c", "abc"},
+		{"soft hyphen", "a" + string(rune(0xad)) + "b", "ab"},
+		{"byte order mark", string(rune(0xfeff)) + "a", "a"},
+		{"variation selectors", "a" + string(rune(0xfe0f)) + "b" + string(rune(0xe0100)) + "c", "abc"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -44,6 +49,31 @@ func TestText(t *testing.T) {
 func TestLineCollapsesWhitespace(t *testing.T) {
 	if got := Line("a\nb\t c\r\n\x1b[2Jd"); got != "a b c d" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+// Before the fix, 1 MiB of unterminated OSC introducers took over 100 seconds.
+// The bound is generous because it only has to separate linear from quadratic.
+func TestHostileInputStaysLinear(t *testing.T) {
+	const size = 8 << 20
+	for name, unit := range map[string]string{
+		"unterminated OSC":    "\x1b]",
+		"unterminated C1 OSC": "\u009d",
+		"unterminated DCS":    "\x1bP",
+		"unterminated CSI":    "\x1b[1",
+		"C1 CSI":              "\u009b1",
+		"bare ESC":            "\x1b",
+	} {
+		t.Run(name, func(t *testing.T) {
+			input := strings.Repeat(unit, size/len(unit))
+			done := make(chan string, 1)
+			go func() { done <- Text(input) }()
+			select {
+			case <-done:
+			case <-time.After(30 * time.Second):
+				t.Fatal("sanitizing did not finish in time")
+			}
+		})
 	}
 }
 

@@ -2,39 +2,33 @@ package selfupdate
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"slices"
 	"strings"
 	"time"
-
-	lib "github.com/creativeprojects/go-selfupdate"
 )
 
 const verifyTimeout = 30 * time.Second
 
-// ErrNoRelease means no release has a build for this platform.
-var ErrNoRelease = errors.New("no matching release")
+var (
+	// ErrNoRelease means no release has a build for this platform.
+	ErrNoRelease = errors.New("no matching release")
+	// ErrChecksum means an archive does not match checksums.txt.
+	ErrChecksum = errors.New("checksum verification failed")
+	// ErrManaged means a package manager, or another user, owns the binary.
+	ErrManaged = errors.New("this binary should not be replaced by self-update")
+)
 
-// assetPattern matches an archive under the release contract.
-var assetPattern = regexp.MustCompile(`^memoria_(.+)_(windows|linux|darwin)_(amd64|arm64)\.(tar\.gz|zip)$`)
-
-func isContractAsset(name, version string) bool {
-	if name == checksumsAsset {
-		return true
-	}
-	match := assetPattern.FindStringSubmatch(name)
-	if match == nil || match[1] != version {
-		return false
-	}
-	// Windows ships zip; everything else ships tar.gz.
-	return (match[2] == "windows") == (match[4] == "zip")
-}
+// versionEnvAllowlist is all the post-install check passes to the new binary. It
+// holds nothing secret: no API key, no GITHUB_TOKEN, no cloud credentials.
+var versionEnvAllowlist = []string{"PATH", "SYSTEMROOT", "TMP", "TEMP", "TMPDIR"}
 
 // Options configures an Updater.
 type Options struct {
@@ -48,15 +42,18 @@ type Options struct {
 	Attester Attester
 	// ChecksumOnly skips provenance and trusts checksums.txt alone.
 	ChecksumOnly bool
+	// Force replaces a binary that a package manager appears to own.
+	Force bool
 }
 
 // Candidate is a release chosen for this platform.
 type Candidate struct {
-	Tag        string
-	Version    string
-	Asset      string
-	Prerelease bool
-	release    *lib.Release
+	Tag          string
+	Version      string
+	Asset        string
+	Prerelease   bool
+	assetURL     string
+	checksumsURL string
 }
 
 // Updater finds and installs releases.
@@ -69,6 +66,12 @@ type Updater struct {
 func New(opts Options) *Updater { return newUpdater(newSource(), opts) }
 
 func newUpdater(src *source, opts Options) *Updater {
+	if opts.OS == "" {
+		opts.OS = runtime.GOOS
+	}
+	if opts.Arch == "" {
+		opts.Arch = runtime.GOARCH
+	}
 	if opts.Verify == nil {
 		opts.Verify = RunVersion
 	}
@@ -78,59 +81,22 @@ func newUpdater(src *source, opts Options) *Updater {
 	return &Updater{source: src, opts: opts}
 }
 
-func checksumValidator() *lib.ChecksumValidator {
-	return &lib.ChecksumValidator{UniqueFilename: checksumsAsset}
-}
-
-// installValidator is the checksum, plus provenance unless told otherwise.
-func (u *Updater) installValidator(ctx context.Context, tag string) lib.Validator {
-	if u.opts.ChecksumOnly {
-		return checksumValidator()
-	}
-	return &attestedValidator{
-		ChecksumValidator: checksumValidator(),
-		attest: func(digest []byte) error {
-			return u.opts.Attester.Verify(ctx, digest, tag)
-		},
-	}
-}
-
-func (u *Updater) library(validator lib.Validator, oldSavePath string) (*lib.Updater, error) {
-	return lib.NewUpdater(lib.Config{
-		Source:      u.source,
-		Validator:   validator,
-		OS:          u.opts.OS,
-		Arch:        u.opts.Arch,
-		Prerelease:  u.opts.Prerelease,
-		OldSavePath: oldSavePath,
-	})
-}
-
 // Find returns the newest release, or the one tagged tag when tag is not empty.
 // A release with no build for this platform, or no checksums.txt, is an error.
 func (u *Updater) Find(ctx context.Context, tag string) (*Candidate, error) {
-	library, err := u.library(checksumValidator(), "")
-	if err != nil {
-		return nil, fmt.Errorf("creating the updater: %w", err)
-	}
-	slug := lib.ParseSlug(repoSlug)
-	rel, found, err := library.DetectVersion(ctx, slug, tag)
+	releases, err := u.source.list(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if !found {
-		return nil, fmt.Errorf("%w: %s for %s/%s", ErrNoRelease, describeTag(tag), u.platformOS(), u.platformArch())
+	best := u.choose(releases, tag)
+	if best == nil {
+		return nil, fmt.Errorf("%w: %s for %s/%s", ErrNoRelease, describeTag(tag), u.opts.OS, u.opts.Arch)
 	}
-	return &Candidate{
-		Tag:        tagOf(rel.Version()),
-		Version:    rel.Version(),
-		Asset:      rel.AssetName,
-		Prerelease: rel.Prerelease,
-		release:    rel,
-	}, nil
+	if best.checksumsURL == "" {
+		return nil, fmt.Errorf("release %s has no %s, so it cannot be verified", best.Tag, checksumsAsset)
+	}
+	return best, nil
 }
-
-func tagOf(version string) string { return "v" + version }
 
 func describeTag(tag string) string {
 	if tag == "" {
@@ -139,44 +105,83 @@ func describeTag(tag string) string {
 	return tag
 }
 
-func (u *Updater) platformOS() string {
-	if u.opts.OS != "" {
-		return u.opts.OS
+func (u *Updater) choose(releases []apiRelease, tag string) *Candidate {
+	var best *Candidate
+	for i := range releases {
+		candidate := u.candidateFrom(&releases[i], tag)
+		if candidate != nil && newerThan(candidate, best) {
+			best = candidate
+		}
 	}
-	return runtime.GOOS
+	return best
 }
 
-func (u *Updater) platformArch() string {
-	if u.opts.Arch != "" {
-		return u.opts.Arch
+// candidateFrom returns the release as a candidate if it is eligible. A pinned tag
+// matches itself, and Decide then rules on it. Otherwise drafts and prereleases
+// are out, whether GitHub flags them or only the tag says so: an unflagged
+// v9.9.9-evil must not outrank the stable releases everyone should update to.
+func (u *Updater) candidateFrom(rel *apiRelease, tag string) *Candidate {
+	if rel.Draft || !ValidTag(rel.TagName) {
+		return nil
 	}
-	return runtime.GOARCH
+	if tag != "" && rel.TagName != tag {
+		return nil
+	}
+	prerelease := rel.Prerelease || hasPrereleaseTag(rel.TagName)
+	if tag == "" && prerelease && !u.opts.Prerelease {
+		return nil
+	}
+	version := strings.TrimPrefix(rel.TagName, "v")
+	asset := assetName(version, u.opts.OS, u.opts.Arch)
+	assetURL := rel.assetURL(asset)
+	if assetURL == "" {
+		return nil
+	}
+	return &Candidate{
+		Tag:          rel.TagName,
+		Version:      version,
+		Asset:        asset,
+		Prerelease:   prerelease,
+		assetURL:     assetURL,
+		checksumsURL: rel.assetURL(checksumsAsset),
+	}
+}
+
+func assetName(version, goos, arch string) string {
+	extension := "tar.gz"
+	if goos == "windows" {
+		extension = "zip"
+	}
+	return fmt.Sprintf("memoria_%s_%s_%s.%s", version, goos, arch, extension)
 }
 
 // Install replaces exe with the candidate. In order: download, verify the
-// checksum, verify provenance, unpack, swap the files, run the new binary, and on
-// failure swap back. Nothing on disk changes until all of those checks pass.
-//
-// The running binary's file can be renamed on every supported platform, Windows
-// included, which only forbids overwriting or deleting it. So the swap is two
-// renames in the same directory. The backup of a running Windows binary cannot
-// be deleted until the process exits, so it is hidden and removed next time.
+// checksum, verify provenance, unpack to a private temp file, swap, run the new
+// binary, and on failure swap back. Nothing at exe changes until every check has
+// passed. Running the new binary proves only that it works: trust comes from the
+// checks before it.
 func (u *Updater) Install(ctx context.Context, candidate *Candidate, exe string) error {
 	resolved, err := filepath.EvalSymlinks(exe)
 	if err != nil {
 		return fmt.Errorf("locating the installed binary: %w", err)
 	}
-	backup := backupPath(resolved)
-	removeStale(backup)
-
-	library, err := u.library(u.installValidator(ctx, candidate.Tag), backup)
-	if err != nil {
-		return fmt.Errorf("creating the updater: %w", err)
+	if err := u.checkReplaceable(resolved); err != nil {
+		return err
 	}
-	if err := library.UpdateTo(ctx, candidate.release, resolved); err != nil {
+	archive, err := u.verifiedArchive(ctx, candidate)
+	if err != nil {
+		return err
+	}
+	staged, err := stageBinary(archive, u.opts.OS, resolved)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.Remove(staged) }()
+
+	backup := backupPath(resolved)
+	if err := swapIn(staged, resolved, backup); err != nil {
 		return fmt.Errorf("installing %s: %w", candidate.Tag, err)
 	}
-
 	if err := u.opts.Verify(ctx, resolved, candidate.Version); err != nil {
 		return rollback(resolved, backup, err)
 	}
@@ -184,12 +189,127 @@ func (u *Updater) Install(ctx context.Context, candidate *Candidate, exe string)
 	return nil
 }
 
+func (u *Updater) checkReplaceable(exe string) error {
+	if u.opts.Force {
+		return nil
+	}
+	if managedPath(exe) {
+		return fmt.Errorf("%w: %s looks package-managed, so update it with that package manager, or pass --force", ErrManaged, exe)
+	}
+	if err := checkOwnedByCurrentUser(exe); err != nil {
+		return fmt.Errorf("%w: %v; pass --force to replace it anyway", ErrManaged, err)
+	}
+	return nil
+}
+
+// Paths that mean a package manager installed the binary, and would be left
+// confused by replacing it. Unix system paths are anchored, since /usr/local/bin
+// also contains /bin/. Windows ones can sit under any profile or drive.
+var (
+	managedPrefixes = []string{
+		"/usr/bin/", "/bin/", "/usr/sbin/", "/sbin/", "/nix/store/", "/snap/", "/opt/homebrew/",
+		"/usr/local/Cellar/", "/home/linuxbrew/",
+	}
+	managedParts = []string{"/WinGet/Packages/", "/scoop/apps/", "/Program Files/", "/Program Files (x86)/", "/chocolatey/"}
+)
+
+func managedPath(path string) bool {
+	normalized := strings.ReplaceAll(path, `\`, "/")
+	return slices.ContainsFunc(managedPrefixes, func(prefix string) bool {
+		return strings.HasPrefix(normalized, prefix)
+	}) || slices.ContainsFunc(managedParts, func(part string) bool {
+		return strings.Contains(normalized, part)
+	})
+}
+
+// verifiedArchive downloads the archive and returns it once both checks pass.
+func (u *Updater) verifiedArchive(ctx context.Context, candidate *Candidate) ([]byte, error) {
+	archive, err := u.source.fetchAll(ctx, candidate.assetURL, maxArchiveBytes)
+	if err != nil {
+		return nil, fmt.Errorf("downloading %s: %w", candidate.Asset, err)
+	}
+	checksums, err := u.source.fetchAll(ctx, candidate.checksumsURL, maxListBytes)
+	if err != nil {
+		return nil, fmt.Errorf("downloading %s: %w", checksumsAsset, err)
+	}
+	digest := sha256.Sum256(archive)
+	if err := verifyChecksum(checksums, candidate.Asset, digest[:]); err != nil {
+		return nil, err
+	}
+	if !u.opts.ChecksumOnly {
+		if err := u.opts.Attester.Verify(ctx, digest[:], candidate.Tag); err != nil {
+			return nil, err
+		}
+	}
+	return archive, nil
+}
+
+// verifyChecksum looks up name in sha256sum format, by exact name. A malformed
+// line cannot match, so it cannot vouch for anything.
+func verifyChecksum(checksums []byte, name string, digest []byte) error {
+	for _, line := range strings.Split(string(checksums), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || strings.TrimPrefix(fields[1], "*") != name {
+			continue
+		}
+		if !strings.EqualFold(fields[0], hex.EncodeToString(digest)) {
+			return fmt.Errorf("%w: %s does not match %s", ErrChecksum, name, checksumsAsset)
+		}
+		return nil
+	}
+	return fmt.Errorf("%w: %s is not listed in %s", ErrChecksum, name, checksumsAsset)
+}
+
+// stageBinary unpacks to a new, randomly named file beside the target. CreateTemp
+// uses O_EXCL, so a planted file or symlink at a predictable name cannot redirect
+// the write. It takes the mode of the binary it will replace.
+func stageBinary(archive []byte, goos, target string) (path string, err error) {
+	info, err := os.Stat(target)
+	if err != nil {
+		return "", fmt.Errorf("locating the installed binary: %w", err)
+	}
+	file, err := os.CreateTemp(filepath.Dir(target), "."+filepath.Base(target)+".new-*")
+	if err != nil {
+		return "", fmt.Errorf("creating a temporary file: %w", err)
+	}
+	defer func() {
+		_ = file.Close()
+		if err != nil {
+			_ = os.Remove(file.Name())
+		}
+	}()
+	if err = extractBinary(archive, goos, file); err != nil {
+		return "", err
+	}
+	if err = file.Sync(); err != nil {
+		return "", err
+	}
+	if err = file.Chmod(info.Mode().Perm()); err != nil && runtime.GOOS != "windows" {
+		return "", err
+	}
+	return file.Name(), nil
+}
+
 func backupPath(exe string) string {
 	return filepath.Join(filepath.Dir(exe), "."+filepath.Base(exe)+".old")
 }
 
-func removeStale(backup string) {
-	_ = os.Remove(backup)
+// swapIn puts staged at exe and leaves the old binary at backup. On Unix a hard
+// link keeps the old file and a rename replaces exe atomically, so there is no
+// moment with no binary. Windows forbids overwriting a running exe but allows
+// renaming it, so there it moves aside first, and a failure moves it back.
+func swapIn(staged, exe, backup string) error {
+	_ = os.Remove(backup) // A leftover from an update Windows could not clean up.
+	if runtime.GOOS != "windows" && os.Link(exe, backup) == nil {
+		return os.Rename(staged, exe)
+	}
+	if err := os.Rename(exe, backup); err != nil {
+		return err
+	}
+	if err := os.Rename(staged, exe); err != nil {
+		return errors.Join(err, os.Rename(backup, exe))
+	}
+	return nil
 }
 
 // removeBackup deletes the backup, or hides it if this running process holds it.
@@ -201,31 +321,19 @@ func removeBackup(backup string) {
 
 // rollback restores the backup after the new binary failed to run.
 func rollback(exe, backup string, cause error) error {
-	if err := restore(exe, backup); err != nil {
+	if err := os.Rename(backup, exe); err != nil {
 		return fmt.Errorf("the new binary failed (%v) and rollback failed (%w); the previous binary is at %s", cause, err, backup)
 	}
 	return fmt.Errorf("the new binary failed, so the previous version was restored: %w", cause)
 }
 
-func restore(exe, backup string) error {
-	failed := exe + ".failed"
-	if err := os.Rename(exe, failed); err != nil {
-		return err
-	}
-	if err := os.Rename(backup, exe); err != nil {
-		return errors.Join(err, os.Rename(failed, exe))
-	}
-	_ = os.Remove(failed)
-	return nil
-}
-
-// RunVersion runs "<exe> version" and checks that it reports expected. The API
-// key is removed from the child's environment; version has no use for it.
+// RunVersion runs "<exe> version" and checks that it reports expected. It runs
+// with a scrubbed environment and proves only that the binary works.
 func RunVersion(ctx context.Context, exe, expected string) error {
 	ctx, cancel := context.WithTimeout(ctx, verifyTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, exe, "version")
-	cmd.Env = environWithout(os.Environ(), "MEMORIA_API_KEY")
+	cmd.Env = scrubbedEnviron(os.Environ())
 	out, err := cmd.Output()
 	if err != nil {
 		return fmt.Errorf("running version: %w", err)
@@ -244,8 +352,9 @@ func reportsVersion(output, expected string) bool {
 	})
 }
 
-func environWithout(environ []string, name string) []string {
+func scrubbedEnviron(environ []string) []string {
 	return slices.DeleteFunc(slices.Clone(environ), func(entry string) bool {
-		return strings.HasPrefix(strings.ToUpper(entry), name+"=")
+		name, _, _ := strings.Cut(entry, "=")
+		return !slices.Contains(versionEnvAllowlist, strings.ToUpper(name))
 	})
 }

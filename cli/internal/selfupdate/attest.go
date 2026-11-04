@@ -3,14 +3,11 @@ package selfupdate
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 
-	lib "github.com/creativeprojects/go-selfupdate"
 	"github.com/golang/snappy"
 	"github.com/sigstore/sigstore-go/pkg/bundle"
 	"github.com/sigstore/sigstore-go/pkg/root"
@@ -180,37 +177,4 @@ func decodeBundle(compressed []byte) ([]byte, error) {
 		return nil, errors.New("an attestation bundle is malformed")
 	}
 	return data, nil
-}
-
-// fetchAll reads a whole response, failing rather than truncating at limit.
-func (s *source) fetchAll(ctx context.Context, url string, limit int64) ([]byte, error) {
-	body, err := s.fetch(ctx, url)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = body.Close() }()
-	data, err := io.ReadAll(io.LimitReader(body, limit+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(data)) > limit {
-		return nil, errors.New("the response exceeds the size limit")
-	}
-	return data, nil
-}
-
-// attestedValidator runs inside the library's download step: the checksum first,
-// then provenance. Either failing stops the update before anything is unpacked.
-type attestedValidator struct {
-	*lib.ChecksumValidator
-	attest func(digest []byte) error
-}
-
-// Validate implements lib.Validator.
-func (v *attestedValidator) Validate(filename string, release, asset []byte) error {
-	if err := v.ChecksumValidator.Validate(filename, release, asset); err != nil {
-		return err
-	}
-	sum := sha256.Sum256(release)
-	return v.attest(sum[:])
 }

@@ -13,15 +13,16 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/mggarofalo/memoria/cli/internal/redact"
+	"github.com/mggarofalo/memoria/cli/internal/termsafe"
 )
 
 // Defaults for Options.
@@ -30,6 +31,9 @@ const (
 	DefaultMaxOutboundBytes = 32 << 20
 	DefaultRequestTimeout   = 5 * time.Minute
 	maxConcurrent           = 16
+	// maxPending bounds requests waiting for a slot, so a client that floods the
+	// bridge is told so rather than growing it without limit.
+	maxPending = 1024
 )
 
 // Options configures a Bridge.
@@ -56,8 +60,10 @@ type Options struct {
 
 // Bridge relays newline-delimited JSON-RPC between stdio and HTTP.
 type Bridge struct {
-	opts Options
-	out  *frameWriter
+	opts    Options
+	out     *frameWriter
+	slots   chan struct{}
+	pending atomic.Int64
 
 	mu       sync.Mutex
 	cancels  map[string]context.CancelFunc
@@ -85,33 +91,69 @@ func New(stdout io.Writer, opts Options) *Bridge {
 	return &Bridge{
 		opts:    opts,
 		out:     &frameWriter{w: stdout, redactor: opts.Redactor, max: opts.MaxOutboundBytes},
+		slots:   make(chan struct{}, maxConcurrent),
 		cancels: map[string]context.CancelFunc{},
 	}
 }
 
+// inbound is one read from stdin.
+type inbound struct {
+	line    []byte
+	tooLong bool
+	err     error
+}
+
 // Run relays until stdin closes or ctx ends. In-flight requests finish first on
 // a clean close, so a client that writes and closes still gets its answers.
+//
+// Stdin is read on its own goroutine, for two reasons. A signal must end the
+// process even while stdin stays open. And a read loop that waited for a free
+// slot could not see a cancellation for the very requests holding those slots.
 func (b *Bridge) Run(ctx context.Context, stdin io.Reader) error {
 	if b.opts.StartupErr != nil {
 		b.logf("cannot reach upstream: %v", b.opts.StartupErr)
 	}
-	reader := bufio.NewReaderSize(stdin, 64*1024)
-	slots := make(chan struct{}, maxConcurrent)
+	lines := make(chan inbound)
+	go b.readLines(ctx, stdin, lines)
+
 	var wg sync.WaitGroup
 	defer wg.Wait()
-
-	for ctx.Err() == nil {
-		line, tooLong, err := readBoundedLine(reader, b.opts.MaxInboundBytes)
-		if tooLong {
-			b.reject(nil, codeInvalidRequest, "message exceeds the size limit")
-		} else if len(bytes.TrimSpace(line)) > 0 {
-			b.dispatch(ctx, line, slots, &wg)
-		}
-		if err != nil {
-			return readEndError(err)
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case in := <-lines:
+			b.handle(ctx, in, &wg)
+			if in.err != nil {
+				return readEndError(in.err)
+			}
 		}
 	}
-	return nil
+}
+
+func (b *Bridge) readLines(ctx context.Context, stdin io.Reader, lines chan<- inbound) {
+	reader := bufio.NewReaderSize(stdin, 64*1024)
+	for {
+		line, tooLong, err := readBoundedLine(reader, b.opts.MaxInboundBytes)
+		select {
+		case lines <- inbound{line: line, tooLong: tooLong, err: err}:
+		case <-ctx.Done():
+			return
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+func (b *Bridge) handle(ctx context.Context, in inbound, wg *sync.WaitGroup) {
+	if in.tooLong {
+		b.reject(nil, codeInvalidRequest, "message exceeds the size limit")
+		return
+	}
+	if len(bytes.TrimSpace(in.line)) > 0 {
+		b.dispatch(ctx, in.line, wg)
+	}
 }
 
 func readEndError(err error) error {
@@ -141,7 +183,7 @@ func readBoundedLine(r *bufio.Reader, max int) (line []byte, tooLong bool, err e
 }
 
 // dispatch classifies one message and starts its exchange.
-func (b *Bridge) dispatch(ctx context.Context, raw []byte, slots chan struct{}, wg *sync.WaitGroup) {
+func (b *Bridge) dispatch(ctx context.Context, raw []byte, wg *sync.WaitGroup) {
 	msg, rejection := parseMessage(raw)
 	if rejection != nil {
 		b.reject(rejection.id, rejection.code, rejection.message)
@@ -155,19 +197,33 @@ func (b *Bridge) dispatch(ctx context.Context, raw []byte, slots chan struct{}, 
 		b.fail(msg, b.opts.StartupErr)
 		return
 	}
-	select {
-	case slots <- struct{}{}:
-	case <-ctx.Done():
+	if b.pending.Add(1) > maxPending {
+		b.pending.Add(-1)
+		b.fail(msg, errTooManyRequests)
 		return
 	}
 	reqCtx, cancel := b.track(ctx, msg)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		defer func() { <-slots }()
+		defer b.pending.Add(-1)
 		defer b.untrack(msg, cancel)
-		b.exchange(reqCtx, msg)
+		b.runWhenFree(reqCtx, msg)
 	}()
+}
+
+// runWhenFree waits for a slot. A request is cancellable while it waits, and one
+// that times out waiting still gets an answer.
+func (b *Bridge) runWhenFree(ctx context.Context, msg *message) {
+	select {
+	case b.slots <- struct{}{}:
+		defer func() { <-b.slots }()
+		b.exchange(ctx, msg)
+	case <-ctx.Done():
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			b.fail(msg, ctx.Err())
+		}
+	}
 }
 
 func (b *Bridge) track(ctx context.Context, msg *message) (context.Context, context.CancelFunc) {
@@ -203,21 +259,26 @@ func (b *Bridge) cancelRequest(id string) {
 func (b *Bridge) exchange(ctx context.Context, msg *message) {
 	answered, err := b.post(ctx, msg)
 	switch {
+	case answered:
+		return
 	case errors.Is(ctx.Err(), context.Canceled):
 		return
 	case err != nil:
 		b.fail(msg, err)
-	case msg.isRequest() && !answered:
+	case msg.isRequest():
 		b.fail(msg, errNoResponse)
 	}
 }
 
+// logf writes one sanitized, scrubbed line. Upstream text can reach it, and the
+// log is often a terminal.
 func (b *Bridge) logf(format string, args ...any) {
-	line := fmt.Sprintf(format, args...) + "\n"
+	line := termsafe.Line(fmt.Sprintf(format, args...)) + "\n"
 	_, _ = io.WriteString(b.opts.Log, b.opts.Redactor.Diagnostic(line))
 }
 
-// frameWriter serializes frames onto stdout, each validated, one line, scrubbed.
+// frameWriter serializes frames onto stdout: scrubbed after decoding, compacted
+// to one line, and within the size limit.
 type frameWriter struct {
 	mu       sync.Mutex
 	w        io.Writer
@@ -225,11 +286,15 @@ type frameWriter struct {
 	max      int
 }
 
-var errInvalidFrame = errors.New("upstream sent an invalid frame")
-
-func (f *frameWriter) write(frame []byte) error {
+// write takes the request id the frame answers, if it is a string, so that a
+// client's id which happens to contain the key still correlates.
+func (f *frameWriter) write(frame []byte, keepID string) error {
+	scrubbed, err := f.redactor.JSON(frame, keepID)
+	if err != nil {
+		return errInvalidFrame
+	}
 	var compact bytes.Buffer
-	if err := json.Compact(&compact, f.redactor.Bytes(frame)); err != nil {
+	if err := compactJSON(&compact, scrubbed); err != nil {
 		return errInvalidFrame
 	}
 	if compact.Len() > f.max {
@@ -238,6 +303,6 @@ func (f *frameWriter) write(frame []byte) error {
 	compact.WriteByte('\n')
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	_, err := f.w.Write(compact.Bytes())
+	_, err = f.w.Write(compact.Bytes())
 	return err
 }

@@ -48,7 +48,7 @@ memoria self-update                    # newest stable release
 memoria self-update --version v1.2.3   # a specific release
 ```
 
-`self-update` downloads over https only, redirects included. Before changing anything on disk it verifies the checksum and the build provenance. Then it swaps the binary and runs the new binary's `version` command. If that fails, the previous binary is put back.
+`self-update` is a small in-house updater that downloads over https only, redirects included. It unpacks to a randomly named temporary file, limited to 128 MiB, and keeps the old binary's mode. It runs the `version` check with a scrubbed environment, and only to prove the binary works: trust comes from the earlier checks. Before changing anything on disk it verifies the checksum and the build provenance. Then it swaps the binary and runs the new binary's `version` command. If that fails, the previous binary is put back.
 
 Provenance is a GitHub attestation, verified with Sigstore. It must be signed by this repository's `release.yml` workflow for that exact tag, so an attacker who replaces both the archive and `checksums.txt` is caught, and an old signed build cannot pass as a newer release. It does not defend against a compromised release workflow, which can sign whatever it builds. Verifying it needs to reach GitHub and Sigstore's trust root at `tuf-repo-cdn.sigstore.dev`.
 
@@ -56,7 +56,7 @@ It refuses these unless you ask:
 
 | Refusal | Flag |
 |---|---|
-| Replacing a development build (`dev`) | `--force` |
+| Replacing a development build (`dev`), or a binary a package manager or another user appears to own | `--force` |
 | Installing an older version | `--allow-downgrade` |
 | Installing a prerelease | `--prerelease` |
 | Installing without verified provenance (trusts `checksums.txt` alone) | `--checksum-only` |
@@ -86,7 +86,7 @@ The first of these that has a key wins:
 |---|---|---|
 | 1 | `--api-key` | Lands in shell history, and is visible in process listings while the command runs. The CLI warns every time. |
 | 2 | `MEMORIA_API_KEY` | Inherited by every child process. Readable by anything running as you. The CLI warns at a terminal. |
-| 3 | OS keyring | Encrypted at rest by the OS. Any process running as you may still be able to ask for it, depending on the keyring. |
+| 3 | OS keyring (login Keychain, Credential Manager, or the Secret Service on Linux) | Encrypted at rest by the OS. Any process running as you may still be able to ask for it, depending on the keyring. |
 | 4 | Credentials file | Unencrypted on disk. See below. |
 
 On macOS the keyring is the login Keychain, reached through `/usr/bin/security` so that the binary needs no cgo. The key goes to that tool on stdin, never as a process argument. The entry trusts `/usr/bin/security`, so any process running as you can read the key through that tool without a prompt. The Keychain still encrypts it at rest and locks it with your login keychain. From an SSH session a locked Keychain cannot prompt; run `security unlock-keychain` first.
@@ -95,7 +95,11 @@ The config file (`config.json`) never holds a key. It records the active profile
 
 The server URL comes from `--api-url`, then `MEMORIA_URL`, then the profile.
 
-A key from the keyring or file is sent only to the server it was saved for. If `--api-url` or `MEMORIA_URL` names another origin, the command refuses rather than handing the stored key to it. Use a separate `--profile` for a second server.
+A key from the keyring or file is sent only to the server it was saved for. That origin is stored with the key, in the same secret, so replacing the config cannot redirect it. If `--api-url`, `MEMORIA_URL` or the config names another origin, the command refuses. Use a separate `--profile` for a second server.
+
+`auth login` shows the server before it asks for the key. It ignores `MEMORIA_URL`, so only `--api-url` can point a profile at a new server.
+
+The CLI refuses a `config.json` or credentials file that other accounts can reach, that is a symlink or has a second hard link, or whose directory other accounts can reach.
 
 ### The file backend
 
@@ -129,9 +133,9 @@ memoria status
 
 `--format` takes `json`, `table` or `markdown`. `query`, `collections` and `status` default to a table; `get` and `multi-get` default to markdown.
 
-**Table and markdown output is sanitized.** Document text comes from transcripts, which can hold terminal escape sequences that write your clipboard or rewrite your screen. The CLI strips control characters, escape sequences, carriage returns and bidirectional overrides from these formats, whether or not stdout is a terminal.
+**Table and markdown output is sanitized.** Document text comes from transcripts, which can hold terminal escape sequences that write your clipboard or rewrite your screen. The CLI strips control and format characters, escape sequences, carriage returns, bidirectional overrides and variation selectors from these formats, whether or not stdout is a terminal. In markdown, snippets and multi-get bodies are fenced so a document cannot forge a result heading. Stripping format characters also removes the zero-width joiners in some emoji.
 
-**`--format json` is the server's response, byte for byte, and is not sanitized.** Treat it as data, and do not print it raw to a terminal. There is one exception: if a response contains the exact key in use, that key is replaced with `[REDACTED]`, because the key never reaches stdout.
+**`--format json` is the server's response, byte for byte, and is not sanitized.** Treat it as data, and do not print it raw to a terminal. There is one exception: if a response contains the key in use, even JSON-escaped, or the secret half of it alone, that text is replaced with `[REDACTED]`, because the key never reaches stdout. This cannot catch a key that has been split across strings or transformed in some other way.
 
 ## Exit codes
 
@@ -141,7 +145,7 @@ memoria status
 | 1 | Other failure |
 | 2 | Bad usage, including a 400 from the server |
 | 3 | No usable key, or the server said 401 or 403 |
-| 4 | Not found, including a `multi-get` where any reference failed |
+| 4 | Not found, including a `multi-get` where any reference failed or nothing was returned |
 | 5 | Server unavailable: 502, 503, 504, a timeout, or no connection |
 | 6 | Rate limited (429). The message includes `Retry-After` when the server sends it |
 | 7 | Refused for transport safety: plain http to a public address, a cross-origin redirect, or a stored key aimed at another server |
@@ -153,12 +157,12 @@ A bearer key sent over plain http can be read by anyone on the path.
 | Server address | Behavior |
 |---|---|
 | https | Allowed. TLS 1.2 or later |
-| Loopback | Allowed quietly |
-| Private (RFC 1918, ULA) | Allowed with a warning |
-| Hostname over http | Warns, and refuses at connect time unless it resolves to loopback or a private address |
-| Anything else over http | Refused, unless you pass `--allow-insecure-http` or set `MEMORIA_ALLOW_INSECURE_HTTP=1` |
+| Private IP literal (RFC 1918, ULA) | Allowed with a warning |
+| Loopback, including `localhost` (which must resolve to a loopback address) | Allowed quietly |
+| A hostname over http | Refused, unless you pass `--allow-insecure-http` or set `MEMORIA_ALLOW_INSECURE_HTTP=1` |
+| Anything else over http | Refused, with the same override |
 
-Link-local addresses count as public, including `169.254.169.254`, the cloud metadata address. Plain http never goes through a configured proxy, which would otherwise see the key.
+Link-local addresses count as public, and so do the cloud metadata addresses `169.254.169.254` and `fd00:ec2::254`. Hosts must be plain ASCII: use the `xn--` form of an internationalized name. Plain http never goes through a configured proxy, which would otherwise see the key.
 
 A redirect to a different origin is never followed. A different origin includes a subdomain, another port, and a move from https to http. Go's HTTP client keeps the `Authorization` header in the subdomain and downgrade cases, so the CLI attaches the header itself, only to requests for the configured origin.
 

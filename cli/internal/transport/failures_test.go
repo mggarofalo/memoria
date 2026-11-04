@@ -40,11 +40,20 @@ func TestClassifiedDialRefusalSurvivesWrapping(t *testing.T) {
 	}
 }
 
-func TestCheckDialAddressRejectsWhatItCannotParse(t *testing.T) {
+func TestCheckLoopbackDialRejectsWhatItCannotParse(t *testing.T) {
 	for _, address := range []string{"no-port", "not-an-ip:80"} {
-		if err := checkDialAddress(address); err == nil {
-			t.Errorf("checkDialAddress(%q) should fail", address)
+		if err := checkLoopbackDial(address); err == nil {
+			t.Errorf("checkLoopbackDial(%q) should fail", address)
 		}
+	}
+}
+
+// The largest valid response is a multi-get: 16 MiB of bodies and 16 MiB of
+// metadata. The cap must clear that, and not by much, since it bounds decompression.
+func TestResponseCap(t *testing.T) {
+	const largestValid = 32 << 20
+	if DefaultMaxResponseBytes < largestValid || DefaultMaxResponseBytes > 64<<20 {
+		t.Fatalf("cap = %d", DefaultMaxResponseBytes)
 	}
 }
 

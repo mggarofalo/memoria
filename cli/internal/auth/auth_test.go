@@ -58,6 +58,17 @@ func (m *memoryStore) Delete(name string) error {
 	return nil
 }
 
+const testOrigin = "https://memoria.example.com:443"
+
+// entry is what a store holds for a key.
+func entry(key string) string {
+	value, err := EncodeStoredKey(testOrigin, key)
+	if err != nil {
+		panic(err)
+	}
+	return value
+}
+
 func emptyConfig() *Config {
 	return &Config{ActiveProfile: DefaultProfile, Profiles: map[string]Profile{}}
 }
@@ -72,9 +83,9 @@ func envOf(pairs ...string) func(string) string {
 
 func TestResolverPrecedence(t *testing.T) {
 	name := KeyName(DefaultProfile)
-	ring := func() (SecretStore, error) { return newMemoryStore(name, keyringKey), nil }
+	ring := func() (SecretStore, error) { return newMemoryStore(name, entry(keyringKey)), nil }
 	noRing := func() (SecretStore, error) { return newMemoryStore(), nil }
-	file := newMemoryStore(name, fileKey)
+	file := newMemoryStore(name, entry(fileKey))
 	empty := newMemoryStore()
 
 	cases := []struct {
@@ -125,13 +136,13 @@ func TestResolverDoesNotOpenTheKeyringWhenAFlagOrEnvKeyIsGiven(t *testing.T) {
 }
 
 func TestResolverSkipsTheKeyringForAFileProfile(t *testing.T) {
-	store := newMemoryStore(KeyName(DefaultProfile), keyringKey)
+	store := newMemoryStore(KeyName(DefaultProfile), entry(keyringKey))
 	cfg := emptyConfig()
 	cfg.Profiles[DefaultProfile] = Profile{Backend: BackendFile}
 	r := Resolver{
 		Profile: DefaultProfile, Config: cfg, Getenv: envOf(),
 		Keyring: func() (SecretStore, error) { return store, nil },
-		File:    newMemoryStore(KeyName(DefaultProfile), fileKey),
+		File:    newMemoryStore(KeyName(DefaultProfile), entry(fileKey)),
 	}
 	got, err := r.Resolve()
 	if err != nil {
@@ -145,7 +156,7 @@ func TestResolverSkipsTheKeyringForAFileProfile(t *testing.T) {
 func TestResolverUsesTheNamedProfile(t *testing.T) {
 	r := Resolver{
 		Profile: "work", Config: emptyConfig(), Getenv: envOf(),
-		File: newMemoryStore(KeyName("home"), fileKey, KeyName("work"), keyringKey),
+		File: newMemoryStore(KeyName("home"), entry(fileKey), KeyName("work"), entry(keyringKey)),
 	}
 	got, err := r.Resolve()
 	if err != nil {
@@ -180,7 +191,7 @@ func TestResolverReportsKeyringFailure(t *testing.T) {
 func TestResolverUnavailableKeyringFallsThroughToFile(t *testing.T) {
 	r := Resolver{
 		Profile: DefaultProfile, Config: emptyConfig(), Getenv: envOf(),
-		File:    newMemoryStore(KeyName(DefaultProfile), fileKey),
+		File:    newMemoryStore(KeyName(DefaultProfile), entry(fileKey)),
 		Keyring: func() (SecretStore, error) { return nil, ErrKeyringUnavailable },
 	}
 	got, err := r.Resolve()
@@ -218,6 +229,7 @@ func TestResolverInvalidValuesDoNotEcho(t *testing.T) {
 		{FlagKey: bad, Getenv: envOf()},
 		{Getenv: envOf(EnvAPIKey, bad)},
 		{Getenv: envOf(), File: newMemoryStore(KeyName(DefaultProfile), bad)},
+		{Getenv: envOf(), File: newMemoryStore(KeyName(DefaultProfile), `{"origin":"https://x:443","key":"`+bad+`"}`)},
 	} {
 		r.Profile, r.Config = DefaultProfile, emptyConfig()
 		_, err := r.Resolve()
@@ -356,7 +368,7 @@ func TestConfigNeverCarriesAKey(t *testing.T) {
 	}
 	path := filepath.Join(dir, configFileName)
 	body := `{"active_profile":"default","api_key":"` + flagKey + `","profiles":{"default":{"api_url":"https://x","token":"` + flagKey + `"}}}`
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+	if err := writePrivateFile(path, []byte(body)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -388,7 +400,7 @@ func TestConfigParseErrorsDoNotQuoteTheFile(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, configFileName), []byte(flagKey), 0o600); err != nil {
+	if err := writePrivateFile(filepath.Join(dir, configFileName), []byte(flagKey)); err != nil {
 		t.Fatal(err)
 	}
 	_, err := LoadConfig()
@@ -499,5 +511,102 @@ func TestFileWarningSaysWhatItIs(t *testing.T) {
 		if !strings.Contains(FileWarning, phrase) {
 			t.Errorf("warning does not say %q", phrase)
 		}
+	}
+}
+
+func TestStoredKeyCarriesItsOrigin(t *testing.T) {
+	r := Resolver{Profile: DefaultProfile, Config: emptyConfig(), Getenv: envOf(), File: newMemoryStore(KeyName(DefaultProfile), entry(fileKey))}
+	got, err := r.Resolve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Origin != testOrigin || got.Credential.Reveal() != fileKey {
+		t.Fatalf("origin = %q", got.Origin)
+	}
+}
+
+func TestFlagAndEnvKeysHaveNoOrigin(t *testing.T) {
+	r := Resolver{FlagKey: flagKey, Profile: DefaultProfile, Config: emptyConfig(), Getenv: envOf()}
+	got, err := r.Resolve()
+	if err != nil || got.Origin != "" || got.Stored() {
+		t.Fatalf("got %+v, err = %v", got, err)
+	}
+}
+
+// A bare key, as an earlier layout stored, has no origin and must not be used.
+func TestStoredValueWithoutAnOriginIsRefused(t *testing.T) {
+	for _, value := range []string{fileKey, `{"key":"` + fileKey + `"}`, `{"origin":"","key":"` + fileKey + `"}`, "null"} {
+		r := Resolver{Profile: DefaultProfile, Config: emptyConfig(), Getenv: envOf(), File: newMemoryStore(KeyName(DefaultProfile), value)}
+		_, err := r.Resolve()
+		if apperr.ExitCode(err) != apperr.ExitAuth || strings.Contains(err.Error(), fileKey) {
+			t.Errorf("value %q: err = %v", value, err)
+		}
+	}
+}
+
+func TestEncodeStoredKeyNeedsAnOrigin(t *testing.T) {
+	if _, err := EncodeStoredKey("", fileKey); err == nil {
+		t.Fatal("expected an error")
+	}
+}
+
+func TestStoredOrigin(t *testing.T) {
+	store := newMemoryStore(KeyName("good"), entry(fileKey), KeyName("bad"), "not an entry")
+	if got := StoredOrigin(store, "good"); got != testOrigin {
+		t.Errorf("got %q", got)
+	}
+	for _, profile := range []string{"bad", "absent"} {
+		if got := StoredOrigin(store, profile); got != "" {
+			t.Errorf("%s: got %q", profile, got)
+		}
+	}
+}
+
+func TestRelativeXDGConfigHomeIsIgnored(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join("relative", "dir"))
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home directory")
+	}
+	dir, err := ConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dir != filepath.Join(home, ".config", configDirName) {
+		t.Fatalf("dir = %s", dir)
+	}
+}
+
+func TestConfigIsNotReadFromASymlink(t *testing.T) {
+	dir := useTempConfig(t)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "elsewhere.json")
+	if err := os.WriteFile(target, []byte(`{"profiles":{"default":{"api_url":"https://evil.test"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(dir, configFileName)); err != nil {
+		t.Skip("symlinks unavailable:", err)
+	}
+	if _, err := LoadConfig(); !errors.Is(err, ErrInsecurePermissions) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestHardLinkedCredentialsAreRefused(t *testing.T) {
+	useTempConfig(t)
+	store, err := NewFileStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("a", entry(fileKey)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(store.Path(), filepath.Join(filepath.Dir(store.Path()), "copy")); err != nil {
+		t.Skip("hard links unavailable:", err)
+	}
+	if _, err := store.Get("a"); !errors.Is(err, ErrInsecurePermissions) {
+		t.Fatalf("err = %v", err)
 	}
 }

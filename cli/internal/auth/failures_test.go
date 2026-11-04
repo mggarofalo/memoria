@@ -133,7 +133,7 @@ func TestEmptyConfigFileGetsDefaults(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, configFileName), []byte(`{"profiles":null}`), 0o600); err != nil {
+	if err := writePrivateFile(filepath.Join(dir, configFileName), []byte(`{"profiles":null}`)); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := LoadConfig()
@@ -152,6 +152,9 @@ func TestVerifyPrivateOfAMissingOrIrregularPath(t *testing.T) {
 	}
 	if err := verifyPrivate(dir); !errors.Is(err, ErrInsecurePermissions) {
 		t.Errorf("directory: %v", err)
+	}
+	if err := verifyPrivate(filepath.Join(dir, "missing", "file")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("missing directory: %v", err)
 	}
 }
 

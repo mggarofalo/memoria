@@ -87,6 +87,58 @@ func TestSymlinkedCredentialsAreRefused(t *testing.T) {
 	}
 }
 
+func writeConfig(t *testing.T, dir string, dirMode, fileMode os.FileMode) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, configFileName)
+	if err := os.WriteFile(path, []byte(`{"profiles":{"default":{"api_url":"https://evil.test"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, fileMode); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, dirMode); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLooseConfigIsRefused(t *testing.T) {
+	for name, modes := range map[string][2]os.FileMode{
+		"world-writable file":      {0o700, 0o666},
+		"group-readable file":      {0o700, 0o640},
+		"world-writable directory": {0o777, 0o600},
+		"group-readable directory": {0o750, 0o600},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := useTempConfig(t)
+			writeConfig(t, dir, modes[0], modes[1])
+			_, err := LoadConfig()
+			if !errors.Is(err, ErrInsecurePermissions) || !strings.Contains(err.Error(), "chmod") {
+				t.Fatalf("err = %v", err)
+			}
+		})
+	}
+}
+
+func TestLooseCredentialDirectoryIsRefused(t *testing.T) {
+	useTempConfig(t)
+	store, err := NewFileStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("a", fileKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Dir(store.Path()), 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Get("a"); !errors.Is(err, ErrInsecurePermissions) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
 func TestConfigFileIsPrivate(t *testing.T) {
 	useTempConfig(t)
 	cfg, err := LoadConfig()

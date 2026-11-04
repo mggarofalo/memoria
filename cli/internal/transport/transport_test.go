@@ -44,6 +44,10 @@ func TestParseBaseURL(t *testing.T) {
 		"https://host?key=" + testKey,
 		"https://host#" + testKey,
 		"https://host/%zz" + testKey,
+		"https://exam\u0130ple.test",
+		"https://exam%C4%B0ple.test",
+		"https://ex\u212Aample.test",
+		"http://127.0.0.1\u3002evil.test",
 	}
 	for _, raw := range bad {
 		_, err := ParseBaseURL(raw)
@@ -75,6 +79,7 @@ func TestClassify(t *testing.T) {
 		"http://172.31.255.255":          ClassPrivate,
 		"http://192.168.1.20:8080":       ClassPrivate,
 		"http://[fd00::1]":               ClassPrivate,
+		"http://[fd00:ec2::254]":         ClassPublic, // AWS metadata, inside the ULA range.
 		"http://[::ffff:10.0.0.1]":       ClassPrivate,
 		"http://8.8.8.8":                 ClassPublic,
 		"http://172.32.0.1":              ClassPublic,
@@ -111,7 +116,11 @@ func TestEvaluate(t *testing.T) {
 		{"http://127.0.0.1", false, false, false},
 		{"http://localhost", false, false, false},
 		{"http://192.168.1.1", false, true, false},
-		{"http://memoria.lan", false, true, false},
+		{"http://memoria.lan", false, false, true},
+		{"http://memoria.internal:8080", false, false, true},
+		{"http://[fd00:ec2::254]", false, false, true},
+		{"http://169.254.169.254", false, false, true},
+		{"http://memoria.lan", true, true, false},
 		{"http://8.8.8.8", false, false, true},
 		{"http://8.8.8.8", true, true, false},
 		{"http://memoria.example.com", true, true, false},
@@ -130,36 +139,36 @@ func TestEvaluate(t *testing.T) {
 	}
 }
 
-func TestCheckDialAddress(t *testing.T) {
-	for _, addr := range []string{"127.0.0.1:80", "[::1]:80", "10.0.0.1:80", "192.168.0.5:8080", "[fd00::1]:80"} {
-		if err := checkDialAddress(addr); err != nil {
-			t.Errorf("checkDialAddress(%q) = %v", addr, err)
+func TestCheckLoopbackDial(t *testing.T) {
+	for _, addr := range []string{"127.0.0.1:80", "[::1]:80", "127.8.8.8:80"} {
+		if err := checkLoopbackDial(addr); err != nil {
+			t.Errorf("checkLoopbackDial(%q) = %v", addr, err)
 		}
 	}
-	for _, addr := range []string{"8.8.8.8:80", "[2001:4860:4860::8888]:80", "169.254.169.254:80", "[::ffff:8.8.8.8]:80"} {
-		err := checkDialAddress(addr)
-		if apperr.ExitCode(err) != apperr.ExitInsecure {
-			t.Errorf("checkDialAddress(%q) = %v", addr, err)
+	// localhost answering with anything else is a poisoned resolver.
+	for _, addr := range []string{"8.8.8.8:80", "10.0.0.1:80", "192.168.0.5:8080", "[fd00::1]:80", "[2001:4860:4860::8888]:80"} {
+		if apperr.ExitCode(checkLoopbackDial(addr)) != apperr.ExitInsecure {
+			t.Errorf("checkLoopbackDial(%q) should refuse", addr)
 		}
 	}
 }
 
-func TestDialControlIsWiredForPlainHTTPOnly(t *testing.T) {
-	refused := newBaseTransport(mustParse(t, "http://memoria.lan"), false)
-	if refused.DialContext == nil {
-		t.Fatal("plain http needs the dial check")
-	}
-	// A hostname that resolves to a public address is refused at connect. An IP
-	// literal exercises the same control without depending on DNS.
+func TestLoopbackDialIsWiredForTheNameLocalhostOnly(t *testing.T) {
+	refused := newBaseTransport(mustParse(t, "http://localhost:8080"), false)
 	_, err := refused.DialContext(context.Background(), "tcp", "8.8.8.8:80")
 	if apperr.ExitCode(classifyDialRefusal(err)) != apperr.ExitInsecure {
 		t.Fatalf("dial = %v", err)
 	}
-	override := newBaseTransport(mustParse(t, "http://memoria.lan"), true)
-	secure := newBaseTransport(mustParse(t, "https://memoria.example.com"), false)
-	// Both keep DefaultTransport's dialer, which has no address rule.
-	if override.DialContext == nil || secure.DialContext == nil {
-		t.Fatal("expected the default dialer")
+	for raw, allow := range map[string]bool{
+		"http://127.0.0.1:8080": false,
+		"http://10.0.0.1":       false,
+		"https://localhost":     false,
+		"http://localhost:8080": true,
+		"http://memoria.lan":    true,
+	} {
+		if needsLoopbackDial(mustParse(t, raw), allow) {
+			t.Errorf("%s (override %v) should not need the check", raw, allow)
+		}
 	}
 }
 
@@ -236,6 +245,67 @@ func TestGuardAttachesTheKeyToTheConfiguredOriginOnly(t *testing.T) {
 		if req.Header.Get("Authorization") != "Bearer preset" {
 			t.Errorf("%s: the caller's request was mutated", raw)
 		}
+	}
+}
+
+// U+0130 lowercases to ASCII i in Go, while the network stack maps it through IDNA
+// to a different xn-- name. A check using Unicode case folding sends the key there.
+func TestNonASCIIHostsNeverMatchAnOrigin(t *testing.T) {
+	base := mustParse(t, "https://memoria.example.test")
+	for _, raw := range []string{
+		"https://memor\u0130a.example.test/",
+		"https://memor%C4%B0a.example.test/",
+		"https://memor\u0131a.example.test/",
+		"https://ex\u212Aample.test/",
+	} {
+		other, err := url.Parse(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if SameOrigin(base, other) || SameOrigin(other, base) {
+			t.Errorf("%s matched the origin", raw)
+		}
+	}
+	if Origin(mustParse(t, "https://memor\u0130a.example.test")) == Origin(base) {
+		t.Error("Origin should not fold Unicode case")
+	}
+}
+
+func TestNonASCIIRedirectIsRefusedAndGetsNoKey(t *testing.T) {
+	fake := &fakeRoundTripper{}
+	client := newClientWithBase(Options{BaseURL: mustParse(t, "https://memoria.example.test"), Key: testKey}, fake)
+	req, err := http.NewRequest(http.MethodGet, "https://memor\u0130a.example.test/x", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if got := fake.got[0].Header.Get("Authorization"); got != "" {
+		t.Fatalf("Authorization = %q", got)
+	}
+}
+
+func TestRedirectLocationWithNonASCIIHostIsRefused(t *testing.T) {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", "https://exam%C4%B0ple.test/x")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer server.Close()
+	client, err := NewClient(Options{BaseURL: mustParse(t, server.URL), Key: testKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.Get(server.URL)
+	if err == nil {
+		_ = resp.Body.Close()
+		t.Fatal("expected a refusal")
+	}
+	if got := apperr.ExitCode(apperr.FromTransport(err)); got != apperr.ExitInsecure {
+		t.Fatalf("exit = %d: %v", got, err)
 	}
 }
 

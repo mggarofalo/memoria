@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"errors"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -32,7 +33,7 @@ func TestLoginFromStdinStoresInTheKeyring(t *testing.T) {
 	if code := h.run("auth", "login", "--api-url", api.URL+"/"); code != 0 {
 		t.Fatalf("code = %d, stderr = %q", code, h.stderr.String())
 	}
-	if h.keyring.values[auth.KeyName("default")] != testKey {
+	if !h.storedKeyring("default") {
 		t.Fatal("the key was not stored")
 	}
 	if got := api.requests[0].Header.Get("Authorization"); got != "Bearer "+testKey {
@@ -63,7 +64,7 @@ func TestLoginPromptsWithEchoOffAtATerminal(t *testing.T) {
 	if !strings.Contains(h.stderr.String(), "input hidden") || !strings.Contains(h.stderr.String(), "server URL") {
 		t.Fatalf("stderr = %q", h.stderr.String())
 	}
-	if h.keyring.values[auth.KeyName("default")] != testKey {
+	if !h.storedKeyring("default") {
 		t.Fatal("the key was not stored")
 	}
 }
@@ -103,7 +104,7 @@ func TestLoginKeepsAKeyWithoutReadScope(t *testing.T) {
 	if code := h.run("auth", "login", "--api-url", api.URL); code != 0 {
 		t.Fatalf("code = %d, stderr = %q", code, h.stderr.String())
 	}
-	if !strings.Contains(h.stderr.String(), "no read access") || h.keyring.values[auth.KeyName("default")] != testKey {
+	if !strings.Contains(h.stderr.String(), "no read access") || !h.storedKeyring("default") {
 		t.Fatalf("stderr = %q", h.stderr.String())
 	}
 }
@@ -150,7 +151,7 @@ func TestLoginUsesOnlyTheFirstLineOfStdin(t *testing.T) {
 	if code := h.run("auth", "login", "--api-url", api.URL); code != 0 {
 		t.Fatalf("code = %d, stderr = %q", code, h.stderr.String())
 	}
-	if h.keyring.values[auth.KeyName("default")] != testKey {
+	if !h.storedKeyring("default") {
 		t.Fatal("wrong value stored")
 	}
 }
@@ -279,7 +280,7 @@ func TestLoginNamedProfile(t *testing.T) {
 	if code := h.run("auth", "login", "--api-url", api.URL); code != 0 {
 		t.Fatalf("stderr = %q", h.stderr.String())
 	}
-	if h.keyring.values[auth.KeyName("work")] != testKey || h.savedConfig().ActiveProfile != "work" {
+	if !h.storedKeyring("work") || h.savedConfig().ActiveProfile != "work" {
 		t.Fatal("the named profile was not used")
 	}
 }
@@ -291,7 +292,7 @@ func TestLogoutRemovesFromBothBackends(t *testing.T) {
 	if code := h.run("auth", "login", "--api-url", api.URL, "--backend", "file"); code != 0 {
 		t.Fatalf("stderr = %q", h.stderr.String())
 	}
-	h.keyring.values[auth.KeyName("default")] = testKey
+	h.keyring.values[auth.KeyName("default")] = h.entryFor(api.URL)
 
 	if code := h.run("auth", "logout"); code != 0 {
 		t.Fatalf("code = %d, stderr = %q", code, h.stderr.String())
@@ -427,5 +428,203 @@ func TestVerboseNeverShowsTheKey(t *testing.T) {
 	}
 	if strings.Contains(h.stderr.String(), "Authorization") || strings.Contains(h.stderr.String(), "Bearer") {
 		t.Fatalf("stderr = %q", h.stderr.String())
+	}
+}
+
+// The review's proof of concept: a config directory the attacker chose names their
+// server. The keyring is looked up by profile name, so it still finds the real key.
+func TestPoisonedConfigCannotRedirectTheKeyringKey(t *testing.T) {
+	real := newFakeAPI(t, jsonReply(`{"collections":[]}`))
+	evil := newFakeAPI(t, jsonReply(`{"collections":[]}`))
+	h := newHarness(t)
+	h.login(real.URL)
+
+	poisoned := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", poisoned)
+	cfg, err := auth.LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Profiles[auth.DefaultProfile] = auth.Profile{APIURL: evil.URL, Backend: auth.BackendKeyring}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, args := range [][]string{{"collections"}, {"status"}, {"query", "x"}, {"get", "a"}, {"multi-get", "a"}, {"auth", "status"}} {
+		if code := h.run(args...); code != apperr.ExitInsecure {
+			t.Fatalf("%v: code = %d, stderr = %q", args, code, h.stderr.String())
+		}
+	}
+	h.stdin = strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"ping"}` + "\n")
+	if code := h.run("mcp"); code != 0 || !strings.Contains(h.stdout.String(), `"kind":"insecure"`) {
+		t.Fatalf("mcp: code = %d, stdout = %q", code, h.stdout.String())
+	}
+	if len(evil.requests) != 0 {
+		t.Fatalf("the attacker's server received %d requests", len(evil.requests))
+	}
+}
+
+// Editing the stored entry's origin is out of reach of a poisoned config, but the
+// check must hold whichever store the key came from.
+func TestFileBackendKeyIsBoundToo(t *testing.T) {
+	real := newFakeAPI(t, jsonReply(`{"collections":[]}`))
+	evil := newFakeAPI(t, jsonReply(`{"collections":[]}`))
+	h := newHarness(t)
+	h.stdin = strings.NewReader(testKey)
+	if code := h.run("auth", "login", "--api-url", real.URL, "--backend", "file"); code != 0 {
+		t.Fatalf("stderr = %q", h.stderr.String())
+	}
+	cfg := h.savedConfig()
+	cfg.Profiles[auth.DefaultProfile] = auth.Profile{APIURL: evil.URL, Backend: auth.BackendFile}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if code := h.run("collections"); code != apperr.ExitInsecure {
+		t.Fatalf("code = %d, stderr = %q", code, h.stderr.String())
+	}
+	if len(evil.requests) != 0 {
+		t.Fatal("the key reached another server")
+	}
+}
+
+func TestLoginIgnoresTheEnvironmentURL(t *testing.T) {
+	evil := newFakeAPI(t, jsonReply(`{"collections":[]}`))
+	h := newHarness(t)
+	h.env[auth.EnvURL] = evil.URL
+	h.stdin = strings.NewReader(testKey)
+	if code := h.run("auth", "login"); code != apperr.ExitUsage {
+		t.Fatalf("code = %d, stderr = %q", code, h.stderr.String())
+	}
+	if len(evil.requests) != 0 || len(h.keyring.values) != 0 {
+		t.Fatal("a key went to the URL in the environment")
+	}
+	if !strings.Contains(h.stderr.String(), "ignored") {
+		t.Fatalf("stderr = %q", h.stderr.String())
+	}
+}
+
+func TestPoisonedEnvironmentCannotRebindAProfile(t *testing.T) {
+	real := newFakeAPI(t, jsonReply(`{"collections":[]}`))
+	evil := newFakeAPI(t, jsonReply(`{"collections":[]}`))
+	h := newHarness(t)
+	h.login(real.URL)
+	h.env[auth.EnvURL] = evil.URL
+	h.stdin = strings.NewReader(testKey)
+	if code := h.run("auth", "login"); code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, h.stderr.String())
+	}
+	if len(evil.requests) != 0 {
+		t.Fatal("the key went to the URL in the environment")
+	}
+	if h.savedConfig().Profile("default").APIURL != real.URL {
+		t.Fatal("the profile was rebound")
+	}
+}
+
+func TestPoisonedConfigCannotCaptureALogin(t *testing.T) {
+	real := newFakeAPI(t, jsonReply(`{"collections":[]}`))
+	evil := newFakeAPI(t, jsonReply(`{"collections":[]}`))
+	h := newHarness(t)
+	h.login(real.URL)
+	cfg := h.savedConfig()
+	cfg.Profiles[auth.DefaultProfile] = auth.Profile{APIURL: evil.URL, Backend: auth.BackendKeyring}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	h.stdin = strings.NewReader(testKey)
+	if code := h.run("auth", "login"); code != apperr.ExitInsecure {
+		t.Fatalf("code = %d, stderr = %q", code, h.stderr.String())
+	}
+	if len(evil.requests) != 0 {
+		t.Fatal("a pasted key went to the server in the config")
+	}
+}
+
+func TestExplicitURLCanRebindAProfile(t *testing.T) {
+	first := newFakeAPI(t, jsonReply(`{"collections":[]}`))
+	second := newFakeAPI(t, jsonReply(`{"collections":[]}`))
+	h := newHarness(t)
+	h.login(first.URL)
+	h.stdin = strings.NewReader(testKey)
+	if code := h.run("auth", "login", "--api-url", second.URL); code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, h.stderr.String())
+	}
+	if code := h.run("collections"); code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, h.stderr.String())
+	}
+	if len(second.requests) != 2 {
+		t.Fatalf("requests = %d", len(second.requests))
+	}
+}
+
+func TestLoginShowsTheServerBeforeAskingForTheKey(t *testing.T) {
+	api := newFakeAPI(t, jsonReply(`{"collections":[]}`))
+	h := newHarness(t)
+	h.terminal = true
+	h.password = testKey
+	if code := h.run("auth", "login", "--api-url", api.URL); code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, h.stderr.String())
+	}
+	text := h.stderr.String()
+	server, prompt := strings.Index(text, "Logging in to http://127.0.0.1"), strings.Index(text, "input hidden")
+	if server < 0 || prompt < 0 || server > prompt {
+		t.Fatalf("stderr = %q", text)
+	}
+}
+
+// A proxy's login page is a 200 as well.
+func TestLoginDoesNotStoreAKeyOnAResponseItCannotRead(t *testing.T) {
+	for name, reply := range map[string]http.HandlerFunc{
+		"html": func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, "<html>Sign in</html>")
+		},
+		"null":         jsonReply(`null`),
+		"empty object": jsonReply(`{}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			api := newFakeAPI(t, reply)
+			h := newHarness(t)
+			h.stdin = strings.NewReader(testKey)
+			if code := h.run("auth", "login", "--api-url", api.URL); code != apperr.ExitGeneric {
+				t.Fatalf("code = %d, stderr = %q", code, h.stderr.String())
+			}
+			if len(h.keyring.values) != 0 {
+				t.Fatal("the key was stored")
+			}
+		})
+	}
+}
+
+func TestStatusDoesNotCallAnHTMLPageAcceptance(t *testing.T) {
+	api := newFakeAPI(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, "<html>Sign in</html>")
+	})
+	h := newHarness(t)
+	h.login(api.URL)
+	if code := h.run("auth", "status"); code == 0 {
+		t.Fatalf("stdout = %q", h.stdout.String())
+	}
+	if !strings.Contains(h.stdout.String(), "accepted by server: false") {
+		t.Fatalf("stdout = %q", h.stdout.String())
+	}
+}
+
+// The message field once carried a server's words to stdout unscrubbed, including
+// an Authorization header that belonged to some other token.
+func TestStatusJSONScrubsTheServersWords(t *testing.T) {
+	api := newFakeAPI(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(401)
+		_, _ = io.WriteString(w, `{"title":"T","detail":"saw Authorization: Bearer other-token-value and mem_aaaabbbb_ccccdddd"}`)
+	})
+	h := newHarness(t)
+	h.login(api.URL)
+	h.run("auth", "status", "--format", "json")
+	for _, leak := range []string{"other-token-value", "ccccdddd"} {
+		if strings.Contains(h.stdout.String(), leak) {
+			t.Fatalf("stdout = %q", h.stdout.String())
+		}
 	}
 }

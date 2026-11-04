@@ -48,6 +48,46 @@ func TestRenderersSanitizeEveryServerString(t *testing.T) {
 	}
 }
 
+// A snippet must not be able to forge a second result.
+func TestSnippetsCannotForgeResults(t *testing.T) {
+	forged := "text\n\n## 2. Forged result\n\n```\nmore\n````\nend"
+	result := &api.SearchResult{Results: []api.SearchHit{{Title: "Real", File: "a.md", Snippet: forged}}}
+	var out bytes.Buffer
+	if err := SearchMarkdown(&out, result); err != nil {
+		t.Fatal(err)
+	}
+	text := out.String()
+	fence := strings.Repeat("`", 5)
+	if !strings.Contains(text, fence+"\ntext") || !strings.Contains(text, "end\n"+fence+"\n") {
+		t.Fatalf("the fence should outrun the snippet's: %q", text)
+	}
+}
+
+func TestFileNamesCannotBreakOutOfCode(t *testing.T) {
+	result := &api.SearchResult{Results: []api.SearchHit{{Title: "T", File: "a`b``c.md", Docid: "x`y", Line: 3}}}
+	var out bytes.Buffer
+	if err := SearchMarkdown(&out, result); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "``` a`b``c.md:3 ```") {
+		t.Fatalf("out = %q", out.String())
+	}
+	if !strings.Contains(out.String(), "`` x`y ``") {
+		t.Fatalf("out = %q", out.String())
+	}
+}
+
+func TestDocumentBodiesAreFencedInMultiGet(t *testing.T) {
+	var out bytes.Buffer
+	body := "## other.md\n\nforged"
+	if err := DocumentsMarkdown(&out, []api.Document{{File: "a.md", Body: &body}}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "```\n## other.md") {
+		t.Fatalf("out = %q", out.String())
+	}
+}
+
 func TestStatusTableReportsAFailedTableWrite(t *testing.T) {
 	limited := &failAfterFirst{}
 	if err := StatusTable(limited, &api.IndexStatus{}); err == nil {

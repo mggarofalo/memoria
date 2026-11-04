@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -50,6 +51,9 @@ type Resolver struct {
 type Resolved struct {
 	Credential Credential
 	Source     string
+	// Origin is the server a stored key is bound to. It comes from the store, not
+	// from the config, so replacing the config cannot redirect the key.
+	Origin string
 }
 
 // Stored reports whether the key came from a store rather than this invocation.
@@ -139,11 +143,57 @@ func (r *Resolver) nothingFound(profile Profile, keyringErr error) error {
 }
 
 func stored(value, source string) (Resolved, error) {
-	key, err := NormalizeKey(value)
+	origin, key, err := decodeStoredKey(value)
 	if err != nil {
-		return Resolved{}, apperr.Wrap(apperr.KindAuth, err, "the stored API key is invalid: "+err.Error())
+		return Resolved{}, apperr.Wrap(apperr.KindAuth, err, err.Error()+"; run 'memoria auth login' again")
 	}
-	return Resolved{Credential: NewCredential(key), Source: source}, nil
+	return Resolved{Credential: NewCredential(key), Source: source, Origin: origin}, nil
+}
+
+// EncodeStoredKey is the value a store holds: the key with the origin it may be
+// sent to. Keeping them in one secret means nothing outside the store can
+// separate them.
+func EncodeStoredKey(origin, key string) (string, error) {
+	if origin == "" {
+		return "", errors.New("a stored key needs an origin")
+	}
+	data, err := json.Marshal(storedKey{Origin: origin, Key: key})
+	if err != nil {
+		return "", errors.New("cannot encode the stored key")
+	}
+	return string(data), nil
+}
+
+type storedKey struct {
+	Origin string `json:"origin"`
+	Key    string `json:"key"`
+}
+
+func decodeStoredKey(value string) (origin, key string, err error) {
+	var entry storedKey
+	// The decoder's message can quote the value, so it is not passed on.
+	if json.Unmarshal([]byte(value), &entry) != nil || entry.Origin == "" {
+		return "", "", errors.New("the stored API key is not in the expected form")
+	}
+	key, err = NormalizeKey(entry.Key)
+	if err != nil {
+		return "", "", fmt.Errorf("the stored API key is invalid: %w", err)
+	}
+	return entry.Origin, key, nil
+}
+
+// StoredOrigin returns the origin a store's entry for a profile is bound to, or
+// an empty string if it has no readable entry.
+func StoredOrigin(store SecretStore, profile string) string {
+	value, err := store.Get(KeyName(profile))
+	if err != nil {
+		return ""
+	}
+	origin, _, err := decodeStoredKey(value)
+	if err != nil {
+		return ""
+	}
+	return origin
 }
 
 // ResolveURL returns the server URL from flag, env, or the active profile.

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -16,6 +17,7 @@ import (
 	"github.com/mggarofalo/memoria/cli/internal/auth"
 	"github.com/mggarofalo/memoria/cli/internal/output"
 	"github.com/mggarofalo/memoria/cli/internal/termsafe"
+	"github.com/mggarofalo/memoria/cli/internal/transport"
 )
 
 const maxStdinKeyBytes = 64 * 1024
@@ -70,10 +72,16 @@ func (a *app) login(ctx context.Context, o loginOptions) error {
 	if err != nil {
 		return err
 	}
-	base, err := a.parseURL(a.loginURL(cfg, profile))
+	raw, err := a.loginURL(store, cfg, profile)
 	if err != nil {
 		return err
 	}
+	base, err := a.parseURL(raw)
+	if err != nil {
+		return err
+	}
+	// Say where the key is going before asking for it.
+	fmt.Fprintln(a.stderr, "Logging in to "+termsafe.Line(transport.Origin(base)))
 	key, err := a.readKey()
 	if err != nil {
 		return err
@@ -88,17 +96,25 @@ func (a *app) login(ctx context.Context, o loginOptions) error {
 			return err
 		}
 	}
-	if err := store.Set(auth.KeyName(profile), key); err != nil {
+	return a.saveLogin(store, cfg, profile, o.backend, base, key)
+}
+
+func (a *app) saveLogin(store auth.SecretStore, cfg *auth.Config, profile, backend string, base *url.URL, key string) error {
+	entry, err := auth.EncodeStoredKey(transport.Origin(base), key)
+	if err != nil {
 		return err
 	}
-	a.removeFromOtherBackend(o.backend, profile)
+	if err := store.Set(auth.KeyName(profile), entry); err != nil {
+		return err
+	}
+	a.removeFromOtherBackend(backend, profile)
 
 	cfg.ActiveProfile = profile
-	cfg.Profiles[profile] = auth.Profile{APIURL: base.String(), Backend: o.backend}
+	cfg.Profiles[profile] = auth.Profile{APIURL: base.String(), Backend: backend}
 	if err := cfg.Save(); err != nil {
 		return err
 	}
-	a.reportLogin(o.backend, profile, base.String())
+	a.reportLogin(backend, profile, base.String())
 	return nil
 }
 
@@ -133,19 +149,43 @@ func (a *app) openBackend(backend string) (auth.SecretStore, error) {
 		}
 		return store, nil
 	}
-	return nil, apperr.New(apperr.KindUsage, "unknown backend %q: use keyring or file", termsafe.Line(backend))
+	return nil, apperr.New(apperr.KindUsage, "unknown backend: use keyring or file")
 }
 
-// loginURL takes the URL from flag, env or profile, and prompts only at a
-// terminal: piped stdin is the key.
-func (a *app) loginURL(cfg *auth.Config, profile string) string {
-	resolver := auth.Resolver{FlagURL: a.flags.apiURL, Profile: profile, Config: cfg, Getenv: a.getenv}
-	if existing := resolver.ResolveURL(); existing != "" || !a.stdinIsTerminal() {
-		return existing
+// loginURL decides where a pasted key will be sent. Only --api-url can name a new
+// server for an existing entry. MEMORIA_URL is not consulted at all, because an
+// environment set by a project's .env must not be able to receive a key or rebind
+// a profile; and the config cannot override the store's own record of the origin,
+// because the config can be replaced by whoever sets XDG_CONFIG_HOME or HOME.
+func (a *app) loginURL(store auth.SecretStore, cfg *auth.Config, profile string) (string, error) {
+	if a.flags.apiURL != "" {
+		return a.flags.apiURL, nil
+	}
+	if a.getenv(auth.EnvURL) != "" {
+		a.warn(auth.EnvURL + " is ignored by 'auth login'; pass --api-url to choose the server")
+	}
+	saved := cfg.Profile(profile).APIURL
+	if err := checkSavedOrigin(auth.StoredOrigin(store, profile), saved, profile); err != nil {
+		return "", err
+	}
+	if saved != "" || !a.stdinIsTerminal() {
+		return saved, nil
 	}
 	fmt.Fprint(a.stderr, "Memoria server URL: ")
 	line, _ := bufio.NewReader(a.stdin).ReadString('\n')
-	return strings.TrimSpace(line)
+	return strings.TrimSpace(line), nil
+}
+
+func checkSavedOrigin(stored, saved, profile string) error {
+	if stored == "" || saved == "" {
+		return nil
+	}
+	parsed, err := url.Parse(saved)
+	if err == nil && transport.Origin(parsed) == stored {
+		return nil
+	}
+	return apperr.New(apperr.KindInsecure,
+		"the config names a different server than the key stored for profile %q (%s); pass --api-url to choose one explicitly", profile, stored)
 }
 
 func (a *app) readKey() (string, error) {
@@ -205,7 +245,11 @@ func (a *app) verifyKey(ctx context.Context, s *session) error {
 		a.warn("the server accepted this key, but it has no read access")
 		return nil
 	}
-	return checkResponse(resp.StatusCode(), resp.HTTPResponse.Header, resp.Body)
+	if err := checkResponse(resp.StatusCode(), resp.HTTPResponse.Header, resp.Body); err != nil {
+		return err
+	}
+	// A proxy's HTML page is a 200 too, and says nothing about the key.
+	return requireShape(resp.JSON200 != nil && resp.JSON200.Collections != nil)
 }
 
 // removeFromOtherBackend deletes a copy left by an earlier login, so that the
@@ -331,7 +375,7 @@ func (a *app) authStatus(ctx context.Context, offline bool) error {
 		if err != nil {
 			verified = false
 			status.Authenticated = false
-			status.Message = err.Error()
+			status.Message = a.redactor.Diagnostic(termsafe.Line(err.Error()))
 		}
 		status.Verified = &verified
 	}

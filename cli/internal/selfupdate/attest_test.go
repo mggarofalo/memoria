@@ -388,8 +388,7 @@ func (f failingAttester) Verify(context.Context, []byte, string) error {
 }
 
 func TestProvenanceFailureRefusesTheUpdate(t *testing.T) {
-	goos, arch := testPlatform()
-	fake := serveFake(t, goos, arch, fakeRelease{tag: "v1.2.0"})
+	fake := serveFake(t, testOS, testArch, fakeRelease{tag: "v1.2.0"})
 	exe := installedBinary(t)
 	calls := 0
 	err := install(t, fake, exe, "", Options{Attester: failingAttester{calls: &calls}})
@@ -401,19 +400,18 @@ func TestProvenanceFailureRefusesTheUpdate(t *testing.T) {
 }
 
 func TestChecksumOnlySkipsProvenanceButNotTheChecksum(t *testing.T) {
-	goos, arch := testPlatform()
 	calls := 0
 	opts := Options{ChecksumOnly: true, Attester: failingAttester{calls: &calls}}
 
-	fake := serveFake(t, goos, arch, fakeRelease{tag: "v1.2.0"})
+	fake := serveFake(t, testOS, testArch, fakeRelease{tag: "v1.2.0"})
 	exe := installedBinary(t)
 	if err := install(t, fake, exe, "", opts); err != nil || calls != 0 {
 		t.Fatalf("err = %v, calls = %d", err, calls)
 	}
 	assertBinary(t, exe, newBinary)
 
-	name := fmt.Sprintf("memoria_1.2.0_%s_%s.tar.gz", goos, arch)
-	tampered := serveFake(t, goos, arch, fakeRelease{tag: "v1.2.0", checksums: strings.Repeat("0", 64) + "  " + name + "\n"})
+	name := assetName("1.2.0", testOS, testArch)
+	tampered := serveFake(t, testOS, testArch, fakeRelease{tag: "v1.2.0", checksums: strings.Repeat("0", 64) + "  " + name + "\n"})
 	exe = installedBinary(t)
 	if err := install(t, tampered, exe, "", opts); err == nil {
 		t.Fatal("--checksum-only must still verify the checksum")
@@ -422,9 +420,8 @@ func TestChecksumOnlySkipsProvenanceButNotTheChecksum(t *testing.T) {
 }
 
 func TestChecksumFailureNeverReachesProvenance(t *testing.T) {
-	goos, arch := testPlatform()
-	name := fmt.Sprintf("memoria_1.2.0_%s_%s.tar.gz", goos, arch)
-	fake := serveFake(t, goos, arch, fakeRelease{tag: "v1.2.0", checksums: strings.Repeat("0", 64) + "  " + name + "\n"})
+	name := assetName("1.2.0", testOS, testArch)
+	fake := serveFake(t, testOS, testArch, fakeRelease{tag: "v1.2.0", checksums: strings.Repeat("0", 64) + "  " + name + "\n"})
 	calls := 0
 	if err := install(t, fake, installedBinary(t), "", Options{Attester: failingAttester{calls: &calls}}); err == nil || calls != 0 {
 		t.Fatalf("err = %v, calls = %d", err, calls)
@@ -443,9 +440,8 @@ func (r *recordingAttester) Verify(_ context.Context, digest []byte, tag string)
 }
 
 func TestProvenanceIsCheckedForTheDownloadedArchiveAndTag(t *testing.T) {
-	goos, arch := testPlatform()
-	archive := archiveFor(t, goos, []byte(newBinary))
-	fake := serveFake(t, goos, arch, fakeRelease{tag: "v1.2.0", archive: archive})
+	archive := archiveFor(t, testOS, []byte(newBinary))
+	fake := serveFake(t, testOS, testArch, fakeRelease{tag: "v1.2.0", archive: archive})
 	recorder := &recordingAttester{}
 	if err := install(t, fake, installedBinary(t), "", Options{Attester: recorder}); err != nil {
 		t.Fatal(err)

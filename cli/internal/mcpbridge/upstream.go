@@ -88,38 +88,40 @@ func (b *Bridge) relayJSON(msg *message, body io.Reader) (bool, error) {
 	return b.relayFrame(msg, data)
 }
 
-// relayStream relays each SSE message event as one frame. It keeps reading past
-// a frame that fails, so progress noise cannot hide the real answer, and
-// reports the failure only if no answer ever comes.
+// relayStream relays each SSE message event as one frame, and closes the stream
+// once the request is answered: a server holding it open afterwards must not pin
+// a slot. It keeps reading past a frame that fails, so noise cannot hide the real
+// answer, and reports the failure only if no answer ever comes.
 func (b *Bridge) relayStream(msg *message, body io.Reader) (bool, error) {
 	reader := bufio.NewReaderSize(body, 64*1024)
-	answered := false
 	var firstErr error
-	note := func(ok bool, err error) {
-		answered = answered || ok
-		if err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
 	for {
 		data, err := readEvent(reader, b.opts.MaxOutboundBytes)
 		if len(data) > 0 {
-			note(b.relayFrame(msg, data))
+			answered, frameErr := b.relayFrame(msg, data)
+			if answered {
+				return true, nil
+			}
+			firstErr = firstNonNil(firstErr, frameErr)
 		}
 		if err != nil {
-			return streamResult(answered, firstErr, err)
+			return false, streamEndError(firstErr, err)
 		}
 	}
 }
 
-func streamResult(answered bool, frameErr, readErr error) (bool, error) {
-	if answered {
-		return true, nil
+func firstNonNil(a, b error) error {
+	if a != nil {
+		return a
 	}
+	return b
+}
+
+func streamEndError(frameErr, readErr error) error {
 	if !errors.Is(readErr, io.EOF) {
-		return false, readErr
+		return readErr
 	}
-	return false, frameErr
+	return frameErr
 }
 
 // readEvent returns the data of the next SSE "message" event, joining multi-line
@@ -171,28 +173,37 @@ func (e *sseEvent) apply(line string) {
 	}
 }
 
-// relayFrame writes one upstream frame and reports whether it answered msg.
+// relayFrame checks one upstream frame and passes it on if it is either a message
+// from the server or the one answer to msg. It reports whether it was that answer.
+// A response to anything else is dropped: the client is waiting on its own id, and
+// a stray answer could satisfy some other request of its.
 func (b *Bridge) relayFrame(msg *message, frame []byte) (bool, error) {
 	if len(frame) > b.opts.MaxOutboundBytes {
 		return false, errFrameTooLarge
 	}
-	var parsed struct {
-		ID     json.RawMessage `json:"id"`
-		Method string          `json:"method"`
-		Result json.RawMessage `json:"result"`
-		Error  json.RawMessage `json:"error"`
-	}
-	if err := json.Unmarshal(frame, &parsed); err != nil {
+	fields, err := objectFields(frame)
+	if err != nil || stringField(fields, "jsonrpc") != "2.0" {
 		return false, errInvalidFrame
 	}
-	answers := msg.isRequest() && parsed.Method == "" && bytes.Equal(bytes.TrimSpace(parsed.ID), msg.id)
-	if answers && msg.isInitialize() {
-		b.rememberProtocol(parsed.Result)
+	if stringField(fields, "method") != "" {
+		return false, b.out.write(frame, "")
 	}
-	if err := b.out.write(frame); err != nil {
+	if !answers(msg, fields) {
+		b.logf("dropped an upstream response that does not answer the request")
+		return false, nil
+	}
+	if msg.isInitialize() {
+		b.rememberProtocol(fields["result"])
+	}
+	if err := b.out.write(frame, msg.stringID()); err != nil {
 		return false, err
 	}
-	return answers, nil
+	return true, nil
+}
+
+// answers requires the exact id, compared as JSON text, so 1.0 does not answer 1.
+func answers(msg *message, fields map[string]json.RawMessage) bool {
+	return msg.isRequest() && bytes.Equal(fields["id"], msg.id) && isAnswer(fields, fields["id"])
 }
 
 func (b *Bridge) rememberProtocol(result json.RawMessage) {

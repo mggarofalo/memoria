@@ -20,11 +20,37 @@ import (
 // DevVersion is the version of an unstamped build.
 const DevVersion = "dev"
 
-// tagPattern is the shape of a release tag, and of a pinned --version.
-var tagPattern = regexp.MustCompile(`^v\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$`)
+// tagPattern is the shape of a release tag, and of a pinned --version. Parts have
+// no leading zeros, so v01.2.3 cannot display as v1.2.3, and they are bounded, so
+// a tag with a huge number cannot outrank every real release permanently.
+var tagPattern = regexp.MustCompile(`^v(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})(-[0-9A-Za-z.-]{1,64})?$`)
 
 // ValidTag reports whether tag has the form vX.Y.Z or vX.Y.Z-prerelease.
-func ValidTag(tag string) bool { return tagPattern.MatchString(tag) }
+func ValidTag(tag string) bool {
+	if !tagPattern.MatchString(tag) {
+		return false
+	}
+	_, err := parseVersion(tag)
+	return err == nil
+}
+
+// hasPrereleaseTag reports whether a valid tag names a semver prerelease.
+func hasPrereleaseTag(tag string) bool {
+	return strings.Contains(tag, "-")
+}
+
+// newerThan orders candidates by version, treating nil as older than anything.
+func newerThan(a, b *Candidate) bool {
+	if b == nil {
+		return true
+	}
+	first, err := parseVersion(a.Tag)
+	if err != nil {
+		return false
+	}
+	second, err := parseVersion(b.Tag)
+	return err != nil || first.GreaterThan(second)
+}
 
 // Policy holds what the user has explicitly allowed.
 type Policy struct {

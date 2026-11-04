@@ -13,6 +13,7 @@ set -eu
 
 REPO="mggarofalo/memoria"
 BINARY="memoria"
+MAX_UNPACKED_BYTES=134217728
 
 info() { printf '[memoria] %s\n' "$*" >&2; }
 fail() {
@@ -25,7 +26,8 @@ usage() {
 Usage: install.sh [--version vX.Y.Z] [--prefix DIR]
 
   --version vX.Y.Z  Install this release instead of the latest
-  --prefix DIR      Install into DIR (default: ~/.local/bin, or /usr/local/bin as root)
+  --prefix DIR      Install into this absolute directory
+                    (default: ~/.local/bin, or /usr/local/bin as root)
 USAGE
 }
 
@@ -33,15 +35,29 @@ need() {
     command -v "$1" >/dev/null 2>&1 || fail "required command not found: $1"
 }
 
+# -q must come first: it stops curl reading a ~/.curlrc that could undo the rest.
 fetch() {
-    curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL "$@"
+    curl -q --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL "$@"
 }
 
 valid_version() {
     case "$1" in
         *[!0-9A-Za-z.v-]*) return 1 ;;
     esac
-    printf '%s\n' "$1" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
+    printf '%s\n' "$1" | grep -Eq '^v(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})(-[0-9A-Za-z.-]{1,64})?$'
+}
+
+# The archive must name the binary exactly once, as a regular file. A duplicate
+# would let the archive show different programs to different tools, and a symlink
+# would make the install write somewhere else.
+check_members() {
+    count="$(tar -tzf "$1" | grep -c "^${BINARY}\$" || true)"
+    [ "$count" != "0" ] || fail "the archive has no ${BINARY} binary"
+    [ "$count" = "1" ] || fail "the archive names ${BINARY} more than once"
+    type_flag="$(tar -tvzf "$1" "$BINARY" | cut -c1)"
+    [ "$type_flag" = "-" ] || fail "the archive's ${BINARY} is not a regular file"
+    unpacked="$(gzip -dc "$1" | head -c "$((MAX_UNPACKED_BYTES + 1))" | wc -c | tr -d ' ')"
+    [ "$unpacked" -le "$MAX_UNPACKED_BYTES" ] || fail "the archive unpacks to more than the size limit"
 }
 
 VERSION=""
@@ -87,6 +103,7 @@ esac
 
 need curl
 need tar
+need gzip
 if command -v sha256sum >/dev/null 2>&1; then
     SHA256="sha256sum"
 elif command -v shasum >/dev/null 2>&1; then
@@ -102,6 +119,10 @@ if [ -z "$INSTALL_DIR" ]; then
         INSTALL_DIR="${HOME}/.local/bin"
     fi
 fi
+case "$INSTALL_DIR" in
+    /*) ;;
+    *) fail "--prefix must be an absolute path" ;;
+esac
 
 if [ -z "$VERSION" ]; then
     info "Finding the latest release..."
@@ -115,7 +136,8 @@ ARCHIVE="${BINARY}_${VERSION#v}_${OS}_${ARCH}.tar.gz"
 BASE="https://github.com/${REPO}/releases/download/${VERSION}"
 
 WORK_DIR="$(mktemp -d)"
-trap 'rm -rf "$WORK_DIR"' EXIT
+STAGED=""
+trap 'rm -rf "$WORK_DIR"; [ -z "$STAGED" ] || rm -f "$STAGED"' EXIT
 
 info "Downloading ${ARCHIVE}..."
 fetch -o "${WORK_DIR}/${ARCHIVE}" "${BASE}/${ARCHIVE}" || fail "could not download ${ARCHIVE}"
@@ -128,17 +150,25 @@ ACTUAL="$(cd "$WORK_DIR" && $SHA256 "$ARCHIVE" | awk '{ print $1 }')"
 [ "$EXPECTED" = "$ACTUAL" ] || fail "checksum mismatch for ${ARCHIVE}; nothing was installed"
 info "Checksum verified."
 
-# Extract the one expected member, so an archive cannot write anywhere else.
-tar -xzf "${WORK_DIR}/${ARCHIVE}" -C "$WORK_DIR" "$BINARY" || fail "the archive has no ${BINARY} binary"
-[ -f "${WORK_DIR}/${BINARY}" ] || fail "the archive has no ${BINARY} binary"
+check_members "${WORK_DIR}/${ARCHIVE}"
+tar -xzf "${WORK_DIR}/${ARCHIVE}" -C "$WORK_DIR" "$BINARY" || fail "could not unpack ${ARCHIVE}"
+[ -f "${WORK_DIR}/${BINARY}" ] && [ ! -L "${WORK_DIR}/${BINARY}" ] || fail "the archive's ${BINARY} is not a regular file"
 
 mkdir -p "$INSTALL_DIR"
-# Copy beside the target and rename, so a running binary is replaced atomically.
-STAGED="${INSTALL_DIR}/.${BINARY}.new.$$"
-cp "${WORK_DIR}/${BINARY}" "$STAGED"
-chmod 0755 "$STAGED"
-mv -f "$STAGED" "${INSTALL_DIR}/${BINARY}"
-info "Installed ${VERSION} to ${INSTALL_DIR}/${BINARY}"
+TARGET="${INSTALL_DIR}/${BINARY}"
+# mktemp makes a new file under a random name, so a planted symlink cannot redirect
+# the write. Copy into it, then rename, so a running binary is replaced atomically.
+STAGED="$(mktemp "${INSTALL_DIR}/.${BINARY}.XXXXXX")"
+if [ -f "$TARGET" ]; then
+    # Carries the existing binary's mode over to the new file.
+    cp -p "$TARGET" "$STAGED"
+else
+    chmod 0755 "$STAGED"
+fi
+cat "${WORK_DIR}/${BINARY}" >"$STAGED"
+mv -f "$STAGED" "$TARGET"
+STAGED=""
+info "Installed ${VERSION} to ${TARGET}"
 
 case ":${PATH}:" in
     *":${INSTALL_DIR}:"*) ;;

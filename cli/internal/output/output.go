@@ -6,6 +6,7 @@ package output
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -33,7 +34,7 @@ func ParseFormat(value string, fallback Format) (Format, error) {
 	case JSON, Table, Markdown:
 		return Format(value), nil
 	}
-	return "", fmt.Errorf("unknown format %q: use json, table, or markdown", termsafe.Line(value))
+	return "", errors.New("unknown format: use json, table, or markdown")
 }
 
 // table buffers rows and flushes once, so a whole table reaches the writer in
@@ -71,6 +72,35 @@ func writeText(w io.Writer, b *strings.Builder) error {
 	return err
 }
 
+// longestBacktickRun finds the longest run of backticks, which is what a code span
+// or fence has to outrun to contain the text.
+func longestBacktickRun(s string) int {
+	longest, run := 0, 0
+	for i := 0; i < len(s); i++ {
+		if s[i] != '`' {
+			run = 0
+			continue
+		}
+		run++
+		longest = max(longest, run)
+	}
+	return longest
+}
+
+// codeSpan makes one-line untrusted text inert, whatever backticks it holds. A
+// name ending in a backtick could otherwise close the span and carry on as markup.
+func codeSpan(s string) string {
+	delimiter := strings.Repeat("`", longestBacktickRun(s)+1)
+	return delimiter + " " + s + " " + delimiter
+}
+
+// fenced puts untrusted text in a code block, with a fence longer than any run of
+// backticks inside it. Unfenced, a snippet could forge a "## 2." result.
+func fenced(s string) string {
+	fence := strings.Repeat("`", max(3, longestBacktickRun(s)+1))
+	return fence + "\n" + strings.TrimRight(s, "\n") + "\n" + fence + "\n"
+}
+
 // SearchTable renders search hits as a table.
 func SearchTable(w io.Writer, result *api.SearchResult) error {
 	rows := make([]string, 0, len(result.Results))
@@ -85,8 +115,10 @@ func SearchMarkdown(w io.Writer, result *api.SearchResult) error {
 	var b strings.Builder
 	for i, hit := range result.Results {
 		fmt.Fprintf(&b, "## %d. %s\n\n", i+1, termsafe.Line(hit.Title))
-		fmt.Fprintf(&b, "`%s:%d` (score %.2f, docid %s)\n\n", termsafe.Line(hit.File), hit.Line, hit.Score, termsafe.Line(hit.Docid))
-		fmt.Fprintf(&b, "%s\n\n", strings.TrimRight(termsafe.Text(hit.Snippet), "\n"))
+		location := fmt.Sprintf("%s:%d", termsafe.Line(hit.File), hit.Line)
+		fmt.Fprintf(&b, "%s (score %.2f, docid %s)\n\n", codeSpan(location), hit.Score, codeSpan(termsafe.Line(hit.Docid)))
+		b.WriteString(fenced(termsafe.Text(hit.Snippet)))
+		b.WriteByte('\n')
 	}
 	return writeText(w, &b)
 }
@@ -119,7 +151,9 @@ func DocumentMarkdown(w io.Writer, doc *api.Document) error {
 func DocumentsMarkdown(w io.Writer, docs []api.Document) error {
 	var b strings.Builder
 	for _, doc := range docs {
-		fmt.Fprintf(&b, "## %s\n\n%s\n", termsafe.Line(doc.File), strings.TrimRight(termsafe.Text(deref(doc.Body)), "\n"))
+		fmt.Fprintf(&b, "## %s\n\n", codeSpan(termsafe.Line(doc.File)))
+		b.WriteString(fenced(termsafe.Text(deref(doc.Body))))
+		b.WriteByte('\n')
 	}
 	return writeText(w, &b)
 }

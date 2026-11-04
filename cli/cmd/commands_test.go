@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mggarofalo/memoria/cli/internal/apperr"
 	"github.com/mggarofalo/memoria/cli/internal/auth"
@@ -279,7 +280,7 @@ func TestMultiGetOutcomes(t *testing.T) {
 	}{
 		{"all found", `{"docs":[` + doc + `],"skipped":[],"errors":[]}`, 0, ""},
 		{"skipped warns", `{"docs":[` + doc + `],"skipped":[{"file":` + hostileJSON() + `,"reason":"too large"}],"errors":[]}`, 0, "too large"},
-		{"only skipped", `{"docs":[],"skipped":[{"file":"a","reason":"too large"}],"errors":[]}`, 0, "too large"},
+		{"only skipped", `{"docs":[],"skipped":[{"file":"a","reason":"too large"}],"errors":[]}`, apperr.ExitNotFound, "every match was skipped"},
 		{"partial failure", `{"docs":[` + doc + `],"skipped":[],"errors":["b.md: missing"]}`, apperr.ExitNotFound, "b.md: missing"},
 		{"nothing matched", `{"docs":[],"skipped":[],"errors":[]}`, apperr.ExitNotFound, "no documents matched"},
 	}
@@ -614,12 +615,147 @@ func TestSelfUpdateChecksumOnlyIsExplicitAndWarns(t *testing.T) {
 	}
 }
 
-func TestStoredKeyWithNoRecordedServerIsRefused(t *testing.T) {
+func TestStoredValueInAnOlderFormIsRefused(t *testing.T) {
 	h := newHarness(t)
 	h.keyring.values[auth.KeyName(auth.DefaultProfile)] = testKey
 	h.env[auth.EnvURL] = "https://memoria.example.com"
-	if code := h.run("status"); code != apperr.ExitInsecure {
+	if code := h.run("status"); code != apperr.ExitAuth {
 		t.Fatalf("code = %d, stderr = %q", code, h.stderr.String())
+	}
+}
+
+func TestShapelessSuccessIsNotSuccess(t *testing.T) {
+	for _, args := range [][]string{{"query", "x"}, {"get", "a"}, {"multi-get", "a"}, {"collections"}, {"status"}} {
+		for _, body := range []string{`null`, `{}`} {
+			t.Run(args[0]+" "+body, func(t *testing.T) {
+				api := newFakeAPI(t, jsonReply(body))
+				h := newHarness(t)
+				h.login(api.URL)
+				if code := h.run(args...); code != apperr.ExitGeneric || !strings.Contains(h.stderr.String(), "cannot read") {
+					t.Fatalf("code = %d, stdout = %q, stderr = %q", code, h.stdout.String(), h.stderr.String())
+				}
+			})
+		}
+	}
+}
+
+func TestHostnameOverPlainHTTPNeedsTheOverride(t *testing.T) {
+	h := newHarness(t)
+	h.env[auth.EnvAPIKey] = testKey
+	if code := h.run("status", "--api-url", "http://memoria.lan:8080"); code != apperr.ExitInsecure {
+		t.Fatalf("code = %d, stderr = %q", code, h.stderr.String())
+	}
+	h.stdin = strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"ping"}` + "\n")
+	if code := h.run("mcp", "--api-url", "http://memoria.lan:8080"); code != 0 || !strings.Contains(h.stdout.String(), `"kind":"insecure"`) {
+		t.Fatalf("mcp: code = %d, stdout = %q", code, h.stdout.String())
+	}
+}
+
+func TestMetadataAddressIsRefused(t *testing.T) {
+	for _, raw := range []string{"http://[fd00:ec2::254]", "http://169.254.169.254"} {
+		h := newHarness(t)
+		h.env[auth.EnvAPIKey] = testKey
+		if code := h.run("status", "--api-url", raw); code != apperr.ExitInsecure {
+			t.Fatalf("%s: code = %d, stderr = %q", raw, code, h.stderr.String())
+		}
+	}
+}
+
+func TestNonASCIIServerURLIsRefused(t *testing.T) {
+	for _, raw := range []string{"https://memor\u0130a.example.test", "https://memor%C4%B0a.example.test"} {
+		h := newHarness(t)
+		h.env[auth.EnvAPIKey] = testKey
+		if code := h.run("status", "--api-url", raw); code != apperr.ExitUsage {
+			t.Fatalf("%s: code = %d, stderr = %q", raw, code, h.stderr.String())
+		}
+	}
+}
+
+// A renderer stuck on a huge document must not outlive the deadline or a signal.
+func TestRenderingStopsAtTheDeadline(t *testing.T) {
+	h := newHarness(t)
+	a := h.app()
+	a.flags.timeout = 20 * time.Millisecond
+	release := make(chan struct{})
+	defer close(release)
+	start := time.Now()
+	_, err := a.renderWithin(context.Background(), func(io.Writer) error {
+		<-release
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "stopped while rendering") {
+		t.Fatalf("err = %v", err)
+	}
+	if time.Since(start) > 10*time.Second {
+		t.Fatal("rendering outlived the deadline")
+	}
+}
+
+func TestRenderingStopsOnCancel(t *testing.T) {
+	h := newHarness(t)
+	a := h.app()
+	a.flags.timeout = 0
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	release := make(chan struct{})
+	defer close(release)
+	_, err := a.renderWithin(ctx, func(io.Writer) error {
+		<-release
+		return nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// A document built to freeze the sanitizer: unterminated OSC, plain and C1.
+func TestHostileDocumentRendersPromptly(t *testing.T) {
+	for name, unit := range map[string]string{"osc": "\x1b]", "c1 osc": "\u009d"} {
+		t.Run(name, func(t *testing.T) {
+			body, err := json.Marshal(strings.Repeat(unit, (8<<20)/len(unit)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			doc := `{"docid":"f6feba","file":"c/a.md","collection":"c","path":"a.md","title":"T","context":null,
+"modifiedAt":"2026-01-01","bodyLength":10,"fromLine":null,"maxLines":null,"body":` + string(body) + `,"metadata":null}`
+			api := newFakeAPI(t, jsonReply(doc))
+			h := newHarness(t)
+			h.login(api.URL)
+			start := time.Now()
+			if code := h.run("get", "a.md"); code != 0 {
+				t.Fatalf("code = %d, stderr = %q", code, h.stderr.String())
+			}
+			if elapsed := time.Since(start); elapsed > time.Minute {
+				t.Fatalf("took %s", elapsed)
+			}
+		})
+	}
+}
+
+func TestEscapedKeyInJSONOutputIsScrubbed(t *testing.T) {
+	// The escape sits inside the secret half, so no byte-level match can see it.
+	escaped := strings.Replace(testKey, "cc", string(rune(92))+"u0063c", 1)
+	body := `{"collections":[{"name":"` + escaped + `","documents":1,"lastModified":null,"includeByDefault":true,"context":null}]}`
+	api := newFakeAPI(t, jsonReply(body))
+	h := newHarness(t)
+	h.login(api.URL)
+	if code := h.run("collections", "--format", "json"); code != 0 {
+		t.Fatalf("code = %d", code)
+	}
+	if strings.Contains(h.stdout.String(), "ddeeff") || !strings.Contains(h.stdout.String(), redact.Placeholder) {
+		t.Fatalf("stdout = %q", h.stdout.String())
+	}
+}
+
+func TestSelfUpdatePassesForce(t *testing.T) {
+	withVersion(t, "dev")
+	h := newHarness(t)
+	h.updater = &fakeUpdater{candidate: candidate("v1.1.0")}
+	if code := h.run("self-update", "--force"); code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, h.stderr.String())
+	}
+	if !h.updateOptions.Force {
+		t.Fatal("--force should reach the updater")
 	}
 }
 

@@ -15,6 +15,9 @@ import (
 	"github.com/mggarofalo/memoria/cli/internal/apperr"
 )
 
+// awsMetadataIPv6 is the instance metadata address on EC2.
+var awsMetadataIPv6 = netip.MustParseAddr("fd00:ec2::254")
+
 // Class describes how a base URL relates to the plain-http rules.
 type Class int
 
@@ -25,8 +28,7 @@ const (
 	ClassLoopback
 	// ClassPrivate is plain http to an RFC 1918 or ULA address.
 	ClassPrivate
-	// ClassHostname is plain http to a name. Its address is unknown until the
-	// connection is made, so the rule is enforced at dial time.
+	// ClassHostname is plain http to a name, whose address a resolver decides.
 	ClassHostname
 	// ClassPublic is plain http to any other IP literal.
 	ClassPublic
@@ -44,6 +46,9 @@ func ParseBaseURL(raw string) (*url.URL, error) {
 	}
 	if u.Hostname() == "" {
 		return nil, apperr.New(apperr.KindUsage, "the server URL has no host")
+	}
+	if !isASCIIHost(u) {
+		return nil, apperr.New(apperr.KindUsage, "the server URL host must be plain ASCII; use its xn-- form")
 	}
 	if u.User != nil {
 		return nil, apperr.New(apperr.KindUsage, "the server URL must not contain credentials; use 'memoria auth login'")
@@ -78,6 +83,9 @@ func classifyAddr(addr netip.Addr) Class {
 	switch {
 	case addr.IsLoopback():
 		return ClassLoopback
+	case addr == awsMetadataIPv6:
+		// Inside the ULA range, but a key sent here goes to a metadata service.
+		return ClassPublic
 	case addr.IsPrivate():
 		return ClassPrivate
 	}
@@ -87,17 +95,11 @@ func classifyAddr(addr netip.Addr) Class {
 // Evaluate applies the plain-http rules to a base URL. It returns a warning to
 // show, if any, and an error when the key must not be sent.
 func Evaluate(u *url.URL, allowInsecure bool) (warning string, err error) {
-	class := Classify(u)
-	switch class {
+	switch Classify(u) {
 	case ClassHTTPS, ClassLoopback:
 		return "", nil
 	case ClassPrivate:
 		return "plain http to a private address: the API key crosses the local network unencrypted. Prefer https.", nil
-	case ClassHostname:
-		if allowInsecure {
-			return insecureOverrideWarning, nil
-		}
-		return "plain http to a hostname: the API key crosses the network unencrypted, and the connection is refused unless the name resolves to a private address. Prefer https.", nil
 	}
 	if allowInsecure {
 		return insecureOverrideWarning, nil
@@ -108,12 +110,12 @@ func Evaluate(u *url.URL, allowInsecure bool) (warning string, err error) {
 const insecureOverrideWarning = "insecure http is explicitly allowed: the API key is being sent unencrypted across a network anyone on the path can read."
 
 func insecureRefusal() error {
-	return apperr.New(apperr.KindInsecure, "refusing to send an API key over plain http to a non-private address; use https, or pass --allow-insecure-http if you accept that the key can be read in transit")
+	return apperr.New(apperr.KindInsecure, "refusing to send an API key over plain http to a hostname or public address; use https, or pass --allow-insecure-http if you accept that the key can be read in transit")
 }
 
-// checkDialAddress enforces the plain-http rule on the address actually being
-// connected to, so a hostname cannot resolve its way around it.
-func checkDialAddress(address string) error {
+// checkLoopbackDial holds the name localhost to its meaning: a resolver that
+// answers with any other address does not get the key.
+func checkLoopbackDial(address string) error {
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
 		return fmt.Errorf("unparseable dial address: %w", err)
@@ -122,16 +124,18 @@ func checkDialAddress(address string) error {
 	if err != nil {
 		return fmt.Errorf("unparseable dial address: %w", err)
 	}
-	if classifyAddr(addr) == ClassPublic {
+	if classifyAddr(addr) != ClassLoopback {
 		return insecureRefusal()
 	}
 	return nil
 }
 
-// Origin returns the normalized scheme://host:port of a URL.
+// Origin returns the normalized scheme://host:port of a URL. Case folds for ASCII
+// only: Unicode folding would map U+0130 to i, while the network stack maps it
+// through IDNA to a different name entirely.
 func Origin(u *url.URL) string {
-	scheme := strings.ToLower(u.Scheme)
-	host := strings.ToLower(u.Hostname())
+	scheme := asciiLower(u.Scheme)
+	host := asciiLower(u.Hostname())
 	port := u.Port()
 	if port == "" {
 		switch scheme {
@@ -148,6 +152,26 @@ func Origin(u *url.URL) string {
 // rule it treats a subdomain and an https-to-http downgrade as different.
 func SameOrigin(a, b *url.URL) bool {
 	return Origin(a) == Origin(b)
+}
+
+func isASCIIHost(u *url.URL) bool {
+	host := u.Hostname()
+	for i := 0; i < len(host); i++ {
+		if host[i] <= 0x20 || host[i] >= 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if c >= 'A' && c <= 'Z' {
+			b[i] = c + ('a' - 'A')
+		}
+	}
+	return string(b)
 }
 
 // ErrResponseTooLarge is returned when a response body exceeds the configured cap.

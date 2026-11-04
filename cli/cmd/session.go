@@ -1,7 +1,10 @@
 package cmd
 
 import (
+	"bytes"
+	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"time"
@@ -106,7 +109,7 @@ func (a *app) connect() (*session, error) {
 	if err != nil {
 		return nil, err
 	}
-	resolved, err := a.resolveKey(resolver, cfg, profile, base)
+	resolved, err := a.resolveKey(resolver, profile, base)
 	if err != nil {
 		return nil, err
 	}
@@ -118,13 +121,13 @@ func (a *app) connect() (*session, error) {
 	return s, nil
 }
 
-func (a *app) resolveKey(resolver *auth.Resolver, cfg *auth.Config, profile string, base *url.URL) (auth.Resolved, error) {
+func (a *app) resolveKey(resolver *auth.Resolver, profile string, base *url.URL) (auth.Resolved, error) {
 	resolved, err := resolver.Resolve()
 	if err != nil {
 		return auth.Resolved{}, err
 	}
 	a.redactor.Add(resolved.Credential.Reveal())
-	if err := checkStoredKeyOrigin(resolved, cfg.Profile(profile), profile, base); err != nil {
+	if err := checkStoredKeyOrigin(resolved, profile, base); err != nil {
 		return auth.Resolved{}, err
 	}
 	if resolved.Source == auth.SourceEnv && a.stdinIsTerminal() && !a.flags.quiet {
@@ -133,20 +136,16 @@ func (a *app) resolveKey(resolver *auth.Resolver, cfg *auth.Config, profile stri
 	return resolved, nil
 }
 
-// checkStoredKeyOrigin binds a stored key to the server it was saved for.
-// Otherwise a stray --api-url, or a MEMORIA_URL set by a project's .env, would
-// quietly hand the stored key to whatever server it named.
-func checkStoredKeyOrigin(resolved auth.Resolved, profile auth.Profile, name string, base *url.URL) error {
-	if !resolved.Stored() {
+// checkStoredKeyOrigin holds a stored key to the origin recorded with it in the
+// store. The config file cannot be the authority: anyone who can set
+// XDG_CONFIG_HOME or HOME can supply one naming their own server.
+func checkStoredKeyOrigin(resolved auth.Resolved, name string, base *url.URL) error {
+	if !resolved.Stored() || resolved.Origin == transport.Origin(base) {
 		return nil
 	}
-	saved, err := url.Parse(profile.APIURL)
-	if err != nil || profile.APIURL == "" || !transport.SameOrigin(saved, base) {
-		return apperr.New(apperr.KindInsecure,
-			"refusing to send the key stored for profile %q to %s, which is not the server it was saved for; run 'memoria auth login --api-url <url>' for that server, or use a separate --profile",
-			name, transport.Origin(base))
-	}
-	return nil
+	return apperr.New(apperr.KindInsecure,
+		"refusing to send the key stored for profile %q to %s, which is not the server it was saved for; run 'memoria auth login --api-url <url>' for that server, or use a separate --profile",
+		name, transport.Origin(base))
 }
 
 func (a *app) newSession(base *url.URL, key string) (*session, error) {
@@ -175,6 +174,61 @@ func (a *app) httpClient(base *url.URL, key string, timeout time.Duration) (*htt
 	return transport.NewClient(options)
 }
 
+// present writes a result in the chosen format. Rendering a huge hostile document
+// happens off to the side, so that the context still ends the command on time.
+// JSON is the response itself and needs no rendering.
+func (a *app) present(ctx context.Context, fallback output.Format, raw []byte, renderers map[output.Format]func(io.Writer) error) error {
+	format := a.format(fallback)
+	if format == output.JSON {
+		return a.writeRaw(raw)
+	}
+	rendered, err := a.renderWithin(ctx, renderers[format])
+	if err != nil {
+		return err
+	}
+	_, err = a.stdout.Write(rendered)
+	return err
+}
+
+func (a *app) renderWithin(ctx context.Context, render func(io.Writer) error) ([]byte, error) {
+	ctx, cancel := a.renderContext(ctx)
+	defer cancel()
+	type outcome struct {
+		data []byte
+		err  error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		var buf bytes.Buffer
+		err := render(&buf)
+		done <- outcome{buf.Bytes(), err}
+	}()
+	select {
+	case result := <-done:
+		return result.data, result.err
+	case <-ctx.Done():
+		return nil, apperr.Wrap(apperr.KindGeneric, ctx.Err(), "stopped while rendering the result")
+	}
+}
+
+func (a *app) renderContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if a.flags.timeout <= 0 {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, a.flags.timeout)
+}
+
+// writeRaw emits the response body byte for byte. The one exception is a response
+// holding the key in use, even in an escaped form, which is scrubbed.
+func (a *app) writeRaw(body []byte) error {
+	scrubbed, err := a.redactor.JSON(body, "")
+	if err != nil {
+		scrubbed = body
+	}
+	_, err = a.stdout.Write(scrubbed)
+	return err
+}
+
 // format returns the chosen output format, or the command's default.
 func (a *app) format(fallback output.Format) output.Format {
 	// prepare has already validated the flag.
@@ -191,3 +245,13 @@ func checkResponse(status int, header http.Header, body []byte) error {
 }
 
 var errBadResponse = apperr.New(apperr.KindGeneric, "the server returned a success response this client cannot read")
+
+// requireShape refuses a 200 whose body did not parse into what the endpoint
+// promises. An HTML page from a proxy, null, and {} all parse to nothing useful,
+// and treating them as success would report a key as accepted.
+func requireShape(present bool) error {
+	if !present {
+		return errBadResponse
+	}
+	return nil
+}

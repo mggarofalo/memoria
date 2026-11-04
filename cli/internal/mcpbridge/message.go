@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"time"
 
 	"github.com/mggarofalo/memoria/cli/internal/apperr"
@@ -26,9 +27,70 @@ const (
 )
 
 var (
-	errNoResponse    = errors.New("upstream closed without answering the request")
-	errFrameTooLarge = errors.New("upstream frame exceeds the size limit")
+	errNoResponse      = errors.New("upstream closed without answering the request")
+	errFrameTooLarge   = errors.New("upstream frame exceeds the size limit")
+	errInvalidFrame    = errors.New("upstream sent an invalid frame")
+	errTooManyRequests = errors.New("too many requests are waiting")
+	errNotObject       = errors.New("not a JSON object")
+	errDuplicateMember = errors.New("duplicate member")
 )
+
+func compactJSON(dst *bytes.Buffer, src []byte) error {
+	return json.Compact(dst, src)
+}
+
+// objectFields reads one JSON object by exact member name. encoding/json matches
+// struct fields case-insensitively, so {"Id":1} would count as an id, and with
+// {"id":2,"ID":1} the last one would win. A client's parser may disagree on
+// either, so a repeated name is refused too.
+func objectFields(raw []byte) (map[string]json.RawMessage, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, err
+	}
+	if tok != json.Delim('{') {
+		return nil, errNotObject
+	}
+	fields := map[string]json.RawMessage{}
+	for dec.More() {
+		if err := readMember(dec, fields); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := dec.Token(); err != nil {
+		return nil, err
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return nil, errNotObject
+	}
+	return fields, nil
+}
+
+func readMember(dec *json.Decoder, fields map[string]json.RawMessage) error {
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	name, _ := tok.(string)
+	if _, repeated := fields[name]; repeated {
+		return errDuplicateMember
+	}
+	var value json.RawMessage
+	if err := dec.Decode(&value); err != nil {
+		return err
+	}
+	fields[name] = value
+	return nil
+}
+
+func stringField(fields map[string]json.RawMessage, name string) string {
+	var value string
+	if raw, ok := fields[name]; ok && json.Unmarshal(raw, &value) == nil {
+		return value
+	}
+	return ""
+}
 
 // message is one inbound JSON-RPC message. Unknown fields are relayed untouched
 // because the raw bytes are what goes upstream.
@@ -47,13 +109,20 @@ func (m *message) isCancellation() bool { return m.method == "notifications/canc
 
 // cancelledID returns the key of the request a cancellation names.
 func (m *message) cancelledID() string {
-	var p struct {
-		RequestID json.RawMessage `json:"requestId"`
-	}
-	if json.Unmarshal(m.params, &p) != nil {
+	fields, err := objectFields(m.params)
+	if err != nil {
 		return ""
 	}
-	return string(p.RequestID)
+	return string(fields["requestId"])
+}
+
+// stringID returns the request id if it is a JSON string.
+func (m *message) stringID() string {
+	var id string
+	if json.Unmarshal(m.id, &id) == nil {
+		return id
+	}
+	return ""
 }
 
 type rejection struct {
@@ -65,30 +134,30 @@ type rejection struct {
 // parseMessage validates framing. It accepts requests, notifications and
 // responses, the last because a client answers server-initiated requests.
 func parseMessage(raw []byte) (*message, *rejection) {
-	var envelope struct {
-		JSONRPC string          `json:"jsonrpc"`
-		ID      json.RawMessage `json:"id"`
-		Method  string          `json:"method"`
-		Params  json.RawMessage `json:"params"`
-		Result  json.RawMessage `json:"result"`
-		Error   json.RawMessage `json:"error"`
-	}
 	trimmed := bytes.TrimSpace(bytes.TrimPrefix(raw, []byte("\xef\xbb\xbf")))
-	if err := json.Unmarshal(trimmed, &envelope); err != nil {
+	fields, err := objectFields(trimmed)
+	if err != nil {
 		return nil, parseFailure(trimmed)
 	}
-	id := normalizeID(envelope.ID)
-	if envelope.JSONRPC != "2.0" {
-		return nil, &rejection{id: id, code: codeInvalidRequest, message: "jsonrpc must be \"2.0\""}
+	id := normalizeID(fields["id"])
+	if stringField(fields, "jsonrpc") != "2.0" {
+		return nil, &rejection{id: validIDOrNil(id), code: codeInvalidRequest, message: "jsonrpc must be \"2.0\""}
 	}
 	if !validID(id) {
 		return nil, &rejection{code: codeInvalidRequest, message: "id must be a string or a number"}
 	}
-	isResponse := id != nil && (envelope.Result != nil || envelope.Error != nil)
-	if envelope.Method == "" && !isResponse {
+	method := stringField(fields, "method")
+	if method == "" && !isAnswer(fields, id) {
 		return nil, &rejection{id: id, code: codeInvalidRequest, message: "message has no method"}
 	}
-	return &message{raw: trimmed, id: id, method: envelope.Method, params: envelope.Params}, nil
+	return &message{raw: trimmed, id: id, method: method, params: fields["params"]}, nil
+}
+
+// isAnswer reports exactly one of result or error, on a message with an id.
+func isAnswer(fields map[string]json.RawMessage, id json.RawMessage) bool {
+	_, result := fields["result"]
+	_, failure := fields["error"]
+	return id != nil && result != failure
 }
 
 func parseFailure(raw []byte) *rejection {
@@ -105,6 +174,13 @@ func normalizeID(id json.RawMessage) json.RawMessage {
 		return nil
 	}
 	return id
+}
+
+func validIDOrNil(id json.RawMessage) json.RawMessage {
+	if validID(id) {
+		return id
+	}
+	return nil
 }
 
 func validID(id json.RawMessage) bool {
@@ -151,15 +227,18 @@ func (b *Bridge) reject(id json.RawMessage, code int, text string) {
 // failure is only logged.
 func (b *Bridge) fail(msg *message, err error) {
 	if !msg.isRequest() {
-		b.logf("upstream failure for %s: %s", termsafe.Line(msg.method), termsafe.Line(err.Error()))
+		b.logf("upstream failure for %s: %s", msg.method, err.Error())
 		return
 	}
 	b.writeError(msg.id, errorBody(apperr.FromTransport(err)))
 }
 
 func (b *Bridge) writeError(id json.RawMessage, body rpcErrorBody) {
+	keepID := ""
 	if id == nil {
 		id = json.RawMessage("null")
+	} else {
+		keepID = (&message{id: id}).stringID()
 	}
 	body.Message = b.opts.Redactor.Diagnostic(termsafe.Line(body.Message))
 	if body.Data != nil {
@@ -167,7 +246,7 @@ func (b *Bridge) writeError(id json.RawMessage, body rpcErrorBody) {
 	}
 	frame, err := json.Marshal(rpcError{JSONRPC: "2.0", ID: id, Error: body})
 	if err == nil {
-		err = b.out.write(frame)
+		err = b.out.write(frame, keepID)
 	}
 	if err != nil {
 		b.logf("cannot write to stdout: %v", err)

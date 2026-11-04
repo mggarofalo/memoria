@@ -170,7 +170,7 @@ clients (Claude Code / CLI / scripts)
 
 **OpenAPI (Memoria.Api):** the served document is pinned to `src/Memoria.Api/openapi.json` by `OpenApiContractTests`. After changing an endpoint or contract record, refresh it with `MEMORIA_WRITE_OPENAPI=1 dotnet test Memoria.slnx --filter OpenApiContract`, then `cd cli && go generate ./...` so the Go client follows. Both drifts fail CI.
 
-**Go:** Mirror the conventions in `~/Source/plane-cli` — cobra command tree, `99designs/keyring` for credential storage, and a resolver precedence of flag → env → keyring → config. `gofmt` is authoritative. In `cli/`, `internal/transport` is the only code that puts an API key on the wire; the key never reaches stdout, stderr, logs, error messages, spawned process arguments or `config.json`, and tests assert this. See `docs/cli.md`.
+**Go:** Mirror the conventions in `~/Source/plane-cli` — cobra command tree and a resolver precedence of flag → env → keyring → file — as a default, not a reason to keep risk. The CLI deliberately diverges where a credential-holding binary needs it: `zalando/go-keyring` on Windows and Linux with `/usr/bin/security` on macOS instead of `99designs/keyring`, and an in-house updater instead of `go-selfupdate`. `gofmt` is authoritative. In `cli/`, `internal/transport` is the only code that puts an API key on the wire; the key never reaches stdout, stderr, logs, error messages, spawned process arguments or `config.json`, and tests assert this. See `docs/cli.md`.
 
 **Line endings:** C# is CRLF, everything else is LF. Enforced in `.gitattributes` and mirrored in `.editorconfig`. After changing either, run `git add --renormalize .`.
 

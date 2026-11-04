@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"github.com/mggarofalo/memoria/cli/internal/apperr"
 	"github.com/mggarofalo/memoria/cli/internal/auth"
 	"github.com/mggarofalo/memoria/cli/internal/selfupdate"
+	"github.com/mggarofalo/memoria/cli/internal/transport"
 )
 
 const testKey = "mem_0011223344556677_8899aabbccddeeff"
@@ -132,13 +134,47 @@ func (h *harness) assertNoKeyLeak() {
 // login stores the key against a server, bypassing the login command.
 func (h *harness) login(url string) {
 	h.t.Helper()
-	h.keyring.values[auth.KeyName(auth.DefaultProfile)] = testKey
+	h.keyring.values[auth.KeyName(auth.DefaultProfile)] = h.entryFor(url)
 	cfg, err := auth.LoadConfig()
 	if err != nil {
 		h.t.Fatal(err)
 	}
 	cfg.Profiles[auth.DefaultProfile] = auth.Profile{APIURL: url, Backend: auth.BackendKeyring}
 	if err := cfg.Save(); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+// entryFor is what the store holds for the test key, bound to a server.
+func (h *harness) entryFor(raw string) string {
+	h.t.Helper()
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	entry, err := auth.EncodeStoredKey(transport.Origin(parsed), testKey)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	return entry
+}
+
+// storedKeyring reports whether the keyring holds the test key for a profile.
+func (h *harness) storedKeyring(profile string) bool {
+	return strings.Contains(h.keyring.values[auth.KeyName(profile)], testKey)
+}
+
+// writeConfigFile replaces the config's content, keeping its private permissions.
+func (h *harness) writeConfigFile(content string) {
+	h.t.Helper()
+	cfg, err := auth.LoadConfig()
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	if err := cfg.Save(); err != nil {
+		h.t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(h.config, "config.json"), []byte(content), 0o600); err != nil {
 		h.t.Fatal(err)
 	}
 }
@@ -282,26 +318,33 @@ func TestKeyOnTheCommandLineWarnsAndNeverEchoes(t *testing.T) {
 
 func TestParseErrorsNeverQuoteTheKey(t *testing.T) {
 	for name, args := range map[string][]string{
-		"unknown command, key shape": {testKey},
-		"as the value of a bad flag": {"query", "x", "--limit", testKey},
-		"positional to a no-arg cmd": {"auth", "login", testKey},
-		"positional, not key-shaped": {"auth", "login", "--api-key", "opaque-secret-value", "opaque-secret-value"},
-		"with --api-key=":            {"--api-key=opaque-secret-value", "--limit", "opaque-secret-value"},
-		"status positional":          {"status", testKey},
-		"mcp positional":             {"mcp", testKey},
-		"self-update positional":     {"self-update", testKey},
-		"self-update as bad version": {"self-update", "--version", testKey},
-		"collections positional":     {"collections", testKey},
-		"auth logout positional":     {"auth", "logout", testKey},
-		"auth status positional":     {"auth", "status", testKey},
-		"version positional":         {"version", testKey},
-		"auth group positional":      {"auth", testKey},
-		"key inside a server url":    {"status", "--api-url", "https://user:" + testKey + "@host"},
-		"key inside a url query":     {"status", "--api-url", "https://host?k=" + testKey},
-		"key inside a malformed url": {"status", "--api-url", "https://host/%zz" + testKey},
-		"key as format":              {"status", "--format", testKey},
-		"key as profile":             {"status", "--profile", testKey + "/x"},
-		"key as backend":             {"auth", "login", "--backend", testKey},
+		"unknown command, key shape":  {testKey},
+		"as the value of a bad flag":  {"query", "x", "--limit", testKey},
+		"positional to a no-arg cmd":  {"auth", "login", testKey},
+		"positional, not key-shaped":  {"auth", "login", "--api-key", "opaque-secret-value", "opaque-secret-value"},
+		"with --api-key=":             {"--api-key=opaque-secret-value", "--limit", "opaque-secret-value"},
+		"status positional":           {"status", testKey},
+		"mcp positional":              {"mcp", testKey},
+		"self-update positional":      {"self-update", testKey},
+		"self-update as bad version":  {"self-update", "--version", testKey},
+		"collections positional":      {"collections", testKey},
+		"auth logout positional":      {"auth", "logout", testKey},
+		"auth status positional":      {"auth", "status", testKey},
+		"version positional":          {"version", testKey},
+		"auth group positional":       {"auth", testKey},
+		"key inside a server url":     {"status", "--api-url", "https://user:" + testKey + "@host"},
+		"key inside a url query":      {"status", "--api-url", "https://host?k=" + testKey},
+		"key inside a malformed url":  {"status", "--api-url", "https://host/%zz" + testKey},
+		"key as format":               {"status", "--format", testKey},
+		"key as profile":              {"status", "--profile", testKey + "/x"},
+		"key as backend":              {"auth", "login", "--backend", "opaque-secret-value"},
+		"opaque key as format":        {"status", "--format", "opaque-secret-value"},
+		"opaque key as timeout":       {"status", "--timeout", "opaque-secret-value"},
+		"opaque key as limit":         {"query", "x", "--limit", "opaque-secret-value"},
+		"opaque key as a command":     {"opaque-secret-value"},
+		"single dash form":            {"-api-key=opaque-secret-value", "status"},
+		"single dash, separate value": {"-api-key", "opaque-secret-value", "--limit", "opaque-secret-value"},
+		"unknown flag with a value":   {"status", "--apikey=opaque-secret-value"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newHarness(t)
@@ -604,23 +647,19 @@ func TestCorruptConfigFailsEveryCommandCleanly(t *testing.T) {
 	for _, args := range [][]string{{"status"}, {"auth", "login"}, {"auth", "logout"}, {"auth", "status"}} {
 		h := newHarness(t)
 		h.env[auth.EnvAPIKey] = testKey
-		if err := os.MkdirAll(h.config, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(h.config, "config.json"), []byte("{oops"), 0o600); err != nil {
-			t.Fatal(err)
-		}
+		h.writeConfigFile("{oops")
 		if code := h.run(args...); code != apperr.ExitGeneric {
 			t.Fatalf("%v: code = %d, stderr = %q", args, code, h.stderr.String())
 		}
 	}
 }
 
-func TestExitCodeForPlainErrors(t *testing.T) {
-	if got := exitCodeFor(errors.New("unknown command \"x\"")); got != apperr.ExitUsage {
-		t.Errorf("got %d", got)
+func TestCobraErrorsAreClassifiedWithoutQuoting(t *testing.T) {
+	err := classifyCobraError(errors.New(`unknown command "opaque-value" for "memoria"`))
+	if apperr.ExitCode(err) != apperr.ExitUsage || strings.Contains(err.Error(), "opaque-value") {
+		t.Errorf("err = %v", err)
 	}
-	if got := exitCodeFor(errors.New("other")); got != apperr.ExitGeneric {
+	if got := apperr.ExitCode(classifyCobraError(errors.New("other"))); got != apperr.ExitGeneric {
 		t.Errorf("got %d", got)
 	}
 }

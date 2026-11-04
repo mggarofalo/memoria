@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"syscall"
 	"time"
@@ -16,9 +17,11 @@ import (
 	"github.com/mggarofalo/memoria/cli/internal/termsafe"
 )
 
-// DefaultMaxResponseBytes caps a REST response. The generated client reads
-// bodies whole, so without this a hostile server could exhaust memory.
-const DefaultMaxResponseBytes int64 = 256 << 20
+// DefaultMaxResponseBytes caps a REST response after decompression. The generated
+// client reads bodies whole, so without this a hostile server could exhaust
+// memory. The largest valid response is a multi-get, which the API budgets at
+// 16 MiB of bodies plus 16 MiB of metadata.
+const DefaultMaxResponseBytes int64 = 64 << 20
 
 const maxRedirects = 5
 
@@ -86,27 +89,35 @@ func newClientWithBase(o Options, base http.RoundTripper) *http.Client {
 func newBaseTransport(u *url.URL, allowInsecure bool) *http.Transport {
 	t := http.DefaultTransport.(*http.Transport).Clone()
 	t.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
-	// An http proxy would see a plain-http request, bearer key included. It
-	// would also defeat the dial check below by connecting to the proxy
-	// instead of the server. So only https goes through a configured proxy,
-	// where the key stays inside the tunnel.
+	// An http proxy would see a plain-http request, bearer key included, so only
+	// https goes through a configured proxy, where the key stays in the tunnel.
 	t.Proxy = func(req *http.Request) (*url.URL, error) {
 		if req.URL.Scheme != "https" {
 			return nil, nil
 		}
 		return http.ProxyFromEnvironment(req)
 	}
-	if u.Scheme == "http" && !allowInsecure {
+	if needsLoopbackDial(u, allowInsecure) {
 		dialer := &net.Dialer{
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
 			Control: func(_, address string, _ syscall.RawConn) error {
-				return checkDialAddress(address)
+				return checkLoopbackDial(address)
 			},
 		}
 		t.DialContext = dialer.DialContext
 	}
 	return t
+}
+
+// needsLoopbackDial is true for plain http to the name localhost, the only name
+// allowed without the override. IP literals need no check, as nothing resolves.
+func needsLoopbackDial(u *url.URL, allowInsecure bool) bool {
+	if u.Scheme != "http" || allowInsecure || Classify(u) != ClassLoopback {
+		return false
+	}
+	_, err := netip.ParseAddr(u.Hostname())
+	return err != nil
 }
 
 // guard attaches the key and enforces limits. Injecting the key here, rather

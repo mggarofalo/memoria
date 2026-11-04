@@ -53,17 +53,11 @@ func (r *Redactor) Add(secret string) {
 	if len(secret) < minSecretLength {
 		return
 	}
-	variants := []string{
-		secret,
-		url.QueryEscape(secret),
-		url.PathEscape(secret),
-		base64.StdEncoding.EncodeToString([]byte(secret)),
-		base64.RawStdEncoding.EncodeToString([]byte(secret)),
-		base64.URLEncoding.EncodeToString([]byte(secret)),
-		base64.RawURLEncoding.EncodeToString([]byte(secret)),
-	}
-	if quoted, err := json.Marshal(secret); err == nil {
-		variants = append(variants, string(quoted[1:len(quoted)-1]))
+	variants := encodings(secret)
+	// The key's format is the server's, so this is only a defence: the part after
+	// the last underscore of mem_<id>_<secret> is what opens the corpus, even alone.
+	if head, tail, ok := cutLast(secret); ok && strings.HasPrefix(head, "mem_") && len(tail) >= minSecretLength {
+		variants = append(variants, encodings(tail)...)
 	}
 
 	r.mu.Lock()
@@ -80,6 +74,29 @@ func (r *Redactor) Add(secret string) {
 	}
 	// Longest first, so one variant cannot leave the tail of another behind.
 	sort.SliceStable(r.secrets, func(i, j int) bool { return len(r.secrets[i]) > len(r.secrets[j]) })
+}
+
+func encodings(secret string) []string {
+	variants := []string{
+		secret,
+		url.QueryEscape(secret),
+		url.PathEscape(secret),
+		base64.StdEncoding.EncodeToString([]byte(secret)),
+		base64.RawStdEncoding.EncodeToString([]byte(secret)),
+		base64.URLEncoding.EncodeToString([]byte(secret)),
+		base64.RawURLEncoding.EncodeToString([]byte(secret)),
+	}
+	// Marshalling a string cannot fail.
+	quoted, _ := json.Marshal(secret)
+	return append(variants, string(quoted[1:len(quoted)-1]))
+}
+
+func cutLast(s string) (head, tail string, ok bool) {
+	i := strings.LastIndexByte(s, '_')
+	if i < 0 {
+		return "", "", false
+	}
+	return s[:i], s[i+1:], true
 }
 
 // String removes known secrets from s.

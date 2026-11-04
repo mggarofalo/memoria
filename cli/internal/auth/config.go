@@ -39,8 +39,9 @@ type Config struct {
 
 // Profile holds per-profile settings.
 type Profile struct {
-	// APIURL is the server this profile's stored key was saved for. The key is
-	// only ever sent to this origin.
+	// APIURL is the profile's server. It is a convenience: the origin a stored key
+	// may go to is recorded with the key itself, because this file can be replaced
+	// by anyone who can set XDG_CONFIG_HOME or HOME.
 	APIURL string `json:"api_url,omitempty"`
 	// Backend is where the stored key lives: BackendKeyring or BackendFile.
 	Backend string `json:"backend,omitempty"`
@@ -57,7 +58,9 @@ func ValidateProfileName(name string) error {
 // ConfigDir returns the configuration directory, respecting XDG_CONFIG_HOME.
 func ConfigDir() (string, error) {
 	base := os.Getenv("XDG_CONFIG_HOME")
-	if base == "" {
+	// The XDG spec says to ignore a relative value, which would otherwise make the
+	// config depend on the current directory.
+	if !filepath.IsAbs(base) {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return "", fmt.Errorf("cannot determine home directory: %w", err)
@@ -84,10 +87,15 @@ func LoadConfig() (*Config, error) {
 	}
 	cfg := &Config{ActiveProfile: DefaultProfile, Profiles: map[string]Profile{}}
 
-	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
+	switch err := verifyPrivate(path); {
+	case errors.Is(err, os.ErrNotExist):
 		return cfg, nil
+	case errors.Is(err, ErrInsecurePermissions):
+		return nil, fmt.Errorf("refusing to use the config: %w: %s; %s", err, path, permissionFixHint(path))
+	case err != nil:
+		return nil, fmt.Errorf("failed to check config: %w", err)
 	}
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config: %w", err)
 	}

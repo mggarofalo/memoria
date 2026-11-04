@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"io"
 
 	"github.com/spf13/cobra"
 
@@ -74,16 +75,14 @@ func (a *app) get(ctx context.Context, ref string, params *api.GetDocumentParams
 	if err := checkResponse(resp.StatusCode(), resp.HTTPResponse.Header, resp.Body); err != nil {
 		return err
 	}
-	if resp.JSON200 == nil {
-		return errBadResponse
+	if err := requireShape(resp.JSON200 != nil && resp.JSON200.Docid != ""); err != nil {
+		return err
 	}
-	switch a.format(output.Markdown) {
-	case output.JSON:
-		return a.writeRaw(resp.Body)
-	case output.Table:
-		return output.DocumentTable(a.stdout, []api.Document{*resp.JSON200})
-	}
-	return output.DocumentMarkdown(a.stdout, resp.JSON200)
+	doc := resp.JSON200
+	return a.present(ctx, output.Markdown, resp.Body, map[output.Format]func(io.Writer) error{
+		output.Table:    func(w io.Writer) error { return output.DocumentTable(w, []api.Document{*doc}) },
+		output.Markdown: func(w io.Writer) error { return output.DocumentMarkdown(w, doc) },
+	})
 }
 
 type multiGetOptions struct {
@@ -102,8 +101,8 @@ func newMultiGetCmd(a *app) *cobra.Command {
 		Long: `Fetch several documents. Bodies are capped at --max-bytes each (server default
 64 KiB); larger documents are reported on stderr as skipped.
 
-Exits 4 if any reference could not be resolved, or if nothing matched. Whatever
-was found is still written first.`,
+Exits 4 if any reference could not be resolved, or if nothing was returned.
+Whatever was found is still written first.`,
 		Example: `  memoria multi-get f6feba claude-sessions/b.md
   memoria multi-get --pattern 'claude-sessions/2026-05*.md' --format json`,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -153,23 +152,20 @@ func (a *app) multiGet(ctx context.Context, request api.MultiGetRequest) error {
 	if err := checkResponse(resp.StatusCode(), resp.HTTPResponse.Header, resp.Body); err != nil {
 		return err
 	}
-	if resp.JSON200 == nil {
-		return errBadResponse
+	if err := requireShape(resp.JSON200 != nil && resp.JSON200.Docs != nil); err != nil {
+		return err
 	}
-	if err := a.renderMultiGet(resp.Body, resp.JSON200); err != nil {
+	if err := a.renderMultiGet(ctx, resp.Body, resp.JSON200); err != nil {
 		return err
 	}
 	return a.reportMultiGet(resp.JSON200)
 }
 
-func (a *app) renderMultiGet(raw []byte, result *api.MultiGetResult) error {
-	switch a.format(output.Markdown) {
-	case output.JSON:
-		return a.writeRaw(raw)
-	case output.Table:
-		return output.DocumentTable(a.stdout, result.Docs)
-	}
-	return output.DocumentsMarkdown(a.stdout, result.Docs)
+func (a *app) renderMultiGet(ctx context.Context, raw []byte, result *api.MultiGetResult) error {
+	return a.present(ctx, output.Markdown, raw, map[output.Format]func(io.Writer) error{
+		output.Table:    func(w io.Writer) error { return output.DocumentTable(w, result.Docs) },
+		output.Markdown: func(w io.Writer) error { return output.DocumentsMarkdown(w, result.Docs) },
+	})
 }
 
 func (a *app) reportMultiGet(result *api.MultiGetResult) error {
@@ -182,7 +178,9 @@ func (a *app) reportMultiGet(result *api.MultiGetResult) error {
 	switch {
 	case len(result.Errors) > 0:
 		return apperr.New(apperr.KindNotFound, "%d of the requested documents could not be fetched", len(result.Errors))
-	case len(result.Docs) == 0 && len(result.Skipped) == 0:
+	case len(result.Docs) == 0 && len(result.Skipped) > 0:
+		return apperr.New(apperr.KindNotFound, "nothing was returned: every match was skipped; see --max-bytes")
+	case len(result.Docs) == 0:
 		return apperr.New(apperr.KindNotFound, "no documents matched")
 	}
 	return nil
@@ -209,16 +207,14 @@ func (a *app) collections(ctx context.Context) error {
 	if err := checkResponse(resp.StatusCode(), resp.HTTPResponse.Header, resp.Body); err != nil {
 		return err
 	}
-	if resp.JSON200 == nil {
-		return errBadResponse
+	if err := requireShape(resp.JSON200 != nil && resp.JSON200.Collections != nil); err != nil {
+		return err
 	}
-	switch a.format(output.Table) {
-	case output.JSON:
-		return a.writeRaw(resp.Body)
-	case output.Markdown:
-		return output.CollectionsMarkdown(a.stdout, resp.JSON200)
-	}
-	return output.CollectionsTable(a.stdout, resp.JSON200)
+	list := resp.JSON200
+	return a.present(ctx, output.Table, resp.Body, map[output.Format]func(io.Writer) error{
+		output.Markdown: func(w io.Writer) error { return output.CollectionsMarkdown(w, list) },
+		output.Table:    func(w io.Writer) error { return output.CollectionsTable(w, list) },
+	})
 }
 
 func newStatusCmd(a *app) *cobra.Command {
@@ -242,14 +238,12 @@ func (a *app) status(ctx context.Context) error {
 	if err := checkResponse(resp.StatusCode(), resp.HTTPResponse.Header, resp.Body); err != nil {
 		return err
 	}
-	if resp.JSON200 == nil {
-		return errBadResponse
+	if err := requireShape(resp.JSON200 != nil && resp.JSON200.Collections != nil); err != nil {
+		return err
 	}
-	switch a.format(output.Table) {
-	case output.JSON:
-		return a.writeRaw(resp.Body)
-	case output.Markdown:
-		return output.StatusMarkdown(a.stdout, resp.JSON200)
-	}
-	return output.StatusTable(a.stdout, resp.JSON200)
+	status := resp.JSON200
+	return a.present(ctx, output.Table, resp.Body, map[output.Format]func(io.Writer) error{
+		output.Markdown: func(w io.Writer) error { return output.StatusMarkdown(w, status) },
+		output.Table:    func(w io.Writer) error { return output.StatusTable(w, status) },
+	})
 }

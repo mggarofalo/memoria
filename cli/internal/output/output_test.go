@@ -19,7 +19,7 @@ func TestParseFormat(t *testing.T) {
 	if got, err := ParseFormat("", Markdown); err != nil || got != Markdown {
 		t.Errorf("default = %q, %v", got, err)
 	}
-	if _, err := ParseFormat("yaml\x1b[2J", Table); err == nil || strings.Contains(err.Error(), "\x1b") {
+	if _, err := ParseFormat("yaml-secret", Table); err == nil || strings.Contains(err.Error(), "yaml-secret") {
 		t.Errorf("err = %v", err)
 	}
 }
@@ -75,7 +75,7 @@ func TestDocumentsMarkdownHandlesAMissingBody(t *testing.T) {
 	if err := DocumentsMarkdown(&out, []api.Document{{File: "a.md"}, {File: "b.md", Body: ptr("text")}}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "## a.md") || !strings.Contains(out.String(), "## b.md\n\ntext") {
+	if !strings.Contains(out.String(), "## ` a.md `") || !strings.Contains(out.String(), "## ` b.md `\n\n```\ntext\n```") {
 		t.Fatalf("out = %q", out.String())
 	}
 }

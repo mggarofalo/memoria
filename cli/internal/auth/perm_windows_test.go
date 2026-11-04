@@ -142,3 +142,83 @@ func TestPreexistingLooseDirectoryIsTightened(t *testing.T) {
 	}
 	assertOwnerOnly(t, dir)
 }
+
+func TestConfigGrantingEveryoneIsRefused(t *testing.T) {
+	dir := useTempConfig(t)
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	everyone, err := windows.CreateWellKnownSid(windows.WinWorldSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
+		AccessPermissions: windows.GENERIC_ALL,
+		AccessMode:        windows.SET_ACCESS,
+		Trustee: windows.TRUSTEE{
+			TrusteeForm:  windows.TRUSTEE_IS_SID,
+			TrusteeType:  windows.TRUSTEE_IS_WELL_KNOWN_GROUP,
+			TrusteeValue: windows.TrusteeValueFromSID(everyone),
+		},
+	}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(filepath.Join(dir, configFileName), windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION, nil, nil, acl, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig(); !errors.Is(err, ErrInsecurePermissions) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestCheckEntryRefusesUnknownTypes(t *testing.T) {
+	me, err := currentUserSID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	trusted := []*windows.SID{me}
+	everyone, err := windows.CreateWellKnownSid(windows.WinWorldSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkEntry(aceAllowed, me, trusted); err != nil {
+		t.Errorf("own allow: %v", err)
+	}
+	if err := checkEntry(aceDenied, everyone, trusted); err != nil {
+		t.Errorf("a deny takes access away: %v", err)
+	}
+	if err := checkEntry(aceAllowed, everyone, trusted); !errors.Is(err, ErrInsecurePermissions) {
+		t.Errorf("foreign allow: %v", err)
+	}
+	const conditionalAllow, objectAllow = 9, 5
+	for _, aceType := range []uint8{conditionalAllow, objectAllow, 2, 17} {
+		if err := checkEntry(aceType, me, trusted); !errors.Is(err, ErrInsecurePermissions) {
+			t.Errorf("type %d: %v", aceType, err)
+		}
+	}
+}
+
+func TestCheckOwner(t *testing.T) {
+	me, err := currentUserSID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	trusted := []*windows.SID{me}
+	everyone, err := windows.CreateWellKnownSid(windows.WinWorldSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkOwner(me, trusted); err != nil {
+		t.Error(err)
+	}
+	for _, owner := range []*windows.SID{everyone, nil} {
+		if err := checkOwner(owner, trusted); !errors.Is(err, ErrInsecurePermissions) {
+			t.Errorf("owner %v: %v", owner, err)
+		}
+	}
+}

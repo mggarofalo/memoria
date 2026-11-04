@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -118,10 +119,10 @@ func (a *app) query(ctx context.Context, text string, params *api.SearchParams) 
 	if err := checkResponse(resp.StatusCode(), resp.HTTPResponse.Header, resp.Body); err != nil {
 		return err
 	}
-	if resp.JSON200 == nil {
-		return errBadResponse
+	if err := requireShape(resp.JSON200 != nil && resp.JSON200.Results != nil); err != nil {
+		return err
 	}
-	if err := a.renderSearch(resp.Body, resp.JSON200); err != nil {
+	if err := a.renderSearch(ctx, resp.Body, resp.JSON200); err != nil {
 		return err
 	}
 	if resp.JSON200.Query.Filtered && len(resp.JSON200.Results) < int(resp.JSON200.Query.Limit) {
@@ -130,20 +131,9 @@ func (a *app) query(ctx context.Context, text string, params *api.SearchParams) 
 	return nil
 }
 
-func (a *app) renderSearch(raw []byte, result *api.SearchResult) error {
-	switch a.format(output.Table) {
-	case output.JSON:
-		return a.writeRaw(raw)
-	case output.Markdown:
-		return output.SearchMarkdown(a.stdout, result)
-	}
-	return output.SearchTable(a.stdout, result)
-}
-
-// writeRaw emits the response body byte for byte. The only thing that could
-// change it is the key scrubbing in a.stdout, which applies if a response
-// contains the very key in use.
-func (a *app) writeRaw(body []byte) error {
-	_, err := a.stdout.Write(body)
-	return err
+func (a *app) renderSearch(ctx context.Context, raw []byte, result *api.SearchResult) error {
+	return a.present(ctx, output.Table, raw, map[output.Format]func(io.Writer) error{
+		output.Markdown: func(w io.Writer) error { return output.SearchMarkdown(w, result) },
+		output.Table:    func(w io.Writer) error { return output.SearchTable(w, result) },
+	})
 }

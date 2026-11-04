@@ -278,10 +278,6 @@ func TestBadUpstreamResponses(t *testing.T) {
 			w.Header().Set("Content-Type", "text/event-stream")
 			_, _ = io.WriteString(w, "data: {\"jsonrpc\":\"2.0\",\"method\":\"note\"}\n\n")
 		},
-		"answer to another id": func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":99,"result":{}}`)
-		},
 	}
 	for name, handler := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -574,6 +570,266 @@ func TestJSONBodyFailingMidwayIsAnError(t *testing.T) {
 	})
 	if f := requireOne(t, runBridge(t, opts, initialize)); f.Error == nil {
 		t.Fatalf("frame = %+v", f)
+	}
+}
+
+func jsonUpstream(t *testing.T, body string) Options {
+	t.Helper()
+	opts, _ := upstream(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, body)
+	})
+	return opts
+}
+
+// None of these answers the request, so the client must get an error for it and
+// must not get the frame: left alone, it would wait forever on its own id.
+func TestFramesThatDoNotAnswerGetAnError(t *testing.T) {
+	for name, body := range map[string]string{
+		"capitalized id":   `{"jsonrpc":"2.0","Id":1,"result":{}}`,
+		"id and ID":        `{"jsonrpc":"2.0","id":2,"ID":1,"result":{}}`,
+		"another id":       `{"jsonrpc":"2.0","id":2,"result":{}}`,
+		"id 1.0 is not 1":  `{"jsonrpc":"2.0","id":1.0,"result":{}}`,
+		"string id":        `{"jsonrpc":"2.0","id":"1","result":{}}`,
+		"null id":          `{"jsonrpc":"2.0","id":null,"result":{}}`,
+		"no jsonrpc":       `{"id":1,"result":{}}`,
+		"wrong jsonrpc":    `{"jsonrpc":"1.0","id":1,"result":{}}`,
+		"capital JSONRPC":  `{"JSONRPC":"2.0","id":1,"result":{}}`,
+		"result and error": `{"jsonrpc":"2.0","id":1,"result":{},"error":{}}`,
+		"neither":          `{"jsonrpc":"2.0","id":1}`,
+		"repeated id":      `{"jsonrpc":"2.0","id":2,"id":1,"result":{}}`,
+		"array":            `[{"jsonrpc":"2.0","id":1,"result":{}}]`,
+		"scalar":           `1`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := requireOne(t, runBridge(t, jsonUpstream(t, body), initialize))
+			if f.Error == nil || string(f.ID) != "1" {
+				t.Fatalf("frame = %+v, id = %s", f.Error, f.ID)
+			}
+		})
+	}
+}
+
+func TestErrorAnswerIsRelayed(t *testing.T) {
+	f := requireOne(t, runBridge(t, jsonUpstream(t, `{"jsonrpc":"2.0","id":1,"error":{"code":-1,"message":"from upstream"}}`), initialize))
+	if f.Error == nil || f.Error.Message != "from upstream" {
+		t.Fatalf("frame = %+v", f.Error)
+	}
+}
+
+func TestStreamIsClosedOnceAnswered(t *testing.T) {
+	closed := make(chan struct{})
+	opts, _ := upstream(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n")
+		w.(http.Flusher).Flush()
+		// A second answer the client must never see, and a stream held open.
+		_, _ = io.WriteString(w, "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"second\":true}}\n\n")
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+		close(closed)
+	})
+	opts.RequestTimeout = time.Minute
+	r := runBridge(t, opts, initialize)
+	if len(r.frames) != 1 || strings.Contains(r.stdout, "second") {
+		t.Fatalf("stdout = %q", r.stdout)
+	}
+	select {
+	case <-closed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the stream was left open after the answer")
+	}
+}
+
+// Held-open streams once filled all 16 slots and stopped stdin being read, so the
+// cancellations that would have freed them were never seen.
+func TestCancellationsArriveWhileEverySlotIsHeld(t *testing.T) {
+	const requests = maxConcurrent + 8
+	var started sync.WaitGroup
+	started.Add(maxConcurrent)
+	opts, _ := upstream(t, func(_ http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		started.Done()
+		<-r.Context().Done()
+	})
+	stdinR, stdinW := io.Pipe()
+	var stdout bytes.Buffer
+	done := make(chan error, 1)
+	go func() { done <- New(&lockedWriter{w: &stdout}, opts).Run(context.Background(), stdinR) }()
+
+	for i := range requests {
+		_, _ = fmt.Fprintf(stdinW, `{"jsonrpc":"2.0","id":%d,"method":"tools/call"}`+"\n", i)
+	}
+	started.Wait()
+	for i := range requests {
+		_, _ = fmt.Fprintf(stdinW, `{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":%d}}`+"\n", i)
+	}
+	_ = stdinW.Close()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the cancellations never got through")
+	}
+}
+
+func TestContextCancelEndsRunWhileStdinIsOpen(t *testing.T) {
+	stdinR, stdinW := io.Pipe()
+	defer func() { _ = stdinW.Close() }()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- New(io.Discard, Options{}).Run(ctx, stdinR) }()
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("a signal should end the bridge even with stdin open")
+	}
+}
+
+func TestContextCancelStopsInFlightRequests(t *testing.T) {
+	started := make(chan struct{})
+	opts, _ := upstream(t, func(_ http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		close(started)
+		<-r.Context().Done()
+	})
+	stdinR, stdinW := io.Pipe()
+	defer func() { _ = stdinW.Close() }()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- New(io.Discard, opts).Run(ctx, stdinR) }()
+	_, _ = io.WriteString(stdinW, initialize+"\n")
+	<-started
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the bridge did not stop")
+	}
+}
+
+func TestTooManyWaitingRequestsAreRefused(t *testing.T) {
+	var stdout bytes.Buffer
+	opts := Options{Endpoint: "https://unused.invalid", Client: http.DefaultClient}
+	b := New(&stdout, opts)
+	b.pending.Store(maxPending)
+	var wg sync.WaitGroup
+	b.dispatch(context.Background(), []byte(`{"jsonrpc":"2.0","id":1,"method":"x"}`), &wg)
+	wg.Wait()
+	if !strings.Contains(stdout.String(), "too many") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestRequestTimingOutInTheQueueIsAnswered(t *testing.T) {
+	var stdout bytes.Buffer
+	b := New(&stdout, Options{RequestTimeout: time.Millisecond})
+	for range maxConcurrent {
+		b.slots <- struct{}{}
+	}
+	var wg sync.WaitGroup
+	b.dispatch(context.Background(), []byte(`{"jsonrpc":"2.0","id":1,"method":"x"}`), &wg)
+	wg.Wait()
+	if !strings.Contains(stdout.String(), `"id":1`) || !strings.Contains(stdout.String(), `"error"`) {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestEscapedKeyInAFrameIsScrubbed(t *testing.T) {
+	// The escape sits inside the secret half, so no byte-level match can see it.
+	escaped := strings.Replace(testKey, "cc", string(rune(92))+"u0063c", 1)
+	r := runBridge(t, jsonUpstream(t, `{"jsonrpc":"2.0","id":1,"result":{"text":"`+escaped+`"}}`), initialize)
+	if strings.Contains(r.stdout, "ddeeff") || !strings.Contains(r.stdout, redact.Placeholder) {
+		t.Fatalf("stdout = %q", r.stdout)
+	}
+}
+
+func TestSecretHalfInAFrameIsScrubbed(t *testing.T) {
+	r := runBridge(t, jsonUpstream(t, `{"jsonrpc":"2.0","id":1,"result":{"text":"8899aabbccddeeff"}}`), initialize)
+	if strings.Contains(r.stdout, "8899aabbccddeeff") {
+		t.Fatalf("stdout = %q", r.stdout)
+	}
+}
+
+func TestKeyInAMemberNameDoesNotCollapseMembers(t *testing.T) {
+	escaped := strings.Replace(testKey, "_", string(rune(92))+"u005f", 1)
+	r := runBridge(t, jsonUpstream(t, `{"jsonrpc":"2.0","id":1,"result":{"`+testKey+`":1,"`+escaped+`":2}}`), initialize)
+	var frame struct {
+		Result map[string]int `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(r.stdout), &frame); err != nil {
+		t.Fatal(err)
+	}
+	if len(frame.Result) != 2 {
+		t.Fatalf("stdout = %q", r.stdout)
+	}
+}
+
+// The id is the client's own. Scrubbing it would leave the client waiting forever.
+func TestKeyUsedAsAnIDStillCorrelates(t *testing.T) {
+	var stdout, log bytes.Buffer
+	opts := jsonUpstream(t, `{"jsonrpc":"2.0","id":"`+testKey+`","result":{"text":"`+testKey+`"}}`)
+	opts.Redactor = redact.New()
+	opts.Redactor.Add(testKey)
+	opts.Log = &log
+	request := `{"jsonrpc":"2.0","id":"` + testKey + `","method":"ping"}` + "\n"
+	if err := New(&stdout, opts).Run(context.Background(), strings.NewReader(request)); err != nil {
+		t.Fatal(err)
+	}
+	var frame struct {
+		ID     string `json:"id"`
+		Result struct {
+			Text string `json:"text"`
+		} `json:"result"`
+		Error json.RawMessage `json:"error"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &frame); err != nil {
+		t.Fatalf("stdout = %q: %v", stdout.String(), err)
+	}
+	if frame.ID != testKey || frame.Error != nil {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+	if frame.Result.Text != redact.Placeholder {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestStartupLogIsSanitized(t *testing.T) {
+	r := runBridge(t, Options{StartupErr: errors.New("bad\x1b]52;c;x\x07\nthing")})
+	if strings.Contains(r.log, "\x1b") || strings.Contains(r.log, "\x07") || strings.Count(r.log, "\n") != 1 {
+		t.Fatalf("log = %q", r.log)
+	}
+}
+
+func TestInboundMemberNamesAreExact(t *testing.T) {
+	for name, line := range map[string]string{
+		"capital JSONRPC": `{"JSONRPC":"2.0","id":1,"method":"ping"}`,
+		"repeated method": `{"jsonrpc":"2.0","id":1,"method":"a","method":"b"}`,
+		"trailing data":   `{"jsonrpc":"2.0","id":1,"method":"a"} {"x":1}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			opts, _ := upstream(t, func(http.ResponseWriter, *http.Request) {
+				t.Error("this should not go upstream")
+			})
+			if f := requireOne(t, runBridge(t, opts, line)); f.Error == nil {
+				t.Fatalf("frame = %+v", f)
+			}
+		})
+	}
+}
+
+func TestObjectFieldsRejectsTruncatedInput(t *testing.T) {
+	for _, raw := range []string{``, `{`, `{"a"`, `{"a":`, `{"a":1`, `{1:2}`} {
+		if _, err := objectFields([]byte(raw)); err == nil {
+			t.Errorf("objectFields(%q) should fail", raw)
+		}
 	}
 }
 

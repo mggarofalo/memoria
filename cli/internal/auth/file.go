@@ -14,8 +14,8 @@ const FileWarning = "the file backend stores the API key unencrypted on disk. It
 	"permissions keep other non-admin users out, but any process running as you, an administrator or root, " +
 	"and anything that reads your backups or disk can read the key. Use it only where no keyring exists, such as CI or a headless host."
 
-// ErrInsecurePermissions means another account can reach the credentials file.
-var ErrInsecurePermissions = errors.New("credentials file permissions are too open")
+// ErrInsecurePermissions means another account can reach the file or its directory.
+var ErrInsecurePermissions = errors.New("permissions are too open")
 
 // FileStore implements SecretStore in a plaintext JSON file beside the config.
 //
@@ -92,13 +92,14 @@ func (f *FileStore) Delete(name string) error {
 }
 
 func (f *FileStore) load() (*credentialFile, error) {
-	if err := verifyPrivate(f.path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		if errors.Is(err, ErrInsecurePermissions) {
-			return nil, fmt.Errorf("%w: %s; %s", ErrInsecurePermissions, f.path, permissionFixHint(f.path))
-		}
-		return nil, fmt.Errorf("cannot check the credentials file: %w", err)
+	err := verifyPrivate(f.path)
+	switch {
+	case err == nil, errors.Is(err, os.ErrNotExist):
+		return f.read()
+	case errors.Is(err, ErrInsecurePermissions):
+		return nil, fmt.Errorf("%w: %s; %s", err, f.path, permissionFixHint(f.path))
 	}
-	return f.read()
+	return nil, fmt.Errorf("cannot check the credentials file: %w", err)
 }
 
 func (f *FileStore) read() (*credentialFile, error) {

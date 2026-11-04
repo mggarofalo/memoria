@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/mggarofalo/memoria/cli/internal/apperr"
 	"github.com/mggarofalo/memoria/cli/internal/auth"
+	"github.com/mggarofalo/memoria/cli/internal/harden"
 	"github.com/mggarofalo/memoria/cli/internal/output"
 	"github.com/mggarofalo/memoria/cli/internal/redact"
 	"github.com/mggarofalo/memoria/cli/internal/termsafe"
@@ -93,7 +95,7 @@ func (a *app) rootCmd() *cobra.Command {
 	root.SetOut(a.stdout)
 	root.SetErr(a.stderr)
 	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
-		return apperr.New(apperr.KindUsage, "%s", err.Error())
+		return safeFlagError(err)
 	})
 
 	pf := root.PersistentFlags()
@@ -115,7 +117,7 @@ func (a *app) rootCmd() *cobra.Command {
 // prepare validates global flags and warns about a key on the command line.
 func (a *app) prepare() error {
 	if _, err := output.ParseFormat(a.flags.format, output.Table); err != nil {
-		return apperr.New(apperr.KindUsage, "%s", err.Error())
+		return apperr.Wrap(apperr.KindUsage, err, err.Error())
 	}
 	if a.flags.apiKey != "" {
 		a.warn("--api-key puts the key in your shell history and in process listings; prefer 'memoria auth login' or " + auth.EnvAPIKey)
@@ -142,13 +144,39 @@ func noArgs(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// registerArgSecrets finds the --api-key value before cobra parses anything, so
-// a parse error that quotes an argument is scrubbed too.
+// flagNamePattern finds a flag's name in pflag's errors, which also quote the
+// value given. A value can be a key pasted in the wrong place, so only the name
+// goes on.
+var flagNamePattern = regexp.MustCompile(`(--[a-z][a-z-]*)\b`)
+
+func safeFlagError(err error) error {
+	message := err.Error()
+	if strings.HasPrefix(message, "unknown") || strings.HasPrefix(message, "bad flag") {
+		return apperr.New(apperr.KindUsage, "unknown flag; see --help")
+	}
+	if name := flagNamePattern.FindString(lastClause(message)); name != "" {
+		return apperr.New(apperr.KindUsage, "invalid value for %s; see --help", name)
+	}
+	return apperr.New(apperr.KindUsage, "invalid flag or value; see --help")
+}
+
+// lastClause skips the quoted value at the start of pflag's "invalid argument"
+// errors, so that a value shaped like a flag is not taken for the flag's name.
+func lastClause(message string) string {
+	if i := strings.LastIndex(message, "\" for "); i >= 0 {
+		return message[i:]
+	}
+	return message
+}
+
+// registerArgSecrets finds an --api-key value before cobra parses anything, in
+// either dash form, so that nothing a parse error quotes can repeat it.
 func registerArgSecrets(r *redact.Redactor, args []string) {
 	for i, arg := range args {
-		if value, ok := strings.CutPrefix(arg, "--api-key="); ok {
+		name := strings.TrimLeft(arg, "-")
+		if value, ok := strings.CutPrefix(name, "api-key="); ok && name != arg {
 			r.Add(value)
-		} else if arg == "--api-key" && i+1 < len(args) {
+		} else if name == "api-key" && arg != name && i+1 < len(args) {
 			r.Add(args[i+1])
 		}
 	}
@@ -165,18 +193,19 @@ func (a *app) run(ctx context.Context, args []string) int {
 	if err == nil {
 		return apperr.ExitOK
 	}
+	err = classifyCobraError(err)
 	fmt.Fprintln(a.stderr, "error: "+termsafe.Line(err.Error()))
-	return exitCodeFor(err)
+	return apperr.ExitCode(err)
 }
 
-// exitCodeFor maps errors, treating cobra's unclassified unknown-command error
-// as a usage error.
-func exitCodeFor(err error) int {
+// classifyCobraError replaces cobra's unknown-command error, which quotes the
+// argument: a bare key given as a command must not come back on stderr.
+func classifyCobraError(err error) error {
 	var classified *apperr.Error
 	if !errors.As(err, &classified) && strings.HasPrefix(err.Error(), "unknown command") {
-		return apperr.ExitUsage
+		return apperr.New(apperr.KindUsage, "unknown command; see 'memoria --help'")
 	}
-	return apperr.ExitCode(err)
+	return err
 }
 
 func newApp(stdin io.Reader, stdout, stderr io.Writer) *app {
@@ -196,6 +225,7 @@ func newApp(stdin io.Reader, stdout, stderr io.Writer) *app {
 
 // Execute runs the command tree and returns the process exit code.
 func Execute() int {
+	_ = harden.Process() // Best effort: it only removes a defence in depth.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return newApp(os.Stdin, os.Stdout, os.Stderr).run(ctx, os.Args[1:])
