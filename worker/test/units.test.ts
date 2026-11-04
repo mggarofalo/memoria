@@ -269,6 +269,9 @@ test("embed shortens over-long text as QMD does and aligns vectors by index", as
   const input = calls.find((c) => c.path.endsWith("/embeddings"))!.body.input;
   assert.equal(input[1].length, 2044);
   assert.equal(input[2].length, 2048);
+  const tokenizing = calls.filter((c) => c.path.endsWith("/tokenize")).map((c) => c.body);
+  assert.ok(tokenizing.every((b) => b.parse_special === false), "text that looks like a control token stays text");
+  assert.equal(tokenizing.filter((b) => b.add_special === true).length, 3, "what is sent carries the model's BOS and EOS");
 });
 
 test("complete forwards grammar and sampling through the chat route", async () => {

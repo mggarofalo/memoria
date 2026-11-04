@@ -95,8 +95,8 @@ export class LlamaServers {
   }
 
   /** `parseSpecial` stays false for user text, as in QMD: what looks like a control token stays text. */
-  async tokenize(role: Role, text: string, parseSpecial = false): Promise<number[]> {
-    const raw = (await this.post(role, "tokenize", { content: text, add_special: false, parse_special: parseSpecial })) as { tokens?: unknown };
+  async tokenize(role: Role, text: string, parseSpecial = false, addSpecial = false): Promise<number[]> {
+    const raw = (await this.post(role, "tokenize", { content: text, add_special: addSpecial, parse_special: parseSpecial })) as { tokens?: unknown };
     if (!Array.isArray(raw.tokens) || !raw.tokens.every((t) => Number.isSafeInteger(t))) {
       throw new UpstreamError("upstream_invalid", "llama-server returned malformed tokens");
     }
@@ -200,8 +200,8 @@ export class Inference {
   }
 
   async embed(texts: string[]): Promise<number[][]> {
-    const fitted = await mapLimited(texts, TOKENIZE_CONCURRENCY, (text) => this.#fitEmbedText(text));
-    const raw = (await this.#servers.post("embed", "v1/embeddings", { input: fitted })) as { data?: unknown };
+    const input = await mapLimited(texts, TOKENIZE_CONCURRENCY, (text) => this.#embedTokens(text));
+    const raw = (await this.#servers.post("embed", "v1/embeddings", { input })) as { data?: unknown };
     if (!Array.isArray(raw.data) || raw.data.length !== texts.length) {
       throw new UpstreamError("upstream_invalid", "llama-server returned the wrong number of embeddings");
     }
@@ -217,11 +217,16 @@ export class Inference {
     return vectors as number[][];
   }
 
-  async #fitEmbedText(text: string): Promise<string> {
+  /**
+   * Tokens rather than a string, because the route parses control tokens found
+   * in a string, so a document could change its own vector. In-process QMD keeps
+   * them as text, and adds the model's BOS and EOS, as this does.
+   */
+  async #embedTokens(text: string): Promise<number[]> {
     const limit = CONTEXT_SIZE.embed;
     const tokens = await this.#servers.tokenize("embed", text);
-    if (tokens.length <= limit) return text;
-    return this.#servers.detokenize("embed", tokens.slice(0, Math.max(1, limit - EMBED_TOKEN_MARGIN)));
+    const fitted = tokens.length <= limit ? text : await this.#servers.detokenize("embed", tokens.slice(0, Math.max(1, limit - EMBED_TOKEN_MARGIN)));
+    return this.#servers.tokenize("embed", fitted, false, true);
   }
 
   /** QMD's budget: context size, less template overhead, less the query. */

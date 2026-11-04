@@ -570,7 +570,7 @@ test("the worker view reports state, heartbeat, load and error rate, and no cred
     assert.equal(b!.calls, 2, "and each call failed over");
     assert.equal(a!.errorRate, 1);
     assert.equal(b!.errorRate, 0);
-    assert.equal(a!.rerankTransport, "llama-server-rerank");
+    assert.equal(a!.rerankTransport, "llama-server-qmd-tokens");
     const text = JSON.stringify([f.pool.workers(), f.pool.load()]);
     assert.ok(!text.includes(TOKENS.a));
     assert.ok(!text.includes(TOKENS.b));

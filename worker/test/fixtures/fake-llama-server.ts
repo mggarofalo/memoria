@@ -42,7 +42,7 @@ const server = createServer((request, response) => {
       case "/detokenize":
         return send(200, { content: (body.tokens as number[]).map((t) => String.fromCodePoint(t - 1)).join("") });
       case "/v1/embeddings":
-        return send(200, { data: (body.input as string[]).map((text, index) => ({ index, embedding: vectorFor(text) })) });
+        return send(200, { data: (body.input as number[][]).map((tokens, index) => ({ index, embedding: vectorFor(tokens.map((t) => String.fromCodePoint(t - 1)).join("")) })) });
       case "/embeddings": {
         // The worker's rerank backend: token arrays in, rank-pooled [yes, no] out.
         const pooled = (body.input as number[][]).map((tokens, index) => {
