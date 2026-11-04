@@ -1,0 +1,16 @@
+{
+  "stryker-config": {
+    "project": "src/Memoria.Api/Memoria.Api.csproj",
+    "test-projects": ["tests/Memoria.Api.Tests/Memoria.Api.Tests.csproj"],
+    "mutate": [
+      "**/Auth/**/*.cs",
+      "**/Redaction/**/*.cs",
+      "**/Http/CallerScope.cs",
+      "**/Http/MemoriaScope.cs",
+      "**/Search/ScopedCorpus.cs",
+      "**/Search/MultiGetPolicy.cs"
+    ],
+    "reporters": ["cleartext", "html", "json"],
+    "thresholds": { "high": 95, "low": 90, "break": 0 }
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "stryker-config": {
+    "project": "src/Memoria.Api/Memoria.Api.csproj",
+    "test-projects": ["tests/Memoria.Api.Tests/Memoria.Api.Tests.csproj"],
+    "reporters": ["cleartext", "html", "json"],
+    "thresholds": { "high": 80, "low": 60, "break": 0 }
+  }
+}

@@ -1,0 +1,8 @@
+# Mutation testing for cli/. See "Quality gates" in AGENTS.md.
+unleash:
+  exclude-files:
+    - "\\.gen\\.go$"
+  # Phase 1 ratchet: reporting only, because main has no mutants to score yet.
+  threshold:
+    efficacy: 0
+    mutant-coverage: 0

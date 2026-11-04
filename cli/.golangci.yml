@@ -1,0 +1,19 @@
+version: "2"
+
+linters:
+  # Only complexity for now. govet and gofmt already run as their own CI steps.
+  default: none
+  enable:
+    - gocyclo
+  settings:
+    gocyclo:
+      # Phase 1 ratchet: the highest value on main. The target is 10.
+      min-complexity: 21
+  exclusions:
+    # Skips files with the standard "Code generated ... DO NOT EDIT." header,
+    # which is how internal/api/client.gen.go is left out.
+    generated: strict
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

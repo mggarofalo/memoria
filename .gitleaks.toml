@@ -1,0 +1,16 @@
+title = "Memoria gitleaks config"
+
+[extend]
+useDefault = true
+
+# Test fixtures hold made-up secrets such as "test-secret-0123456789abcdef".
+# Only the entropy-based generic rule is silenced there, so a real provider
+# credential pasted into a test is still caught.
+[[allowlists]]
+description = "Made-up secrets in test fixtures"
+targetRules = ["generic-api-key"]
+paths = [
+  '''^(sidecar|worker)/test/''',
+  '''^tests/''',
+  '''^cli/.*_test\.go$''',
+]

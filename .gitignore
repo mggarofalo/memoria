@@ -29,6 +29,11 @@ cli/dist/
 node_modules/
 npm-debug.log*
 
+# ---- Mutation testing ----
+.stryker-tmp/
+StrykerOutput/
+reports/
+
 # ---- Editors ----
 .idea/
 *.swp
