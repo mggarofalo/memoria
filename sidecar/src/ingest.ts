@@ -339,7 +339,8 @@ export async function removeDocument(target: ResolvedTarget, hooks: IngestHooks 
   await hooks.onStep?.("moved");
   try {
     await assertContained(target);
-    await assertScratchInRoot(target, scratch);
+    // A link's real path is wherever it points, which says nothing about where the link itself is.
+    await (stats.isSymbolicLink() ? lstat(scratch) : assertScratchInRoot(target, scratch));
     await retryTransient(() => unlink(scratch));
   } catch (err) {
     await rename(scratch, target.absolute).catch(() => undefined);

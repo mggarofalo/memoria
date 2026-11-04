@@ -264,6 +264,15 @@ test("a delete of a target that vanishes before the rename reports nothing delet
   assert.equal(await removeDocument(target), false);
 });
 
+test("a link at the last segment pointing outside the root can be deleted, leaving its target alone", async () => {
+  const f = await fixture();
+  // A junction, so this runs on Windows without the symlink privilege.
+  await symlink(f.outside, path.join(f.root, "linked.md"), "junction");
+  assert.equal(await removeDocument(resolveTarget(f.root, "**/*.md", "linked.md")), true);
+  await assert.rejects(lstat(path.join(f.root, "linked.md")), /ENOENT/);
+  await assertVictimUntouched(f);
+});
+
 test("a link between the root and the file is refused even when it stays inside the root", async () => {
   const f = await fixture();
   await writeFile(path.join(f.dir, "x.md"), "keep");
