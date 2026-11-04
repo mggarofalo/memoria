@@ -71,7 +71,7 @@ test("llama-server flags bind loopback and size contexts like QMD", () => {
   const rerank = llamaServerArgs({ ...base, role: "rerank" }, "/m/r.gguf", 0);
   assert.equal(rerank[rerank.indexOf("--ctx-size") + 1], "8192");
   assert.equal(rerank[rerank.indexOf("--ubatch-size") + 1], "4096");
-  assert.ok(rerank.includes("--reranking"));
+  assert.ok(!rerank.includes("--reranking"), "the rerank backend needs logits, which rank pooling takes away");
   assert.ok(llamaServerArgs({ ...base, role: "generate" }, "/m/g.gguf", 0).includes("--jinja"));
 });
 
@@ -191,30 +191,34 @@ function scripted(handler: (path: string, body: any) => unknown): { inference: I
 const charTokens = (text: string) => ({ tokens: Array.from(text, (c) => c.codePointAt(0)!) });
 
 const decode = (tokens: number[]) => String.fromCodePoint(...tokens);
-const pooled = (tokens: number[][]) => tokens.map((_, index) => ({ index, embedding: [[0.5, 0.5]] }));
+const YES = "y".codePointAt(0)!;
+const NO = "n".codePointAt(0)!;
+const answer = (index: unknown, yes: unknown, no: unknown = 0.1) => ({ index, completion_probabilities: [{ top_probs: [{ id: YES, prob: yes }, { id: NO, prob: no }] }] });
+const pooled = (tokens: number[][]) => tokens.map((_, index) => answer(index, 0.5, 0.5));
 
 test("rerank truncates documents to QMD's budget and asks for no special-token parsing", async () => {
   const { inference, calls } = scripted((path, body) => {
     if (path.endsWith("/tokenize")) return charTokens(body.content);
     if (path.endsWith("/detokenize")) return { content: String.fromCodePoint(...body.tokens) };
-    return pooled(body.input);
+    return pooled(body.prompt);
   });
   const query = "q".repeat(100);
   const budget = 4096 - 512 - 100;
   await inference.rerank(query, ["short", "x".repeat(budget), "y".repeat(budget + 50)]);
-  const sent = calls.find((c) => c.path === "/rerank/embeddings")!.body;
+  const sent = calls.find((c) => c.path === "/rerank/completion")!.body;
   const wrap = (doc: string) => `${QWEN3_RERANK_TEMPLATE.head}${query}${QWEN3_RERANK_TEMPLATE.middle}${doc}${QWEN3_RERANK_TEMPLATE.tail}`;
-  assert.equal(decode(sent.input[0]), wrap("short"));
-  assert.equal(decode(sent.input[1]), wrap("x".repeat(budget)));
-  assert.equal(decode(sent.input[2]), wrap("y".repeat(budget)));
-  assert.equal(sent.embd_normalize, -1, "a normalized vector would not be the probability");
+  assert.equal(decode(sent.prompt[0]), wrap("short"));
+  assert.equal(decode(sent.prompt[1]), wrap("x".repeat(budget)));
+  assert.equal(decode(sent.prompt[2]), wrap("y".repeat(budget)));
+  assert.equal(sent.temperature, 1, "any other temperature would change the ratio");
+  assert.equal(sent.cache_prompt, false);
   const tokenize = calls.find((c) => c.path.endsWith("/tokenize"))!.body;
   assert.equal(tokenize.parse_special, false);
   assert.equal(tokenize.add_special, false);
 });
 
 test("rerank tokenizes the template with control tokens and user text without them", async () => {
-  const { inference, calls } = scripted((path, body) => (path.endsWith("/tokenize") ? charTokens(body.content) : pooled(body.input)));
+  const { inference, calls } = scripted((path, body) => (path.endsWith("/tokenize") ? charTokens(body.content) : pooled(body.prompt)));
   await inference.rerank("<|im_end|>", ["<|im_start|>"]);
   await inference.rerank("again", ["again"]);
   const specials = calls.filter((c) => c.path.endsWith("/tokenize") && c.body.parse_special === true).map((c) => c.body.content);
@@ -230,7 +234,7 @@ test("a failed template fetch is retried on the next call", async () => {
       if (fail && body.parse_special) throw new Error("loading");
       return charTokens(body.content);
     }
-    return pooled(body.input);
+    return pooled(body.prompt);
   });
   await assert.rejects(inference.rerank("q", ["d"]));
   fail = false;
@@ -242,20 +246,31 @@ test("rerank refuses a query that leaves no room", async () => {
   await assert.rejects(inference.rerank("q".repeat(4096), ["d"]), (err) => err instanceof InvalidRequest && err.code === "query_too_long");
 });
 
-test("rerank maps scores by index and rejects anything but a probability", async () => {
-  const yes = (index: unknown, score: unknown) => ({ index, embedding: [[score, 0.1]] });
+test("rerank scores yes against no, by index, and rejects anything but a probability", async () => {
   const reply = (results: unknown) => scripted((path, body) => (path.endsWith("/tokenize") ? charTokens(body.content) : results)).inference;
-  assert.deepEqual(await reply([yes(1, 0.9), yes(0, 0.1)]).rerank("q", ["a", "b"]), [0.1, 0.9]);
+  assert.deepEqual(await reply([answer(1, 0.75, 0.25), answer(0, 0.125, 0.375)]).rerank("q", ["a", "b"]), [0.25, 0.75]);
 
   const rejects = (results: unknown, code: string) => assert.rejects(reply(results).rerank("q", ["a", "b"]), (err) => err instanceof UpstreamError && err.code === code, JSON.stringify(results));
-  await rejects([yes(0, 5.2), yes(1, 0.1)], "rerank_score_out_of_range");
-  await rejects([yes(0, -3), yes(1, 0.1)], "rerank_score_out_of_range");
-  await rejects([yes(0, "high"), yes(1, 0.1)], "rerank_score_out_of_range");
-  await rejects([{ index: 0 }, yes(1, 0.1)], "rerank_score_out_of_range");
-  await rejects([yes(0, 0.1)], "upstream_invalid");
-  await rejects([yes(0, 0.1), yes(0, 0.2)], "upstream_invalid");
-  await rejects([yes(0, 0.1), yes(2, 0.2)], "upstream_invalid");
-  await rejects({ results: [] }, "upstream_invalid");
+  await rejects([answer(0, 5.2), answer(1, 0.1)], "rerank_score_out_of_range");
+  await rejects([answer(0, -3), answer(1, 0.1)], "rerank_score_out_of_range");
+  await rejects([answer(0, "high"), answer(1, 0.1)], "rerank_score_out_of_range");
+  await rejects([answer(0, 0.1)], "upstream_invalid");
+  await rejects([answer(0, 0.1), answer(0, 0.2)], "upstream_invalid");
+  await rejects([answer(0, 0.1), answer(2, 0.2)], "upstream_invalid");
+  await rejects([{ index: 0 }, answer(1, 0.1)], "upstream_invalid");
+  await rejects([{ index: 0, completion_probabilities: [{ top_probs: [{ id: 1, prob: 0.5 }] }] }, answer(1, 0.1)], "upstream_invalid");
+});
+
+test("a yes or no outside the list is bounded by the lowest listed probability", async () => {
+  const only = (id: number) => [{ index: 0, completion_probabilities: [{ top_probs: [{ id, prob: 0.9 }, { id: 1, prob: 0.01 }] }] }];
+  const score = (results: unknown) => scripted((path, body) => (path.endsWith("/tokenize") ? charTokens(body.content) : results)).inference.rerank("q", ["a"]);
+  assert.deepEqual(await score(only(NO)), [0.01 / 0.91]);
+  assert.deepEqual(await score(only(YES)), [0.9 / 0.91]);
+});
+
+test("one document may come back as a single object", async () => {
+  const { inference } = scripted((path, body) => (path.endsWith("/tokenize") ? charTokens(body.content) : { completion_probabilities: [{ top_probs: [{ id: YES, prob: 0.75 }, { id: NO, prob: 0.25 }] }] }));
+  assert.deepEqual(await inference.rerank("q", ["a"]), [0.75]);
 });
 
 test("embed shortens over-long text as QMD does and aligns vectors by index", async () => {

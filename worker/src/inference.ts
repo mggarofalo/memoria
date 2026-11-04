@@ -134,56 +134,99 @@ export const QWEN3_RERANK_TEMPLATE = {
   tail: "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
 } as const;
 
+/** Enough candidates that "yes" and "no" nearly always both appear. */
+const RERANK_N_PROBS = 200;
+
 /**
- * Scores exactly the tokens in-process QMD scores. node-llama-cpp tokenizes the
- * template's pieces, the query and the document separately and joins the tokens;
- * llama-server's `/rerank` tokenizes one formatted string, which on real data
- * moved scores by up to 0.22 (docs/workers.md). So this builds the input itself
- * and sends token arrays to the same rank-pooled model through `/embeddings`,
- * whose output is the softmax of yes and no with yes first. Query and document
- * text never parse as control tokens, as in-process.
+ * Scores the tokens in-process QMD scores. node-llama-cpp tokenizes the template's
+ * pieces, the query and the document separately and joins the tokens; llama-server's
+ * `/rerank` tokenizes one formatted string, which on real data moved scores by up
+ * to 0.19, and it parses control tokens in document text. Neither happens here.
+ *
+ * `/rerank` takes no token arrays, and `/embeddings` on a rank-pooled server does
+ * but crashed the server on real data (docs/workers.md). So this asks `/completion`
+ * on an ordinary server for the probabilities of "yes" and "no" after the prompt.
+ * Their ratio is the softmax rank pooling computes.
  */
 export class QmdTokensRerank implements RerankBackend {
   readonly name = "llama-server-qmd-tokens";
   readonly #servers: LlamaServers;
-  #template: Promise<[number[], number[], number[]]> | undefined;
+  #vocabulary: Promise<{ head: number[]; middle: number[]; tail: number[]; yes: number; no: number }> | undefined;
 
   constructor(servers: LlamaServers) {
     this.#servers = servers;
   }
 
-  #templateTokens(): Promise<[number[], number[], number[]]> {
-    const special = (text: string) => this.#servers.tokenize("rerank", text, true);
-    this.#template ??= Promise.all([special(QWEN3_RERANK_TEMPLATE.head), special(QWEN3_RERANK_TEMPLATE.middle), special(QWEN3_RERANK_TEMPLATE.tail)]).catch((err: unknown) => {
-      this.#template = undefined; // a server still loading must not poison later calls
-      throw err;
-    });
-    return this.#template;
+  #fixedTokens() {
+    const tokenize = (text: string, special: boolean) => this.#servers.tokenize("rerank", text, special);
+    this.#vocabulary ??= Promise.all([tokenize(QWEN3_RERANK_TEMPLATE.head, true), tokenize(QWEN3_RERANK_TEMPLATE.middle, true), tokenize(QWEN3_RERANK_TEMPLATE.tail, true), tokenize("yes", false), tokenize("no", false)])
+      .then(([head, middle, tail, yes, no]) => {
+        if (yes[0] === undefined || no[0] === undefined) throw new UpstreamError("upstream_invalid", "llama-server returned malformed tokens");
+        return { head, middle, tail, yes: yes[0], no: no[0] };
+      })
+      .catch((err: unknown) => {
+        this.#vocabulary = undefined; // a server still loading must not poison later calls
+        throw err;
+      });
+    return this.#vocabulary;
   }
 
   async score(query: string, documents: string[]): Promise<number[]> {
-    const [head, middle, tail] = await this.#templateTokens();
+    const { head, middle, tail, yes, no } = await this.#fixedTokens();
     const queryTokens = await this.#servers.tokenize("rerank", query);
     const documentTokens = await mapLimited(documents, TOKENIZE_CONCURRENCY, (text) => this.#servers.tokenize("rerank", text));
-    const input = documentTokens.map((tokens) => [...head, ...queryTokens, ...middle, ...tokens, ...tail]);
-    const raw = await this.#servers.post("rerank", "embeddings", { input, embd_normalize: -1 });
-    if (!Array.isArray(raw) || raw.length !== documents.length) {
-      throw new UpstreamError("upstream_invalid", "llama-server returned the wrong number of rerank results");
-    }
+    const prompt = documentTokens.map((tokens) => [...head, ...queryTokens, ...middle, ...tokens, ...tail]);
+    const raw = await this.#servers.post("rerank", "completion", {
+      prompt,
+      n_predict: 1,
+      n_probs: RERANK_N_PROBS,
+      post_sampling_probs: true,
+      grammar: 'root ::= "yes" | "no"',
+      temperature: 1,
+      top_k: 0,
+      top_p: 1,
+      min_p: 0,
+      repeat_last_n: 0,
+      cache_prompt: false,
+      stream: false,
+    });
+    const items = Array.isArray(raw) ? raw : [raw];
+    if (items.length !== documents.length) throw new UpstreamError("upstream_invalid", "llama-server returned the wrong number of rerank results");
     const scores = new Array<number | undefined>(documents.length).fill(undefined);
-    for (const item of raw as Array<{ index?: unknown; embedding?: unknown }>) {
-      const { index, embedding } = item;
+    items.forEach((item: { index?: unknown; completion_probabilities?: Array<{ top_probs?: Array<{ id?: unknown; prob?: unknown }> }> }, position) => {
+      const index = item.index ?? position;
       if (typeof index !== "number" || !Number.isInteger(index) || index < 0 || index >= documents.length || scores[index] !== undefined) {
         throw new UpstreamError("upstream_invalid", "llama-server returned a bad rerank index");
       }
-      const score = (embedding as unknown[][] | undefined)?.[0]?.[0];
-      if (typeof score !== "number" || !Number.isFinite(score) || score < 0 || score > 1) {
-        throw new UpstreamError("rerank_score_out_of_range", "llama-server returned a rerank score outside 0 to 1");
-      }
-      scores[index] = score;
-    }
+      const top = item.completion_probabilities?.[0]?.top_probs;
+      if (!Array.isArray(top) || top.length === 0) throw new UpstreamError("upstream_invalid", "llama-server returned no probabilities");
+      scores[index] = yesShare(top, yes, no);
+    });
     return scores as number[];
   }
+}
+
+/**
+ * P(yes) over P(yes) + P(no). A token outside the list is below the lowest listed
+ * probability, which is used as its bound, so such a document scores near an end
+ * of the range; only the order among documents all that far down is lost.
+ */
+function yesShare(top: Array<{ id?: unknown; prob?: unknown }>, yes: number, no: number): number {
+  const probs = top.map((t) => t.prob);
+  if (!probs.every((p): p is number => typeof p === "number" && Number.isFinite(p) && p >= 0 && p <= 1)) {
+    throw new UpstreamError("rerank_score_out_of_range", "llama-server returned a probability outside 0 to 1");
+  }
+  const find = (id: number): number | undefined => {
+    const at = top.findIndex((t) => t.id === id);
+    return at < 0 ? undefined : probs[at];
+  };
+  const y = find(yes);
+  const n = find(no);
+  if (y === undefined && n === undefined) throw new UpstreamError("upstream_invalid", "llama-server listed neither yes nor no");
+  const floor = Math.min(...probs);
+  const a = y ?? floor;
+  const b = n ?? floor;
+  return a + b === 0 ? 0 : a / (a + b);
 }
 
 export class Inference {

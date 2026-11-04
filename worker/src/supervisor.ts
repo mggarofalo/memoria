@@ -84,7 +84,8 @@ export function llamaServerArgs(role: RoleConfig, modelPath: string, gpuLayers: 
     "--ctx-size", String(perSlot * role.parallel),
   ];
   if (role.role === "embed") args.push("--embeddings", "--batch-size", String(perSlot), "--ubatch-size", String(perSlot));
-  if (role.role === "rerank") args.push("--reranking", "--batch-size", String(perSlot), "--ubatch-size", String(perSlot));
+  // An ordinary server, not `--reranking`: see QmdTokensRerank.
+  if (role.role === "rerank") args.push("--batch-size", String(perSlot), "--ubatch-size", String(perSlot));
   if (role.role === "generate") args.push("--jinja");
   return args;
 }
