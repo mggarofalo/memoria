@@ -87,6 +87,8 @@ test("the worker's dry run keeps the token out, and grants read on models and ll
   assert.match(run.stdout, /MEMORIA_WORKER_TOKEN_FILE=/);
   assert.doesNotMatch(run.stdout, /MEMORIA_WORKER_TOKEN=/);
   assert.match(run.stdout, /NT SERVICE\\memoria-worker/);
+  // The install has no .git, so the copy must be stamped or it could only report `unknown`.
+  assert.match(run.stdout, /write-version\.ts/);
   assert.match(run.stdout, /AppKillProcessTree 1/);
   assert.match(run.stdout, /\/models \/grant .*RX/);
   assert.match(run.stdout, /[\\/]pf[\\/]llama \/grant .*RX/);

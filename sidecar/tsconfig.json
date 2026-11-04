@@ -20,5 +20,5 @@
     "sourceMap": true,
     "declaration": false
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts", "bench/**/*.ts", "../worker/src/**/*.ts", "../worker/test/**/*.ts", "../worker/scripts/**/*.ts"]
+  "include": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts", "bench/**/*.ts", "../worker/src/**/*.ts", "../worker/test/**/*.ts", "../worker/scripts/**/*.ts", "../scripts/release/**/*.ts"]
 }

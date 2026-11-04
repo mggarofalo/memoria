@@ -8,8 +8,12 @@ import { MetadataIndex } from "./metadata.ts";
 import { registerRoutes } from "./routes.ts";
 import { documentSchema, errorSchema, jobSchema, metadataSchema } from "./schemas.ts";
 import type { QmdBackend } from "./store.ts";
+import { resolveVersion } from "./version.ts";
 
-export const SIDECAR_VERSION = "0.1.0";
+export const SIDECAR_VERSION = resolveVersion();
+
+/** The contract's own version, as in Memoria.Api's document. It is committed in openapi.json, so it is not the build's. */
+const CONTRACT_VERSION = "v1";
 
 /** Routes that never require the shared secret. */
 export const PUBLIC_PATHS: ReadonlySet<string> = new Set(["/health", "/openapi.json"]);
@@ -112,7 +116,7 @@ export async function buildApp(options: BuildAppOptions): Promise<App> {
           "REST sidecar over the QMD SDK. Runs on the host that holds the models and index.sqlite; " +
           "Memoria.Api is its only intended caller. Every route except /health and /openapi.json requires " +
           "`Authorization: Bearer <shared secret>`.",
-        version: SIDECAR_VERSION,
+        version: CONTRACT_VERSION,
       },
       components: {
         securitySchemes: {

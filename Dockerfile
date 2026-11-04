@@ -14,11 +14,16 @@ COPY src/Memoria.Api/Memoria.Api.csproj src/Memoria.Api/
 RUN dotnet restore src/Memoria.Api/Memoria.Api.csproj
 
 COPY src/ src/
+
+# The version comes from the release tag (.github/workflows/docker.yml); .git is
+# not in the build context, so an image built without it reports 0.0.0-dev.
+ARG MEMORIA_VERSION=0.0.0-dev
 RUN dotnet publish src/Memoria.Api/Memoria.Api.csproj \
     --configuration Release \
     --no-restore \
     --output /app \
-    -p:UseAppHost=false
+    -p:UseAppHost=false \
+    -p:Version=$MEMORIA_VERSION
 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 WORKDIR /app

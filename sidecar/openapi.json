@@ -3,7 +3,7 @@
   "info": {
     "title": "memoria-qmd",
     "description": "REST sidecar over the QMD SDK. Runs on the host that holds the models and index.sqlite; Memoria.Api is its only intended caller. Every route except /health and /openapi.json requires `Authorization: Bearer <shared secret>`.",
-    "version": "0.1.0"
+    "version": "v1"
   },
   "components": {
     "securitySchemes": {

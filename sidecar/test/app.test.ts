@@ -5,6 +5,7 @@ import { test } from "node:test";
 import { authHeaders, makeApp, ManualScheduler, sampleDocs, TEST_SECRET, testConfig } from "./helpers.ts";
 import { FRONTMATTER_DOC } from "./fake-backend.ts";
 import { buildApp } from "../src/app.ts";
+import { resolveVersion } from "../src/version.ts";
 import { FakeBackend } from "./fake-backend.ts";
 
 // --- auth ----------------------------------------------------------------------
@@ -55,6 +56,7 @@ test("/health, /ready and /status report process, model and index state", async 
   try {
     const health = (await app.inject({ method: "GET", url: "/health" })).json();
     assert.equal(health.status, "ok");
+    assert.equal(health.version, resolveVersion());
     assert.equal(typeof health.uptimeSeconds, "number");
 
     let ready = await app.inject({ method: "GET", url: "/ready", headers: authHeaders });

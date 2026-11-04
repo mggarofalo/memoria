@@ -24,6 +24,29 @@ public sealed class HealthEndpointTests(MemoriaApiFactory factory) : IClassFixtu
 		Assert.Empty(factory.Sidecar.Requests);
 	}
 
+	/// <summary>
+	/// Unstamped, the version is plainly a dev one. The release workflow runs this test built with
+	/// <c>-p:Version=X</c> and <c>MEMORIA_EXPECTED_VERSION=X</c>, proving the stamp reaches the endpoint unchanged.
+	/// </summary>
+	[Fact]
+	public async Task Health_ReportsTheStampedVersion()
+	{
+		HttpClient client = factory.CreateClient();
+
+		using JsonDocument body = JsonDocument.Parse(await client.GetStringAsync("/health"));
+
+		string? version = body.RootElement.GetProperty("version").GetString();
+		string? expected = Environment.GetEnvironmentVariable("MEMORIA_EXPECTED_VERSION");
+		if (string.IsNullOrEmpty(expected))
+		{
+			Assert.StartsWith("0.0.0-dev", version);
+		}
+		else
+		{
+			Assert.Equal(expected, version);
+		}
+	}
+
 	[Fact]
 	public async Task Ready_WhenSidecarReady_Returns200WithSidecarDetails()
 	{

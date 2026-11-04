@@ -3,6 +3,8 @@
 [Oo]bj/
 [Dd]ebug/
 [Rr]elease/
+!scripts/release/
+!.claude/skills/release/
 artifacts/
 *.user
 *.suo

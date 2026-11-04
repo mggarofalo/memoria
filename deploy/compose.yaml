@@ -2,13 +2,14 @@
 # is a separate service on the model host; point MEMORIA_SIDECAR_URL at it.
 # See docs/deployment.md.
 #
+#   MEMORIA_VERSION=0.1.0 \
 #   MEMORIA_SIDECAR_URL=http://192.168.1.20:8282 \
 #   MEMORIA_SIDECAR_SECRET=... \
 #   docker compose -f deploy/compose.yaml up -d
 
 services:
   memoria-api:
-    image: ghcr.io/mggarofalo/memoria:latest
+    image: ghcr.io/mggarofalo/memoria:${MEMORIA_VERSION:?set MEMORIA_VERSION to the release to run, e.g. 0.1.0}
     container_name: memoria-api
     restart: unless-stopped
     environment:

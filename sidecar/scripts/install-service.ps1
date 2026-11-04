@@ -44,7 +44,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 $sidecar = Split-Path -Parent $PSScriptRoot
-Import-Module (Join-Path (Split-Path -Parent $sidecar) "deploy/windows/MemoriaService.psm1") -Force
+# Inside a release package, or beside this directory in a checkout.
+$module = Join-Path $sidecar "deploy/windows/MemoriaService.psm1"
+if (-not (Test-Path -LiteralPath $module)) { $module = Join-Path (Split-Path -Parent $sidecar) "deploy/windows/MemoriaService.psm1" }
+Import-Module $module -Force
 
 $dryRun = [bool]$WhatIfPreference
 if (-not $dryRun) {

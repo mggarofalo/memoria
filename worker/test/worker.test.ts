@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { runSmoke } from "../scripts/smoke.ts";
 import type { MachineState } from "../src/probes.ts";
+import { resolveVersion } from "../src/version.ts";
 import { fakeSupervisor, quietMachine, roleConfigs, startWorker, TOKEN, type RunningWorker } from "./helpers.ts";
 
 /**
@@ -49,6 +52,7 @@ test("every endpoint answers, and the smoke script passes against a running work
 
     const health = await json(fetch(`${w.url}/health`, { headers: auth }));
     assert.equal(health.status, "ok");
+    assert.equal(health.version, resolveVersion(path.dirname(fileURLToPath(new URL("../src/server.ts", import.meta.url)))));
     assert.equal(health.models.rerank.loaded, true);
     assert.equal(health.models.embed.state, "ready");
     assert.equal(health.inFlight, 0);
