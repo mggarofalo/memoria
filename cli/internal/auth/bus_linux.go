@@ -35,7 +35,7 @@ func checkSessionBus() error {
 		return err
 	}
 	if err := verifyBusSocket(path, runtimeDirectories(os.Getuid()), os.Getuid()); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", ErrBusRefused, err)
 	}
 	// Pin what was checked, so godbus has nothing left to discover or launch.
 	if err := os.Setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path="+path); err != nil {
@@ -48,12 +48,25 @@ func checkSessionBus() error {
 	return verifySecretsOwner(conn, uint32(os.Getuid()))
 }
 
+// busSocketFromEnvironment finds the bus to check. An address that is set and cannot
+// be used is a refusal. With no address, the first bus found in a runtime directory
+// is the one to check, so a bad XDG_RUNTIME_DIR cannot hide a real bus in
+// /run/user/<uid>. Finding no bus at all is the one case that means "no keyring".
 func busSocketFromEnvironment() (string, error) {
 	if address := os.Getenv("DBUS_SESSION_BUS_ADDRESS"); address != "" {
-		return busSocketPath(address)
+		path, err := busSocketPath(address)
+		if err != nil {
+			return "", fmt.Errorf("%w: %w", ErrBusRefused, err)
+		}
+		return path, nil
 	}
-	dirs := runtimeDirectories(os.Getuid())
-	return filepath.Join(dirs[0], "bus"), nil
+	for _, dir := range runtimeDirectories(os.Getuid()) {
+		path := filepath.Join(dir, "bus")
+		if _, err := os.Lstat(path); err == nil {
+			return path, nil
+		}
+	}
+	return "", errors.New("no session bus was found")
 }
 
 // runtimeDirectories lists where this user's bus may live, the verified
@@ -133,7 +146,7 @@ func verifySecretsOwner(conn *dbus.Conn, uid uint32) error {
 		return err
 	}
 	if owner != uid {
-		return fmt.Errorf("the Secret Service on this bus belongs to uid %d, not this user", owner)
+		return fmt.Errorf("%w: the Secret Service on this bus belongs to uid %d, not this user", ErrBusRefused, owner)
 	}
 	return nil
 }

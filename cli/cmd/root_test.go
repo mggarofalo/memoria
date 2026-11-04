@@ -68,6 +68,7 @@ type harness struct {
 	env           map[string]string
 	keyring       *memoryKeyring
 	noRing        bool
+	ringErr       error
 	terminal      bool
 	password      string
 	updater       releaseUpdater
@@ -94,6 +95,9 @@ func (h *harness) app() *app {
 	a.stdinIsTerminal = func() bool { return h.terminal }
 	a.readPassword = func() ([]byte, error) { return []byte(h.password), nil }
 	a.openKeyring = func() (auth.SecretStore, error) {
+		if h.ringErr != nil {
+			return nil, h.ringErr
+		}
 		if h.noRing {
 			return nil, auth.ErrKeyringUnavailable
 		}

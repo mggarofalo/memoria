@@ -550,6 +550,20 @@ func TestEncodeStoredKeyNeedsAnOrigin(t *testing.T) {
 	}
 }
 
+func TestRecordedOriginPrefersTheKeyThenTheMarker(t *testing.T) {
+	both := newMemoryStore(KeyName("p"), entry(fileKey), OriginMarkerName("p"), "https://marker:443")
+	if got := RecordedOrigin(both, "p"); got != testOrigin {
+		t.Errorf("got %q", got)
+	}
+	marker := newMemoryStore(OriginMarkerName("p"), "https://marker:443")
+	if got := RecordedOrigin(marker, "p"); got != "https://marker:443" {
+		t.Errorf("got %q", got)
+	}
+	if got := RecordedOrigin(newMemoryStore(), "p"); got != "" {
+		t.Errorf("got %q", got)
+	}
+}
+
 func TestStoredOrigin(t *testing.T) {
 	store := newMemoryStore(KeyName("good"), entry(fileKey), KeyName("bad"), "not an entry")
 	if got := StoredOrigin(store, "good"); got != testOrigin {

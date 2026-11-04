@@ -146,13 +146,18 @@ func (a *app) resolveKey(resolver *auth.Resolver, profile string, base *url.URL)
 // A keyring entry for another server gives that away. With no keyring entry nothing
 // can tell, so the origin in use is always stated.
 func (a *app) checkFileBackend(resolved auth.Resolved, profile string) error {
-	origin := a.keyringOrigin(profile)
+	origin, err := a.recordedOrigin(profile)
+	if err != nil {
+		return err
+	}
 	if origin != "" && origin != resolved.Origin {
 		return apperr.New(apperr.KindInsecure,
-			"the credentials file for profile %q names %s, but the OS keyring holds a key for %s; check XDG_CONFIG_HOME and HOME, or run 'memoria auth logout'",
+			"the credentials file for profile %q names %s, but the OS keyring knows this profile by %s; check XDG_CONFIG_HOME and HOME, as they may point at someone else's files",
 			profile, resolved.Origin, origin)
 	}
-	a.info("Using the key from the credentials file, for " + resolved.Origin)
+	// Not a.info: with nothing to compare against, this line is the only signal, so
+	// --quiet must not hide it.
+	a.warn("using the key from the credentials file, for " + resolved.Origin)
 	return nil
 }
 

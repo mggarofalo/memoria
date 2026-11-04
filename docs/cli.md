@@ -97,11 +97,15 @@ The server URL comes from `--api-url`, then `MEMORIA_URL`, then the profile.
 
 A key from the keyring or file is sent only to the server it was saved for. That origin is stored with the key, in the same secret, so replacing the config cannot redirect it. If `--api-url`, `MEMORIA_URL` or the config names another origin, the command refuses. Use a separate `--profile` for a second server.
 
-`auth login` shows the server before it asks for the key. It ignores `MEMORIA_URL`, and it uses the URL saved in the config only when the keyring already holds a key for that server. Otherwise pass `--api-url`, or type the URL at the prompt. The credentials file cannot vouch for a URL, because it sits in the same directory as the config, so logging in again with the file backend needs `--api-url` each time.
+`auth login` shows the server before it asks for the key. It ignores `MEMORIA_URL`. If the config has a saved URL, login uses it only when the keyring confirms that server; otherwise pass `--api-url`. The prompt for a URL appears only at a terminal with no saved URL. The credentials file cannot vouch for a URL, because it sits in the same directory as the config. On a machine with a keyring, a file login leaves a small record of its server there, which holds no key.
 
-A command using the file backend says which server the key is for. It refuses if the keyring holds a key for a different server, since a poisoned config directory looks exactly like that. With no keyring entry to compare, a poisoned directory holding its own credentials can't be detected: the attacker's key would go to the attacker's server, along with your search text. So check that line.
+`auth logout` says which server each removed key was for. It keeps a keyring key for a different server than the config names, because a config can be replaced by whoever sets `XDG_CONFIG_HOME` or `HOME`. Pass `--include-keyring` to remove it anyway.
 
-On Linux, the CLI talks to the Secret Service only over a session bus that is a `unix:path` socket owned by you, inside your runtime directory, and only if your own account holds the service's name. A `DBUS_SESSION_BUS_ADDRESS` naming anything else is refused, because whoever runs the bus would receive the key.
+A command using the file backend always states which server the key is for, even with `--quiet`. It refuses if the keyring knows this profile by a different server, since a poisoned config directory looks exactly like that. It also refuses if the session bus was named but failed the checks below, since hiding the keyring is how a poisoned environment would avoid that comparison. Only a keyring that is genuinely absent counts as none. With nothing to compare, a poisoned directory holding its own credentials can't be detected: the attacker's key would go to the attacker's server, along with your search text. So check that line.
+
+On Linux, the CLI talks to the Secret Service only over a session bus that is a `unix:path` socket owned by you, inside your runtime directory, and only if your own account holds the service's name. A `DBUS_SESSION_BUS_ADDRESS` naming anything else is refused, because whoever runs the bus would receive the key. A process already running as you can run its own bus and is outside this check, as it could read your key in other ways too.
+
+Sessions on a `dbus-launch` abstract socket, or a `dbus-run-session` bus in `/tmp`, fail these checks, so they lose the keyring. To use the file backend there, unset `DBUS_SESSION_BUS_ADDRESS` for the command, since a refused bus stops file-backed commands too.
 
 The CLI refuses a `config.json` or credentials file that other accounts can reach, that is a symlink or has a second hard link, or whose directory other accounts can reach.
 

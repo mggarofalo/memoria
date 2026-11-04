@@ -110,7 +110,9 @@ func (a *app) saveLogin(store auth.SecretStore, cfg *auth.Config, profile, backe
 	if err := store.Set(auth.KeyName(profile), entry); err != nil {
 		return err
 	}
-	a.removeFromOtherBackend(backend, profile, transport.Origin(base))
+	origin := transport.Origin(base)
+	a.removeFromOtherBackend(backend, profile, origin)
+	a.updateOriginMarker(backend, profile, origin)
 
 	cfg.ActiveProfile = profile
 	cfg.Profiles[profile] = auth.Profile{APIURL: base.String(), Backend: backend}
@@ -182,35 +184,55 @@ func (a *app) loginURL(cfg *auth.Config, profile string) (string, error) {
 
 func (a *app) confirmSavedOrigin(saved, profile string) error {
 	parsed, err := url.Parse(saved)
-	if err == nil && a.keyringOrigin(profile) == transport.Origin(parsed) {
-		return nil
+	if err == nil {
+		if origin, ringErr := a.recordedOrigin(profile); ringErr == nil && origin == transport.Origin(parsed) {
+			return nil
+		}
 	}
 	return apperr.New(apperr.KindInsecure,
-		"no key in the OS keyring confirms the server the config names for profile %q; pass --api-url to choose the server explicitly", profile)
+		"nothing in the OS keyring confirms the server the config names for profile %q; pass --api-url to choose the server explicitly", profile)
 }
 
-// keyringOrigin returns the origin of the profile's keyring entry, if there is one.
-func (a *app) keyringOrigin(profile string) string {
+// keyringOrigin returns the origin of the profile's key in the keyring. No keyring
+// means no origin. A refused bus is an error, because a poisoned environment refuses
+// its own way to the entry that would expose it.
+func (a *app) keyringOrigin(profile string) (string, error) {
+	return a.readKeyring(profile, auth.StoredOrigin)
+}
+
+// recordedOrigin is keyringOrigin, also counting the marker a file login leaves.
+func (a *app) recordedOrigin(profile string) (string, error) {
+	return a.readKeyring(profile, auth.RecordedOrigin)
+}
+
+func (a *app) readKeyring(profile string, read func(auth.SecretStore, string) string) (string, error) {
 	ring, err := a.openKeyring()
-	if err != nil {
-		return ""
+	if errors.Is(err, auth.ErrBusRefused) {
+		return "", apperr.Wrap(apperr.KindInsecure, err,
+			"cannot check the OS keyring: "+err.Error()+". If that bus address is simply stale, unset DBUS_SESSION_BUS_ADDRESS")
 	}
-	return auth.StoredOrigin(ring, profile)
+	if err != nil {
+		return "", nil
+	}
+	return read(ring, profile), nil
 }
 
-// checkBackendConflict refuses a file login beside a keyring entry for another
-// server. Commands would refuse that pair anyway, since it is also what a poisoned
-// config directory looks like, so it is better to say so here.
+// checkBackendConflict refuses a file login beside a keyring key for another server.
+// Commands would refuse that pair anyway, since it is also what a poisoned config
+// directory looks like, so it is better to say so here.
 func (a *app) checkBackendConflict(backend, profile string, base *url.URL) error {
 	if backend != auth.BackendFile {
 		return nil
 	}
-	origin := a.keyringOrigin(profile)
+	origin, err := a.keyringOrigin(profile)
+	if err != nil {
+		return err
+	}
 	if origin == "" || origin == transport.Origin(base) {
 		return nil
 	}
 	return apperr.New(apperr.KindInsecure,
-		"profile %q already has a key in the OS keyring for %s; run 'memoria auth logout' first, or use a separate --profile", profile, origin)
+		"profile %q already has a key in the OS keyring for %s; use a separate --profile, or if you mean to replace it, 'memoria auth logout --include-keyring' first", profile, origin)
 }
 
 func (a *app) readKey() (string, error) {
@@ -293,6 +315,21 @@ func (a *app) removeFromOtherBackend(backend, profile, origin string) {
 	}
 }
 
+// updateOriginMarker leaves the keyring a record of a file login's server, so that a
+// later poisoned config directory has something to conflict with. It is best effort:
+// a machine with no keyring has nothing to protect this way.
+func (a *app) updateOriginMarker(backend, profile, origin string) {
+	ring, err := a.openKeyring()
+	if err != nil {
+		return
+	}
+	if backend == auth.BackendFile {
+		_ = ring.Set(auth.OriginMarkerName(profile), origin)
+		return
+	}
+	_ = ring.Delete(auth.OriginMarkerName(profile))
+}
+
 func (a *app) reportLogin(backend, profile, url string) {
 	where := "the OS keyring"
 	if backend == auth.BackendFile {
@@ -305,16 +342,24 @@ func (a *app) reportLogin(backend, profile, url string) {
 }
 
 func newAuthLogoutCmd(a *app) *cobra.Command {
-	return &cobra.Command{
+	var includeKeyring bool
+	cmd := &cobra.Command{
 		Use:   "logout",
 		Short: "Remove the stored API key",
-		Long:  "Remove the profile's key from the OS keyring and the credentials file. This does not revoke it on the server.",
-		Args:  noArgs,
-		RunE:  func(*cobra.Command, []string) error { return a.logout() },
+		Long: `Remove the profile's key from the credentials file and the OS keyring. This does
+not revoke it on the server.
+
+A keyring key for a different server than the config names is kept unless you pass
+--include-keyring. A config can be replaced by whoever sets XDG_CONFIG_HOME or HOME,
+and logging out under one must not destroy the real key.`,
+		Args: noArgs,
+		RunE: func(*cobra.Command, []string) error { return a.logout(includeKeyring) },
 	}
+	cmd.Flags().BoolVar(&includeKeyring, "include-keyring", false, "Also remove a keyring key for a different server than the config names")
+	return cmd
 }
 
-func (a *app) logout() error {
+func (a *app) logout(includeKeyring bool) error {
 	cfg, err := a.loadConfig()
 	if err != nil {
 		return err
@@ -323,14 +368,14 @@ func (a *app) logout() error {
 	if err != nil {
 		return err
 	}
-	removed, failure := a.deleteStoredKeys(profile)
+	removed, failure := a.deleteStoredKeys(cfg, profile, includeKeyring)
 	if failure != nil {
 		return failure
 	}
 	if removed {
 		a.info(fmt.Sprintf("Removed the stored key for profile %q. It stays valid on the server until revoked there.", profile))
 	} else {
-		a.info(fmt.Sprintf("No stored key for profile %q.", profile))
+		a.info(fmt.Sprintf("No key removed for profile %q.", profile))
 	}
 	if a.getenv(auth.EnvAPIKey) != "" {
 		a.warn(auth.EnvAPIKey + " is still set in this environment")
@@ -338,26 +383,61 @@ func (a *app) logout() error {
 	return nil
 }
 
-// deleteStoredKeys tries both stores. An absent keyring is not a failure, since
-// the key may never have been there.
-func (a *app) deleteStoredKeys(profile string) (removed bool, failure error) {
-	stores := make([]auth.SecretStore, 0, 2)
-	if ring, err := a.openKeyring(); err == nil {
-		stores = append(stores, ring)
-	}
+// deleteStoredKeys tries both stores. An absent keyring is not a failure, since the
+// key may never have been there.
+func (a *app) deleteStoredKeys(cfg *auth.Config, profile string, includeKeyring bool) (removed bool, failure error) {
 	file, err := auth.NewFileStore()
 	if err != nil {
 		return false, err
 	}
-	stores = append(stores, file)
-	for _, store := range stores {
-		err := store.Delete(auth.KeyName(profile))
-		removed = removed || err == nil
-		if err != nil && !errors.Is(err, auth.ErrNotFound) {
-			failure = errors.Join(failure, err)
-		}
+	removed, failure = a.deleteFrom(file, "the credentials file", auth.StoredOrigin(file, profile), profile)
+	ring, err := a.openKeyring()
+	if errors.Is(err, auth.ErrBusRefused) {
+		a.warn("the OS keyring was not touched: " + err.Error())
 	}
-	return removed, failure
+	if err != nil {
+		return removed, failure
+	}
+	ringRemoved, ringFailure := a.deleteFromKeyring(ring, cfg, profile, includeKeyring)
+	return removed || ringRemoved, errors.Join(failure, ringFailure)
+}
+
+func (a *app) deleteFromKeyring(ring auth.SecretStore, cfg *auth.Config, profile string, includeKeyring bool) (bool, error) {
+	origin := auth.RecordedOrigin(ring, profile)
+	if !includeKeyring && origin != "" && origin != configOrigin(cfg, profile) {
+		a.warn(fmt.Sprintf("kept the OS keyring's key for %s, because the config names a different server; pass --include-keyring to remove it", origin))
+		return false, nil
+	}
+	_ = ring.Delete(auth.OriginMarkerName(profile))
+	return a.deleteFrom(ring, "the OS keyring", auth.StoredOrigin(ring, profile), profile)
+}
+
+func (a *app) deleteFrom(store auth.SecretStore, where, origin, profile string) (bool, error) {
+	err := store.Delete(auth.KeyName(profile))
+	if errors.Is(err, auth.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	a.info(fmt.Sprintf("Removed the key for %s from %s.", describeOrigin(origin), where))
+	return true, nil
+}
+
+func describeOrigin(origin string) string {
+	if origin == "" {
+		return "an unreadable entry"
+	}
+	return origin
+}
+
+func configOrigin(cfg *auth.Config, profile string) string {
+	saved := cfg.Profile(profile).APIURL
+	parsed, err := url.Parse(saved)
+	if saved == "" || err != nil {
+		return ""
+	}
+	return transport.Origin(parsed)
 }
 
 // authStatus is the output of auth status. It says a key is present and where

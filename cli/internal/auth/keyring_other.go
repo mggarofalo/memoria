@@ -23,7 +23,7 @@ type libraryStore struct {
 // such as a headless Linux host with no session bus.
 func openPlatformKeyring(service string) (SecretStore, error) {
 	if err := sessionBusCheck(); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrKeyringUnavailable, err)
+		return nil, fmt.Errorf("%w: %w", ErrKeyringUnavailable, err)
 	}
 	if _, err := keyring.Get(service, availabilityProbe); err != nil && !errors.Is(err, keyring.ErrNotFound) {
 		return nil, ErrKeyringUnavailable
@@ -34,7 +34,7 @@ func openPlatformKeyring(service string) (SecretStore, error) {
 // Get retrieves a secret. Errors never include the value.
 func (l *libraryStore) Get(name string) (string, error) {
 	if err := sessionBusCheck(); err != nil {
-		return "", fmt.Errorf("%w: %v", ErrKeyringUnavailable, err)
+		return "", fmt.Errorf("%w: %w", ErrKeyringUnavailable, err)
 	}
 	value, err := keyring.Get(l.service, name)
 	if errors.Is(err, keyring.ErrNotFound) {
@@ -49,7 +49,7 @@ func (l *libraryStore) Get(name string) (string, error) {
 // Set stores a secret.
 func (l *libraryStore) Set(name, value string) error {
 	if err := sessionBusCheck(); err != nil {
-		return fmt.Errorf("%w: %v", ErrKeyringUnavailable, err)
+		return fmt.Errorf("%w: %w", ErrKeyringUnavailable, err)
 	}
 	if err := keyring.Set(l.service, name, value); err != nil {
 		return fmt.Errorf("failed to write to the OS keyring: %w", err)
@@ -60,7 +60,7 @@ func (l *libraryStore) Set(name, value string) error {
 // Delete removes a secret. Removing an absent entry is ErrNotFound.
 func (l *libraryStore) Delete(name string) error {
 	if err := sessionBusCheck(); err != nil {
-		return fmt.Errorf("%w: %v", ErrKeyringUnavailable, err)
+		return fmt.Errorf("%w: %w", ErrKeyringUnavailable, err)
 	}
 	err := keyring.Delete(l.service, name)
 	if errors.Is(err, keyring.ErrNotFound) {

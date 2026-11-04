@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -246,7 +247,7 @@ func TestLoginRemovesTheCopyInTheOtherBackend(t *testing.T) {
 	if code := h.run("auth", "login", "--api-url", api.URL, "--backend", "file"); code != 0 {
 		t.Fatalf("stderr = %q", h.stderr.String())
 	}
-	if len(h.keyring.values) != 0 {
+	if h.storedKeyring(auth.DefaultProfile) {
 		t.Fatal("the keyring copy should be gone")
 	}
 }
@@ -311,7 +312,7 @@ func TestLogoutRemovesFromBothBackends(t *testing.T) {
 func TestLogoutEdgeCases(t *testing.T) {
 	t.Run("nothing stored", func(t *testing.T) {
 		h := newHarness(t)
-		if code := h.run("auth", "logout"); code != 0 || !strings.Contains(h.stderr.String(), "No stored key") {
+		if code := h.run("auth", "logout"); code != 0 || !strings.Contains(h.stderr.String(), "No key removed") {
 			t.Fatalf("code = %d, stderr = %q", code, h.stderr.String())
 		}
 	})
@@ -698,7 +699,7 @@ func TestFileLoginBesideAKeyringKeyForAnotherServerIsRefused(t *testing.T) {
 	h.login(real.URL)
 	h.stdin = strings.NewReader(testKey)
 	code := h.run("auth", "login", "--api-url", other.URL, "--backend", "file")
-	if code != apperr.ExitInsecure || !strings.Contains(h.stderr.String(), "auth logout") {
+	if code != apperr.ExitInsecure || !strings.Contains(h.stderr.String(), "--include-keyring") {
 		t.Fatalf("code = %d, stderr = %q", code, h.stderr.String())
 	}
 	if len(other.requests) != 0 || !h.storedKeyring(auth.DefaultProfile) {
@@ -741,6 +742,240 @@ func TestFileBackendStatesTheServerInUse(t *testing.T) {
 	}
 	if !strings.Contains(h.stderr.String(), "for http://127.0.0.1") {
 		t.Fatalf("stderr = %q", h.stderr.String())
+	}
+}
+
+// plantCredentials gives the poisoned directory its own credentials file.
+func (h *harness) plantCredentials(url string) {
+	h.t.Helper()
+	file, err := auth.NewFileStore()
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	if err := file.Set(auth.KeyName(auth.DefaultProfile), h.entryFor(url)); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+// The hint on the conflict error once told the victim to do exactly this.
+func TestLogoutUnderAPoisonedConfigKeepsTheKeyringKey(t *testing.T) {
+	real := newFakeAPI(t, jsonReply(`{"collections":[]}`))
+	evil := newFakeAPI(t, jsonReply(`{"collections":[]}`))
+	h := newHarness(t)
+	h.login(real.URL)
+	want := h.keyring.values[auth.KeyName(auth.DefaultProfile)]
+	h.poisonConfig(evil.URL, auth.BackendFile)
+	h.plantCredentials(evil.URL)
+
+	if code := h.run("auth", "logout"); code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, h.stderr.String())
+	}
+	if h.keyring.values[auth.KeyName(auth.DefaultProfile)] != want {
+		t.Fatal("the real keyring entry was deleted")
+	}
+	if !strings.Contains(h.stderr.String(), "--include-keyring") || !strings.Contains(h.stderr.String(), "127.0.0.1") {
+		t.Fatalf("stderr = %q", h.stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "memoria", credentialFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the planted credentials should be gone: %v", err)
+	}
+}
+
+func TestLogoutWithNoConfigKeepsTheKeyringKey(t *testing.T) {
+	real := newFakeAPI(t, jsonReply(`{"collections":[]}`))
+	h := newHarness(t)
+	h.login(real.URL)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if code := h.run("auth", "logout"); code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, h.stderr.String())
+	}
+	if !h.storedKeyring(auth.DefaultProfile) {
+		t.Fatal("the real keyring entry was deleted")
+	}
+}
+
+func TestLogoutIncludeKeyringIsExplicit(t *testing.T) {
+	real := newFakeAPI(t, jsonReply(`{"collections":[]}`))
+	evil := newFakeAPI(t, jsonReply(`{"collections":[]}`))
+	h := newHarness(t)
+	h.login(real.URL)
+	h.poisonConfig(evil.URL, auth.BackendKeyring)
+	if code := h.run("auth", "logout", "--include-keyring"); code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, h.stderr.String())
+	}
+	if h.storedKeyring(auth.DefaultProfile) {
+		t.Fatal("--include-keyring should remove it")
+	}
+}
+
+func TestLogoutPrintsTheOriginRemoved(t *testing.T) {
+	api := newFakeAPI(t, jsonReply(`{"collections":[]}`))
+	h := newHarness(t)
+	h.login(api.URL)
+	if code := h.run("auth", "logout"); code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, h.stderr.String())
+	}
+	if !strings.Contains(h.stderr.String(), "Removed the key for http://127.0.0.1") || !strings.Contains(h.stderr.String(), "OS keyring") {
+		t.Fatalf("stderr = %q", h.stderr.String())
+	}
+}
+
+func TestLogoutWithABusRefusedRemovesOnlyTheFile(t *testing.T) {
+	api := newFakeAPI(t, jsonReply(`{"collections":[]}`))
+	h := newHarness(t)
+	h.stdin = strings.NewReader(testKey)
+	if code := h.run("auth", "login", "--api-url", api.URL, "--backend", "file"); code != 0 {
+		t.Fatalf("stderr = %q", h.stderr.String())
+	}
+	h.ringErr = fmt.Errorf("%w: %w", auth.ErrKeyringUnavailable, auth.ErrBusRefused)
+	if code := h.run("auth", "logout"); code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, h.stderr.String())
+	}
+	if !strings.Contains(h.stderr.String(), "not touched") {
+		t.Fatalf("stderr = %q", h.stderr.String())
+	}
+}
+
+func TestPoisonedDirectoryErrorDoesNotSuggestLogout(t *testing.T) {
+	real := newFakeAPI(t, jsonReply(`{"collections":[]}`))
+	evil := newFakeAPI(t, jsonReply(`{"collections":[]}`))
+	h := newHarness(t)
+	h.login(real.URL)
+	h.poisonConfig(evil.URL, auth.BackendFile)
+	h.plantCredentials(evil.URL)
+	h.run("collections")
+	if strings.Contains(h.stderr.String(), "logout") {
+		t.Fatalf("stderr = %q", h.stderr.String())
+	}
+}
+
+// A poisoned directory plus a bad bus address once made the keyring look absent, so
+// the conflict check passed and the attacker's key was used.
+func TestRefusedBusFailsTheConflictCheckClosed(t *testing.T) {
+	evil := newFakeAPI(t, jsonReply(`{"collections":[]}`))
+	h := newHarness(t)
+	h.poisonConfig(evil.URL, auth.BackendFile)
+	h.plantCredentials(evil.URL)
+	h.ringErr = fmt.Errorf("%w: %w", auth.ErrKeyringUnavailable, auth.ErrBusRefused)
+	if code := h.run("query", "private search text"); code != apperr.ExitInsecure {
+		t.Fatalf("code = %d, stderr = %q", code, h.stderr.String())
+	}
+	if len(evil.requests) != 0 {
+		t.Fatal("search text reached the attacker")
+	}
+	if !strings.Contains(h.stderr.String(), "DBUS_SESSION_BUS_ADDRESS") {
+		t.Fatalf("stderr = %q", h.stderr.String())
+	}
+}
+
+func TestRefusedBusStopsAFileLogin(t *testing.T) {
+	api := newFakeAPI(t, jsonReply(`{"collections":[]}`))
+	h := newHarness(t)
+	h.ringErr = fmt.Errorf("%w: %w", auth.ErrKeyringUnavailable, auth.ErrBusRefused)
+	h.stdin = strings.NewReader(testKey)
+	if code := h.run("auth", "login", "--api-url", api.URL, "--backend", "file"); code != apperr.ExitInsecure {
+		t.Fatalf("code = %d, stderr = %q", code, h.stderr.String())
+	}
+	if len(api.requests) != 0 {
+		t.Fatal("the key was sent")
+	}
+}
+
+// A headless host really has no keyring, and the file backend is for it.
+func TestAbsentKeyringStillAllowsTheFileBackend(t *testing.T) {
+	api := newFakeAPI(t, jsonReply(`{"collections":[]}`))
+	h := newHarness(t)
+	h.noRing = true
+	h.stdin = strings.NewReader(testKey)
+	if code := h.run("auth", "login", "--api-url", api.URL, "--backend", "file"); code != 0 {
+		t.Fatalf("stderr = %q", h.stderr.String())
+	}
+	if code := h.run("collections"); code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, h.stderr.String())
+	}
+}
+
+func TestFileBackendServerLineIgnoresQuiet(t *testing.T) {
+	api := newFakeAPI(t, jsonReply(`{"collections":[]}`))
+	h := newHarness(t)
+	h.stdin = strings.NewReader(testKey)
+	if code := h.run("auth", "login", "--api-url", api.URL, "--backend", "file"); code != 0 {
+		t.Fatalf("stderr = %q", h.stderr.String())
+	}
+	if code := h.run("collections", "--quiet"); code != 0 {
+		t.Fatalf("stderr = %q", h.stderr.String())
+	}
+	if !strings.Contains(h.stderr.String(), "for http://127.0.0.1") {
+		t.Fatalf("stderr = %q", h.stderr.String())
+	}
+}
+
+// A file login leaves a marker, so a later poisoned directory conflicts with it even
+// though the keyring holds no key.
+func TestFileLoginLeavesAMarkerThatExposesAPoisonedDirectory(t *testing.T) {
+	real := newFakeAPI(t, jsonReply(`{"collections":[]}`))
+	evil := newFakeAPI(t, jsonReply(`{"collections":[]}`))
+	h := newHarness(t)
+	h.stdin = strings.NewReader(testKey)
+	if code := h.run("auth", "login", "--api-url", real.URL, "--backend", "file"); code != 0 {
+		t.Fatalf("stderr = %q", h.stderr.String())
+	}
+	if marker := h.keyring.values[auth.OriginMarkerName(auth.DefaultProfile)]; !strings.HasPrefix(marker, "http://127.0.0.1") || strings.Contains(marker, testKey) {
+		t.Fatalf("marker = %q", marker)
+	}
+	h.poisonConfig(evil.URL, auth.BackendFile)
+	h.plantCredentials(evil.URL)
+	if code := h.run("query", "private search text"); code != apperr.ExitInsecure {
+		t.Fatalf("code = %d, stderr = %q", code, h.stderr.String())
+	}
+	if len(evil.requests) != 0 {
+		t.Fatal("search text reached the attacker")
+	}
+}
+
+func TestFileLoginCanMoveToANewServerExplicitly(t *testing.T) {
+	first := newFakeAPI(t, jsonReply(`{"collections":[]}`))
+	second := newFakeAPI(t, jsonReply(`{"collections":[]}`))
+	h := newHarness(t)
+	for _, api := range []*fakeAPI{first, second} {
+		h.stdin = strings.NewReader(testKey)
+		if code := h.run("auth", "login", "--api-url", api.URL, "--backend", "file"); code != 0 {
+			t.Fatalf("stderr = %q", h.stderr.String())
+		}
+	}
+	if code := h.run("collections"); code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, h.stderr.String())
+	}
+}
+
+func TestKeyringLoginClearsTheMarker(t *testing.T) {
+	api := newFakeAPI(t, jsonReply(`{"collections":[]}`))
+	h := newHarness(t)
+	h.stdin = strings.NewReader(testKey)
+	if code := h.run("auth", "login", "--api-url", api.URL, "--backend", "file"); code != 0 {
+		t.Fatalf("stderr = %q", h.stderr.String())
+	}
+	h.stdin = strings.NewReader(testKey)
+	if code := h.run("auth", "login", "--api-url", api.URL); code != 0 {
+		t.Fatalf("stderr = %q", h.stderr.String())
+	}
+	if _, ok := h.keyring.values[auth.OriginMarkerName(auth.DefaultProfile)]; ok {
+		t.Fatal("the marker should be gone")
+	}
+}
+
+func TestLogoutClearsTheMarkerForTheConfigsServer(t *testing.T) {
+	api := newFakeAPI(t, jsonReply(`{"collections":[]}`))
+	h := newHarness(t)
+	h.stdin = strings.NewReader(testKey)
+	if code := h.run("auth", "login", "--api-url", api.URL, "--backend", "file"); code != 0 {
+		t.Fatalf("stderr = %q", h.stderr.String())
+	}
+	if code := h.run("auth", "logout"); code != 0 {
+		t.Fatalf("stderr = %q", h.stderr.String())
+	}
+	if len(h.keyring.values) != 0 {
+		t.Fatalf("keyring = %v", h.keyring.values)
 	}
 }
 

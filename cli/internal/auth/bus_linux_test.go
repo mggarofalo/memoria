@@ -5,6 +5,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -269,16 +270,57 @@ func TestCheckSessionBusAcceptsThisUsersBusAndPinsIt(t *testing.T) {
 	}
 }
 
-func TestUnsetBusAddressFallsBackToTheRuntimeDirectory(t *testing.T) {
+func TestUnsetBusAddressFindsTheBusInTheRuntimeDirectory(t *testing.T) {
 	runtime := privateRuntimeDir(t)
+	listenUnix(t, filepath.Join(runtime, "bus"))
 	t.Setenv("XDG_RUNTIME_DIR", runtime)
 	t.Setenv("DBUS_SESSION_BUS_ADDRESS", "")
 	got, err := busSocketFromEnvironment()
 	if err != nil || got != filepath.Join(runtime, "bus") {
 		t.Fatalf("got %q, err = %v", got, err)
 	}
-	// Nothing is listening there, and nothing may be launched instead.
-	if err := checkSessionBus(); err == nil {
-		t.Fatal("expected no bus")
+}
+
+// No bus anywhere is what a headless host looks like, so it must not be a refusal.
+func TestNoBusAnywhereMeansNoKeyring(t *testing.T) {
+	if _, err := os.Lstat(fmt.Sprintf("/run/user/%d/bus", os.Getuid())); err == nil {
+		t.Skip("this machine has a real session bus")
+	}
+	t.Setenv("XDG_RUNTIME_DIR", privateRuntimeDir(t))
+	t.Setenv("DBUS_SESSION_BUS_ADDRESS", "")
+	err := checkSessionBus()
+	if err == nil || errors.Is(err, ErrBusRefused) {
+		t.Fatalf("err = %v", err)
+	}
+	_, err = openPlatformKeyring("memoria-cli-test")
+	if !errors.Is(err, ErrKeyringUnavailable) || errors.Is(err, ErrBusRefused) {
+		t.Fatalf("open = %v", err)
+	}
+}
+
+// Each of these would otherwise make a real keyring entry look absent.
+func TestBusThatFailsTheChecksIsARefusalNotAbsence(t *testing.T) {
+	runtime := privateRuntimeDir(t)
+	missing := filepath.Join(runtime, "missing")
+	loose := privateRuntimeDir(t)
+	listenUnix(t, filepath.Join(loose, "bus"))
+	if err := os.Chmod(loose, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, env := range map[string][2]string{
+		"tcp address":             {"tcp:host=127.0.0.1,port=1", runtime},
+		"abstract address":        {"unix:abstract=/tmp/x", runtime},
+		"socket outside":          {"unix:path=/tmp/elsewhere/bus", runtime},
+		"named socket is missing": {"unix:path=" + missing, runtime},
+		"loose runtime directory": {"", loose},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("DBUS_SESSION_BUS_ADDRESS", env[0])
+			t.Setenv("XDG_RUNTIME_DIR", env[1])
+			_, err := openPlatformKeyring("memoria-cli-test")
+			if !errors.Is(err, ErrBusRefused) || !errors.Is(err, ErrKeyringUnavailable) {
+				t.Fatalf("err = %v", err)
+			}
+		})
 	}
 }
