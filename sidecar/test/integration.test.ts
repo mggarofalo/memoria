@@ -148,6 +148,33 @@ test("sidecar serves a real QMD index end to end", { skip: enabled ? false : "se
     assert.equal((await app.inject({ method: "GET", url: "/docs/sessions/2026-10-31_gamma.md", headers: authHeaders })).statusCode, 404);
     assert.equal((await app.inject({ method: "GET", url: "/status", headers: authHeaders })).json().totalDocuments, 2);
 
+    // Frontmatter past the head window: POST and the real rescan must agree.
+    const padding = Array.from({ length: 600 }, (_, i) => `/some/long/path/number/${i}.md`);
+    const huge = FRONTMATTER_DOC({ project: "Big", files_touched: padding }, "# Big\n\noverrunmarker\n");
+    const hugePost = await app.inject({ method: "POST", url: "/documents", headers: authHeaders, payload: { collection: "sessions", path: "huge.md", content: huge, embed: false } });
+    assert.equal(hugePost.statusCode, 202, hugePost.body);
+    assert.equal(hugePost.json().metadata, null);
+    await app.ctx.jobs.idle();
+    const hugeDoc = await app.inject({ method: "GET", url: "/docs/sessions/huge.md", headers: authHeaders });
+    assert.equal(hugeDoc.statusCode, 200, hugeDoc.body);
+    assert.equal(hugeDoc.json().metadata, null);
+
+    // The window edge counted the same way by JavaScript and by SQLite's substr.
+    const astral = FRONTMATTER_DOC({ project: "Edge", note: "\u{1f600}".repeat(8100 / 2) }, "# Edge\n\nastralmarker\n");
+    const astralPost = await app.inject({ method: "POST", url: "/documents", headers: authHeaders, payload: { collection: "sessions", path: "astral.md", content: astral, embed: false } });
+    assert.equal(astralPost.json().metadata?.project, "Edge");
+    await app.ctx.jobs.idle();
+    const astralDoc = await app.inject({ method: "GET", url: "/docs/sessions/astral.md", headers: authHeaders });
+    assert.equal(astralDoc.json().metadata?.project, "Edge");
+
+    // A directory QMD excludes really is never indexed, which is why ingest refuses it.
+    await mkdir(path.join(corpus, "vendor"));
+    await writeFile(path.join(corpus, "vendor", "excluded.md"), "# Excluded\n\nvendormarker\n", "utf8");
+    await app.inject({ method: "POST", url: "/reindex", headers: authHeaders, payload: { collections: ["sessions"], embed: false } });
+    await app.ctx.jobs.idle();
+    const vendored = await app.inject({ method: "POST", url: "/search", headers: authHeaders, payload: { searches: [{ type: "lex", query: "vendormarker" }], rerank: false } });
+    assert.equal(vendored.json().total, 0);
+
     const escape = await app.inject({ method: "DELETE", url: `/documents?collection=sessions&path=${encodeURIComponent("../index.sqlite")}`, headers: authHeaders });
     assert.equal(escape.statusCode, 400);
     assert.equal((await app.inject({ method: "GET", url: "/status", headers: authHeaders })).statusCode, 200);

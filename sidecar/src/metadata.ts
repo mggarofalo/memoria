@@ -190,6 +190,19 @@ export function matchesFilters(meta: DocumentMetadata | undefined, filters: Sear
 
 export const DEFAULT_HEAD_BYTES = 8192;
 
+/**
+ * The first `count` characters, counted the way SQLite's `substr` counts them
+ * on TEXT: by code point, where `String.slice` would count surrogate halves.
+ */
+export function firstCodePoints(text: string, count: number): string {
+  if (text.length <= count) return text;
+  let end = 0;
+  for (let seen = 0; seen < count && end < text.length; seen++) {
+    end += text.codePointAt(end)! > 0xffff ? 2 : 1;
+  }
+  return text.slice(0, end);
+}
+
 export class MetadataIndex {
   readonly #source: MetadataSource;
   readonly #headBytes: number;
@@ -222,9 +235,14 @@ export class MetadataIndex {
     return this.#entries.get(displayPath);
   }
 
-  /** Update one entry without a full rescan (used after ingest-by-value). */
+  /**
+   * Update one entry without a full rescan (used after ingest-by-value). Reads
+   * the same window `refresh` reads, so this answer matches the next rescan's: a
+   * frontmatter block that does not close within the window has no metadata on
+   * either path.
+   */
   set(displayPath: string, text: string): DocumentMetadata | undefined {
-    const meta = metadataFromText(text);
+    const meta = metadataFromText(firstCodePoints(text, this.#headBytes));
     if (meta) this.#entries.set(displayPath, meta);
     else this.#entries.delete(displayPath);
     return meta;
