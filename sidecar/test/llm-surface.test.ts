@@ -166,3 +166,10 @@ test("in-process reranking still goes through node-llama-cpp's rank context, as 
   assert.match(ranking, /chat_template\.rerank/, "the prompt comes from the model's own template");
   assert.match(ranking, /_getEvaluationInput\(query, document\)/);
 });
+
+test("the full-size test text is at least as long as the SDK's longest chunk", async () => {
+  const { FULL_CHUNK_TEXT } = await import("../src/llm/remote.ts");
+  const sdk = (await import(new URL("./store.js", import.meta.resolve("@tobilu/qmd")).href)) as { CHUNK_SIZE_TOKENS: number; CHUNK_SIZE_CHARS: number };
+  assert.ok(FULL_CHUNK_TEXT.trim().split(" ").length > sdk.CHUNK_SIZE_TOKENS, "in words, each about a token");
+  assert.ok(FULL_CHUNK_TEXT.length > sdk.CHUNK_SIZE_CHARS, "and in characters");
+});

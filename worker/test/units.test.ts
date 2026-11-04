@@ -250,6 +250,17 @@ test("complete forwards grammar and sampling through the chat route", async () =
   });
 });
 
+test("llama-server rejecting the input becomes a refusal, repeating none of its text, and a broken server does not", async () => {
+  for (const status of [400, 413, 422]) {
+    const { inference } = scripted(() => new Response("the prompt was PRIVATE TEXT", { status }));
+    await assert.rejects(inference.tokenize("x"), (err) => err instanceof InvalidRequest && err.code === "upstream_rejected" && !err.message.includes("PRIVATE"), String(status));
+  }
+  for (const status of [404, 429, 500, 503]) {
+    const { inference } = scripted(() => new Response("x", { status }));
+    await assert.rejects(inference.tokenize("x"), (err) => err instanceof UpstreamError && err.code === "upstream_error", String(status));
+  }
+});
+
 test("upstream failures become fixed codes that repeat none of the upstream's text", async () => {
   const secretish = "upstream said: the prompt was PRIVATE TEXT";
   const bad = scripted(() => new Response(secretish, { status: 500 })).inference;

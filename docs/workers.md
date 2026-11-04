@@ -123,16 +123,16 @@ A later write failure, such as a full disk, is logged and the queue carries on i
 
 **One bad chunk costs one document.** A failed batch is retried with a short backoff, which rides out a brief failure even on one worker. Then a known-good text decides what happened: if no worker can embed it, that is an outage and the job waits. If one can, the batch is split until what fails is alone.
 
-**Only a definite refusal sets a document aside.** That means a 400 or 413 for that text. A 5xx or a timeout says nothing lasting about the document, so it stays pending and the job ends `failed` with `embed.docsPending` set, for the next job to try. If 5 or more documents fail that way and failures outnumber successes, the worker looks at fault, so the job stops and waits. Documents that failed lately go last in the next run, so they cannot starve the rest.
+**A document is set aside only when the worker is shown to be fine.** When a run ends with documents that failed, every worker is asked to embed a known-good text as long as the longest real chunk. A worker refusing that is too small or broken, so its refusals say nothing about the documents: the job waits, and sets nothing aside. If every worker accepts it:
 
-**Too many refusals blame the worker.** The known-good text is short, so passing it proves little: a worker with too small a context refuses all real text. So refusals are recorded only when a run finishes. If there are too many, the job waits and sets nothing aside, and its `error` says to check the worker. A run may set aside at most the smaller of these:
+- **A refusal is believed at once.** That means a 400 or 413 for that text. The worker returns 400 when llama-server rejects the input.
+- **A 5xx or a timeout needs to repeat.** The document stays pending, and the job ends `failed` with `embed.docsPending` set, for the next job to try. After failing in 3 runs at least 10 minutes apart, it is set aside. A brief window of errors cannot span that. The count is kept in memory, so a restart starts it again.
 
-- **3, or a quarter of the run if that is more.** A few is believable at any size. A quarter catches a small job on a large index.
-- **3, or 1% of the index if that is more, less what is already set aside.** This stops many small jobs adding up.
+**Failures that outnumber everything blame the worker.** If 5 or more documents are refused, or 5 or more fail, and they outnumber all the documents that have ever embedded, the job stops and waits. Documents that failed lately go last in the next run, so they cannot starve the rest, and if they were the problem the rest then embed and outnumber them.
 
-These numbers are a judgement. The chunker sizes chunks by tokens, so a healthy worker should rarely refuse anything.
+**A waiting job is never quiet.** A job can wait for as long as it takes, and that includes a worker that accepts the test text and refuses every real one. While it waits, `/ready` reads `degraded` and shows `jobs.stuck` with the reason and how many times it has tried, and each retry logs a warning.
 
-**A set-aside document is out of vector search, and comes back by itself.** It is recorded in `memoria_dead_letters`, a table in the index beside QMD's, and any vectors it had are dropped, so a force job cannot leave a bad worker's vector live. It can still be found lexically. The job that found it ends `failed` and counts it in `embed.docsDeadLettered`, and later jobs skip it and succeed. `/ready` shows the count in `llm.documentsSetAside`, and `/status` still counts it as needing embedding.
+**A set-aside document is out of vector search, and comes back by itself.** It is recorded in `memoria_dead_letters`, a table in the index beside QMD's, and any vectors it had are dropped, so a force job cannot leave a bad worker's vector live. It can still be found lexically. The job that found it ends `failed` and counts it in `embed.docsDeadLettered`, and later jobs skip it and succeed. `/ready` shows the count in `llm.documentsSetAside`, and `/status` reports it as `documentsSetAside`, not in `needsEmbedding`.
 
 It is tried again when any of these happens:
 

@@ -226,6 +226,7 @@ function farmDeps(handles: SdkHandles, llm: RemoteLlm, model: string, fingerprin
   return {
     canEmbed: () => llm.canServe("embed", "background"),
     confirmWorkers: () => llm.pool.confirmDocuments(),
+    acceptsFullChunk: () => llm.acceptsFullChunk(),
     capacity: () => llm.pool.backgroundCapacity("embed"),
     pendingDocs: pending,
     readBody: (hash) => (db.prepare("SELECT doc FROM content WHERE hash = ?").get(hash) as { doc?: string } | undefined)?.doc ?? "",
@@ -245,7 +246,7 @@ function farmDeps(handles: SdkHandles, llm: RemoteLlm, model: string, fingerprin
     },
     setAsideCount: () => (db.prepare(`SELECT COUNT(*) AS n FROM memoria_dead_letters l WHERE ${LETTER_HOLDS}`).get(...letterParams(llm, fingerprint)) as { n: number }).n,
     documentCount: () => (db.prepare("SELECT COUNT(DISTINCT hash) AS n FROM documents WHERE active = 1").get() as { n: number }).n,
-    recentFailures: new Set(),
+    recentFailures: new Map(),
     removeOrphans: () => removeOrphanVectors(db),
     embed: (texts) => llm.embedDocuments(texts),
     sleep: (ms) =>

@@ -322,9 +322,14 @@ export class WorkerPool {
     }
   }
 
-  async #tryRole(capability: Capability, entry: Entry): Promise<boolean> {
+  #tryRole(capability: Capability, entry: Entry): Promise<boolean> {
+    return this.#passes(entry, (target) => this.#trial!(capability, target));
+  }
+
+  /** Did the worker do it? Anything it did wrong is an answer, and anything else is a bug here. */
+  async #passes(entry: Entry, check: (target: DispatchTarget) => Promise<unknown>): Promise<boolean> {
     try {
-      await this.#trial!(capability, { name: entry.config.name, client: entry.client });
+      await check({ name: entry.config.name, client: entry.client });
       return true;
     } catch (err) {
       if (err instanceof WorkerError) return false;
@@ -348,6 +353,13 @@ export class WorkerPool {
       alive = true;
     }
     return alive;
+  }
+
+  /** Every worker that could take embedding passes, and there is at least one. */
+  async everyEmbedderPasses(check: (target: DispatchTarget) => Promise<unknown>): Promise<boolean> {
+    const able = this.#entries.filter((e) => e.reachable !== false && this.#servesRole(e, "embed"));
+    const passed = await Promise.all(able.map((e) => this.#passes(e, check)));
+    return able.length > 0 && passed.every(Boolean);
   }
 
   /**

@@ -29,6 +29,12 @@ const MAX_DETOKENIZED_CHARS = 8 * 1024 * 1024;
 export const PROBE_TEXT = "task: search result | query: memoria worker identity probe";
 
 /**
+ * As long as the longest chunk the SDK makes (900 tokens, which a test pins), and more,
+ * as these are short common words. A worker that refuses this is too small for real text.
+ */
+export const FULL_CHUNK_TEXT = "the quick brown fox ".repeat(230);
+
+/**
  * One deadline for all of a search's model work, well under `Memoria.Api`'s 2-minute
  * client timeout, so a hung worker gives a degraded answer rather than a timeout.
  */
@@ -293,8 +299,12 @@ export class RemoteLlm implements LlmSurface {
     this.#validated(client.name, "trial", () => parseText(raw, MAX_EXPANSION_CHARS));
   }
 
-  async #probeVector(target: DispatchTarget): Promise<number[]> {
-    const raw = await target.client.post("trial", "embedQuery", "/v1/embed", { texts: [PROBE_TEXT] }, 1, TRIAL_TIMEOUT_MS);
+  acceptsFullChunk(): Promise<boolean> {
+    return this.pool.everyEmbedderPasses((target) => this.#probeVector(target, FULL_CHUNK_TEXT));
+  }
+
+  async #probeVector(target: DispatchTarget, text = PROBE_TEXT): Promise<number[]> {
+    const raw = await target.client.post("trial", "embedQuery", "/v1/embed", { texts: [text] }, 1, TRIAL_TIMEOUT_MS);
     const parsed = this.#validated(target.client.name, "trial", () => parseEmbedResponse(raw, 1, this.#dimensions));
     if (!this.pool.servesIndexModel(parsed.model)) throw new WorkerError("model_mismatch", "trial", target.client.name, "the worker does not serve the index's embedding model");
     return parsed.vectors[0]!;

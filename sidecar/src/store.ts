@@ -86,6 +86,8 @@ export interface ContextRow {
 export interface IndexStatusInfo {
   totalDocuments: number;
   needsEmbedding: number;
+  /** Documents out of embedding until a retry is due. Not counted in `needsEmbedding`. */
+  documentsSetAside: number;
   hasVectorIndex: boolean;
   collections: { name: string; path: string | null; pattern: string | null; documents: number; lastUpdated: string }[];
 }
@@ -377,6 +379,7 @@ export async function openBackend(options: OpenBackendOptions): Promise<OpenedBa
   reportRepair(repairVectorRows(store.internal.db), options);
   const wired = llmOptions.mode === "remote" ? await wire(store.internal, internal, llmOptions, options) : undefined;
   const remote = wired?.llm;
+  const setAside = (): number => wired?.deadLetters().length ?? 0;
   const active = (remote ?? llm) as unknown as LlmSurface;
   const db = store.internal.db;
   const headsStatement = db.prepare(
@@ -418,7 +421,7 @@ export async function openBackend(options: OpenBackendOptions): Promise<OpenedBa
     return { hits: outcome.hits, degradedReasons: [...outcome.degradedReasons, "no_vectors"] };
   };
 
-  const llmHealth = (): LlmHealth => (remote ? remoteHealth(remote, wired?.deadLetters().length ?? 0) : { mode: "local", degraded: false, unavailable: [], workersUp: 0, workersTotal: 0, embedDisagreement: [], documentsSetAside: 0 });
+  const llmHealth = (): LlmHealth => (remote ? remoteHealth(remote, setAside()) : { mode: "local", degraded: false, unavailable: [], workersUp: 0, workersTotal: 0, embedDisagreement: [], documentsSetAside: 0 });
 
   return {
     dbPath: store.dbPath,
@@ -446,7 +449,7 @@ export async function openBackend(options: OpenBackendOptions): Promise<OpenedBa
         unchanged: r.unchanged,
         removed: r.removed,
         skipped: r.skipped,
-        needsEmbedding: r.needsEmbedding,
+        needsEmbedding: Math.max(0, r.needsEmbedding - setAside()),
       };
     },
     purgeCache: () => withShortBusyTimeout(db as never, () => Number(db.prepare("DELETE FROM llm_cache").run().changes)),
@@ -457,7 +460,11 @@ export async function openBackend(options: OpenBackendOptions): Promise<OpenedBa
       const r = await store.embed({ force: o.force, ...(o.collection !== undefined ? { collection: o.collection } : {}) });
       return { docsProcessed: r.docsProcessed, chunksEmbedded: r.chunksEmbedded, errors: r.errors, durationMs: r.durationMs };
     },
-    getStatus: () => store.getStatus(),
+    getStatus: async () => {
+      const status = await store.getStatus();
+      const documentsSetAside = setAside();
+      return { ...status, needsEmbedding: Math.max(0, status.needsEmbedding - documentsSetAside), documentsSetAside };
+    },
     readDocumentHeads: (maxBytes: number): DocumentHead[] => {
       const rows = headsStatement.all(maxBytes) as HeadRow[];
       return rows.map((r) => ({ collection: r.collection, path: r.path, head: r.head ?? "" }));

@@ -244,7 +244,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     type: "object",
     required: ["status", "version", "uptimeSeconds", "index", "models", "warmup", "metadata", "jobs"],
     properties: {
-      status: { type: "string", enum: ["ready", "warming", "degraded"], description: "`degraded`: remote LLM mode with some model role no worker can serve." },
+      status: { type: "string", enum: ["ready", "warming", "degraded"], description: "`degraded`: remote LLM mode with some model role no worker can serve, or a job waiting to try again: see `jobs.stuck`." },
       llm: {
         type: "object",
         required: ["mode", "degraded", "unavailable", "workersUp", "workersTotal"],
@@ -306,6 +306,13 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         properties: {
           pending: { type: "integer" },
           persistent: { type: "boolean", description: "False means jobs are in memory only and would not survive a restart." },
+          stuck: {
+            type: "object",
+            nullable: true,
+            required: ["reason", "attempts"],
+            description: "A job waiting to try again, and why. It retries by itself, for as long as it takes.",
+            properties: { reason: { type: "string" }, attempts: { type: "integer" } },
+          },
         },
       },
     },
@@ -337,8 +344,9 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         llm.mode === "remote"
           ? { ...ctx.warmup, done: !llm.degraded, error: llm.degraded ? `No worker can serve: ${llm.unavailable.join(", ")}` : null }
           : ctx.warmup;
+      const stuck = ctx.jobs.stuck();
       const body = {
-        status: llm.degraded ? ("degraded" as const) : models.resident ? ("ready" as const) : ("warming" as const),
+        status: llm.degraded || stuck ? ("degraded" as const) : models.resident ? ("ready" as const) : ("warming" as const),
         llm,
         version: SIDECAR_VERSION,
         uptimeSeconds: Math.floor((Date.now() - ctx.startedAt) / 1000),
@@ -351,7 +359,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         models,
         warmup: warmupState,
         metadata: { documents: ctx.metadata.size, refreshedAt: ctx.metadata.refreshedAt?.toISOString() ?? null },
-        jobs: { pending: ctx.jobs.pending, persistent: ctx.jobs.persistence().healthy },
+        jobs: { pending: ctx.jobs.pending, persistent: ctx.jobs.persistence().healthy, stuck },
       };
       if (request.query.requireModels && !models.resident) {
         return reply.code(503).send(body);
@@ -373,7 +381,8 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
             required: ["totalDocuments", "needsEmbedding", "hasVectorIndex", "collections"],
             properties: {
               totalDocuments: { type: "integer" },
-              needsEmbedding: { type: "integer" },
+              needsEmbedding: { type: "integer", description: "Documents waiting to embed. Those set aside are counted in `documentsSetAside` instead." },
+              documentsSetAside: { type: "integer", description: "Documents a job will not try again until a retry is due: see `GET /queue/dead-letters`." },
               hasVectorIndex: { type: "boolean" },
               collections: {
                 type: "array",
