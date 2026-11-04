@@ -3,7 +3,7 @@ namespace Memoria.Api.Configuration;
 /// <summary>
 /// Root of the <c>Memoria</c> configuration section. Each child is one
 /// concern the host owns. Sections that later epics add keep this shape:
-/// MEMORIA-3 adds <c>Auth</c> (keys and collection scopes), MEMORIA-18 adds
+/// API-key auth adds <c>Auth</c> (keys and collection scopes), the control plane adds
 /// <c>Workers</c> (the inference pool: name, url, token reference,
 /// capabilities, priority, availability thresholds) and <c>Queue</c>
 /// (concurrency, batch budget, priority classes). See docs/configuration.md.
@@ -57,7 +57,7 @@ public sealed class SearchOptions
 	/// <summary>Largest <c>limit</c> a caller may ask for; the sidecar itself caps at 100.</summary>
 	public int MaxLimit { get; set; } = 100;
 
-	/// <summary>Full reranked hybrid search unless the caller passes <c>rerank=false</c>. Decided in MEMORIA-1.</summary>
+	/// <summary>Full reranked hybrid search unless the caller passes <c>rerank=false</c>.</summary>
 	public bool RerankByDefault { get; set; } = true;
 
 	/// <summary>Collections searched when the caller names none. Null defers to QMD's default-included set.</summary>

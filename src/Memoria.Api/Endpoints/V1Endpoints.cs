@@ -6,7 +6,7 @@ public static class V1Endpoints
 {
 	/// <summary>
 	/// The public read surface. Every route here needs the <see cref="MemoriaScopes.Read"/>
-	/// scope once MEMORIA-3 enforces keys, and every route can fail with the
+	/// scope once API keys are enforced, and every route can fail with the
 	/// gateway statuses the sidecar mapping produces.
 	/// </summary>
 	public static IEndpointRouteBuilder MapV1(this IEndpointRouteBuilder app)

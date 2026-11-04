@@ -1,7 +1,7 @@
 namespace Memoria.Api.Http;
 
 /// <summary>
-/// What the current caller is allowed to see. This is the seam MEMORIA-3
+/// What the current caller is allowed to see. This is the seam API-key auth
 /// fills in: an API-key authentication handler will register a scoped
 /// implementation that reads the key's collection list. Until then every
 /// caller is unrestricted, and endpoints already route every collection
@@ -13,7 +13,7 @@ public interface ICallerScope
 	IReadOnlyCollection<string>? Collections { get; }
 }
 
-/// <summary>Default scope while no authentication is configured (MEMORIA-3).</summary>
+/// <summary>Default scope while no authentication is configured.</summary>
 public sealed class UnrestrictedCallerScope : ICallerScope
 {
 	public IReadOnlyCollection<string>? Collections => null;

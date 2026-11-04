@@ -24,8 +24,10 @@ All issue work is tracked in Plane. Project: "Memoria" (identifier: `MEMORIA`) �
 ### Branching
 
 Single-trunk model: `main` is the only long-lived branch. Cut a short-lived
-`<type>/memoria-<id>-<slug>` branch off `main`, open a PR, and **squash-merge to
+`<type>/<slug>` branch off `main`, open a PR, and **squash-merge to
 `main`**. There is no `develop` branch and no module/parent branches.
+
+**This repository is public.** Tracker URLs and work-item IDs never go in branch names, commit messages, PRs, code comments, or documentation here. Cross-reference from the tracker to the PR, never the reverse.
 
 **Never close or merge a pull request you did not open in the current session.**
 If a PR looks like a blocker, report it and stop — do not close it.
@@ -101,7 +103,7 @@ clients (Claude Code / CLI / scripts)
 | `Dockerfile` | `Memoria.Api` only; the sidecar runs as its own service beside the models (docs/deployment.md) |
 | `docs/` | Plane workflow (`plane.md`), API configuration (`configuration.md`), deployment (`deployment.md`) |
 
-**Inside `Memoria.Api`:** `Configuration/` (the `Memoria` options root and its validator), `Sidecar/` (typed-client registration and trace propagation), `Http/` (request logging, problem-details mapping, the `MemoriaScope` and `ICallerScope` seams for MEMORIA-3), `Endpoints/` (`/health`, `/ready`, `/v1/*`), `Mcp/` (the outward MCP server; tools translate to the sidecar client through the same `Search/SearchRequestFactory` the REST endpoints use), `OpenApi/` (document and schema transformers that keep the committed spec generator-friendly), `Hosting/` (the container health-check switch). The sidecar client itself (`IMemoriaQmdClient`, its wire records) lives in `Memoria.Core/Sidecar/`; the public v1 contracts in `Memoria.Core/Contracts/`. When the sidecar contract changes, update the records in `Memoria.Core/Sidecar/SidecarContracts.cs` — `SidecarContractTests` fails until they match the committed `openapi.json`.
+**Inside `Memoria.Api`:** `Configuration/` (the `Memoria` options root and its validator), `Sidecar/` (typed-client registration and trace propagation), `Http/` (request logging, problem-details mapping, the `MemoriaScope` and `ICallerScope` seams for API-key auth), `Endpoints/` (`/health`, `/ready`, `/v1/*`), `Mcp/` (the outward MCP server; tools translate to the sidecar client through the same `Search/SearchRequestFactory` the REST endpoints use), `OpenApi/` (document and schema transformers that keep the committed spec generator-friendly), `Hosting/` (the container health-check switch). The sidecar client itself (`IMemoriaQmdClient`, its wire records) lives in `Memoria.Core/Sidecar/`; the public v1 contracts in `Memoria.Core/Contracts/`. When the sidecar contract changes, update the records in `Memoria.Core/Sidecar/SidecarContracts.cs` — `SidecarContractTests` fails until they match the committed `openapi.json`.
 
 **Key invariants:**
 

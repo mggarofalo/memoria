@@ -2,6 +2,11 @@
 
 Guidance for AI agents working with the Plane workspace for this project.
 
+The tracker is private and this repository is public. The phase plan, epics, and
+work-item IDs live in Plane. Never copy tracker URLs or work-item IDs into
+branch names, commit messages, PRs, code comments, or documentation here. To
+connect the two, comment on the Plane issue with a link to the PR.
+
 ## Workspace
 
 - **Project:** Memoria (identifier: `MEMORIA`)
@@ -24,7 +29,6 @@ Every issue needs at least one **layer** label. Add **type** labels as appropria
 
 Issues labeled `epic` are parent containers — skip and work their children.
 
-
 ## Modules
 
 Phases are tracked as Plane **modules**. Use `plane module list --all -p MEMORIA` to discover them and their status.
@@ -32,29 +36,11 @@ Phases are tracked as Plane **modules**. Use `plane module list --all -p MEMORIA
 **Every issue must be attached to a module.** `plane issue create` does NOT accept a `--module-id` flag — attach via a separate call after creation:
 
 ```bash
-ID=$(plane issue create --name "..." --labels api --priority medium --id-only -p MEMORIA)
+ID=$(plane issue create --name "..." --labels <label-uuid> --priority medium --id-only -p MEMORIA)
 plane module add-work-items --module-id "Host" --issues "$ID" -p MEMORIA
 ```
 
-Modules: **Host**, **API**, **Auth**, **Ingest**, **CLI**, **Sources**, **Workers**, and **Maintenance Backlog** — the default bucket for hardening and bug fixes that don't belong to a phase.
-
-## Epics
-
-Seven epics track the phases, each attached to its matching module. Work their children, not the epics themselves.
-
-| Issue | Module | Priority |
-|---|---|---|
-| `MEMORIA-1` Host: provision the always-on QMD node | Host | Urgent — ready now |
-| `MEMORIA-2` API: Memoria.Api front door over QMD | API | High |
-| `MEMORIA-3` Auth: API keys and collection scoping | Auth | Medium |
-| `MEMORIA-4` Ingest: redaction, envelope, and queue | Ingest | Medium |
-| `MEMORIA-5` CLI: the memoria Go binary | CLI | Medium |
-| `MEMORIA-6` Sources: sync workers beyond transcripts | Sources | Low |
-| `MEMORIA-12` Workers: inference pool and control plane behind one memoria ingress | Workers | High |
-
-`MEMORIA-1` is the only epic in Todo. Its `qmd query` benchmark gates the API's default search mode, so it blocks meaningful progress on `MEMORIA-2`.
-
-`MEMORIA-12` decouples model inference from the index: the sidecar on the always-on node keeps the index and routes model calls to GPU workers (desktop, MacBook) through QMD's `llm` seam. Its children are `MEMORIA-13` through `MEMORIA-21`; `MEMORIA-13` (remote LLM adapter), `MEMORIA-14` (worker runtime) and `MEMORIA-15` (parity benchmark) are ready now. It changes what `MEMORIA-1` and `MEMORIA-8` mean once `MEMORIA-19` moves the index: the QMD node needs no GPU, and sleeping the desktop costs rerank quality rather than availability.
+Modules: **Host**, **API**, **Auth**, **Ingest**, **CLI**, **Sources**, **Workers**, **Adoption**, and **Maintenance Backlog** — the default bucket for hardening and bug fixes that don't belong to a phase.
 
 ## Priority
 
@@ -69,9 +55,9 @@ Priority reflects **execution readiness**, not importance: Urgent = ready now, H
 
 ## Issue Workflow
 
-**Start:** `plane issue update <id> -p MEMORIA --state "In Progress"` — branch as `<type>/memoria-<id>-<slug>`
+**Start:** `plane issue update -p MEMORIA --resource-id <UUID> --state "In Progress"` — branch as `<type>/<slug>`, with no work-item ID
 
-**Finish:** `plane issue update <id> -p MEMORIA --state Done` — check whether this unblocks downstream issues
+**Finish:** `plane issue update -p MEMORIA --resource-id <UUID> --state Done` — check whether this unblocks downstream issues
 
 **Create:** Always use `-p MEMORIA`, attach a module via `plane module add-work-items`, set priority by readiness, add at least one layer label
 
@@ -85,7 +71,7 @@ plane issue get-by-sequence-id --project-identifier MEMORIA --issue-identifier <
 plane issue update -p MEMORIA --resource-id <UUID> --state "In Progress"
 
 # Create a new issue. `--labels` takes label UUIDs only (names do not resolve here);
-# `--parent` accepts a UUID or a sequence ID such as MEMORIA-12
+# `--parent` accepts a UUID or a sequence ID
 plane issue create -p MEMORIA --name "<title>" --description-html "<description>" --priority medium --labels <label-uuid> --id-only
 
 # Add a comment
