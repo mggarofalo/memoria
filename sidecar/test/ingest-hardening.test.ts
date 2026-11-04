@@ -60,6 +60,46 @@ for (const step of ["opened", "written", "checked"] as const) {
   });
 }
 
+test("a temp file created through a swapped directory is caught when the swap is undone", async () => {
+  const f = await fixture();
+  const target = resolveTarget(f.root, "**/*.md", "sub/victim.md");
+  let unflipped = false;
+  await assert.rejects(
+    writeDocument(target, "overwritten", true, {
+      onStep: async (s) => {
+        if (s === "ready") await flip(f.dir, f.outside);
+        if (s === "opened") {
+          // Back to the real directory, so a check of the directory alone would pass.
+          await rm(f.dir, { force: true });
+          await rename(`${f.dir}-real`, f.dir);
+          unflipped = true;
+        }
+      },
+    }),
+    isCode("path_changed"),
+  );
+  assert.equal(unflipped, true);
+  assert.equal(await readFile(f.victim, "utf8"), "keep");
+  // The only trace outside the root is an empty file: the content was never written.
+  for (const name of (await readdir(f.outside)).filter((n) => n !== "victim.md")) {
+    assert.equal((await stat(path.join(f.outside, name))).size, 0);
+  }
+});
+
+test("a temp file created through a swapped directory that stays swapped is refused", async () => {
+  const f = await fixture();
+  const target = resolveTarget(f.root, "**/*.md", "sub/victim.md");
+  await assert.rejects(
+    writeDocument(target, "overwritten", true, {
+      onStep: async (s) => {
+        if (s === "ready") await flip(f.dir, f.outside);
+      },
+    }),
+    isCode("invalid_path"),
+  );
+  await assertVictimUntouched(f);
+});
+
 test("a directory swapped just before the rename leaves the temp file's name unresolvable", async () => {
   const f = await fixture();
   const target = resolveTarget(f.root, "**/*.md", "sub/victim.md");

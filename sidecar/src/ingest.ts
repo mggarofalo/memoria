@@ -17,13 +17,18 @@ import { foldName, segmentProblem, unindexableProblem } from "./path-rules.ts";
  * symlink instead of writing through it. A reader never sees half a document.
  * And the source and destination share a parent path, so swapping a directory
  * for a junction after the last check leaves the source missing and the rename
- * fails.
+ * fails. That only holds if the temp file really is inside the root, so its real
+ * location is checked as well as the directory's.
  *
  * What this does not close: Node has no `openat` or `renameat`, so paths are
  * resolved again on each call. An attacker who can write to the collection
  * root can still win the very short gap inside the rename itself, between the
- * kernel resolving the source and resolving the destination. Treat write access
- * to a collection root as trust in that account (docs/deployment.md).
+ * kernel resolving the source and resolving the destination. A swap at the
+ * moment the temp file is created can leave an empty file outside the root. A
+ * delete's rename aside can land on a file outside the root; it is put back when
+ * the swap is still in place, and otherwise is left under a `.memoria-*.tmp`
+ * name, never unlinked. Treat write access to a collection root as trust in that
+ * account (sidecar/README.md).
  */
 
 export interface ResolvedTarget {
@@ -160,16 +165,31 @@ async function nearestRealParent(target: ResolvedTarget): Promise<string | undef
   }
 }
 
+async function assertRealPathInRoot(target: ResolvedTarget, real: string): Promise<void> {
+  const rel = path.relative(await realpath(target.root), real);
+  if (rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
+    throw invalidPath("path resolves outside the collection root");
+  }
+}
+
 /** Refuse a target whose parent directory really lives outside the collection root. */
 async function assertContained(target: ResolvedTarget): Promise<void> {
   await assertNoLinkedParent(target);
   const real = await nearestRealParent(target);
   // The root itself is missing, so nothing under it can be a link.
-  if (real === undefined) return;
-  const rel = path.relative(await realpath(target.root), real);
-  if (rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
-    throw invalidPath("path resolves outside the collection root");
-  }
+  if (real !== undefined) await assertRealPathInRoot(target, real);
+}
+
+/**
+ * Where the scratch file really is, from one path resolution. Checking the
+ * directory is not enough: a directory swapped only while the scratch file was
+ * created, then swapped back for the check, leaves it outside the root, and a
+ * second swap before the rename would land it on a file there. A scratch file
+ * outside the root shows up here as outside when the swap is in place, and as
+ * missing when it is not.
+ */
+async function assertScratchInRoot(target: ResolvedTarget, scratch: string): Promise<void> {
+  await assertRealPathInRoot(target, await realpath(scratch));
 }
 
 async function assertSafePath(target: ResolvedTarget): Promise<void> {
@@ -207,7 +227,7 @@ function pathChanged(): HttpError {
 }
 
 /** Points in a write or delete where tests can change the filesystem underneath it. */
-export type IngestStep = "opened" | "written" | "checked" | "renamed" | "moved";
+export type IngestStep = "ready" | "opened" | "written" | "checked" | "renamed" | "moved";
 
 export interface IngestHooks {
   onStep?: (step: IngestStep) => Promise<void>;
@@ -249,11 +269,13 @@ async function ensureParents(target: ResolvedTarget): Promise<void> {
 const CREATE_FLAGS = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0);
 
 async function writeAndCommit(target: ResolvedTarget, scratch: string, content: string, mode: number, hooks: IngestHooks): Promise<void> {
-  // The file stays empty until containment holds, so a swapped directory receives no content.
+  await hooks.onStep?.("ready");
+  // The file stays empty until it is known to be inside the root, so a swapped directory receives no content.
   const handle = await open(scratch, CREATE_FLAGS, mode);
   try {
     await hooks.onStep?.("opened");
     await assertContained(target);
+    await assertScratchInRoot(target, scratch);
     await handle.writeFile(content, "utf8");
     await handle.sync();
   } finally {
@@ -262,6 +284,7 @@ async function writeAndCommit(target: ResolvedTarget, scratch: string, content: 
   await hooks.onStep?.("written");
   await retryTransient(async () => {
     await assertSafePath(target);
+    await assertScratchInRoot(target, scratch);
     await hooks.onStep?.("checked");
     await rename(scratch, target.absolute);
   });
@@ -316,6 +339,7 @@ export async function removeDocument(target: ResolvedTarget, hooks: IngestHooks 
   await hooks.onStep?.("moved");
   try {
     await assertContained(target);
+    await assertScratchInRoot(target, scratch);
     await retryTransient(() => unlink(scratch));
   } catch (err) {
     await rename(scratch, target.absolute).catch(() => undefined);
