@@ -3,7 +3,7 @@ import path from "node:path";
 import picomatch from "picomatch";
 import type { EmbedSummary, UpdateSummary } from "../src/jobs.ts";
 import type { DocumentHead } from "../src/metadata.ts";
-import type { DegradedReason, LlmHealth, PoolLoad, WorkerView } from "../src/llm/types.ts";
+import type { DeadLetter, DegradedReason, LlmHealth, PoolLoad, WorkerView } from "../src/llm/types.ts";
 import type {
   BackendEmbedOptions,
   BackendSearchOptions,
@@ -74,9 +74,10 @@ export class FakeBackend implements QmdBackend {
   /** Replaces embed's default answer, so a test can defer, fail or hold a job. */
   embedImpl: ((options: BackendEmbedOptions) => Promise<EmbedSummary>) | null = null;
   degradedReasons: DegradedReason[] = [];
-  health: LlmHealth = { mode: "local", degraded: false, unavailable: [], workersUp: 0, workersTotal: 0 };
+  health: LlmHealth = { mode: "local", degraded: false, unavailable: [], workersUp: 0, workersTotal: 0, embedDisagreement: [] };
   workerViews: WorkerView[] = [];
   load: PoolLoad | null = null;
+  deadLetterList: DeadLetter[] = [];
   closed = false;
   /** Docs a scan found on disk. Only these can vanish; seeded docs have no file. */
   readonly #scanned = new Set<FakeDoc>();
@@ -314,9 +315,14 @@ export class FakeBackend implements QmdBackend {
     return 3;
   }
 
-  purgeWorkerVectors(worker: string): number {
-    this.#record("purgeWorkerVectors", worker);
-    return 2;
+  deadLetters(): DeadLetter[] {
+    return this.deadLetterList;
+  }
+
+  clearDeadLetters(): number {
+    const cleared = this.deadLetterList.length;
+    this.deadLetterList = [];
+    return cleared;
   }
 
   async getStatus(): Promise<IndexStatusInfo> {

@@ -23,14 +23,16 @@ export interface RerankTransport {
 export class WorkerRerankTransport implements RerankTransport {
   readonly name = "llama-server-rerank";
   readonly #pool: WorkerPool;
+  readonly #remainingMs: () => number | null;
 
-  constructor(pool: WorkerPool) {
+  constructor(pool: WorkerPool, remainingMs: () => number | null = () => null) {
     this.#pool = pool;
+    this.#remainingMs = remainingMs;
   }
 
   scores(query: string, texts: string[]): Promise<number[]> {
     return this.#pool.dispatch("rerank", "interactive", "rerank", async ({ client }) => {
-      const raw = await client.post("rerank", "rerank", "/v1/rerank", { query, documents: texts }, texts.length);
+      const raw = await client.post("rerank", "rerank", "/v1/rerank", { query, documents: texts }, texts.length, this.#remainingMs());
       try {
         return parseRerankResults(raw, texts.length);
       } catch (err) {

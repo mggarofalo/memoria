@@ -35,6 +35,7 @@ function llmOptionsFrom(config: SidecarConfig): LlmOptions {
     statusPollMs: config.llm.pollMs,
     embedBatchBytes: config.llm.embedBatchBytes,
     rerankTimeoutMs: config.llm.rerankTimeoutMs,
+    searchDeadlineMs: config.llm.searchDeadlineMs,
   };
 }
 
@@ -52,10 +53,9 @@ async function main(): Promise<void> {
     dbPath,
     keepWarm: config.keepWarm,
     llm: llmOptionsFrom(config),
-    ...(jobStore ? { provenance: jobStore } : {}),
     onLlmCall: (entry) => log?.info(entry, "llm worker call"),
     onLlmDegraded: (entry) => log?.warn(entry, "llm worker call degraded"),
-    onProvenanceError: (message) => log?.warn({ error: message }, "could not record which worker embedded a document"),
+    onLlmWarning: (message) => (log ? log.warn({}, message) : earlyWarnings.push(message)),
     onVectorRepair: (rows) => earlyWarnings.push(`Removed ${rows} vector rows left with no vector by an interrupted write. Those documents will embed again.`),
   });
   const app = await buildApp({

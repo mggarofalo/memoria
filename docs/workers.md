@@ -30,13 +30,16 @@ On the sidecar:
 | `MEMORIA_QMD_WORKER_URL` | unset | Shorthand for a pool of one. Must not contain credentials. Set this or the list, not both. |
 | `MEMORIA_QMD_WORKER_TOKEN` | unset | The token for `MEMORIA_QMD_WORKER_URL`. Required unless the worker is on loopback. At least 16 characters. `MEMORIA_QMD_WORKER_TOKEN_FILE` reads it from a file instead, which is what a service should use. |
 | `MEMORIA_QMD_WORKER_POLL_MS` | `10000` | How often each worker's `/health` and `/capabilities` are read. |
-| `MEMORIA_QMD_LLM_FALLBACK` | `1` | Tokenize and embed queries on this host's CPU when no worker answers. Needs the embedding model on this host. |
+| `MEMORIA_QMD_LLM_FALLBACK` | `1` | Tokenize and embed queries on this host's CPU when no worker answers. Needs the embedding model in QMD's cache on this host, under the name QMD gives it (`hf_<owner>_<file>`). It never downloads one, and a call gives up after 30 s. |
 | `MEMORIA_QMD_EMBED_DIMENSIONS` | `768` | Every embedding must have this length. `0` pins it to the first response. |
 | `MEMORIA_QMD_EMBED_BATCH_BYTES` | `262144` | Most text one embedding batch carries. A single larger chunk still goes alone. |
-| `MEMORIA_QMD_RERANK_TIMEOUT_MS` | `20000` | Deadline for one search-time rerank call. Query vectors and expansion have 10 s each. With one retry of each, a search spends at most 80 s on workers, well under `Memoria.Api`'s 2-minute client timeout, so a hung worker yields a degraded answer rather than a timeout. |
+| `MEMORIA_QMD_RERANK_TIMEOUT_MS` | `20000` | Deadline for one search-time rerank call. Query vectors and expansion have 10 s each. |
+| `MEMORIA_QMD_SEARCH_DEADLINE_MS` | `60000` | Deadline for all of one search's calls to workers, including retries, slot waits and the CPU fallback. It sits well under `Memoria.Api`'s 2-minute client timeout, so a hung worker yields a degraded answer rather than a timeout. |
 | `MEMORIA_QMD_QUEUE_DB_PATH` | beside the index | The job queue's database. Applies in both LLM modes. |
 
-The pool list names the environment variable holding each token, never the token, so the list itself can be kept in plain configuration. As with other secrets, setting `<name>_FILE` instead of `<name>` reads the token from a file:
+The pool list names the environment variable holding each token, never the token, so the list itself can be kept in plain configuration. As with other secrets, setting `<name>_FILE` instead of `<name>` reads the token from a file, and `tokenEnv` always names `<name>`. A worker's token must not be the sidecar's own secret: the sidecar compares the values at startup and refuses to run if they match, whatever the variable is called.
+
+Example:
 
 ```json
 [
@@ -55,13 +58,17 @@ The pool list names the environment variable holding each token, never the token
 
 **When a call fails,** it is retried once on a different worker, and counts against the worker it failed on. Only a 400 or 413 says something about the request itself: those are not retried, since another worker would refuse too, and do not count. A 404, 410, 501 or similar is about the worker. Even a 400 stops being taken at its word after 5 in a row with no success, so a worker refusing everything cannot starve its neighbour.
 
-**The circuit breaker.** Each worker has one circuit per role, so a reranker failing does not take embedding down with it, and an embedding success cannot reset the reranker's count. Three failures in a row open a role's circuit. While open, calls for that role skip the worker with no connection attempt. After a backoff of 5 s, doubling up to 1 min, one trial call decides: success closes the circuit, failure doubles the wait. A failed heartbeat takes the whole worker out at once. A good heartbeat does not close a circuit, because `/health` can be fine while every rerank fails. It only frees a trial that never reported back, and lets a worker returning from an outage try straight away.
+**The circuit breaker.** Each worker has one circuit per role, so a reranker failing does not take embedding down with it, and an embedding success cannot reset the reranker's count. Embedding has two circuits, one for documents and one for query vectors, so a chunk that keeps failing cannot cost search its vectors. Three failures in a row open a role's circuit. While open, calls for that role skip the worker with no connection attempt. After a backoff of 5 s, doubling up to 1 min, one trial call decides: success closes the circuit, failure doubles the wait. The heartbeat makes that call itself, a small real one for that role, so a role recovers with no search needing to try it first. A search that arrives first can be the trial instead. A failed heartbeat takes the whole worker out at once. A good `/health` does not close a circuit, because it can be fine while every rerank fails. It only frees a trial that never reported back, and lets a worker returning from an outage try straight away.
 
 **Priority.** Search-time work (rerank, expansion, query vectors) is interactive. Embedding and tokenizing documents is background. Interactive calls take any free slot ahead of waiting background calls, and background work can never use a worker's last slot unless `maxConcurrent` is 1. A call already running is not interrupted, so this is priority at the next free slot and not true preemption. A long embedding batch on a `maxConcurrent: 1` worker still makes a search wait for it.
 
-**The embedding model, per worker.** A worker must name the index's model exactly, at every heartbeat and on every embed response, which catches a restart with a different model between heartbeats. Claiming the right name is not proof, so each worker is also asked every minute to embed a fixed text, and its answer compared by cosine with a stored reference. A worker failing either check does no embedding or tokenizing until a later check clears it, though it can still rerank and expand. The first answer becomes the reference, so a worker lying from the very start would pass and make honest ones fail. That shows up as disagreement in `GET /workers`, and purging the liar clears the reference. This guards against mistakes and a compromised worker holding a valid token, in proportion: it is not proof against a careful attacker.
+**The embedding model, per worker.** A worker must name the index's model exactly, at every heartbeat and on every embed response, which catches a restart with a different model between heartbeats. A worker failing that does no embedding or tokenizing until a later check clears it, though it can still rerank and expand.
 
-**If a worker did embed bad vectors,** it can be undone. Which worker embedded which document is recorded in the queue's database, outside QMD's schema. `POST /workers/{name}:purge-vectors` removes that worker's documents' vectors and queues a job to embed them again, and works for a worker no longer in the pool.
+**Workers are compared, and the result is only reported.** Claiming the right name is not proof, so every minute each worker is asked to embed a fixed text and the answers are compared with each other by cosine in that one pass. If they differ, `GET /workers` and `/ready` name the workers and a warning is logged. It cannot say which one is wrong, and it stores nothing between passes. With one worker there is nothing to compare, so it does not run, and a worker's first vectors have nothing to be checked against.
+
+It never takes a worker out of service. This is for honest mistakes, such as two workers on different builds of a model. The bearer token is the trust boundary: a token holder is trusted, and a careful liar would answer this public text honestly anyway. A lockout on this signal could take embedding down over a legitimate model update.
+
+**If a worker did embed bad vectors,** take it out of `MEMORIA_QMD_WORKERS` and run a full force re-embed (`POST /reindex` with `force: true` and no collection). Old vectors stand until each document's new set is written. Jobs keep the names of the workers they used, for tracing, but vectors do not record which worker made them.
 
 ### Degraded mode
 
@@ -80,11 +87,13 @@ When no worker can serve a role, search skips the step that needs it rather than
 
 **Cached answers do not outlive their worker.** Rerank and expansion cache keys include the identity of the workers serving them (name, address and model file), so replacing a worker cannot replay what it scored. Cached answers expire after 7 days, swept hourly in remote mode. For a worker that gave bad answers and came back unchanged, `POST /cache:purge` drops them all.
 
-`/ready` reports `status: "degraded"` and an `llm` block listing the roles no worker can serve. Those follow recent outcomes, so a role whose circuit is open reads as down even while `/health` looks fine, and an elapsed backoff is not taken as recovery. `models.resident` and `warmup.done` follow the same state, not a stored flag, so neither reads as healthy with no worker up. `/ready?requireModels=true` returns 503 in that state.
+`/ready` reports `status: "degraded"` and an `llm` block listing the roles no worker can serve. Those follow recent outcomes, so a role whose circuit is open reads as down even while `/health` looks fine, and a role reads as down until a trial call has actually succeeded. `models.resident` and `warmup.done` follow the same state, not a stored flag, so neither reads as healthy with no worker up. `/ready?requireModels=true` returns 503 in that state.
 
 `Memoria.Api` does not pass `degraded` through to its own callers yet. Its `/ready` already follows `models.resident`, but its search responses do not carry the flag.
 
-`GET /workers` lists each worker's state, circuit, last heartbeat, in-flight calls, queue depth and error rate.
+`llm.embedDisagreement` names any workers that embedded the same text differently. That is reported only, and does not make `status` degraded.
+
+`GET /workers` lists each worker's state, circuits, whether it disagrees, last heartbeat, in-flight calls, queue depth and error rate.
 
 ## The job queue
 
@@ -96,7 +105,11 @@ Reindex jobs persist in their own SQLite file beside the index (`index.sqlite.qu
 
 **QMD's own write is not atomic.** Its `insertEmbedding` writes two tables with no transaction, so a kill between them leaves a row claiming a vector that does not exist, and the document reads as complete for good. The farm's transaction closes this for remote mode, but in-process embedding still goes through the SDK. So every start, in both LLM modes, removes such rows and logs how many, and those documents embed again. Between a kill and the next start the index may be short a vector, and only a restart repairs it.
 
-**A damaged queue file does not stop search.** A row that cannot be read is moved to `jobs_quarantine`. A file that cannot be read is renamed to `*.corrupt-<time>`, not deleted, and a new one started. Either way the jobs involved will not run, which a warning says. A later write failure, such as a locked or full disk, is logged and the queue carries on in memory, writing what it missed if the store recovers. `/ready` shows `jobs.persistent` and `GET /queue` shows `persistence`, so this cannot go unnoticed. Writes never wait on a lock, because they run on the event loop.
+**A damaged queue file does not stop search.** A row that cannot be read is moved to `jobs_quarantine`. Only a file SQLite reports as corrupt, or as not a database, is renamed to `*.corrupt-<time>`, and the last 3 of those are kept. Either way the jobs involved will not run, which a warning says. Any other trouble opening it leaves the file untouched and runs with jobs in memory, with a warning: that covers a file from a newer version and one held by another process.
+
+**One sidecar owns a queue file.** It holds an exclusive SQLite lock for as long as it runs, and the operating system releases that if the process dies. A second sidecar on the same file runs with its jobs in memory and says so, and a `/ready` showing `jobs.persistent: false` is how to notice.
+
+A later write failure, such as a full disk, is logged and the queue carries on in memory, writing what it missed if the store recovers. `/ready` shows `jobs.persistent` and `GET /queue` shows `persistence`, so this cannot go unnoticed. Writes never wait on a lock, because they run on the event loop.
 
 **What is stored:** the request, timestamps, result counts, attempts, worker names, and error text. A reason names a file path at most. Document bodies and tokens are never stored, and a test reads the database's raw bytes to check.
 
@@ -106,9 +119,15 @@ Reindex jobs persist in their own SQLite file beside the index (`index.sqlite.qu
 
 **In remote mode, embedding is farmed out.** After the scan, chunks are grouped into batches by byte budget, and as many batches run at once as workers have background slots. Vectors are written through QMD's `insertEmbedding`, and the output matches the SDK's own path byte for byte, which a test checks. Progress is whatever the index holds, so a re-run asks what is still pending.
 
-**`force` clears nothing first.** Old vectors stand until a document's new set is ready, so an outage partway through loses none. A job resuming redoes only what it has not redone since it was accepted. The one exception is a new vector length, which cannot share the table: a force job then drops everything, but only once it holds a real vector of that length.
+**`force` clears nothing first.** Old vectors stand until a document's new set is ready, so an outage partway through loses none. A job resuming redoes only what it has not redone since it was accepted. The one exception is a new vector length, which cannot share the table: a force job over every collection then drops everything, but only once it holds a real vector of that length. Any other job meeting a new length fails with an explanation and changes nothing. A full force job that finishes also removes the rows of documents no longer in the index. A row dated in the future, from a clock moved back since, counts as due, so `force` still redoes it.
 
-**One bad chunk costs one document.** A failed batch is retried with a short backoff, which rides out a brief failure even on one worker, then split until whatever cannot be embedded is alone.
+**One bad chunk costs one document, once.** A failed batch is retried with a short backoff, which rides out a brief failure even on one worker. Then a known-good text decides what happened, because a batch's own failures cannot tell a bad batch from a dead worker. If no worker can embed it, that is an outage and the job waits, with nothing held against any document. If one can, the batch is split until what cannot be embedded is alone, and that document is set aside.
+
+A set-aside document is recorded in `memoria_dead_letters`, a table in the index beside QMD's. The job that found it ends `failed` and counts it in `embed.docsDeadLettered`. Later jobs skip it and succeed. It is not in vector search but can still be found lexically, and `/status` still counts it as needing embedding. Changing the document retries it, because the record is by content. So does a force job, and `POST /queue/dead-letters:clear`, for after a worker or model has been fixed.
+
+**Other processes may hold the index.** QMD sets a 120 s busy timeout, and SQLite waits on the event loop, so the farm's writes, the startup repair and the cache sweep all use a 250 ms one instead. A farm write that cannot get the index defers the job rather than failing it. The sweep and the repair log it, or skip it, and try again next time.
+
+**The startup repair can catch another process mid-write.** It cannot tell a row left by a kill from one another process has just written and not yet given a vector, because QMD's write holds no lock between the two. That row is removed, and the document embeds again on the next job. No vector is lost, and nothing cheap can detect the writer.
 
 The farm has to reach SDK internals that are not part of its public API, and copies the SQL of a private function. `test/llm-surface.test.ts` pins all of this to the exact SDK version.
 
@@ -119,8 +138,8 @@ The farm has to reach SDK internals that are not part of its public API, and cop
 | `GET /queue` | Jobs by state, model calls by priority class, and calls per worker. |
 | `POST /queue/jobs/{id}:retry` | Queue a failed job again under the same id. 409 unless it has failed. |
 | `POST /queue/jobs/{id}:cancel` | End a waiting job at once. A running job stops at its next safe point, between batches when farming, so a long scan or an in-process embed runs on until it returns. A cancelled job reports `failed` with the error `Cancelled`. 409 if already finished. |
-
-| `POST /workers/{name}:purge-vectors` | Remove one worker's vectors and queue a job to embed those documents again. |
+| `GET /queue/dead-letters` | Documents set aside, and why. `GET /queue` has the count. |
+| `POST /queue/dead-letters:clear` | Let them embed again, and queue a job to do it. |
 | `POST /cache:purge` | Drop every cached rerank score and expansion. |
 
 These are sidecar routes. `Memoria.Api` does not expose them.

@@ -3,7 +3,8 @@ import type { DocumentHead, MetadataSource } from "./metadata.ts";
 import type { EmbedSummary, UpdateSummary } from "./jobs.ts";
 import type { BreakerOptions } from "./llm/pool.ts";
 import type { RemoteLlm } from "./llm/remote.ts";
-import type { DegradedReason, EmbeddingResult, LlmCallSink, LlmHealth, LlmSurface, PoolLoad, PoolWorkerConfig, ProvenanceStore, Queryable, RerankDocument, RerankResult, WorkerView } from "./llm/types.ts";
+import { withShortBusyTimeout } from "./sqlite-busy.ts";
+import type { DeadLetter, DegradedReason, EmbeddingResult, LlmCallSink, LlmHealth, LlmSurface, PoolLoad, PoolWorkerConfig, Queryable, RerankDocument, RerankResult, WorkerView } from "./llm/types.ts";
 import type { SdkDb, SdkHandles, WiredRemote } from "./llm/wire.ts";
 
 /**
@@ -144,8 +145,10 @@ export interface QmdBackend extends MetadataSource {
   getStatus(): Promise<IndexStatusInfo>;
   /** Drop every cached rerank score and expansion. Returns how many. */
   purgeCache(): number;
-  /** Remove the vectors one worker wrote, so those documents embed again. Returns how many documents. */
-  purgeWorkerVectors(worker: string): number;
+  /** Documents set aside because no worker could embed them. Empty in local mode. */
+  deadLetters(): DeadLetter[];
+  /** Let those documents embed again. Returns how many. */
+  clearDeadLetters(): number;
   snippet(body: string, query: string, maxLen: number, chunkPos: number, chunkLen: number, intent?: string): Snippet;
   addLineNumbers(text: string, startLine: number): string;
   models(): ModelStatus;
@@ -171,8 +174,10 @@ export type LlmOptions =
       breaker?: Partial<BreakerOptions>;
       /** Deadline for one search-time rerank call. */
       rerankTimeoutMs?: number;
-      /** How often each worker is asked to embed the probe text. */
+      /** How often workers are compared on a fixed text. */
       probeEveryMs?: number;
+      /** Deadline for all of one search's model work. */
+      searchDeadlineMs?: number;
     };
 
 export interface OpenBackendOptions {
@@ -182,9 +187,8 @@ export interface OpenBackendOptions {
   /** Receives one structured entry per worker call. */
   onLlmCall?: LlmCallSink;
   onLlmDegraded?: (entry: { operation: string; error: string; fallback: boolean }) => void;
-  /** Records which worker embedded what, and the probe's reference. Outside QMD's schema. */
-  provenance?: ProvenanceStore;
-  onProvenanceError?: (message: string) => void;
+  /** Something an operator should know about, that needs no action from the caller. */
+  onLlmWarning?: (message: string) => void;
   /** Told how many vector rows the startup repair removed, when it removes any. */
   onVectorRepair?: (rows: number) => void;
 }
@@ -259,14 +263,18 @@ async function sdkHandles(storeInternal: unknown, local: LlmSurface): Promise<Sd
  * kill between them leaves a row claiming a vector that does not exist. The document
  * then reads as fully embedded, for good. This runs at every start, in both LLM
  * modes, and removes such rows so the document becomes pending again.
+ *
+ * Another process caught between those two inserts looks the same, so its row can go
+ * too. That is harmless: the document embeds again on the next job. Nothing cheap can
+ * tell the two apart, because the SDK's write holds no lock between them.
  */
-export function repairVectorRows(db: { prepare(sql: string): { get(...a: unknown[]): unknown; run(...a: unknown[]): { changes: number | bigint } } }): number {
+export function repairVectorRows(db: { prepare(sql: string): { get(...a: unknown[]): unknown; run(...a: unknown[]): { changes: number | bigint } }; exec(sql: string): unknown }): number {
   const table = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='vectors_vec'").get();
   try {
     const statement = table
       ? "DELETE FROM content_vectors WHERE hash || '_' || seq NOT IN (SELECT hash_seq FROM vectors_vec)"
       : "DELETE FROM content_vectors";
-    return Number(db.prepare(statement).run().changes);
+    return withShortBusyTimeout(db, () => Number(db.prepare(statement).run().changes));
   } catch {
     // A host without sqlite-vec cannot read that table, and so cannot judge it.
     return 0;
@@ -292,6 +300,7 @@ function remoteHealth(remote: RemoteLlm): LlmHealth {
     unavailable,
     workersUp: workers.filter((w) => w.state === "up" || w.state === "busy").length,
     workersTotal: workers.length,
+    embedDisagreement: [...remote.pool.disagreeing],
   };
 }
 
@@ -311,12 +320,6 @@ interface HeadRow {
   head: string;
 }
 
-/**
- * Degraded mode must not compete with a worker for this host's GPU. The SDK reads
- * this when it first loads a model, which may be never. Process-wide: only set when
- * a fallback can load, so the parity benchmark, which runs both modes in one process
- * with the fallback off, keeps its local side's GPU.
- */
 function requireIndex(dbPath: string): void {
   if (!existsSync(dbPath)) {
     throw new Error(`QMD index not found at ${dbPath}. Run \`qmd update\` on this host first, or set MEMORIA_QMD_DB_PATH.`);
@@ -327,6 +330,12 @@ function reportRepair(rows: number, options: OpenBackendOptions): void {
   if (rows > 0) options.onVectorRepair?.(rows);
 }
 
+/**
+ * Degraded mode must not compete with a worker for this host's GPU. The SDK reads
+ * this when it first loads a model, which may be never. Process-wide: only set when
+ * a fallback can load, so the parity benchmark, which runs both modes in one process
+ * with the fallback off, keeps its local side's GPU.
+ */
 function keepFallbackOffGpu(llm: LlmOptions): void {
   if (llm.mode === "remote" && llm.fallback) process.env.QMD_FORCE_CPU ??= "1";
 }
@@ -407,7 +416,7 @@ export async function openBackend(options: OpenBackendOptions): Promise<OpenedBa
     return { hits: outcome.hits, degradedReasons: [...outcome.degradedReasons, "no_vectors"] };
   };
 
-  const llmHealth = (): LlmHealth => (remote ? remoteHealth(remote) : { mode: "local", degraded: false, unavailable: [], workersUp: 0, workersTotal: 0 });
+  const llmHealth = (): LlmHealth => (remote ? remoteHealth(remote) : { mode: "local", degraded: false, unavailable: [], workersUp: 0, workersTotal: 0, embedDisagreement: [] });
 
   return {
     dbPath: store.dbPath,
@@ -438,8 +447,9 @@ export async function openBackend(options: OpenBackendOptions): Promise<OpenedBa
         needsEmbedding: r.needsEmbedding,
       };
     },
-    purgeCache: () => Number(db.prepare("DELETE FROM llm_cache").run().changes),
-    purgeWorkerVectors: (worker) => wired?.purgeWorkerVectors(worker) ?? 0,
+    purgeCache: () => withShortBusyTimeout(db as never, () => Number(db.prepare("DELETE FROM llm_cache").run().changes)),
+    deadLetters: () => wired?.deadLetters() ?? [],
+    clearDeadLetters: () => wired?.clearDeadLetters() ?? 0,
     embed: async (o) => {
       if (wired) return wired.embed(o);
       const r = await store.embed({ force: o.force, ...(o.collection !== undefined ? { collection: o.collection } : {}) });
@@ -490,17 +500,14 @@ function remoteModelStatus(remote: RemoteLlm, local: LlmSurface): ModelStatus {
   };
 }
 
-function modelStatus(llm: LlamaLike | undefined): ModelStatus {
-  const loaded = {
-    embed: !!llm?.embedModel,
-    rerank: !!llm?.rerankModel,
-    generate: !!llm?.generateModel,
-  };
+function modelStatus(held: LlamaLike | undefined): ModelStatus {
+  const llm = held ?? {};
+  const loaded = { embed: !!llm.embedModel, rerank: !!llm.rerankModel, generate: !!llm.generateModel };
   return {
-    embed: llm?.embedModelName ?? "",
-    rerank: llm?.rerankModelName ?? "",
-    generate: llm?.generateModelName ?? "",
+    embed: llm.embedModelName ?? "",
+    rerank: llm.rerankModelName ?? "",
+    generate: llm.generateModelName ?? "",
     loaded,
-    resident: loaded.embed && loaded.rerank && loaded.generate,
+    resident: Object.values(loaded).every(Boolean),
   };
 }

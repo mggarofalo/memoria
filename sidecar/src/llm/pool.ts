@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { WorkerClient, WorkerError, type OperationTimeouts } from "./client.ts";
+import { cosineOf } from "./probe.ts";
 import type { Capability, LlmCallSink, PoolLoad, PoolWorkerConfig, PriorityClass, WorkerView } from "./types.ts";
 import { parseCapabilities, parseHealth, ResponseViolation, type WorkerCapabilities, type WorkerHealth } from "./validate.ts";
 
@@ -12,8 +13,9 @@ import { parseCapabilities, parseHealth, ResponseViolation, type WorkerCapabilit
  *   A batch is one call to one worker, and a retry moves the whole batch.
  * - **Failure:** one retry on a different worker. Repeated failures open that
  *   worker's circuit for that role, so a worker whose reranker is down costs no
- *   further reranker calls until a backoff passes, and then only one trial call.
- *   Its embedding, if healthy, carries on.
+ *   further reranker calls until a backoff passes. Then a heartbeat makes one trial
+ *   call, so a role recovers without waiting for a search to try it. Embedding has
+ *   two circuits: one bad document chunk must not cost search its query vectors.
  * - **Priority:** interactive calls take free slots ahead of waiting background
  *   ones, and one slot per worker is kept back from background work. Calls in
  *   flight are not interrupted, so this is priority at the next free slot.
@@ -38,6 +40,10 @@ const REFUSAL_STREAK_LIMIT = 5;
 const ROLES: readonly Capability[] = ["embed", "rerank", "generate"];
 
 export type BreakerState = "closed" | "open" | "half_open";
+
+/** Document embedding fails for reasons query embedding does not, so it has its own circuit. */
+type CircuitKey = Capability | "documents";
+const CIRCUITS: readonly CircuitKey[] = [...ROLES, "documents"];
 
 export class Breaker {
   readonly #options: BreakerOptions;
@@ -85,6 +91,13 @@ export class Breaker {
     if (this.#failures >= this.#options.threshold) this.#open(now);
   }
 
+  /** Known good, by a test of the role itself rather than the call that failed. */
+  reset(): void {
+    this.#state = "closed";
+    this.#failures = 0;
+    this.#backoff = this.#options.backoffBaseMs;
+  }
+
   /** The worker answered but the call says nothing about the role, such as a wrong-model refusal. */
   settle(): void {
     if (this.#state === "half_open") this.#state = "closed";
@@ -111,7 +124,7 @@ export class Breaker {
 interface Entry {
   config: PoolWorkerConfig;
   client: WorkerClient;
-  breakers: Record<Capability, Breaker>;
+  breakers: Record<CircuitKey, Breaker>;
   /** Null until the first heartbeat. */
   reachable: boolean | null;
   health: WorkerHealth | null;
@@ -119,10 +132,7 @@ interface Entry {
   capabilities: WorkerCapabilities | null;
   /** Null until checked. False keeps this worker off embedding and tokens. */
   modelOk: boolean | null;
-  /** The worker's answer to the probe text disagreed with the reference. */
-  probeFailed: boolean;
-  lastProbe: number | null;
-  refusals: Record<Capability, number>;
+  refusals: Record<CircuitKey, number>;
   inFlight: Record<PriorityClass, number>;
   outcomes: boolean[];
   calls: number;
@@ -134,8 +144,11 @@ export interface DispatchTarget {
   client: WorkerClient;
 }
 
-/** Compare a worker's embedding of a fixed text against the reference. False means it disagrees. */
-export type EmbedProbe = (target: DispatchTarget) => Promise<boolean>;
+/** A small real call for a role, proving it works. Throws `WorkerError` if not. */
+export type RoleTrial = (capability: Capability, target: DispatchTarget) => Promise<void>;
+
+/** A worker's embedding of a fixed text, to compare with its neighbours'. */
+export type EmbedProbe = (target: DispatchTarget) => Promise<number[]>;
 
 export interface WorkerPoolOptions {
   workers: PoolWorkerConfig[];
@@ -148,11 +161,23 @@ export interface WorkerPoolOptions {
   now?: () => number;
   /** Longest a call waits for a free slot. */
   queueTimeoutMs?: Record<PriorityClass, number>;
+  /** Time left for the search in progress, which a wait for a slot must not outlast. */
+  interactiveBudgetMs?: () => number | null;
+  trial?: RoleTrial;
   probe?: EmbedProbe;
   probeEveryMs?: number;
+  /** Told when workers start or stop disagreeing about the same text. */
+  onDisagreement?: (workers: readonly string[]) => void;
 }
 
 type Attempt<T> = { ok: true; value: T } | { ok: false; error: WorkerError; retry: boolean };
+
+/** Below this, two workers are not running one model. Above it is rounding between CPU and GPU. */
+const PROBE_MIN_COSINE = 0.995;
+
+function circuitFor(capability: Capability, klass: PriorityClass): CircuitKey {
+  return capability === "embed" && klass === "background" ? "documents" : capability;
+}
 
 /** Operations that need the worker to hold a particular role. */
 const OPERATIONS: Record<Capability, string> = { embed: "embed", rerank: "rerank", generate: "complete" };
@@ -171,15 +196,13 @@ function newEntry(config: PoolWorkerConfig, breaker: BreakerOptions, options: Wo
       ...(options.fetch ? { fetch: options.fetch } : {}),
       ...(onCall ? { onCall } : {}),
     }),
-    breakers: { embed: new Breaker(breaker), rerank: new Breaker(breaker), generate: new Breaker(breaker) },
+    breakers: { embed: new Breaker(breaker), rerank: new Breaker(breaker), generate: new Breaker(breaker), documents: new Breaker(breaker) },
     reachable: null,
     health: null,
     lastHeartbeat: null,
     capabilities: null,
     modelOk: null,
-    probeFailed: false,
-    lastProbe: null,
-    refusals: { embed: 0, rerank: 0, generate: 0 },
+    refusals: { embed: 0, rerank: 0, generate: 0, documents: 0 },
     inFlight: { interactive: 0, background: 0 },
     outcomes: [],
     calls: 0,
@@ -188,6 +211,7 @@ function newEntry(config: PoolWorkerConfig, breaker: BreakerOptions, options: Wo
 
 function worstCircuit(entry: Entry): BreakerState {
   const states = entry.config.capabilities.map((role) => entry.breakers[role].state);
+  if (entry.config.capabilities.includes("embed")) states.push(entry.breakers.documents.state);
   if (states.includes("open")) return "open";
   return states.includes("half_open") ? "half_open" : "closed";
 }
@@ -197,8 +221,13 @@ export class WorkerPool {
   readonly #embedFiles: ReadonlySet<string>;
   readonly #now: () => number;
   readonly #queueTimeoutMs: Record<PriorityClass, number>;
+  readonly #interactiveBudgetMs: () => number | null;
+  readonly #trial: RoleTrial | undefined;
   readonly #probe: EmbedProbe | undefined;
   readonly #probeEveryMs: number;
+  readonly #onDisagreement: ((workers: readonly string[]) => void) | undefined;
+  #lastProbe: number | null = null;
+  #disagreeing: readonly string[] = [];
   readonly #waiters: Array<() => void> = [];
   readonly #waiting: Record<PriorityClass, number> = { interactive: 0, background: 0 };
   #poll: NodeJS.Timeout | undefined;
@@ -208,8 +237,11 @@ export class WorkerPool {
     this.#embedFiles = new Set(options.embedFiles);
     this.#now = options.now ?? (() => Date.now());
     this.#queueTimeoutMs = options.queueTimeoutMs ?? { interactive: 5_000, background: 600_000 };
+    this.#interactiveBudgetMs = options.interactiveBudgetMs ?? (() => null);
+    this.#trial = options.trial;
     this.#probe = options.probe;
     this.#probeEveryMs = options.probeEveryMs ?? 60_000;
+    this.#onDisagreement = options.onDisagreement;
     const breaker = { ...DEFAULT_BREAKER, ...options.breaker };
     // Heartbeats would drown the per-call log, and they say nothing about model work.
     const sink = options.onCall;
@@ -234,6 +266,7 @@ export class WorkerPool {
 
   async refresh(): Promise<void> {
     await Promise.all(this.#entries.map((entry) => this.#heartbeat(entry)));
+    await this.#compareEmbeddings();
     this.#wake();
   }
 
@@ -251,7 +284,8 @@ export class WorkerPool {
     entry.reachable = true;
     entry.lastHeartbeat = this.#now();
     this.#settleCircuits(entry, wasDown);
-    await this.#checkModel(entry);
+    entry.modelOk = this.servesIndexModel(entry.capabilities?.models.embed);
+    await this.#runTrials(entry);
   }
 
   /**
@@ -260,32 +294,107 @@ export class WorkerPool {
    * worker returning from an outage gets its trials early.
    */
   #settleCircuits(entry: Entry, wasDown: boolean): void {
-    for (const role of ROLES) {
-      entry.breakers[role].unstick();
-      if (wasDown) entry.breakers[role].recovered(this.#now());
+    for (const key of CIRCUITS) {
+      entry.breakers[key].unstick();
+      if (wasDown) entry.breakers[key].recovered(this.#now());
     }
   }
 
-  /** Re-checked every beat: a worker can restart with a different model. */
-  async #checkModel(entry: Entry): Promise<void> {
-    const named = this.servesIndexModel(entry.capabilities?.models.embed);
-    if (named && this.#probeDue(entry)) await this.#runProbe(entry);
-    entry.modelOk = named && !entry.probeFailed;
+  /**
+   * An open circuit whose backoff has passed gets a real call from here. Otherwise
+   * `/ready` would stay degraded until a search cleared it, and a router going by
+   * `/ready` would never send that search.
+   */
+  async #runTrials(entry: Entry): Promise<void> {
+    if (!this.#trial) return;
+    const now = this.#now();
+    for (const key of CIRCUITS) {
+      const capability: Capability = key === "documents" ? "embed" : key;
+      const breaker = entry.breakers[key];
+      if (breaker.state !== "open" || !breaker.allows(now) || !this.#servesRole(entry, capability)) continue;
+      breaker.begin(now);
+      if (await this.#tryRole(capability, entry)) {
+        breaker.success();
+        entry.refusals[key] = 0;
+      } else {
+        breaker.failure(this.#now());
+      }
+    }
   }
 
-  #probeDue(entry: Entry): boolean {
-    if (!this.#probe || !entry.config.capabilities.includes("embed")) return false;
-    return entry.lastProbe === null || this.#now() - entry.lastProbe >= this.#probeEveryMs;
-  }
-
-  /** An unanswered probe says nothing about the model, so only a real answer changes the verdict. */
-  async #runProbe(entry: Entry): Promise<void> {
-    entry.lastProbe = this.#now();
+  async #tryRole(capability: Capability, entry: Entry): Promise<boolean> {
     try {
-      entry.probeFailed = !(await this.#probe!({ name: entry.config.name, client: entry.client }));
+      await this.#trial!(capability, { name: entry.config.name, client: entry.client });
+      return true;
     } catch (err) {
-      if (!(err instanceof WorkerError)) throw err;
+      if (err instanceof WorkerError) return false;
+      throw err;
     }
+  }
+
+  /**
+   * Can any worker embed at all? Called when a batch fails, because that alone cannot
+   * tell a bad batch from a dead worker. A known-good text can. It ignores the document
+   * circuit, which the bad batch may have opened, and clears it for a worker that passes.
+   */
+  async confirmDocuments(): Promise<boolean> {
+    if (!this.#trial) return false;
+    let alive = false;
+    for (const entry of this.#entries) {
+      if (entry.reachable === false || !this.#servesRole(entry, "embed")) continue;
+      if (!(await this.#tryRole("embed", entry))) continue;
+      entry.breakers.documents.reset();
+      entry.refusals.documents = 0;
+      alive = true;
+    }
+    return alive;
+  }
+
+  /**
+   * Catches honest mistakes, such as two workers on different builds of a model. It
+   * only reports. A token holder is already trusted, a careful liar would answer this
+   * public text honestly, and acting on it could take embedding down over a legitimate
+   * model update. With one worker there is nothing to compare, so it does not run.
+   */
+  async #compareEmbeddings(): Promise<void> {
+    if (!this.#probe || !this.#probeDue()) return;
+    this.#lastProbe = this.#now();
+    const answers: Array<{ name: string; vector: number[] }> = [];
+    for (const entry of this.#entries) {
+      if (entry.reachable !== true || !entry.config.capabilities.includes("embed") || entry.modelOk !== true) continue;
+      const vector = await this.#probeWorker(entry);
+      if (vector) answers.push({ name: entry.config.name, vector });
+    }
+    // Fewer than two answers says nothing, so the last verdict stands.
+    if (answers.length < 2) return;
+    const first = answers[0]!.vector;
+    const agreed = answers.every((a) => cosineOf(first, a.vector) >= PROBE_MIN_COSINE);
+    this.#setDisagreement(agreed ? [] : answers.map((a) => a.name));
+  }
+
+  #probeDue(): boolean {
+    const embedders = this.#entries.filter((e) => e.config.capabilities.includes("embed")).length;
+    return embedders > 1 && (this.#lastProbe === null || this.#now() - this.#lastProbe >= this.#probeEveryMs);
+  }
+
+  async #probeWorker(entry: Entry): Promise<number[] | null> {
+    try {
+      return await this.#probe!({ name: entry.config.name, client: entry.client });
+    } catch (err) {
+      if (err instanceof WorkerError) return null;
+      throw err;
+    }
+  }
+
+  #setDisagreement(workers: readonly string[]): void {
+    if (workers.join() === this.#disagreeing.join()) return;
+    this.#disagreeing = workers;
+    this.#onDisagreement?.(workers);
+  }
+
+  /** Workers that answered the same text differently, at the last comparison. */
+  get disagreeing(): readonly string[] {
+    return this.#disagreeing;
   }
 
   /** Exact, so `evil-embeddinggemma...` does not pass for `embeddinggemma...`. */
@@ -302,27 +411,27 @@ export class WorkerPool {
     return !entry.health || entry.health.models[capability];
   }
 
-  #eligible(entry: Entry, capability: Capability, now: number): boolean {
-    return entry.reachable !== false && entry.breakers[capability].allows(now) && this.#servesRole(entry, capability);
+  #eligible(entry: Entry, capability: Capability, key: CircuitKey, now: number): boolean {
+    return entry.reachable !== false && entry.breakers[key].allows(now) && this.#servesRole(entry, capability);
   }
 
-  #candidates(capability: Capability, exclude: ReadonlySet<Entry>): Entry[] {
+  #candidates(capability: Capability, key: CircuitKey, exclude: ReadonlySet<Entry>): Entry[] {
     const now = this.#now();
     const depth = (e: Entry) => e.inFlight.interactive + e.inFlight.background + (e.health?.queueDepth ?? 0);
     const busy = (e: Entry) => (e.health?.status === "busy" ? 1 : 0);
     return this.#entries
-      .filter((e) => !exclude.has(e) && this.#eligible(e, capability, now))
+      .filter((e) => !exclude.has(e) && this.#eligible(e, capability, key, now))
       .sort((a, b) => busy(a) - busy(b) || depth(a) - depth(b) || a.config.priority - b.config.priority || a.config.name.localeCompare(b.config.name));
   }
 
   /** Is anyone able to take this now? Optimistic before the first heartbeat. */
-  canServe(capability: Capability): boolean {
-    return this.#candidates(capability, new Set()).length > 0;
+  canServe(capability: Capability, klass: PriorityClass = "interactive"): boolean {
+    return this.#candidates(capability, circuitFor(capability, klass), new Set()).length > 0;
   }
 
   /** Slots background work could use at once, to size embedding concurrency. */
   backgroundCapacity(capability: Capability): number {
-    return this.#candidates(capability, new Set()).reduce((sum, e) => sum + this.#limit(e, "background"), 0);
+    return this.#candidates(capability, circuitFor(capability, "background"), new Set()).reduce((sum, e) => sum + this.#limit(e, "background"), 0);
   }
 
   /** One slot per worker is kept back from background work, when there is more than one. */
@@ -335,11 +444,11 @@ export class WorkerPool {
     for (const resolve of this.#waiters.splice(0)) resolve();
   }
 
-  #takeFreeSlot(candidates: Entry[], capability: Capability, klass: PriorityClass): Entry | null {
+  #takeFreeSlot(candidates: Entry[], key: CircuitKey, klass: PriorityClass): Entry | null {
     if (klass === "background" && this.#waiting.interactive > 0) return null;
     const free = candidates.find((e) => e.inFlight.interactive + e.inFlight.background < this.#limit(e, klass));
     if (!free) return null;
-    free.breakers[capability].begin(this.#now());
+    free.breakers[key].begin(this.#now());
     free.inFlight[klass]++;
     return free;
   }
@@ -358,13 +467,15 @@ export class WorkerPool {
 
   /** Take a slot on the best worker, waiting if all are full. Null when nobody can serve this. */
   async #acquire(capability: Capability, klass: PriorityClass, exclude: ReadonlySet<Entry>, operation: string): Promise<Entry | null> {
-    const deadline = this.#now() + this.#queueTimeoutMs[klass];
+    const key = circuitFor(capability, klass);
+    const budget = klass === "interactive" ? this.#interactiveBudgetMs() : null;
+    const deadline = this.#now() + Math.min(this.#queueTimeoutMs[klass], budget ?? Infinity);
     this.#waiting[klass]++;
     try {
       for (;;) {
-        const candidates = this.#candidates(capability, exclude);
+        const candidates = this.#candidates(capability, key, exclude);
         if (candidates.length === 0) return null;
-        const taken = this.#takeFreeSlot(candidates, capability, klass);
+        const taken = this.#takeFreeSlot(candidates, key, klass);
         if (taken) return taken;
         if (this.#now() >= deadline) throw new WorkerError("saturated", operation, "pool", "no worker had a free slot before the deadline");
         await this.#waitForChange();
@@ -400,26 +511,32 @@ export class WorkerPool {
     try {
       if (capability === "embed") await this.#verifyEmbedModel(entry, operation);
       const value = await work({ name: entry.config.name, client: entry.client });
-      entry.breakers[capability].success();
-      entry.refusals[capability] = 0;
+      const key = circuitFor(capability, klass);
+      entry.breakers[key].success();
+      entry.refusals[key] = 0;
       this.#record(entry, true);
       return { ok: true, value };
     } catch (err) {
-      return this.#failed(entry, capability, err);
+      return this.#failed(entry, circuitFor(capability, klass), err);
     } finally {
       entry.inFlight[klass]--;
       this.#wake();
     }
   }
 
-  #failed(entry: Entry, capability: Capability, err: unknown): Attempt<never> {
-    const breaker = entry.breakers[capability];
+  #failed(entry: Entry, key: CircuitKey, err: unknown): Attempt<never> {
+    const breaker = entry.breakers[key];
     if (!(err instanceof WorkerError)) {
       this.#record(entry, false);
       breaker.failure(this.#now());
       throw err;
     }
-    if (isBodySpecific(err) && ++entry.refusals[capability] < REFUSAL_STREAK_LIMIT) {
+    if (err.code === "deadline") {
+      // The search ran out of time before asking. The worker has done nothing wrong.
+      breaker.settle();
+      return { ok: false, error: err, retry: false };
+    }
+    if (isBodySpecific(err) && ++entry.refusals[key] < REFUSAL_STREAK_LIMIT) {
       // The worker answered and refused this request; another would refuse it too.
       breaker.settle();
       this.#record(entry, true);
@@ -479,7 +596,7 @@ export class WorkerPool {
 
   #state(entry: Entry): WorkerView["state"] {
     if (entry.reachable === false) return "down";
-    if (worstCircuit(entry) !== "closed") return "circuit_open";
+    if (entry.config.capabilities.some((role) => entry.breakers[role].state !== "closed")) return "circuit_open";
     if (entry.reachable === null) return "unknown";
     if (entry.health?.status === "starting") return "starting";
     return entry.health?.status === "busy" ? "busy" : "up";
@@ -494,7 +611,8 @@ export class WorkerPool {
         host: e.client.name,
         state: this.#state(e),
         circuit: worstCircuit(e),
-        circuits: { embed: e.breakers.embed.state, rerank: e.breakers.rerank.state, generate: e.breakers.generate.state },
+        circuits: { embed: e.breakers.embed.state, rerank: e.breakers.rerank.state, generate: e.breakers.generate.state, documents: e.breakers.documents.state },
+        embedDisagrees: this.#disagreeing.includes(e.config.name),
         capabilities: [...e.config.capabilities],
         priority: e.config.priority,
         maxConcurrent: e.config.maxConcurrent,

@@ -2,7 +2,6 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { WorkerError, type OperationTimeouts, workerName } from "./client.ts";
 import { EXPANSION_GRAMMAR, EXPANSION_SAMPLING, expansionFailure, expansionPrompt, parseExpansion } from "./expansion.ts";
 import { WorkerPool, type BreakerOptions, type DispatchTarget } from "./pool.ts";
-import { cosineOf } from "./probe.ts";
 import { WorkerRerankTransport, type RerankTransport } from "./rerank-transport.ts";
 import type {
   Capability,
@@ -15,22 +14,39 @@ import type {
   LocalFallback,
   PoolWorkerConfig,
   PriorityClass,
-  ProbeReference,
   Queryable,
   RerankDocument,
   RerankResult,
   WorkerOptions,
 } from "./types.ts";
-import { checkedScore, parseEmbedResponse, parseText, parseTokens, ResponseViolation } from "./validate.ts";
+import { checkedScore, parseEmbedResponse, parseRerankResults, parseText, parseTokens, ResponseViolation } from "./validate.ts";
 
 /** Longer than any honest expansion: QMD asks for 600 tokens at most. */
 const MAX_EXPANSION_CHARS = 16 * 1024;
 const MAX_DETOKENIZED_CHARS = 8 * 1024 * 1024;
 
-/** A fixed text every worker should embed alike, to catch one serving something else. */
+/** A fixed text for checking a role works, and that workers embed alike. */
 export const PROBE_TEXT = "task: search result | query: memoria worker identity probe";
-/** Below this, it is a different model and not rounding between CPU and GPU. */
-export const PROBE_MIN_COSINE = 0.995;
+
+/**
+ * One deadline for all of a search's model work, well under `Memoria.Api`'s 2-minute
+ * client timeout, so a hung worker gives a degraded answer rather than a timeout.
+ */
+export const DEFAULT_SEARCH_DEADLINE_MS = 60_000;
+
+/** A trial holds up the heartbeat it runs in, and a slow answer is no proof of health anyway. */
+const TRIAL_TIMEOUT_MS = 10_000;
+
+/** A CPU fallback may have to load a model first, but cannot be left to wait forever. */
+const FALLBACK_DEADLINE_MS = 30_000;
+
+/** What one search has spent and learned, so its rerun without reranking repeats no work. */
+interface SearchContext {
+  reasons: Set<DegradedReason>;
+  deadline: number;
+  expansions: Map<string, Queryable[]>;
+  vectors: Map<string, (EmbeddingResult | null)[]>;
+}
 
 /**
  * Marks results that came through a worker, and which workers. QMD keys
@@ -64,16 +80,16 @@ export interface RemoteLlmOptions {
   statusPollMs?: number;
   /** Length of vectors already in the index. Query vectors must match it to be searchable. */
   indexDimensions?: () => number | null;
-  /** Where the probe's reference answer lives. Enables probing. */
-  probeReference?: { get(): ProbeReference | null; set(reference: ProbeReference): void };
   probeEveryMs?: number;
+  onDisagreement?: (workers: readonly string[]) => void;
+  searchDeadlineMs?: number;
 }
 
 function basename(uri: string): string {
   return (uri.split("/").pop() ?? uri).toLowerCase();
 }
 
-/** The model's file name, and QMD's cache name for it (`hf_<owner>_<file>`). Exact names only. */
+/** What a worker may report for the model: its file name, or QMD's cache name for it. Exact names only. */
 export function acceptedEmbedFiles(uri: string): string[] {
   const file = basename(uri);
   const owner = /^hf:([^/]+)\//.exec(uri)?.[1]?.toLowerCase();
@@ -111,8 +127,9 @@ export class RemoteLlm implements LlmSurface {
   readonly #fallback: LocalFallback | null;
   readonly #onDegraded: RemoteLlmOptions["onDegraded"];
   readonly #indexDimensions: (() => number | null) | undefined;
-  readonly #probeReference: RemoteLlmOptions["probeReference"];
-  readonly #degradation = new AsyncLocalStorage<Set<DegradedReason>>();
+  readonly #now: () => number;
+  readonly #searchDeadlineMs: number;
+  readonly #search = new AsyncLocalStorage<SearchContext>();
   #dimensions: number;
 
   constructor(options: RemoteLlmOptions) {
@@ -123,14 +140,17 @@ export class RemoteLlm implements LlmSurface {
     this.#fallback = options.fallback;
     this.#onDegraded = options.onDegraded;
     this.#indexDimensions = options.indexDimensions;
-    this.#probeReference = options.probeReference;
-    const probe = options.probeReference && ((target: DispatchTarget) => this.#checkProbe(target));
+    this.#now = options.now ?? Date.now;
+    this.#searchDeadlineMs = options.searchDeadlineMs ?? DEFAULT_SEARCH_DEADLINE_MS;
     this.pool = new WorkerPool({
       workers: workersFrom(options),
       embedFiles: acceptedEmbedFiles(options.models.embed),
-      ...definedOnly({ breaker: options.breaker, timeouts: options.timeouts, fetch: options.fetch, onCall: options.onCall, now: options.now, probe, probeEveryMs: options.probeEveryMs }),
+      ...definedOnly({ breaker: options.breaker, timeouts: options.timeouts, fetch: options.fetch, onCall: options.onCall, now: options.now, probeEveryMs: options.probeEveryMs, onDisagreement: options.onDisagreement }),
+      interactiveBudgetMs: () => this.#remainingMs(),
+      trial: (capability, target) => this.#trial(capability, target),
+      probe: (target) => this.#probeVector(target),
     });
-    this.#transport = options.rerankTransport ?? new WorkerRerankTransport(this.pool);
+    this.#transport = options.rerankTransport ?? new WorkerRerankTransport(this.pool, () => this.#remainingMs());
     this.transportName = this.#transport.name;
     if (options.statusPollMs && options.statusPollMs > 0) this.pool.start(options.statusPollMs);
   }
@@ -148,12 +168,18 @@ export class RemoteLlm implements LlmSurface {
    * has these failures swallowed, so this is how a caller still hears about them.
    */
   track<T>(run: (reasons: Set<DegradedReason>) => Promise<T>): Promise<T> {
-    const reasons = new Set<DegradedReason>();
-    return this.#degradation.run(reasons, () => run(reasons));
+    const context: SearchContext = { reasons: new Set(), deadline: this.#now() + this.#searchDeadlineMs, expansions: new Map(), vectors: new Map() };
+    return this.#search.run(context, () => run(context.reasons));
   }
 
-  canServe(capability: Capability): boolean {
-    return this.pool.canServe(capability);
+  /** Time left for the current search. Null outside one. */
+  #remainingMs(): number | null {
+    const context = this.#search.getStore();
+    return context ? context.deadline - this.#now() : null;
+  }
+
+  canServe(capability: Capability, klass: PriorityClass = "interactive"): boolean {
+    return this.pool.canServe(capability, klass);
   }
 
   // --- embeddings ------------------------------------------------------------
@@ -180,7 +206,7 @@ export class RemoteLlm implements LlmSurface {
 
   async #embedOn(target: DispatchTarget, texts: string[], isQuery: boolean): Promise<number[][]> {
     const { client } = target;
-    const raw = await client.post("embed", isQuery ? "embedQuery" : "embed", "/v1/embed", { texts }, texts.length);
+    const raw = await client.post("embed", isQuery ? "embedQuery" : "embed", "/v1/embed", { texts }, texts.length, isQuery ? this.#remainingMs() : null);
     // Checked on every response, not just at startup: a worker restarted with
     // another model between heartbeats must not get vectors into the index.
     const parsed = this.#validated(client.name, "embed", () => parseEmbedResponse(raw, texts.length, this.#dimensions));
@@ -200,6 +226,16 @@ export class RemoteLlm implements LlmSurface {
 
   async #embedMany(texts: string[], isQuery: boolean): Promise<(EmbeddingResult | null)[]> {
     if (texts.length === 0) return [];
+    const context = isQuery ? this.#search.getStore() : undefined;
+    const key = texts.join("\0");
+    const known = context?.vectors.get(key);
+    if (known) return known;
+    const out = await this.#embedAnyhow(texts, isQuery);
+    context?.vectors.set(key, out);
+    return out;
+  }
+
+  async #embedAnyhow(texts: string[], isQuery: boolean): Promise<(EmbeddingResult | null)[]> {
     const klass: PriorityClass = isQuery ? "interactive" : "background";
     try {
       const vectors = await this.pool.dispatch("embed", klass, "embed", (target) => this.#embedOn(target, texts, isQuery));
@@ -214,7 +250,7 @@ export class RemoteLlm implements LlmSurface {
     this.#onDegraded?.({ operation: "embed", error: messageOf(err), fallback: fallback !== null });
     if (fallback) {
       try {
-        const out = this.#keepSearchable(await fallback.embedBatch(texts));
+        const out = this.#keepSearchable(await this.#withinDeadline(fallback.embedBatch(texts)));
         this.#note(out.every((r) => r !== null) ? "cpu_embedding" : "no_vectors");
         return out;
       } catch {
@@ -231,22 +267,38 @@ export class RemoteLlm implements LlmSurface {
     return local.map((r) => (r && (!expected || r.embedding.length === expected) ? { embedding: r.embedding, model: this.embedModelName } : null));
   }
 
-  /**
-   * Trust the first answer as the reference, and hold every later one to it. A
-   * worker that lies from the very start can only be found by comparing it with
-   * others, which is why `GET /workers` shows the verdict and purging that worker
-   * clears the reference.
-   */
-  async #checkProbe(target: DispatchTarget): Promise<boolean> {
-    const raw = await target.client.post("probe", "embedQuery", "/v1/embed", { texts: [PROBE_TEXT] }, 1);
-    const parsed = this.#validated(target.client.name, "probe", () => parseEmbedResponse(raw, 1, this.#dimensions));
-    const vector = parsed.vectors[0]!;
-    const reference = this.#probeReference!.get();
-    if (!reference) {
-      this.#probeReference!.set({ worker: target.name, vector });
-      return true;
+  /** A fallback that outlasts its deadline keeps running, but the caller moves on. */
+  #withinDeadline<T>(work: Promise<T>): Promise<T> {
+    const ms = Math.min(FALLBACK_DEADLINE_MS, this.#remainingMs() ?? Infinity);
+    let timer: NodeJS.Timeout;
+    const expired = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("the local fallback took too long")), Math.max(0, ms));
+      timer.unref();
+    });
+    return Promise.race([work, expired]).finally(() => clearTimeout(timer));
+  }
+
+  /** A small real call for one role, from a heartbeat or a failed batch. Bypasses every circuit. */
+  async #trial(capability: Capability, target: DispatchTarget): Promise<void> {
+    if (capability === "embed") {
+      await this.#probeVector(target);
+      return;
     }
-    return cosineOf(reference.vector, vector) >= PROBE_MIN_COSINE;
+    const { client } = target;
+    if (capability === "rerank") {
+      const raw = await client.post("trial", "rerank", "/v1/rerank", { query: "memoria trial", documents: ["memoria trial"] }, 1, TRIAL_TIMEOUT_MS);
+      this.#validated(client.name, "trial", () => parseRerankResults(raw, 1));
+      return;
+    }
+    const raw = await client.post("trial", "complete", "/v1/complete", { prompt: "memoria trial", maxTokens: 1 }, 1, TRIAL_TIMEOUT_MS);
+    this.#validated(client.name, "trial", () => parseText(raw, MAX_EXPANSION_CHARS));
+  }
+
+  async #probeVector(target: DispatchTarget): Promise<number[]> {
+    const raw = await target.client.post("trial", "embedQuery", "/v1/embed", { texts: [PROBE_TEXT] }, 1, TRIAL_TIMEOUT_MS);
+    const parsed = this.#validated(target.client.name, "trial", () => parseEmbedResponse(raw, 1, this.#dimensions));
+    if (!this.pool.servesIndexModel(parsed.model)) throw new WorkerError("model_mismatch", "trial", target.client.name, "the worker does not serve the index's embedding model");
+    return parsed.vectors[0]!;
   }
 
   // --- rerank ----------------------------------------------------------------
@@ -282,9 +334,19 @@ export class RemoteLlm implements LlmSurface {
    */
   async expandQuery(query: string, options: ExpandOptions = {}): Promise<Queryable[]> {
     const includeLexical = options.includeLexical ?? true;
+    const context = this.#search.getStore();
+    const key = `${includeLexical}:${query}`;
+    const known = context?.expansions.get(key);
+    if (known) return known;
+    const out = await this.#expand(query, includeLexical);
+    context?.expansions.set(key, out);
+    return out;
+  }
+
+  async #expand(query: string, includeLexical: boolean): Promise<Queryable[]> {
     try {
       const output = await this.pool.dispatch("generate", "interactive", "complete", async ({ client }) => {
-        const raw = await client.post("complete", "complete", "/v1/complete", { prompt: expansionPrompt(query), grammar: EXPANSION_GRAMMAR, ...EXPANSION_SAMPLING }, 1);
+        const raw = await client.post("complete", "complete", "/v1/complete", { prompt: expansionPrompt(query), grammar: EXPANSION_GRAMMAR, ...EXPANSION_SAMPLING }, 1, this.#remainingMs());
         return this.#validated(client.name, "complete", () => parseText(raw, MAX_EXPANSION_CHARS));
       });
       const expanded = parseExpansion(query, output, includeLexical);
@@ -332,7 +394,7 @@ export class RemoteLlm implements LlmSurface {
     this.#onDegraded?.({ operation, error: messageOf(err), fallback: fallback !== null });
     if (!fallback) throw err;
     try {
-      return await run(fallback);
+      return await this.#withinDeadline(run(fallback));
     } catch {
       throw new WorkerError("no_worker", operation, "local", "no worker answered and the local fallback is unavailable");
     }
@@ -355,7 +417,7 @@ export class RemoteLlm implements LlmSurface {
   }
 
   #note(reason: DegradedReason): void {
-    this.#degradation.getStore()?.add(reason);
+    this.#search.getStore()?.reasons.add(reason);
   }
 
   #validated<T>(worker: string, operation: string, parse: () => T): T {

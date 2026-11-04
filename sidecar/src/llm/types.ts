@@ -113,7 +113,10 @@ export interface WorkerView {
   state: "unknown" | "up" | "busy" | "starting" | "down" | "circuit_open";
   /** The worst of `circuits`, over the roles this worker is configured for. */
   circuit: "closed" | "open" | "half_open";
-  circuits: Record<Capability, "closed" | "open" | "half_open">;
+  /** `documents` is document embedding, kept apart from `embed`, which is query vectors. */
+  circuits: Record<Capability | "documents", "closed" | "open" | "half_open">;
+  /** This worker embedded the same text differently from another. Reported only: nothing acts on it. */
+  embedDisagrees: boolean;
   capabilities: Capability[];
   priority: number;
   maxConcurrent: number;
@@ -133,19 +136,12 @@ export interface PoolLoad {
   workers: Array<{ name: string; interactive: number; background: number; queueDepth: number }>;
 }
 
-/** A fixed text's embedding, which every worker of one model should roughly reproduce. */
-export interface ProbeReference {
-  worker: string;
-  vector: number[];
-}
-
-/** Which worker embedded which document, kept outside QMD's schema so one worker's work can be undone. */
-export interface ProvenanceStore {
-  recordDocument(hash: string, workers: readonly string[]): void;
-  documentsBy(worker: string): string[];
-  forgetDocuments(hashes: readonly string[]): void;
-  probeReference(): ProbeReference | null;
-  setProbeReference(reference: ProbeReference | null): void;
+/** A document a worker could not embed, set aside so it stops failing every later job. */
+export interface DeadLetter {
+  hash: string;
+  path: string;
+  reason: string;
+  at: string;
 }
 
 /** Whether model work is at full strength. Drives `/ready`. */
@@ -156,4 +152,6 @@ export interface LlmHealth {
   unavailable: Capability[];
   workersUp: number;
   workersTotal: number;
+  /** Workers that embedded the same text differently. Reported only: nothing acts on it. */
+  embedDisagreement: string[];
 }

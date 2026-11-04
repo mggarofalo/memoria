@@ -1,3 +1,4 @@
+import { isBusy } from "./sqlite-busy.ts";
 import type { FastifyInstance } from "fastify";
 import type { AppContext } from "./app.ts";
 import { SIDECAR_VERSION } from "./app.ts";
@@ -190,6 +191,30 @@ interface ReindexBody {
 
 // --- routes ------------------------------------------------------------------
 
+function definedRange(fromLine: number | undefined, maxLines: number | undefined): { fromLine?: number; maxLines?: number } {
+  return { ...(fromLine !== undefined ? { fromLine } : {}), ...(maxLines !== undefined ? { maxLines } : {}) };
+}
+
+async function readBody(backend: QmdBackend, file: string, range: { fromLine?: number; maxLines?: number }, lineNumbers: boolean | undefined): Promise<string> {
+  const body = (await backend.getDocumentBody(file, range)) ?? "";
+  return lineNumbers ? backend.addLineNumbers(body, range.fromLine ?? 1) : body;
+}
+
+function firstLines(body: string, maxLines: number | undefined): { body: string; truncatedTo?: number } {
+  if (maxLines === undefined) return { body };
+  const lines = body.split("\n");
+  return lines.length > maxLines ? { body: lines.slice(0, maxLines).join("\n"), truncatedTo: maxLines } : { body };
+}
+
+function multiGetView(doc: Parameters<typeof documentView>[0] & { body?: string | undefined }, request: MultiGetBody, backend: QmdBackend, ctx: Parameters<typeof documentView>[1]) {
+  if (!request.includeBody) return documentView(doc, ctx, { body: null });
+  const { body, truncatedTo } = firstLines(doc.body ?? "", request.maxLines);
+  return documentView(doc, ctx, {
+    body: request.lineNumbers ? backend.addLineNumbers(body, 1) : body,
+    ...(truncatedTo !== undefined ? { maxLines: truncatedTo } : {}),
+  });
+}
+
 export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Promise<void> {
   const { backend, config } = ctx;
 
@@ -229,6 +254,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
           unavailable: { type: "array", items: { type: "string", enum: ["embed", "rerank", "generate"] }, description: "Roles no worker can serve right now." },
           workersUp: { type: "integer" },
           workersTotal: { type: "integer" },
+          embedDisagreement: { type: "array", items: { type: "string" }, description: "Workers that embedded the same text differently. Reported only: nothing acts on it. Empty until two workers have been compared." },
         },
       },
       version: { type: "string" },
@@ -519,12 +545,9 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       const found = await backend.get(parsed.lookup);
       if ("error" in found) return reply.code(404).send(lookupErrorBody(found));
 
-      let body: string | null = null;
-      if (request.query.body) {
-        body = (await backend.getDocumentBody(found.filepath, { ...(fromLine !== undefined ? { fromLine } : {}), ...(maxLines !== undefined ? { maxLines } : {}) })) ?? "";
-        if (request.query.lineNumbers) body = backend.addLineNumbers(body, fromLine ?? 1);
-      }
-      return documentView(found, ctx, { ...(fromLine !== undefined ? { fromLine } : {}), ...(maxLines !== undefined ? { maxLines } : {}), body });
+      const range = definedRange(fromLine, maxLines);
+      const body = request.query.body ? await readBody(backend, found.filepath, range, request.query.lineNumbers) : null;
+      return documentView(found, ctx, { ...range, body });
     },
   );
 
@@ -577,21 +600,8 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       const out = [];
       const skipped = [];
       for (const entry of docs) {
-        if (entry.skipped) {
-          skipped.push({ file: entry.doc.displayPath, reason: entry.skipReason });
-          continue;
-        }
-        let body: string | null = request.body.includeBody ? (entry.doc.body ?? "") : null;
-        let truncatedTo: number | undefined;
-        if (body !== null && request.body.maxLines !== undefined) {
-          const lines = body.split("\n");
-          if (lines.length > request.body.maxLines) {
-            body = lines.slice(0, request.body.maxLines).join("\n");
-            truncatedTo = request.body.maxLines;
-          }
-        }
-        if (body !== null && request.body.lineNumbers) body = backend.addLineNumbers(body, 1);
-        out.push(documentView(entry.doc, ctx, { body, ...(truncatedTo !== undefined ? { maxLines: truncatedTo } : {}) }));
+        if (entry.skipped) skipped.push({ file: entry.doc.displayPath, reason: entry.skipReason });
+        else out.push(multiGetView(entry.doc, request.body, backend, ctx));
       }
       return { docs: out, skipped, errors };
     },
@@ -846,8 +856,9 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         response: {
           200: {
             type: "object",
-            required: ["jobs", "classes", "workers", "persistence"],
+            required: ["jobs", "classes", "workers", "persistence", "deadLetters"],
             properties: {
+              deadLetters: { type: "integer", description: "Documents set aside because no worker could embed them. See `GET /queue/dead-letters`." },
               persistence: {
                 type: "object",
                 required: ["enabled", "healthy"],
@@ -889,9 +900,59 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       return {
         jobs: ctx.jobs.counts(),
         persistence: ctx.jobs.persistence(),
+        deadLetters: backend.deadLetters().length,
         classes: load?.classes ?? { interactive: { inFlight: 0, waiting: 0 }, background: { inFlight: 0, waiting: 0 } },
         workers: load?.workers ?? [],
       };
+    },
+  );
+
+  app.get(
+    "/queue/dead-letters",
+    {
+      schema: {
+        tags: ["index"],
+        summary: "Documents set aside",
+        description:
+          "Documents a worker refused or could not embed while it could embed a known-good text. They are recorded once and " +
+          "later jobs skip them, so they stay out of vector search until cleared. A changed document is tried afresh, and a " +
+          "force job retries them. They can still be found lexically.",
+        response: {
+          200: {
+            type: "object",
+            required: ["documents"],
+            properties: {
+              documents: {
+                type: "array",
+                items: {
+                  type: "object",
+                  required: ["hash", "path", "reason", "at"],
+                  properties: { hash: { type: "string" }, path: { type: "string" }, reason: { type: "string" }, at: { type: "string" } },
+                },
+              },
+            },
+          },
+          ...errorResponses,
+        },
+      },
+    },
+    async () => ({ documents: backend.deadLetters() }),
+  );
+
+  app.post(
+    "/queue/dead-letters::clear",
+    {
+      schema: {
+        tags: ["index"],
+        summary: "Try set-aside documents again",
+        description: "Let every set-aside document embed again, and queue a job for it. For after a worker or model has been fixed.",
+        response: { 202: { type: "object", required: ["documents", "job"], properties: { documents: { type: "integer" }, job: { $ref: "Job#" } } }, ...errorResponses },
+      },
+    },
+    async (_request, reply) => {
+      const documents = backend.clearDeadLetters();
+      const job = ctx.jobs.enqueue({ collections: null, embed: true, force: false, reason: "POST /queue/dead-letters:clear" });
+      return reply.code(202).send({ documents, job });
     },
   );
 
@@ -955,7 +1016,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
                 type: "array",
                 items: {
                   type: "object",
-                  required: ["name", "host", "state", "circuit", "circuits", "capabilities", "priority", "maxConcurrent", "embedModelCompatible", "rerankTransport", "lastHeartbeat", "inFlight", "queueDepth", "calls", "errorRate"],
+                  required: ["name", "host", "state", "circuit", "circuits", "embedDisagrees", "capabilities", "priority", "maxConcurrent", "embedModelCompatible", "rerankTransport", "lastHeartbeat", "inFlight", "queueDepth", "calls", "errorRate"],
                   properties: {
                     name: { type: "string" },
                     host: { type: "string", description: "Host and port." },
@@ -963,13 +1024,16 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
                     circuit: { type: "string", enum: ["closed", "open", "half_open"], description: "The worst of `circuits`, over the roles this worker is configured for." },
                     circuits: {
                       type: "object",
-                      required: ["embed", "rerank", "generate"],
+                      required: ["embed", "rerank", "generate", "documents"],
+                      description: "`documents` is document embedding, kept apart from `embed`, which is query vectors.",
                       properties: {
                         embed: { type: "string", enum: ["closed", "open", "half_open"] },
                         rerank: { type: "string", enum: ["closed", "open", "half_open"] },
                         generate: { type: "string", enum: ["closed", "open", "half_open"] },
+                        documents: { type: "string", enum: ["closed", "open", "half_open"] },
                       },
                     },
+                    embedDisagrees: { type: "boolean", description: "This worker embedded the same text differently from another. Reported only: nothing acts on it." },
                     capabilities: { type: "array", items: { type: "string", enum: ["embed", "rerank", "generate"] } },
                     priority: { type: "integer" },
                     maxConcurrent: { type: "integer" },
@@ -992,27 +1056,6 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     async () => ({ mode: backend.llmHealth().mode, workers: backend.workers() }),
   );
 
-  app.post<{ Params: { name: string } }>(
-    "/workers/:name([^:]+)::purge-vectors",
-    {
-      schema: {
-        tags: ["workers"],
-        summary: "Undo a worker's embeddings",
-        description:
-          "Remove every vector this worker wrote, whole documents at a time, and queue a job to embed them again. Works for " +
-          "a worker no longer in the pool, and for one that lied about its model. Clears the identity probe's reference if " +
-          "this worker set it. The documents stay findable lexically meanwhile.",
-        params: { type: "object", required: ["name"], properties: { name: { type: "string" } } },
-        response: { 202: { type: "object", required: ["documents", "job"], properties: { documents: { type: "integer" }, job: { $ref: "Job#" } } }, ...errorResponses },
-      },
-    },
-    async (request, reply) => {
-      const documents = backend.purgeWorkerVectors(request.params.name);
-      const job = ctx.jobs.enqueue({ collections: null, embed: true, force: false, reason: `purge vectors from worker ${request.params.name}` });
-      return reply.code(202).send({ documents, job });
-    },
-  );
-
   app.post(
     "/cache::purge",
     {
@@ -1026,7 +1069,14 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         response: { 200: { type: "object", required: ["entries"], properties: { entries: { type: "integer" } } }, ...errorResponses },
       },
     },
-    async () => ({ entries: backend.purgeCache() }),
+    async () => {
+      try {
+        return { entries: backend.purgeCache() };
+      } catch (err) {
+        if (isBusy(err)) throw new HttpError(503, "busy", "The index is busy. Try again shortly.");
+        throw err;
+      }
+    },
   );
 
   // ---- contract --------------------------------------------------------------

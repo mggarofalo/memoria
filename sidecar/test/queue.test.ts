@@ -499,6 +499,7 @@ test("GET /queue reports jobs by state, and model calls when there is a pool", a
       jobs: { queued: 1, held: 1, running: 0, succeeded: 0, failed: 0 },
       classes: { interactive: { inFlight: 0, waiting: 0 }, background: { inFlight: 0, waiting: 0 } },
       workers: [],
+      deadLetters: 0,
     });
     backend.load = {
       classes: { interactive: { inFlight: 1, waiting: 2 }, background: { inFlight: 3, waiting: 4 } },
@@ -570,8 +571,8 @@ test("GET /workers is empty in local mode and passes through only declared field
   const { app, backend } = await makeApp();
   try {
     assert.deepEqual((await app.inject({ method: "GET", url: "/workers", headers: authHeaders })).json(), { mode: "local", workers: [] });
-    backend.health = { mode: "remote", degraded: false, unavailable: [], workersUp: 1, workersTotal: 1 };
-    const view = { name: "d", host: "h:1", state: "up" as const, circuit: "closed" as const, circuits: { embed: "closed" as const, rerank: "closed" as const, generate: "closed" as const }, capabilities: ["embed" as const], priority: 1, maxConcurrent: 2, embedModelCompatible: true, rerankTransport: null, lastHeartbeat: null, inFlight: 0, queueDepth: 0, calls: 0, errorRate: 0 };
+    backend.health = { mode: "remote", degraded: false, unavailable: [], workersUp: 1, workersTotal: 1, embedDisagreement: [] };
+    const view = { name: "d", host: "h:1", state: "up" as const, circuit: "closed" as const, circuits: { embed: "closed" as const, rerank: "closed" as const, generate: "closed" as const, documents: "closed" as const }, embedDisagrees: false, capabilities: ["embed" as const], priority: 1, maxConcurrent: 2, embedModelCompatible: true, rerankTransport: null, lastHeartbeat: null, inFlight: 0, queueDepth: 0, calls: 0, errorRate: 0 };
     // Even if a token somehow reached the view, the response schema would drop it.
     backend.workerViews = [{ ...view, token: "should-not-appear" } as never];
     const body = (await app.inject({ method: "GET", url: "/workers", headers: authHeaders })).body;
@@ -590,13 +591,13 @@ test("/ready and search say so when degraded, and warmup does not read as done",
     assert.equal(ready.llm.mode, "local");
     assert.equal(ready.llm.degraded, false);
 
-    backend.health = { mode: "remote", degraded: true, unavailable: ["rerank", "generate"], workersUp: 0, workersTotal: 2 };
+    backend.health = { mode: "remote", degraded: true, unavailable: ["rerank", "generate"], workersUp: 0, workersTotal: 2, embedDisagreement: ["x", "y"] };
     app.ctx.warmup.done = true;
     const response = await app.inject({ method: "GET", url: "/ready", headers: authHeaders });
     assert.equal(response.statusCode, 200);
     ready = response.json();
     assert.equal(ready.status, "degraded");
-    assert.deepEqual(ready.llm, { mode: "remote", degraded: true, unavailable: ["rerank", "generate"], workersUp: 0, workersTotal: 2 });
+    assert.deepEqual(ready.llm, { mode: "remote", degraded: true, unavailable: ["rerank", "generate"], workersUp: 0, workersTotal: 2, embedDisagreement: ["x", "y"] });
     assert.equal(ready.warmup.done, false, "a stored flag must not read as healthy");
     assert.match(ready.warmup.error, /rerank, generate/);
     assert.equal(ready.models.resident, false);
@@ -643,6 +644,51 @@ test("a job's update runs and metadata refreshes even when embedding has to wait
     app.ctx.jobs.flush();
     await app.ctx.jobs.idle();
     assert.equal((await app.inject({ method: "GET", url: `/reindex/jobs/${job.id}`, headers: authHeaders })).json().job.state, "succeeded");
+  } finally {
+    await app.close();
+  }
+});
+
+test("dead letters are listed and cleared through the routes, and clearing queues a job", async () => {
+  const { app, backend } = await makeApp();
+  try {
+    backend.deadLetterList = [{ hash: "h", path: "c/a.md", reason: "HTTP 400", at: "2026-01-01T00:00:00.000Z" }];
+    assert.equal((await app.inject({ method: "GET", url: "/queue/dead-letters" })).statusCode, 401);
+    assert.equal((await app.inject({ method: "POST", url: "/queue/dead-letters:clear" })).statusCode, 401);
+    assert.equal((await app.inject({ method: "GET", url: "/queue", headers: authHeaders })).json().deadLetters, 1);
+    assert.deepEqual((await app.inject({ method: "GET", url: "/queue/dead-letters", headers: authHeaders })).json().documents, backend.deadLetterList);
+    const cleared = await app.inject({ method: "POST", url: "/queue/dead-letters:clear", headers: authHeaders });
+    assert.equal(cleared.statusCode, 202);
+    assert.equal(cleared.json().documents, 1);
+    assert.equal(cleared.json().job.request.embed, true);
+    assert.deepEqual(backend.deadLetterList, []);
+  } finally {
+    await app.close();
+  }
+});
+
+test("the worker-purge route is gone", async () => {
+  const { app } = await makeApp();
+  try {
+    assert.equal((await app.inject({ method: "POST", url: "/workers/a:purge-vectors", headers: authHeaders })).statusCode, 404);
+  } finally {
+    await app.close();
+  }
+});
+
+test("purging the cache while another process holds the index says busy, with a 503", async () => {
+  const { app, backend } = await makeApp();
+  try {
+    backend.purgeCache = () => {
+      throw Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" });
+    };
+    const busy = await app.inject({ method: "POST", url: "/cache:purge", headers: authHeaders });
+    assert.equal(busy.statusCode, 503);
+    assert.match(busy.body, /index is busy/);
+    backend.purgeCache = () => {
+      throw new Error("disk full");
+    };
+    assert.equal((await app.inject({ method: "POST", url: "/cache:purge", headers: authHeaders })).statusCode, 500);
   } finally {
     await app.close();
   }

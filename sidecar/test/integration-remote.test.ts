@@ -190,10 +190,9 @@ test("vectors of the wrong size never reach sqlite-vec", { skip }, async () => {
   const r = await openRemote();
   try {
     r.worker.on("POST /v1/embed", (b) => ({ body: { model: EMBED_FILE, embeddings: (b.texts as string[]).map(() => [1, 2, 3]) } }));
-    const out = await r.backend.embed({ force: false });
-    assert.equal(out.chunksEmbedded, 0);
-    assert.ok(out.errors > 0);
-    assert.equal(out.docsPending, 2);
+    // Even the known-good text comes back wrong, so that is the worker at fault, not the documents.
+    await assert.rejects(r.backend.embed({ force: false }), /No worker can embed/);
+    assert.deepEqual(r.backend.deadLetters(), []);
     const status = await r.backend.getStatus();
     assert.equal(status.hasVectorIndex, false);
     assert.equal(status.needsEmbedding, 2, "the documents stay pending");
@@ -531,9 +530,11 @@ test("the token reaches no API response or log line, whatever the worker sends b
 
     // Failed embed work surfaces through the job record and /ready, both of which reach callers.
     const job = await app.inject({ method: "POST", url: "/reindex", headers: authHeaders, payload: { embed: true } });
-    await app.ctx.jobs.idle();
-    const record = await app.inject({ method: "GET", url: `/reindex/jobs/${job.json().job.id}`, headers: authHeaders });
-    assert.ok(record.json().job.state === "failed" || record.json().job.result.embed.errors > 0, record.body);
+    // Every embed fails, so it waits for a worker: it does not finish.
+    const fetchRecord = () => app.inject({ method: "GET", url: `/reindex/jobs/${job.json().job.id}`, headers: authHeaders });
+    for (let i = 0; i < 2000 && (await fetchRecord()).json().job.error === null; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    const record = await fetchRecord();
+    assert.match(record.json().job.error, /No worker can embed/);
     replies.push(record.body);
 
     // Whether warmup records an error depends on its query finding candidates to

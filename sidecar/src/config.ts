@@ -55,6 +55,8 @@ export type LlmConfig =
       embedBatchBytes: number;
       /** Deadline for one search-time rerank call. */
       rerankTimeoutMs: number;
+      /** Deadline for all of one search's model work. */
+      searchDeadlineMs: number;
     };
 
 const CAPABILITIES: readonly Capability[] = ["embed", "rerank", "generate"];
@@ -125,8 +127,8 @@ function readWorkerName(name: unknown, at: string, names: Set<string>): string {
 function readTokenEnv(env: NodeJS.ProcessEnv, tokenEnv: unknown, at: string): string | undefined {
   if (tokenEnv === undefined) return undefined;
   if (typeof tokenEnv !== "string" || tokenEnv === "") throw new Error(`${at}.tokenEnv must name an environment variable`);
-  // It would hand every caller's key to a worker: the sidecar's secret guards the whole corpus.
-  if (tokenEnv === "MEMORIA_QMD_SECRET") throw new Error(`${at}.tokenEnv must not be the sidecar's own secret`);
+  // Naming the file variable would send its path as the token.
+  if (tokenEnv.toUpperCase().endsWith("_FILE")) throw new Error(`${at}.tokenEnv must name the secret, not its file: leave off _FILE`);
   // The same two ways in as every other secret: `<name>_FILE` or `<name>`.
   const token = resolveSecret(env, tokenEnv);
   if (!token) throw new Error(`${at}.tokenEnv names ${tokenEnv}, which is not set`);
@@ -172,6 +174,16 @@ function readInt(value: string | undefined, fallback: number, name: string, min:
   return n;
 }
 
+/**
+ * The sidecar's secret guards the whole corpus, and a worker must never hold it. This
+ * compares values, not names: an alias, a lower-case variable on Windows, and a file
+ * all reach the same place.
+ */
+function rejectSecretReuse(workers: readonly PoolWorkerConfig[], secret: string | undefined): void {
+  const reused = secret === undefined ? undefined : workers.find((w) => w.token === secret);
+  if (reused) throw new Error(`The token for worker "${reused.name}" is the sidecar's own secret. Give each worker its own.`);
+}
+
 function loadWorkers(env: NodeJS.ProcessEnv): PoolWorkerConfig[] {
   const list = trimmed(env.MEMORIA_QMD_WORKERS);
   const raw = trimmed(env.MEMORIA_QMD_WORKER_URL);
@@ -193,19 +205,22 @@ function trimmed(value: string | undefined): string | undefined {
  * Remote settings are read only in remote mode: in local mode a stray worker
  * URL in the environment has no effect and cannot fail startup.
  */
-function loadLlmConfig(env: NodeJS.ProcessEnv): LlmConfig {
+function loadLlmConfig(env: NodeJS.ProcessEnv, secret: string | undefined): LlmConfig {
   const mode = env.MEMORIA_QMD_LLM?.trim().toLowerCase() || "local";
   if (mode === "local") return { mode };
   if (mode !== "remote") throw new Error(`MEMORIA_QMD_LLM must be "local" or "remote", got "${mode}"`);
 
+  const workers = loadWorkers(env);
+  rejectSecretReuse(workers, secret);
   return {
     mode,
-    workers: loadWorkers(env),
+    workers,
     fallback: readBool(env.MEMORIA_QMD_LLM_FALLBACK, true),
     embedDimensions: readInt(env.MEMORIA_QMD_EMBED_DIMENSIONS, 768, "MEMORIA_QMD_EMBED_DIMENSIONS", 0, 65536),
     pollMs: readInt(env.MEMORIA_QMD_WORKER_POLL_MS, 10_000, "MEMORIA_QMD_WORKER_POLL_MS", 100, 3_600_000),
     embedBatchBytes: readInt(env.MEMORIA_QMD_EMBED_BATCH_BYTES, 256 * 1024, "MEMORIA_QMD_EMBED_BATCH_BYTES", 1024, 16 * 1024 * 1024),
     rerankTimeoutMs: readInt(env.MEMORIA_QMD_RERANK_TIMEOUT_MS, 20_000, "MEMORIA_QMD_RERANK_TIMEOUT_MS", 100, 110_000),
+    searchDeadlineMs: readInt(env.MEMORIA_QMD_SEARCH_DEADLINE_MS, 60_000, "MEMORIA_QMD_SEARCH_DEADLINE_MS", 100, 110_000),
   };
 }
 
@@ -246,7 +261,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): SidecarConfig 
     reindexDebounceMs,
     reindexMaxWaitMs,
     shutdownDrainMs: readInt(env.MEMORIA_QMD_SHUTDOWN_DRAIN_MS, 10_000, "MEMORIA_QMD_SHUTDOWN_DRAIN_MS", 0, 600_000),
-    llm: loadLlmConfig(env),
+    llm: loadLlmConfig(env, secret),
     queueDbPath: trimmed(env.MEMORIA_QMD_QUEUE_DB_PATH),
   };
 }

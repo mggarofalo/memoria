@@ -8,10 +8,10 @@ import { JobDeferred, JobPartial, JobQueue, type JobResult, type JobStore, type 
 import { WorkerClient, WorkerError } from "../src/llm/client.ts";
 import { MAX_EXPANSION_QUERIES, parseExpansion } from "../src/llm/expansion.ts";
 import { cosineOf } from "../src/llm/probe.ts";
-import { acceptedEmbedFiles, PROBE_MIN_COSINE, RemoteLlm, type RemoteLlmOptions } from "../src/llm/remote.ts";
-import type { LocalFallback, PoolWorkerConfig, ProbeReference } from "../src/llm/types.ts";
+import { acceptedEmbedFiles, RemoteLlm, type RemoteLlmOptions } from "../src/llm/remote.ts";
+import type { Capability, LocalFallback, PoolWorkerConfig } from "../src/llm/types.ts";
 import { parseEmbeddings, ResponseViolation } from "../src/llm/validate.ts";
-import { guardedFallback } from "../src/llm/wire.ts";
+import { guardedFallback, sdkCacheFileName, type SdkDb } from "../src/llm/wire.ts";
 import { openJobStore, SqliteJobStore } from "../src/queue-store.ts";
 import { loadConfig } from "../src/config.ts";
 import { ManualScheduler } from "./helpers.ts";
@@ -181,11 +181,11 @@ test("a wrong-model trial settles the circuit rather than sticking it half-open"
     const healthy = a.handlers.get("POST /v1/embed")!;
     a.on("POST /v1/embed", () => ({ status: 500, body: {} }));
     await assert.rejects(llm.embedDocuments(["x"]));
-    assert.equal(llm.pool.workers()[0]!.circuits.embed, "open");
+    assert.equal(llm.pool.workers()[0]!.circuits.documents, "open");
     now += 1_000;
     a.on("POST /v1/embed", (b) => ({ body: { model: "other.gguf", embeddings: (b.texts as string[]).map(() => [1, 2, 3, 4, 5, 6, 7, 8]) } }));
     await assert.rejects(llm.embedDocuments(["x"]), (e) => e instanceof WorkerError && e.code === "model_mismatch");
-    assert.equal(llm.pool.workers()[0]!.circuits.embed, "closed");
+    assert.equal(llm.pool.workers()[0]!.circuits.documents, "closed");
     a.on("POST /v1/embed", healthy);
     await llm.refreshStatus();
     assert.equal((await llm.embedDocuments(["x"])).worker, "a");
@@ -203,14 +203,17 @@ test("a good heartbeat frees a trial that never came back", async () => {
     a.on("POST /v1/rerank", () => ({ status: 500, body: {} }));
     await assert.rejects(rerank(llm));
     now += 1_000;
+    const healthy = () => ({ body: { results: [{ index: 0, score: 0.5 }] } });
     let release = (_: { body: unknown }) => {};
     a.on("POST /v1/rerank", () => new Promise((resolve) => (release = resolve)));
     const trial = rerank(llm).catch(() => "ended");
     await new Promise((r) => setTimeout(r, 20));
     assert.equal(llm.pool.workers()[0]!.circuits.rerank, "half_open");
     assert.equal(llm.canServe("rerank"), false);
+    // The stuck trial is freed, and the heartbeat's own trial then finds the role well.
+    a.on("POST /v1/rerank", healthy);
     await llm.refreshStatus();
-    assert.equal(llm.pool.workers()[0]!.circuits.rerank, "open");
+    assert.equal(llm.pool.workers()[0]!.circuits.rerank, "closed");
     assert.equal(llm.canServe("rerank"), true);
     release({ body: {} });
     await trial;
@@ -238,54 +241,93 @@ test("the model name must match exactly: a suffix is not enough", async () => {
   }
 });
 
-function memoryReference(start: ProbeReference | null = null) {
-  let held = start;
-  return { get: () => held, set: (r: ProbeReference) => void (held = r), peek: () => held };
-}
+const reportedBy = (llm: RemoteLlm) => llm.pool.workers().map((w) => [w.name, w.embedDisagrees]);
 
-test("a worker whose embeddings disagree with the reference is taken off embedding, and back on if it recovers", async () => {
-  const reference = memoryReference();
-  const p = await pair({ probeReference: reference, probeEveryMs: 0 });
+test("workers embedding one text differently are reported, and nothing is locked out", async () => {
+  const told: string[][] = [];
+  const p = await pair({ probeEveryMs: 0, onDisagreement: (w) => told.push([...w]) });
   try {
     await p.llm.refreshStatus();
-    assert.ok(["a", "b"].includes(reference.peek()!.worker), "the first answer became the reference");
-    assert.equal(p.llm.pool.workers()[0]!.embedModelCompatible, true);
-    assert.equal(p.llm.pool.workers()[1]!.embedModelCompatible, true);
+    assert.deepEqual(reportedBy(p.llm), [["a", false], ["b", false]]);
+    assert.deepEqual(told, []);
 
-    // Claims the right model, returns something else.
+    // Claims the right model, returns something else: a build mismatch looks like this.
     const honest = p.b.handlers.get("POST /v1/embed")!;
     p.b.on("POST /v1/embed", (b) => ({ body: { model: EMBED_FILE, embeddings: (b.texts as string[]).map(() => [-1, 2, -3, 4, -5, 6, -7, 8]) } }));
     await p.llm.refreshStatus();
-    assert.equal(p.llm.pool.workers()[1]!.embedModelCompatible, false);
+    assert.deepEqual(reportedBy(p.llm), [["a", true], ["b", true]]);
+    assert.deepEqual(told, [["a", "b"]], "told once, by name");
+    await p.llm.refreshStatus();
+    assert.equal(told.length, 1, "not on every beat");
+
+    // Nothing acts on it.
+    assert.deepEqual(p.llm.pool.workers().map((w) => w.embedModelCompatible), [true, true]);
+    assert.equal(p.llm.canServe("embed"), true);
     assert.equal((await p.llm.embedDocuments(["x"])).worker, "a");
 
     p.b.on("POST /v1/embed", honest);
     await p.llm.refreshStatus();
-    assert.equal(p.llm.pool.workers()[1]!.embedModelCompatible, true);
+    assert.deepEqual(reportedBy(p.llm), [["a", false], ["b", false]]);
+    assert.deepEqual(told.at(-1), [], "and told when it clears");
   } finally {
     await p.done();
   }
 });
 
-test("a probe nobody answered changes no verdict, and rounding between devices passes", async () => {
-  const text = vectorFor("x", 8);
-  assert.ok(cosineOf(text, text.map((v) => v * (1 + 1e-4))) >= PROBE_MIN_COSINE);
-  assert.equal(cosineOf([1, 0], [1, 0, 0]), 0);
-  assert.equal(cosineOf([0, 0], [1, 1]), 0);
-  const reference = memoryReference();
-  const p = await pair({ probeReference: reference, probeEveryMs: 0 });
+test("rounding between devices is not a disagreement", async () => {
+  const p = await pair({ probeEveryMs: 0 });
   try {
+    p.b.on("POST /v1/embed", (b) => ({ body: { model: EMBED_FILE, embeddings: (b.texts as string[]).map((t) => vectorFor(t, 8).map((v) => v * (1 + 1e-4))) } }));
     await p.llm.refreshStatus();
-    p.a.on("POST /v1/embed", () => ({ status: 503, body: {} }));
-    await p.llm.refreshStatus();
-    assert.equal(p.llm.pool.workers()[0]!.embedModelCompatible, true);
+    assert.deepEqual(reportedBy(p.llm), [["a", false], ["b", false]]);
+    assert.equal(cosineOf([1, 0], [1, 0, 0]), 0);
+    assert.equal(cosineOf([0, 0], [1, 1]), 0);
   } finally {
     await p.done();
   }
 });
 
-test("probes run on their own schedule", async () => {
-  const p = await pair({ probeReference: memoryReference(), probeEveryMs: 60_000 });
+test("a worker not answering makes no verdict either way", async () => {
+  const p = await pair({ probeEveryMs: 0 });
+  try {
+    p.b.on("POST /v1/embed", (b) => ({ body: { model: EMBED_FILE, embeddings: (b.texts as string[]).map(() => [-1, 2, -3, 4, -5, 6, -7, 8]) } }));
+    await p.llm.refreshStatus();
+    assert.deepEqual(p.llm.pool.disagreeing, ["a", "b"]);
+    p.b.on("POST /v1/embed", () => ({ status: 503, body: {} }));
+    await p.llm.refreshStatus();
+    assert.deepEqual(p.llm.pool.disagreeing, ["a", "b"], "the last verdict stands");
+  } finally {
+    await p.done();
+  }
+});
+
+test("a lying first worker costs an honest one nothing, and nor does a model update", async () => {
+  // Under the old first-answer rule the liar became the reference, and every honest worker was refused.
+  const p = await pair({ probeEveryMs: 0 });
+  try {
+    p.a.on("POST /v1/embed", (b) => ({ body: { model: EMBED_FILE, embeddings: (b.texts as string[]).map(() => [-1, 2, -3, 4, -5, 6, -7, 8]) } }));
+    await p.llm.refreshStatus();
+    assert.deepEqual(p.llm.pool.workers().map((w) => w.embedModelCompatible), [true, true]);
+    assert.ok(p.llm.pool.canServe("embed", "background"));
+  } finally {
+    await p.done();
+  }
+});
+
+test("one worker has nothing to compare, so the comparison does not run", async () => {
+  const a = await new MockWorker(8).start();
+  const llm = new RemoteLlm({ workers: [workerConfig("a", a.url)], embedDimensions: 8, models: MODELS, fallback: null, probeEveryMs: 0 });
+  try {
+    await llm.refreshStatus();
+    assert.equal(a.count("/v1/embed"), 0);
+    assert.deepEqual(llm.pool.disagreeing, []);
+  } finally {
+    await a.stop();
+  }
+});
+
+test("comparisons run on their own schedule", async () => {
+  const p = await pair({ probeEveryMs: 60_000 });
   try {
     await p.llm.refreshStatus();
     const first = p.a.count("/v1/embed");
@@ -298,6 +340,208 @@ test("probes run on their own schedule", async () => {
   } finally {
     await p.done();
   }
+});
+
+// --- one bad document must not cost search its vectors ---------------------------------------
+
+test("document failures open their own circuit: query vectors still work", async () => {
+  const a = await new MockWorker(8).start();
+  const llm = new RemoteLlm({ workers: [workerConfig("a", a.url)], embedDimensions: 8, models: MODELS, fallback: null });
+  try {
+    const healthy = a.handlers.get("POST /v1/embed")!;
+    a.on("POST /v1/embed", (b, r) => ((b.texts as string[]).includes("BAD") ? { status: 502, body: {} } : healthy(b, r)));
+    for (let i = 0; i < 3; i++) await assert.rejects(llm.embedDocuments(["BAD"]), WorkerError);
+    const { circuits } = llm.pool.workers()[0]!;
+    assert.equal(circuits.documents, "open");
+    assert.equal(circuits.embed, "closed");
+    assert.equal(llm.canServe("embed", "background"), false);
+    assert.equal(llm.canServe("embed"), true, "search can still ask");
+    assert.ok((await llm.embedBatch(["a query"]))[0]?.embedding);
+    await llm.refreshStatus();
+    assert.equal(llm.pool.workers()[0]!.state, "up", "not reported as a role down");
+  } finally {
+    await a.stop();
+  }
+});
+
+test("a known-good call clears the document circuit and the refusal streak, and needs a real answer", async () => {
+  const a = await new MockWorker(8).start();
+  const llm = new RemoteLlm({ workers: [workerConfig("a", a.url)], embedDimensions: 8, models: MODELS, fallback: null });
+  try {
+    const healthy = a.handlers.get("POST /v1/embed")!;
+    a.on("POST /v1/embed", (b, r) => ((b.texts as string[]).includes("BAD") ? { status: 400, body: {} } : healthy(b, r)));
+    // Refusals say nothing about a worker until there is a long streak of them.
+    for (let i = 0; i < 7; i++) await assert.rejects(llm.embedDocuments(["BAD"]), WorkerError);
+    assert.equal(llm.pool.workers()[0]!.circuits.documents, "open");
+    assert.equal(await llm.pool.confirmDocuments(), true);
+    assert.equal(llm.pool.workers()[0]!.circuits.documents, "closed");
+    // A streak left standing would make each of these count against the worker, and open it again.
+    for (let i = 0; i < 4; i++) await assert.rejects(llm.embedDocuments(["BAD"]), WorkerError);
+    assert.equal(llm.pool.workers()[0]!.circuits.documents, "closed", "the streak started over");
+
+    a.on("POST /v1/embed", () => ({ status: 503, body: {} }));
+    assert.equal(await llm.pool.confirmDocuments(), false, "that is an outage");
+    a.on("POST /v1/embed", () => ({ body: { model: "other.gguf", embeddings: [vectorFor("x", 8)] } }));
+    assert.equal(await llm.pool.confirmDocuments(), false, "another model is no proof");
+  } finally {
+    await a.stop();
+  }
+});
+
+// --- recovery without a search -----------------------------------------------------------------
+
+for (const [role, route, fail] of [
+  ["rerank", "POST /v1/rerank", (llm: RemoteLlm) => llm.pool.dispatch("rerank", "interactive", "rerank", () => Promise.reject(new WorkerError("unavailable", "rerank", "a", "HTTP 503", 503)))],
+  ["generate", "POST /v1/complete", (llm: RemoteLlm) => llm.pool.dispatch("generate", "interactive", "complete", () => Promise.reject(new WorkerError("unavailable", "complete", "a", "HTTP 503", 503)))],
+  ["embed", "POST /v1/embed", (llm: RemoteLlm) => llm.pool.dispatch("embed", "interactive", "embed", () => Promise.reject(new WorkerError("unavailable", "embed", "a", "HTTP 503", 503)))],
+  ["documents", "POST /v1/embed", (llm: RemoteLlm) => llm.pool.dispatch("embed", "background", "embed", () => Promise.reject(new WorkerError("unavailable", "embed", "a", "HTTP 503", 503)))],
+] as Array<[Capability | "documents", string, (llm: RemoteLlm) => Promise<unknown>]>) {
+  test(`a heartbeat retries ${role} once its backoff has passed, so /ready recovers with no search`, async () => {
+    const a = await new MockWorker(8).start();
+    let now = 1_000_000;
+    const llm = new RemoteLlm({ workers: [workerConfig("a", a.url)], embedDimensions: 8, models: MODELS, fallback: null, now: () => now, breaker: { threshold: 3, backoffBaseMs: 1_000, backoffMaxMs: 8_000 } });
+    const circuit = () => llm.pool.workers()[0]!.circuits[role];
+    try {
+      for (let i = 0; i < 3; i++) await fail(llm).catch(() => {});
+      assert.equal(circuit(), "open");
+      await llm.refreshStatus();
+      assert.equal(a.count(route.split(" ")[1]!), 0, "not before the backoff");
+
+      const healthy = a.handlers.get(route)!;
+      a.on(route, () => ({ status: 503, body: {} }));
+      now += 1_000;
+      await llm.refreshStatus();
+      assert.equal(circuit(), "open", "a failed trial changes nothing, and waits longer");
+      const calls = a.count(route.split(" ")[1]!);
+      now += 1_000;
+      await llm.refreshStatus();
+      assert.equal(a.count(route.split(" ")[1]!), calls, "the backoff doubled");
+
+      a.on(route, healthy);
+      now += 1_000;
+      await llm.refreshStatus();
+      assert.equal(circuit(), "closed");
+    } finally {
+      await a.stop();
+    }
+  });
+}
+
+// --- one deadline per search --------------------------------------------------------------------
+
+const hang = () => new Promise<never>(() => {});
+
+test("a hung worker uses up one deadline for the search, not one per call", async () => {
+  const a = await new MockWorker(8).start();
+  const llm = new RemoteLlm({ workers: [workerConfig("a", a.url)], embedDimensions: 8, models: MODELS, fallback: null, searchDeadlineMs: 200 });
+  try {
+    for (const route of ["POST /v1/complete", "POST /v1/embed", "POST /v1/rerank"]) a.on(route, hang);
+    const started = Date.now();
+    const reasons = await llm.track(async (r) => {
+      await llm.expandQuery("api keys");
+      await llm.embedBatch(["api keys"]);
+      await rerank(llm).catch(() => {});
+      return r;
+    });
+    assert.ok(Date.now() - started < 1_500, "one 200 ms deadline, against 10 + 10 + 20 s of per-call ones");
+    assert.deepEqual([...reasons].sort(), ["no_expansion", "no_vectors"]);
+  } finally {
+    await a.stop();
+  }
+});
+
+test("waiting for a slot stops at the search's deadline too", async () => {
+  const a = await new MockWorker(8).start();
+  const llm = new RemoteLlm({ workers: [workerConfig("a", a.url, { maxConcurrent: 1 })], embedDimensions: 8, models: MODELS, fallback: null, searchDeadlineMs: 100 });
+  let open = () => {};
+  const gate = new Promise<void>((r) => (open = r));
+  const holder = llm.pool.dispatch("embed", "background", "embed", () => gate);
+  try {
+    await new Promise((r) => setImmediate(r));
+    const started = Date.now();
+    await llm.track(() => llm.embedBatch(["q"]));
+    assert.ok(Date.now() - started < 1_500, "the usual wait is 5 s");
+  } finally {
+    open();
+    await holder;
+    await a.stop();
+  }
+});
+
+test("past the deadline no call is made, and the worker is not blamed", async () => {
+  const a = await new MockWorker(8).start();
+  let now = 1_000_000;
+  const llm = new RemoteLlm({ workers: [workerConfig("a", a.url)], embedDimensions: 8, models: MODELS, fallback: null, searchDeadlineMs: 100, now: () => now });
+  try {
+    await llm.track(async () => {
+      now += 200;
+      for (let i = 0; i < 5; i++) await assert.rejects(rerank(llm), WorkerError);
+    });
+    assert.equal(a.count("/v1/rerank"), 0);
+    assert.equal(llm.pool.workers()[0]!.circuits.rerank, "closed");
+  } finally {
+    await a.stop();
+  }
+});
+
+test("within one search, expansions and query vectors are asked for once", async () => {
+  const a = await new MockWorker(8).start();
+  const llm = new RemoteLlm({ workers: [workerConfig("a", a.url)], embedDimensions: 8, models: MODELS, fallback: null });
+  try {
+    await llm.track(async () => {
+      const first = await llm.expandQuery("api keys");
+      assert.deepEqual(await llm.expandQuery("api keys"), first);
+      await llm.embedBatch(["api keys"]);
+      await llm.embedBatch(["api keys"]);
+      await llm.embed("api keys", { isQuery: true });
+      await llm.expandQuery("api keys", { includeLexical: false });
+    });
+    assert.equal(a.count("/v1/complete"), 2, "once per distinct question");
+    assert.equal(a.count("/v1/embed"), 1);
+    // A new search asks afresh, and so do calls outside one.
+    await llm.track(() => llm.expandQuery("api keys"));
+    assert.equal(a.count("/v1/complete"), 3);
+    await llm.expandQuery("api keys");
+    assert.equal(a.count("/v1/complete"), 4);
+  } finally {
+    await a.stop();
+  }
+});
+
+test("a search that failed its rerank reruns without expanding or embedding again", async () => {
+  const { searchDegradable } = await import("../src/llm/degraded-search.ts");
+  const a = await new MockWorker(8).start();
+  const llm = new RemoteLlm({ workers: [workerConfig("a", a.url)], embedDimensions: 8, models: MODELS, fallback: null });
+  const validators = { validateLexQuery: () => null, validateSemanticQuery: () => null };
+  try {
+    a.on("POST /v1/rerank", () => ({ status: 503, body: {} }));
+    const runs: boolean[] = [];
+    const out = await searchDegradable(llm, validators, async (o) => {
+      runs.push(o.rerank === true);
+      await llm.expandQuery("q");
+      await llm.embedBatch(["q"]);
+      if (o.rerank) await rerank(llm);
+      return [];
+    }, { query: "q", limit: 5, minScore: 0, rerank: true });
+    assert.deepEqual(runs, [true, false]);
+    assert.deepEqual(out.degradedReasons, ["no_rerank"]);
+    assert.equal(a.count("/v1/complete"), 1);
+    assert.equal(a.count("/v1/embed"), 1);
+  } finally {
+    await a.stop();
+  }
+});
+
+test("a fallback that hangs cannot hold a query past the deadline", async () => {
+  const a = await new MockWorker(8).start();
+  await a.stop();
+  const fallback: LocalFallback = { embedBatch: hang, tokenize: hang, detokenize: hang };
+  const llm = new RemoteLlm({ workers: [workerConfig("a", a.url)], embedDimensions: 8, models: MODELS, fallback, searchDeadlineMs: 100 });
+  const started = Date.now();
+  const out = await llm.track(() => llm.embedBatch(["q"]));
+  assert.deepEqual(out, [null]);
+  await assert.rejects(llm.track(() => llm.tokenize("q")), WorkerError);
+  assert.ok(Date.now() - started < 1_500);
 });
 
 // --- values that break after the float32 cast -----------------------------------------------
@@ -415,14 +659,44 @@ test("the fallback will not load a model that is not already on this host", asyn
   const unreadable = guardedFallback(fallback, "/cache", URI, () => { throw new Error("ENOENT"); });
   await assert.rejects(unreadable.tokenize("x"), /not on this host/);
 
-  for (const cached of [EMBED_FILE, `hf_ggml-org_${EMBED_FILE}`]) {
-    const present = guardedFallback(fallback, "/cache", URI, () => [cached]);
-    assert.deepEqual(await present.tokenize("x"), [1], cached);
-    await present.detokenize([1]);
-    await present.embedBatch(["x"]);
+  const present = guardedFallback(fallback, "/cache", URI, () => [`hf_ggml-org_${EMBED_FILE}`]);
+  assert.deepEqual(await present.tokenize("x"), [1]);
+  await present.detokenize([1]);
+  await present.embedBatch(["x"]);
+
+  // The SDK would not find either of these, and would go to Hugging Face.
+  for (const wrong of [EMBED_FILE, `${EMBED_FILE}.ipull`, `hf_ggml-org_${EMBED_FILE}.ipull`]) {
+    const untouched = trackingFallback();
+    const guard = guardedFallback(untouched, "/cache", URI, () => [wrong]);
+    await assert.rejects(guard.tokenize("x"), /not on this host/, wrong);
+    assert.deepEqual(untouched.used, [], wrong);
   }
-  const partial = guardedFallback(trackingFallback(), "/cache", URI, () => [`${EMBED_FILE}.ipull`]);
-  await assert.rejects(partial.tokenize("x"), /not on this host/, "a partial download does not count");
+});
+
+test("the guard's idea of the SDK's cache name is the SDK's own", async () => {
+  const { parseModelUri } = (await import(new URL("./utils/parseModelUri.js", import.meta.resolve("node-llama-cpp")).href)) as { parseModelUri(uri: string): { fullFilename?: string } };
+  for (const uri of [
+    URI,
+    "hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf",
+    "hf:Org/Model-GGUF/model-q4.gguf",
+    "hf:Org/Model-GGUF/other-q4.gguf",
+    "hf:Org/Model/model-q4.gguf",
+    "hf:ggml-org/qwen3-reranker-0.6b-GGUF/qwen3-reranker-0.6b-q8_0.gguf",
+  ]) {
+    assert.equal(sdkCacheFileName(uri), parseModelUri(uri).fullFilename, uri);
+  }
+  assert.equal(sdkCacheFileName("/models/local.gguf"), null);
+  assert.equal(sdkCacheFileName("hf:org/repo:latest"), null);
+});
+
+test("a model given by path counts only if it is there, and a URL never does", async () => {
+  const file = await tempFile("local.gguf");
+  await writeFile(file, "");
+  const fallback = trackingFallback();
+  assert.deepEqual(await guardedFallback(fallback, "/cache", file).tokenize("x"), [1]);
+  await assert.rejects(guardedFallback(fallback, "/cache", `${file}.gone`).tokenize("x"), /not on this host/);
+  await assert.rejects(guardedFallback(fallback, "/cache", "https://example.invalid/m.gguf").tokenize("x"), /not on this host/);
+  await assert.rejects(guardedFallback(fallback, "/cache", "hf:org/repo:latest", () => ["hf:org/repo:latest"]).tokenize("x"), /not on this host/);
 });
 
 test("a query vector the index cannot use degrades, on the worker's path and the fallback's", async () => {
@@ -450,8 +724,9 @@ test("the vector repair covers a missing table, a healthy one, and a host that c
   const { repairVectorRows } = await import("../src/store.ts");
   const seen: string[] = [];
   const db = (hasTable: boolean, run: () => { changes: number }) => ({
+    exec: () => {},
     prepare: (sql: string) => ({
-      get: () => (hasTable ? {} : undefined),
+      get: () => (sql === "PRAGMA busy_timeout" ? { timeout: 120_000 } : hasTable ? {} : undefined),
       run: () => {
         seen.push(sql);
         return run();
@@ -470,11 +745,37 @@ test("the vector repair covers a missing table, a healthy one, and a host that c
 
 // --- configuration ---------------------------------------------------------------------------------
 
-test("a worker's token cannot be the sidecar's own secret", () => {
-  assert.throws(
-    () => loadConfig({ MEMORIA_QMD_LLM: "remote", MEMORIA_QMD_SECRET: "0123456789abcdefXYZ", MEMORIA_QMD_WORKERS: JSON.stringify([{ name: "a", url: "http://127.0.0.1:1", tokenEnv: "MEMORIA_QMD_SECRET" }]) }),
-    /must not be the sidecar's own secret/,
-  );
+const SECRET = "0123456789abcdefXYZ";
+const listed = (tokenEnv: string, extra: NodeJS.ProcessEnv = {}) => () => loadConfig({ MEMORIA_QMD_LLM: "remote", MEMORIA_QMD_SECRET: SECRET, MEMORIA_QMD_WORKERS: JSON.stringify([{ name: "a", url: "http://127.0.0.1:1", tokenEnv }]), ...extra });
+
+test("a worker's token cannot be the sidecar's secret, by any route: values are compared, not names", async () => {
+  const secretFile = await tempFile("secret");
+  await writeFile(secretFile, SECRET);
+  const reuse = /is the sidecar's own secret/;
+  assert.throws(listed("MEMORIA_QMD_SECRET"), reuse);
+  assert.throws(listed("memoria_qmd_secret", { memoria_qmd_secret: SECRET }), reuse, "lower case, as Windows allows");
+  assert.throws(listed("ALIAS", { ALIAS: SECRET }), reuse, "an alias");
+  assert.throws(listed("ALIAS", { ALIAS_FILE: secretFile }), reuse, "an alias's file");
+  assert.throws(() => loadConfig({ MEMORIA_QMD_LLM: "remote", MEMORIA_QMD_SECRET: SECRET, MEMORIA_QMD_WORKER_URL: "http://127.0.0.1:1", MEMORIA_QMD_WORKER_TOKEN: SECRET }), reuse, "the single-worker setting");
+  assert.throws(() => loadConfig({ MEMORIA_QMD_LLM: "remote", MEMORIA_QMD_SECRET_FILE: secretFile, MEMORIA_QMD_WORKER_URL: "http://127.0.0.1:1", MEMORIA_QMD_WORKER_TOKEN: SECRET }), reuse, "the secret from a file");
+  const fine = listed("ALIAS", { ALIAS: "a-different-token-entirely" })().llm;
+  assert.ok(fine.mode === "remote" && fine.workers[0]!.token === "a-different-token-entirely");
+});
+
+test("tokenEnv naming a file variable is refused, as it would send the path as the token", () => {
+  const refused = /leave off _FILE/;
+  assert.throws(listed("ALIAS_FILE", { ALIAS_FILE: "/run/secrets/x" }), refused);
+  assert.throws(listed("alias_file", { alias_file: "/run/secrets/x" }), refused);
+  assert.throws(() => loadConfig({ MEMORIA_QMD_LLM: "remote", MEMORIA_QMD_SECRET: SECRET, MEMORIA_QMD_WORKERS: JSON.stringify([{ name: "a", url: "http://127.0.0.1:1", tokenEnv: "MEMORIA_QMD_SECRET_FILE" }]) }), refused);
+});
+
+test("the search deadline is configurable and cannot reach the API's timeout", () => {
+  const remote = (over: NodeJS.ProcessEnv) => loadConfig({ MEMORIA_QMD_LLM: "remote", MEMORIA_QMD_WORKER_URL: "http://127.0.0.1:1", ...over }).llm;
+  const unset = remote({});
+  assert.ok(unset.mode === "remote" && unset.searchDeadlineMs === 60_000);
+  const set = remote({ MEMORIA_QMD_SEARCH_DEADLINE_MS: "5000" });
+  assert.ok(set.mode === "remote" && set.searchDeadlineMs === 5000);
+  assert.throws(() => remote({ MEMORIA_QMD_SEARCH_DEADLINE_MS: "120000" }), /MEMORIA_QMD_SEARCH_DEADLINE_MS/);
 });
 
 test("the rerank deadline is configurable but cannot reach the API's timeout", () => {
@@ -672,25 +973,27 @@ test("with no store, persistence says so", () => {
   assert.deepEqual(new JobQueue(async () => result).persistence(), { enabled: false, healthy: false });
 });
 
-test("a locked queue file fails fast rather than freezing the event loop", async () => {
+test("two sidecars cannot share a queue file: the second runs in memory and leaves it alone", async () => {
   const file = await tempFile("q.sqlite");
-  const store = new SqliteJobStore(file);
-  const { DatabaseSync } = await import("node:sqlite");
-  const other = new DatabaseSync(file);
-  other.exec("BEGIN EXCLUSIVE");
-  try {
-    const errors: string[] = [];
-    const queue = new JobQueue(() => never, { store, onStoreError: (m) => errors.push(m) });
-    const started = Date.now();
-    queue.enqueue(req());
-    assert.ok(Date.now() - started < 1_000, "a 5 s busy timeout would freeze everything");
-    assert.equal(queue.persistence().healthy, false);
-    assert.ok(errors.length > 0);
-  } finally {
-    other.exec("ROLLBACK");
-    other.close();
-    store.close();
-  }
+  const first = new SqliteJobStore(file);
+  const queue = new JobQueue(async () => result, { store: first });
+  queue.enqueue(req());
+  await queue.idle();
+  const warnings: string[] = [];
+  const started = Date.now();
+  const second = openJobStore(file, (m) => warnings.push(m), () => 1);
+  assert.ok(Date.now() - started < 1_000, "it does not wait on the lock");
+  assert.equal(second.store, null);
+  assert.equal(second.movedTo, null);
+  assert.match(warnings.join(), /in memory only/);
+  assert.ok(!existsSync(`${file}.corrupt-1`), "a locked file is not moved aside");
+  queue.enqueue(req({ collections: ["more"] }));
+  await queue.idle();
+  assert.equal(queue.persistence().healthy, true, "the first keeps its file");
+  first.close();
+  const third = openJobStore(file, () => {});
+  assert.equal(third.store?.load().length, 2, "and the lock goes when it does");
+  third.store?.close();
 });
 
 // --- a damaged queue file must not stop startup ----------------------------------------------------------
@@ -754,17 +1057,57 @@ test("a corrupt queue file is moved aside and a new one started", async () => {
   opened.store.close();
 });
 
-test("a queue file from a newer version is moved aside too", async () => {
+test("a queue file from a newer version is refused and left exactly as it was", async () => {
   const file = await tempFile("q.sqlite");
   new SqliteJobStore(file).close();
   const { DatabaseSync } = await import("node:sqlite");
   const db = new DatabaseSync(file);
   db.exec("PRAGMA user_version = 999");
   db.close();
-  const opened = openJobStore(file, () => {}, () => 1);
-  assert.ok(opened.store);
-  assert.ok(existsSync(`${file}.corrupt-1`));
-  opened.store.close();
+  const warnings: string[] = [];
+  const opened = openJobStore(file, (m) => warnings.push(m), () => 1);
+  assert.equal(opened.store, null);
+  assert.equal(opened.movedTo, null);
+  assert.ok(!existsSync(`${file}.corrupt-1`));
+  assert.match(warnings.join(), /in memory only/);
+  const check = new DatabaseSync(file);
+  assert.deepEqual({ ...(check.prepare("PRAGMA user_version").get() as object) }, { user_version: 999 });
+  check.close();
+});
+
+test("only the last few corrupt files are kept, with their sidecar files", async () => {
+  const file = await tempFile("q.sqlite");
+  const leftovers = [`${file}.corrupt-1-wal`, `${file}.corrupt-1`];
+  await writeFile(leftovers[0]!, "");
+  await writeFile(leftovers[1]!, "");
+  const unrelated = `${file}.corrupt-notes.txt`;
+  await writeFile(unrelated, "");
+  for (const stamp of [2, 3, 4, 5]) {
+    await writeFile(file, "this is not a database, and never was. ".repeat(400));
+    openJobStore(file, () => {}, () => stamp).store?.close();
+  }
+  const names = readdirSync(path.dirname(file)).filter((n) => n.includes(".corrupt-")).sort();
+  assert.deepEqual(names, ["q.sqlite.corrupt-3", "q.sqlite.corrupt-4", "q.sqlite.corrupt-5", "q.sqlite.corrupt-notes.txt"]);
+});
+
+test("a bad row with no id is set aside once, not on every load", async () => {
+  const file = await tempFile("q.sqlite");
+  new SqliteJobStore(file).close();
+  const { DatabaseSync } = await import("node:sqlite");
+  const db = new DatabaseSync(file);
+  db.exec("INSERT INTO jobs (id, seq, state, priority, attempts, embed, force, reason, base_reason, merged_requests, created_at, deferred, deferrals, crashes) VALUES (NULL, 1, 'queued', 'background', 0, 1, 0, 'r', 'r', 1, '2026-01-01T00:00:00.000Z', 0, 0, 0)");
+  db.close();
+  for (let i = 0; i < 3; i++) {
+    const store = new SqliteJobStore(file);
+    assert.deepEqual(store.load(), []);
+    store.close();
+  }
+  const raw = new DatabaseSync(file);
+  const rows = raw.prepare("SELECT COUNT(*) AS n FROM jobs_quarantine").get() as { n: number };
+  const left = raw.prepare("SELECT COUNT(*) AS n FROM jobs").get() as { n: number };
+  raw.close();
+  assert.equal(rows.n, 1);
+  assert.equal(left.n, 0);
 });
 
 test("if no file can be used at all, the sidecar runs with jobs in memory", async () => {
@@ -915,4 +1258,43 @@ test("only 400 and 413 say something about the request", async () => {
   } finally {
     await a.stop();
   }
+});
+
+// --- housekeeping must never take the process down ----------------------------------------------------------
+
+function lockedDb(failure: unknown): { db: SdkDb; timeouts: string[] } {
+  const timeouts: string[] = [];
+  return {
+    timeouts,
+    db: {
+      exec: (sql: string) => timeouts.push(sql),
+      prepare: (sql: string) => ({
+        all: () => [],
+        get: () => (sql === "PRAGMA busy_timeout" ? { timeout: 120_000 } : undefined),
+        run: () => {
+          throw failure;
+        },
+      }),
+    },
+  };
+}
+
+test("a cache sweep meeting a lock warns, does not throw, and puts the timeout back", async () => {
+  const { sweepExpiredCache } = await import("../src/llm/wire.ts");
+  const { db, timeouts } = lockedDb(Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" }));
+  const warnings: string[] = [];
+  sweepExpiredCache(db, (m) => warnings.push(m));
+  assert.match(warnings[0]!, /will try again: database is locked/);
+  assert.deepEqual(timeouts, ["PRAGMA busy_timeout = 250", "PRAGMA busy_timeout = 120000"]);
+});
+
+test("both drivers' way of saying busy is recognized, and nothing else is", async () => {
+  const { isBusy } = await import("../src/sqlite-busy.ts");
+  assert.ok(isBusy({ code: "SQLITE_BUSY" }));
+  assert.ok(isBusy({ code: "SQLITE_BUSY_SNAPSHOT" }));
+  assert.ok(isBusy({ errcode: 5 }));
+  assert.ok(isBusy({ errcode: 261 }));
+  assert.ok(!isBusy({ code: "SQLITE_FULL" }));
+  assert.ok(!isBusy({ errcode: 13 }));
+  assert.ok(!isBusy(new Error("nope")));
 });

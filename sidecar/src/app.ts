@@ -71,6 +71,7 @@ export async function buildApp(options: BuildAppOptions): Promise<App> {
       total.errors += r.errors;
       total.durationMs += r.durationMs;
       if (r.docsPending) total.docsPending = (total.docsPending ?? 0) + r.docsPending;
+      if (r.docsDeadLettered) total.docsDeadLettered = (total.docsDeadLettered ?? 0) + r.docsDeadLettered;
     }
     return total;
   };
@@ -84,7 +85,7 @@ export async function buildApp(options: BuildAppOptions): Promise<App> {
     const embed = request.embed ? await embedRequested(request, context) : null;
     const result = { update, embed, metadata: metadata.refresh() };
     // Documents left behind must not read as success. See JobPartial.
-    if (embed?.docsPending) throw new JobPartial(`${embed.docsPending} of ${embed.docsProcessed} documents could not be embedded and stay pending. Retry the job, or see embed.errors.`, result);
+    if (embed?.docsPending) throw new JobPartial(`${embed.docsPending} of ${embed.docsProcessed} documents could not be embedded, of which ${embed.docsDeadLettered ?? 0} were set aside (GET /queue/dead-letters). The rest stay pending.`, result);
     return result;
   };
 
@@ -163,7 +164,7 @@ export async function buildApp(options: BuildAppOptions): Promise<App> {
       }
       // The router needs a regex to tell actions apart; clients do not. The double
       // colon is swagger's escape for a literal one.
-      const action = /^\/(queue\/jobs|workers)\/:(\w+)\(.*\)::([\w-]+)$/.exec(url);
+      const action = /^\/(queue\/jobs)\/:(\w+)\(.*\)::([\w-]+)$/.exec(url);
       if (action) return { schema, url: `/${action[1]}/{${action[2]}}::${action[3]}` };
       return { schema, url };
     },

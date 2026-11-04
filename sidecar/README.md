@@ -79,7 +79,8 @@ Every route except `/health` and `/openapi.json` requires `Authorization: Bearer
 | `POST /reindex` | Queue `update` (+ `embed`) for some or all collections, without waiting on the debounce. One worker runs one job at a time. |
 | `GET /reindex/jobs`, `GET /reindex/jobs/{id}` | Job history, which persists across restarts. |
 | `GET /queue`, `POST /queue/jobs/{id}:retry`, `POST /queue/jobs/{id}:cancel` | Queue depth, and operator control of jobs. |
-| `GET /workers`, `POST /workers/{name}:purge-vectors` | The worker pool's state, and undoing one worker's embeddings, in remote LLM mode. |
+| `GET /workers` | The worker pool's state, in remote LLM mode. |
+| `GET /queue/dead-letters`, `POST /queue/dead-letters:clear` | Documents no worker could embed, and letting them try again. |
 | `POST /cache:purge` | Drop every cached rerank score and expansion. |
 
 ### Search example

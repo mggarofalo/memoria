@@ -564,7 +564,8 @@ test("the worker view reports state, heartbeat, load and error rate, and no cred
     assert.equal(a!.host, new URL(f.a.url).host);
     assert.equal(a!.state, "up");
     assert.ok(a!.lastHeartbeat);
-    assert.deepEqual(a!.circuits, { embed: "closed", rerank: "closed", generate: "closed" });
+    assert.deepEqual(a!.circuits, { embed: "closed", rerank: "closed", generate: "closed", documents: "closed" });
+    assert.equal(a!.embedDisagrees, false);
     assert.equal(a!.calls, 2, "still preferred: two failures is under the threshold");
     assert.equal(b!.calls, 2, "and each call failed over");
     assert.equal(a!.errorRate, 1);

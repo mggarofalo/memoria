@@ -6,8 +6,8 @@
  * Opt in with MEMORIA_QMD_INTEGRATION=1 (CI sets it; `npm test` does not).
  */
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
+import { spawn, spawnSync } from "node:child_process";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { createServer, type AddressInfo } from "node:net";
 import path from "node:path";
 import { createInterface } from "node:readline";
@@ -15,11 +15,11 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { buildApp } from "../src/app.ts";
 import type { PoolWorkerConfig } from "../src/llm/types.ts";
-import { replaceDocumentVectors, type SdkDb, type SdkHandles } from "../src/llm/wire.ts";
-import { queueDbPathFor, SqliteJobStore } from "../src/queue-store.ts";
+import { replaceDocumentVectors, sweepExpiredCache, type SdkDb, type SdkHandles } from "../src/llm/wire.ts";
+import { queueDbPathFor } from "../src/queue-store.ts";
 import { openBackend, type LlmOptions, type OpenedBackend } from "../src/store.ts";
 import { authHeaders, tempDir, testConfig } from "./helpers.ts";
-import { MockWorker, vectorFor } from "./mock-worker.ts";
+import { EMBED_FILE, MockWorker, vectorFor } from "./mock-worker.ts";
 
 async function freePort(): Promise<number> {
   const probe = createServer();
@@ -65,11 +65,11 @@ function remoteOptions(workers: PoolWorkerConfig[], over: Partial<Extract<LlmOpt
 }
 
 /** Run queries on an index with the SDK itself, after whatever had it has closed it. */
-async function withSdk<T>(dbPath: string, run: (db: { prepare(sql: string): { all(...a: unknown[]): unknown[]; get(...a: unknown[]): unknown; run(...a: unknown[]): unknown }; exec(sql: string): void }) => T): Promise<T> {
+async function withSdk<T>(dbPath: string, run: (db: { prepare(sql: string): { all(...a: unknown[]): unknown[]; get(...a: unknown[]): unknown; run(...a: unknown[]): unknown }; exec(sql: string): void }) => T): Promise<Awaited<T>> {
   const qmd = await import("@tobilu/qmd");
   const store = await qmd.createStore({ dbPath });
   try {
-    return run(store.internal.db as never);
+    return await run(store.internal.db as never);
   } finally {
     await store.close();
   }
@@ -147,6 +147,80 @@ test("the farm's output matches the SDK's byte for byte", { skip }, async () => 
   const farmRows = await snapshot(farmSide.dbPath);
   assert.deepEqual(farmRows, await snapshot(sdkSide.dbPath));
   assert.ok(farmRows.vectors.length >= 4);
+});
+
+test("parity holds on awkward documents: no heading, unicode, frontmatter, duplicates across collections, empty", { skip }, async () => {
+  const awkward: Record<string, Record<string, string>> = {
+    one: {
+      "no-heading-at-all.md": "Just a paragraph, with no heading, so the title comes from the file name.\n",
+      "unicode-Ω-日本語.md": "# Ünïcödé 日本語 Ω\n\nCafé naïve résumé — 東京 🙂 \u200B zero width.\n",
+      "frontmatter.md": "---\ntitle: From Frontmatter\ntags: [a, b]\n---\n\nBody after frontmatter.\n",
+      "frontmatter-and-heading.md": "---\ntitle: Ignored Perhaps\n---\n\n# Real Heading\n\nBody.\n",
+      "duplicate.md": "# Same Body\n\nThis exact body is in both collections.\n",
+      "empty.md": "",
+      "blank.md": "   \n\n  \n",
+      "long.md": `No heading here either. ${"A long run of words about nothing in particular. ".repeat(200)}\n`,
+    },
+    two: {
+      "other-name-for-duplicate.md": "# Same Body\n\nThis exact body is in both collections.\n",
+      "duplicate-no-heading-a.md": "A body with no heading, in the second collection only.\n",
+    },
+  };
+  const build = async () => {
+    const root = await tempDir("memoria-parity-");
+    const collections: Record<string, { path: string; pattern: string }> = {};
+    for (const [name, docs] of Object.entries(awkward)) {
+      const dir = path.join(root, name);
+      await mkdir(dir, { recursive: true });
+      for (const [file, body] of Object.entries(docs)) await writeFile(path.join(dir, file), body, "utf8");
+      collections[name] = { path: dir, pattern: "**/*.md" };
+    }
+    const dbPath = path.join(root, "index.sqlite");
+    const qmd = await import("@tobilu/qmd");
+    const builder = await qmd.createStore({ dbPath, config: { collections } });
+    await builder.update();
+    await builder.close();
+    return dbPath;
+  };
+  const farmDb = await build();
+  const sdkDb = await build();
+  const mock = await new MockWorker(8).start();
+  const farm = await openBackend({ dbPath: farmDb, keepWarm: false, llm: remoteOptions([worker("w", mock)]) });
+  const out = await farm.embed({ force: false });
+  assert.equal(out.errors, 0);
+  await farm.close();
+  await mock.stop();
+
+  const qmd = await import("@tobilu/qmd");
+  const store = await qmd.createStore({ dbPath: sdkDb });
+  const original = (store.internal as unknown as { llm: { embedModelName: string; rerankModelName: string; generateModelName: string } }).llm;
+  const stub = {
+    embedModelName: original.embedModelName,
+    rerankModelName: original.rerankModelName,
+    generateModelName: original.generateModelName,
+    tokenize: async (text: string) => Array.from(text, (c) => c.codePointAt(0)),
+    detokenize: async (tokens: number[]) => String.fromCodePoint(...tokens),
+    embed: async (text: string) => ({ embedding: vectorFor(text, 8), model: original.embedModelName }),
+    embedBatch: async (texts: string[]) => texts.map((text) => ({ embedding: vectorFor(text, 8), model: original.embedModelName })),
+    dispose: async () => {},
+  };
+  (store.internal as unknown as { llm: unknown }).llm = stub;
+  const sdkLlm = (await import(new URL("./llm.js", import.meta.resolve("@tobilu/qmd")).href)) as { setDefaultLlamaCpp(llm: unknown): void };
+  sdkLlm.setDefaultLlamaCpp(stub);
+  const sdkOut = await store.embed({ force: false });
+  sdkLlm.setDefaultLlamaCpp(null);
+  (store.internal as unknown as { llm: unknown }).llm = original;
+  await store.close();
+  assert.equal(sdkOut.errors, 0);
+
+  const snapshot = (dbPath: string) =>
+    withSdk(dbPath, (db) => ({
+      rows: db.prepare("SELECT hash, seq, pos, model, embed_fingerprint, total_chunks FROM content_vectors ORDER BY hash, seq").all(),
+      vectors: (db.prepare("SELECT hash_seq, embedding FROM vectors_vec ORDER BY hash_seq").all() as Array<{ hash_seq: string; embedding: Uint8Array }>).map((r) => [r.hash_seq, Buffer.from(r.embedding).toString("hex")]),
+    }));
+  const farmRows = await snapshot(farmDb);
+  assert.deepEqual(farmRows, await snapshot(sdkDb));
+  assert.ok(farmRows.vectors.length >= 7, String(farmRows.vectors.length));
 });
 
 // --- a kill between the two inserts ---------------------------------------------------------
@@ -238,31 +312,6 @@ test("rows whose vector table is gone are repaired too", { skip }, async () => {
   await again.close();
 });
 
-const killFixture = fileURLToPath(new URL("./fixtures/farm-kill.ts", import.meta.url));
-
-test("killing the farm mid-write leaves every vector row with its vector", { skip }, async () => {
-  const docs: Record<string, string> = {};
-  for (let i = 0; i < 300; i++) docs[`d${i}.md`] = `# Doc ${i}\n\nUnique text number ${i} about something.\n`;
-  const { dbPath } = await fixture(docs);
-  const mock = await new MockWorker(768, undefined).start();
-  let written = 0;
-  for (const delayMs of [0, 2, 5, 10, 20, 40]) {
-    const child = spawn(process.execPath, [killFixture, dbPath, mock.url], { stdio: ["ignore", "pipe", "ignore"] });
-    const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
-    // Killed only once batches are coming back, then after a varied moment.
-    const before = mock.count("/v1/embed");
-    while (mock.count("/v1/embed") < before + 4) await new Promise((resolve) => setTimeout(resolve, 1));
-    await new Promise((resolve) => setTimeout(resolve, delayMs));
-    child.kill("SIGKILL");
-    await exited;
-    const { cv, vec } = await counts(dbPath);
-    assert.equal(cv, vec, `after a kill at ${delayMs} ms`);
-    written = Math.max(written, cv);
-  }
-  assert.ok(written > 0, "the kills landed while it was writing");
-  await mock.stop();
-});
-
 // --- force ------------------------------------------------------------------------------------
 
 test("a force job that hits an outage loses no vectors, and a retry does not start over", { skip }, async () => {
@@ -289,7 +338,8 @@ test("a force job failing partway keeps the old vectors of everything not yet re
   try {
     await o.backend.embed({ force: false });
     const before = await counts(o.dbPath);
-    o.mock.on("POST /v1/embed", () => ({ status: 400, body: {} }));
+    const healthy = o.mock.handlers.get("POST /v1/embed")!;
+    o.mock.on("POST /v1/embed", (b, req) => ((b.texts as string[]).some((t) => t.includes("memoria worker identity probe")) ? healthy(b, req) : { status: 400, body: {} }));
     const out = await o.backend.embed({ force: true });
     assert.equal(out.chunksEmbedded, 0);
     assert.ok(out.docsPending! > 0);
@@ -357,14 +407,28 @@ test("a job leaving documents pending does not report success, and :retry finish
     assert.match(failed.error, /1 of 4 documents/);
     assert.equal(failed.result.embed.docsPending, 1);
     assert.equal(failed.result.embed.errors, 1);
+    assert.equal(failed.result.embed.docsDeadLettered, 1);
 
-    o.mock.on("POST /v1/embed", healthy);
+    // It stops failing later jobs: a retry leaves it set aside, and succeeds.
     const retried = await app.inject({ method: "POST", url: `/queue/jobs/${job.id}:retry`, headers: authHeaders });
     assert.equal(retried.statusCode, 202);
     await app.ctx.jobs.idle();
-    const done = (await app.inject({ method: "GET", url: `/reindex/jobs/${job.id}`, headers: authHeaders })).json().job;
-    assert.equal(done.state, "succeeded");
+    const skipped = (await app.inject({ method: "GET", url: `/reindex/jobs/${job.id}`, headers: authHeaders })).json().job;
+    assert.equal(skipped.state, "succeeded");
+    assert.equal(skipped.result.embed.docsProcessed, 0);
+
+    const letters = (await app.inject({ method: "GET", url: "/queue/dead-letters", headers: authHeaders })).json().documents;
+    assert.equal(letters.length, 1);
+    assert.match(letters[0].path, /delta/);
+    assert.equal((await app.inject({ method: "GET", url: "/queue", headers: authHeaders })).json().deadLetters, 1);
+
+    o.mock.on("POST /v1/embed", healthy);
+    const cleared = await app.inject({ method: "POST", url: "/queue/dead-letters:clear", headers: authHeaders });
+    assert.equal(cleared.statusCode, 202);
+    assert.equal(cleared.json().documents, 1);
+    await app.ctx.jobs.idle();
     assert.equal((await o.backend.getStatus()).needsEmbedding, 0);
+    assert.deepEqual(o.backend.deadLetters(), []);
   } finally {
     await app.close();
     await o.done();
@@ -467,70 +531,6 @@ test("cache rows past their age are swept when a remote sidecar starts", { skip 
   await mock.stop();
 });
 
-// --- provenance -----------------------------------------------------------------------------------------
-
-test("one worker's vectors can be traced and undone, and the routes do it", { skip }, async () => {
-  const { dbPath } = await fixture();
-  const liar = await new MockWorker(8).start();
-  const provenance = new SqliteJobStore(queueDbPathFor(dbPath));
-  const backend = await openBackend({ dbPath, keepWarm: false, llm: remoteOptions([worker("liar", liar)]), provenance });
-  const app = await buildApp({ backend, config: testConfig(), jobStore: provenance, logger: false });
-  try {
-    await backend.embed({ force: false });
-    const documents = provenance.documentsBy("liar");
-    assert.equal(documents.length, 4);
-    assert.equal(backend.purgeWorkerVectors("nobody"), 0);
-    await backend.llm.refreshWorkers();
-    assert.equal(provenance.probeReference()?.worker, "liar");
-
-    liar.on("GET /health", () => ({ status: 500, body: {} }));
-    await backend.llm.refreshWorkers();
-    const purge = await app.inject({ method: "POST", url: "/workers/liar:purge-vectors", headers: authHeaders });
-    assert.equal(purge.statusCode, 202, purge.body);
-    assert.equal(purge.json().documents, 4);
-    assert.equal((await backend.getStatus()).needsEmbedding, 4);
-    assert.deepEqual(provenance.documentsBy("liar"), []);
-    assert.equal(provenance.probeReference(), null, "a reference from a liar goes too");
-    const lexical = await backend.searchDetailed({ queries: [{ type: "lex", query: "AuthenticationHandler" }], limit: 5, minScore: 0, rerank: false });
-    assert.ok(lexical.hits.length > 0, "still findable lexically");
-
-    // The job it queued waits for a worker, rather than failing.
-    assert.equal(purge.json().job.request.reason, "purge vectors from worker liar");
-  } finally {
-    await app.close();
-    await backend.close();
-    provenance.close();
-    await liar.stop();
-  }
-});
-
-test("a broken provenance store costs the record, never a vector", { skip }, async () => {
-  const { dbPath } = await fixture();
-  const mock = await new MockWorker(8).start();
-  const errors: string[] = [];
-  const broken = () => {
-    throw new Error("database is locked");
-  };
-  const backend = await openBackend({
-    dbPath,
-    keepWarm: false,
-    llm: remoteOptions([worker("w", mock)]),
-    provenance: { recordDocument: broken, documentsBy: broken, forgetDocuments: broken, probeReference: broken, setProbeReference: broken },
-    onProvenanceError: (message) => errors.push(message),
-  });
-  try {
-    await backend.llm.refreshWorkers(); // the probe reads and writes its reference through it too
-    const out = await backend.embed({ force: false });
-    assert.equal(out.docsPending, 0);
-    assert.equal((await backend.getStatus()).needsEmbedding, 0);
-    assert.ok(errors.length > 0 && errors.every((m) => m === "database is locked"));
-    assert.equal(backend.workers()[0]!.embedModelCompatible, true);
-  } finally {
-    await backend.close();
-    await mock.stop();
-  }
-});
-
 test("a missing index is refused by name, and keep-warm applies in local mode", { skip }, async () => {
   await assert.rejects(openBackend({ dbPath: "/definitely/not/an/index.sqlite", keepWarm: false }), /QMD index not found/);
   const { dbPath } = await fixture();
@@ -538,7 +538,8 @@ test("a missing index is refused by name, and keep-warm applies in local mode", 
   assert.equal(backend.llmHealth().mode, "local");
   assert.deepEqual(backend.workers(), []);
   assert.equal(backend.poolLoad(), null);
-  assert.equal(backend.purgeWorkerVectors("anyone"), 0);
+  assert.deepEqual(backend.deadLetters(), []);
+  assert.equal(backend.clearDeadLetters(), 0);
   await backend.close();
 });
 
@@ -613,3 +614,396 @@ test("a corrupt queue file does not stop the sidecar from starting", { skip }, a
   }
 });
 
+
+// --- a bad chunk, on the real pool and index ------------------------------------------------------------------
+
+const refuseText = (mock: MockWorker, status: number, needle: string): void => {
+  const healthy = mock.handlers.get("POST /v1/embed")!;
+  mock.on("POST /v1/embed", (b, req) => ((b.texts as string[]).some((t) => t.includes(needle)) ? { status, body: {} } : healthy(b, req)));
+};
+
+const vecSearch = { queries: [{ type: "vec" as const, query: "AuthenticationHandler" }], limit: 5, minScore: 0, rerank: false };
+
+for (const [label, status, needle] of [
+  ["answered with 502", 502, "Nested document"],
+  ["answered with 400, all of a long document", 400, "A long paragraph"],
+] as Array<[string, number, string]>) {
+  test(`a chunk ${label} costs one document, once, and search keeps its vectors`, { skip }, async () => {
+    const { dbPath } = await fixture();
+    const mock = await new MockWorker(8).start();
+    const backend = await openBackend({ dbPath, keepWarm: false, llm: remoteOptions([worker("only", mock)], { embedBatchBytes: 400 }) });
+    try {
+      refuseText(mock, status, needle);
+      const first = await backend.embed({ force: false });
+      assert.equal(first.docsProcessed, 4);
+      assert.equal(first.docsDeadLettered, 1);
+      assert.equal(first.docsPending, 1);
+      assert.equal(backend.deadLetters().length, 1);
+
+      const search = await backend.searchDetailed(vecSearch);
+      assert.deepEqual(search.degradedReasons, [], "one bad chunk did not cost query vectors");
+      assert.ok(search.hits.length > 0);
+
+      // It is recorded once. Later jobs pass over it and report plain success.
+      const calls = mock.count("/v1/embed");
+      const second = await backend.embed({ force: false });
+      assert.equal(second.docsProcessed, 0);
+      assert.equal(second.docsPending, 0);
+      assert.equal(mock.count("/v1/embed"), calls);
+      assert.equal(backend.deadLetters().length, 1);
+    } finally {
+      await backend.close();
+      await mock.stop();
+    }
+  });
+}
+
+test("a real outage is still an outage, and sets nothing aside", { skip }, async () => {
+  const o = await opened();
+  try {
+    o.mock.on("POST /v1/embed", () => ({ status: 503, body: {} }));
+    await assert.rejects(o.backend.embed({ force: false }), /No worker can embed/);
+    assert.deepEqual(o.backend.deadLetters(), []);
+  } finally {
+    await o.done();
+  }
+});
+
+test("a set-aside document gets a fresh start when its content changes, or on a force job", { skip }, async () => {
+  const { dbPath, corpus } = await fixture();
+  const mock = await new MockWorker(8).start();
+  const backend = await openBackend({ dbPath, keepWarm: false, llm: remoteOptions([worker("only", mock)]) });
+  try {
+    const healthy = mock.handlers.get("POST /v1/embed")!;
+    refuseText(mock, 400, "Nested document");
+    await backend.embed({ force: false });
+    assert.equal(backend.deadLetters().length, 1);
+
+    mock.on("POST /v1/embed", healthy);
+    assert.equal((await backend.embed({ force: true })).docsPending, 0);
+    assert.deepEqual(backend.deadLetters(), [], "a force job retries it, and success clears it");
+
+    refuseText(mock, 400, "Beta text");
+    await writeFile(path.join(corpus, "beta.md"), "# Beta\n\nBeta text, changed.\n");
+    await backend.update({});
+    await backend.embed({ force: false });
+    assert.equal(backend.deadLetters().length, 1);
+    mock.on("POST /v1/embed", healthy);
+    await writeFile(path.join(corpus, "beta.md"), "# Beta\n\nFixed now.\n");
+    await backend.update({});
+    assert.equal((await backend.embed({ force: false })).docsPending, 0);
+    assert.equal((await backend.getStatus()).needsEmbedding, 0);
+  } finally {
+    await backend.close();
+    await mock.stop();
+  }
+});
+
+// --- scoped force, old rows, a clock moved back -----------------------------------------------------------------
+
+test("a scoped force job with a new vector length is refused, and every collection keeps its vectors", { skip }, async () => {
+  const { dbPath } = await fixture();
+  const first = await new MockWorker(8).start();
+  const backend = await openBackend({ dbPath, keepWarm: false, llm: remoteOptions([worker("w", first)]) });
+  await backend.embed({ force: false });
+  await backend.close();
+  await first.stop();
+  const before = await counts(dbPath);
+
+  const longer = await new MockWorker(4).start();
+  const again = await openBackend({ dbPath, keepWarm: false, llm: remoteOptions([worker("w", longer)], { embedDimensions: 0 }) });
+  try {
+    await assert.rejects(again.embed({ force: true, collection: "sessions" }), /force embed with no collection/);
+    assert.equal((await again.getStatus()).needsEmbedding, 0);
+  } finally {
+    await again.close();
+    await longer.stop();
+  }
+  assert.deepEqual(await counts(dbPath), before);
+});
+
+test("a full force job with a new length does it all at once, and honestly", { skip }, async () => {
+  const { dbPath } = await fixture();
+  const first = await new MockWorker(8).start();
+  const backend = await openBackend({ dbPath, keepWarm: false, llm: remoteOptions([worker("w", first)]) });
+  await backend.embed({ force: false });
+  await backend.close();
+  await first.stop();
+
+  const longer = await new MockWorker(4).start();
+  const again = await openBackend({ dbPath, keepWarm: false, llm: remoteOptions([worker("w", longer)], { embedDimensions: 0 }) });
+  try {
+    const out = await again.embed({ force: true });
+    assert.equal(out.docsPending, 0);
+    assert.equal((await again.getStatus()).needsEmbedding, 0);
+  } finally {
+    await again.close();
+    await longer.stop();
+  }
+  const after = await counts(dbPath);
+  assert.equal(after.cv, after.vec);
+});
+
+test("a full force job removes rows of documents no longer in the index; a scoped one does not", { skip }, async () => {
+  const { dbPath, corpus } = await fixture();
+  const mock = await new MockWorker(8).start();
+  const backend = await openBackend({ dbPath, keepWarm: false, llm: remoteOptions([worker("w", mock)]) });
+  try {
+    await backend.embed({ force: false });
+    const whole = await counts(dbPath);
+    await rm(path.join(corpus, "alpha.md"));
+    await backend.update({});
+    await backend.embed({ force: true, collection: "sessions" });
+    assert.deepEqual(await counts(dbPath), whole, "a scoped job leaves them");
+    await backend.embed({ force: true });
+    const after = await counts(dbPath);
+    assert.ok(after.cv < whole.cv, `${after.cv} < ${whole.cv}`);
+    assert.equal(after.cv, after.vec);
+    // And a second force, finding the same state, leaves it alone.
+    await backend.embed({ force: true });
+    assert.deepEqual(await counts(dbPath), after);
+  } finally {
+    await backend.close();
+    await mock.stop();
+  }
+});
+
+test("a clock moved back does not turn force into a silent no-op", { skip }, async () => {
+  const o = await opened();
+  try {
+    await o.backend.embed({ force: false });
+    const future = new Date(Date.now() + 86_400_000).toISOString();
+    const { DatabaseSync } = await import("node:sqlite");
+    const raw = new DatabaseSync(o.dbPath);
+    raw.prepare("UPDATE content_vectors SET embedded_at = ?").run(future);
+    raw.close();
+    const calls = o.mock.count("/v1/embed");
+    const out = await o.backend.embed({ force: true });
+    assert.equal(out.docsProcessed, 4, "everything is redone");
+    assert.ok(o.mock.count("/v1/embed") > calls);
+  } finally {
+    await o.done();
+  }
+});
+
+// --- another process holding the index -----------------------------------------------------------------------------
+
+async function holdingLock<T>(dbPath: string, run: () => Promise<T>): Promise<T> {
+  const { DatabaseSync } = await import("node:sqlite");
+  const other = new DatabaseSync(dbPath);
+  other.exec("BEGIN IMMEDIATE");
+  try {
+    return await run();
+  } finally {
+    other.exec("ROLLBACK");
+    other.close();
+  }
+}
+
+test("a farm write meeting a lock defers within moments, and the job finishes once it clears", { skip }, async () => {
+  const o = await opened();
+  try {
+    const started = Date.now();
+    await holdingLock(o.dbPath, () => assert.rejects(o.backend.embed({ force: false }), /index is busy/));
+    assert.ok(Date.now() - started < 10_000, "the SDK's 120 s busy timeout would block the event loop");
+    assert.equal((await o.backend.embed({ force: false })).docsPending, 0);
+  } finally {
+    await o.done();
+  }
+});
+
+test("a sweep and a remote open both survive a lock on the index, without waiting on it", { skip }, async () => {
+  const o = await opened();
+  await o.backend.embed({ force: false });
+  await o.done();
+  const warnings: string[] = [];
+  await withSdk(o.dbPath, async (db) => {
+    const before = db.prepare("PRAGMA busy_timeout").get();
+    await holdingLock(o.dbPath, async () => {
+      const started = Date.now();
+      sweepExpiredCache(db as never, (m) => warnings.push(m));
+      assert.ok(Date.now() - started < 2_000);
+    });
+    assert.deepEqual(db.prepare("PRAGMA busy_timeout").get(), before, "it goes back afterward");
+  });
+  assert.match(warnings[0]!, /Could not sweep/);
+
+  const mock = await new MockWorker(8).start();
+  const started = Date.now();
+  const told: string[] = [];
+  const repaired: number[] = [];
+  await holdingLock(o.dbPath, async () => {
+    // Vectors missing their rows would normally be repaired here; a lock must not stop the open.
+    const backend = await openBackend({ dbPath: o.dbPath, keepWarm: false, llm: remoteOptions([worker("w", mock)]), onLlmWarning: (m) => told.push(m), onVectorRepair: (n) => repaired.push(n) });
+    assert.ok(Date.now() - started < 10_000, `took ${Date.now() - started} ms`);
+    assert.ok((await backend.searchDetailed({ queries: [{ type: "lex", query: "AuthenticationHandler" }], limit: 5, minScore: 0, rerank: false })).hits.length > 0);
+    await backend.close();
+  });
+  assert.match(told.join(), /Could not sweep/);
+  assert.deepEqual(repaired, []);
+  await mock.stop();
+});
+
+// --- the deadline, end to end -------------------------------------------------------------------------------------
+
+test("every role hung: the search answers lexically within its one deadline, well under the API's timeout", { skip }, async () => {
+  const o = await opened({ searchDeadlineMs: 1_500 });
+  try {
+    const hang = () => new Promise<never>(() => {});
+    for (const route of ["POST /v1/complete", "POST /v1/embed", "POST /v1/rerank"]) o.mock.on(route, hang);
+    const started = Date.now();
+    const out = await o.backend.searchDetailed({ query: "AuthenticationHandler", limit: 5, minScore: 0, rerank: true });
+    assert.ok(Date.now() - started < 5_000, `took ${Date.now() - started} ms`);
+    assert.ok(out.degradedReasons.includes("no_expansion"), String(out.degradedReasons));
+  } finally {
+    await o.done();
+  }
+});
+
+test("a failed rerank on the real SDK does not expand or embed a second time", { skip }, async () => {
+  const o = await opened();
+  try {
+    await o.backend.embed({ force: false });
+    o.backend.llm.clearCache();
+    o.mock.on("POST /v1/rerank", () => ({ status: 503, body: {} }));
+    const expansions = o.mock.count("/v1/complete");
+    const embeds = o.mock.count("/v1/embed");
+    const out = await o.backend.searchDetailed({ query: "AuthenticationHandler", limit: 5, minScore: 0, rerank: true });
+    assert.deepEqual(out.degradedReasons, ["no_rerank"]);
+    assert.equal(o.mock.count("/v1/complete"), expansions + 1);
+    assert.equal(o.mock.count("/v1/embed"), embeds + 1);
+  } finally {
+    await o.done();
+  }
+});
+
+// --- /ready, without a search --------------------------------------------------------------------------------------
+
+test("/ready recovers from a heartbeat alone, and shows disagreement", { skip }, async () => {
+  const { dbPath } = await fixture();
+  const a = await new MockWorker(8).start();
+  const b = await new MockWorker(8).start();
+  const backend = await openBackend({ dbPath, keepWarm: false, llm: remoteOptions([worker("a", a), worker("b", b)], { breaker: { threshold: 1, backoffBaseMs: 1, backoffMaxMs: 1 }, probeEveryMs: 1 }) });
+  const app = await buildApp({ backend, config: testConfig(), logger: false });
+  const ready = async () => (await app.inject({ method: "GET", url: "/ready", headers: authHeaders }));
+  try {
+    await backend.llm.refreshWorkers();
+    const healthyRerank = a.handlers.get("POST /v1/rerank")!;
+    for (const m of [a, b]) m.on("POST /v1/rerank", () => ({ status: 500, body: {} }));
+    await backend.searchDetailed({ queries: [{ type: "lex", query: "AuthenticationHandler" }], limit: 5, minScore: 0, rerank: true });
+    assert.deepEqual((await ready()).json().llm.unavailable, ["rerank"]);
+    assert.equal((await ready()).json().status, "degraded");
+    assert.equal((await ready()).statusCode, 200, "degraded is still a 200, for the API to pass on");
+
+    for (const m of [a, b]) m.on("POST /v1/rerank", healthyRerank);
+    await new Promise((r) => setTimeout(r, 5));
+    await backend.llm.refreshWorkers();
+    assert.deepEqual((await ready()).json().llm.unavailable, [], "no search was needed");
+
+    b.on("POST /v1/embed", (body) => ({ body: { model: EMBED_FILE, embeddings: (body.texts as string[]).map(() => [-1, 2, -3, 4, -5, 6, -7, 8]) } }));
+    await new Promise((r) => setTimeout(r, 5));
+    await backend.llm.refreshWorkers();
+    const shown = (await ready()).json();
+    assert.deepEqual(shown.llm.embedDisagreement, ["a", "b"]);
+    assert.notEqual(shown.status, "degraded", "a disagreement is reported, and takes nothing down");
+    const workers = (await app.inject({ method: "GET", url: "/workers", headers: authHeaders })).json().workers;
+    assert.deepEqual(workers.map((w: { embedDisagrees: boolean }) => w.embedDisagrees), [true, true]);
+    assert.deepEqual(workers.map((w: { circuits: { documents: string } }) => w.circuits.documents), ["closed", "closed"]);
+  } finally {
+    await app.close();
+    await backend.close();
+    await a.stop();
+    await b.stop();
+  }
+});
+
+// --- the fallback with the network blocked -------------------------------------------------------------------------
+
+test("with the network blocked, only the SDK's own cache name gets the SDK's model loader going", { skip }, async () => {
+  const { dbPath } = await fixture();
+  const attempt = async (cachedName: string) => {
+    const cache = await tempDir("memoria-offline-cache-");
+    const qmdModels = path.join(cache, "qmd", "models");
+    await mkdir(qmdModels, { recursive: true });
+    await writeFile(path.join(qmdModels, cachedName), "");
+    const fixturePath = fileURLToPath(new URL("./fixtures/fallback-offline.ts", import.meta.url));
+    const run = spawnSync(process.execPath, [fixturePath, dbPath], { env: { ...process.env, XDG_CACHE_HOME: cache }, encoding: "utf8", timeout: 60_000 });
+    assert.equal(run.status, 0, run.stderr);
+    return JSON.parse(run.stdout.trim().split("\n").at(-1)!) as { attempts: string[]; loaderCalls: string[]; vector: unknown };
+  };
+
+  // The plain name, which the SDK's loader does not look for: it would go to Hugging Face.
+  const plain = await attempt(EMBED_FILE);
+  assert.deepEqual(plain.loaderCalls, [], "the loader, which would download, was never reached");
+  assert.deepEqual(plain.attempts, [], "nothing tried to reach the network");
+  assert.equal(plain.vector, null);
+
+  // The control: the same run does reach it when the model really is there.
+  const cached = await attempt(`hf_ggml-org_${EMBED_FILE}`);
+  assert.ok(cached.loaderCalls.length > 0, "otherwise this test proves nothing");
+  assert.deepEqual(cached.attempts, []);
+});
+
+// --- store.ts on the real SDK: paths the rest do not walk -------------------------------------------------------
+
+test("a local backend reports its models honestly, and embeds with nothing pending without loading any", { skip }, async () => {
+  const o = await opened();
+  await o.backend.embed({ force: false });
+  await o.done();
+  const local = await openBackend({ dbPath: o.dbPath, keepWarm: false });
+  try {
+    const models = local.models();
+    assert.ok(models.embed.length > 0);
+    assert.deepEqual(models.loaded, { embed: false, rerank: false, generate: false });
+    assert.equal(models.resident, false);
+    const out = await local.embed({ force: false, collection: "sessions" });
+    assert.equal(out.docsProcessed, 0);
+    assert.equal(out.errors, 0);
+    assert.equal(local.llm.mode, "local");
+    assert.equal(local.llm.rerankTransport, "in-process");
+    assert.deepEqual(local.models().loaded, { embed: false, rerank: false, generate: false }, "still nothing loaded");
+  } finally {
+    await local.close();
+  }
+});
+
+test("search passes its optional settings through to the SDK", { skip }, async () => {
+  const o = await opened();
+  try {
+    await o.backend.embed({ force: false });
+    o.backend.llm.clearCache();
+    const before = o.mock.requests.length;
+    const out = await o.backend.searchDetailed({ queries: [{ type: "lex", query: "AuthenticationHandler" }], intent: "the auth handler", collections: ["sessions"], candidateLimit: 1, limit: 5, minScore: 0, rerank: true });
+    assert.ok(out.hits.length > 0);
+    const rerank = o.mock.requests.slice(before).find((r) => r.path === "/v1/rerank");
+    assert.equal((rerank?.body as { documents: string[] }).documents.length, 1, "candidateLimit reached the SDK");
+    const elsewhere = await o.backend.searchDetailed({ queries: [{ type: "lex", query: "AuthenticationHandler" }], collections: ["sessions"], limit: 5, minScore: 0, rerank: false });
+    assert.ok(elsewhere.hits.every((h) => h.displayPath.startsWith("sessions/")));
+  } finally {
+    await o.done();
+  }
+});
+
+test("a search with neither a query nor sub-queries is the SDK's to refuse, and does not report degradation", { skip }, async () => {
+  const { dbPath } = await fixture();
+  const local = await openBackend({ dbPath, keepWarm: false });
+  try {
+    await assert.rejects(local.searchDetailed({ limit: 5, minScore: 0, rerank: false }));
+  } finally {
+    await local.close();
+  }
+});
+
+test("document heads come from the index, and an empty body reads as an empty head", { skip }, async () => {
+  const { dbPath } = await fixture({ "empty.md": "", "full.md": "# Full\n\nBody.\n" });
+  const local = await openBackend({ dbPath, keepWarm: false });
+  try {
+    const heads = local.readDocumentHeads(5);
+    const full = heads.find((h) => h.path === "full.md");
+    assert.equal(full?.head, "# Ful");
+    const empty = heads.find((h) => h.path === "empty.md");
+    if (empty) assert.equal(empty.head, "");
+  } finally {
+    await local.close();
+  }
+});

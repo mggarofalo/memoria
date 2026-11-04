@@ -211,7 +211,11 @@
                   },
                   "docsPending": {
                     "type": "integer",
-                    "description": "Documents this run could not finish. They stay pending, and the job does not report success."
+                    "description": "Documents this run could not finish, including any it set aside. The job does not report success."
+                  },
+                  "docsDeadLettered": {
+                    "type": "integer",
+                    "description": "Of those, how many were set aside for good. Later jobs skip them: see `GET /queue/dead-letters`."
                   }
                 }
               },
@@ -459,6 +463,13 @@
                         },
                         "workersTotal": {
                           "type": "integer"
+                        },
+                        "embedDisagreement": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          },
+                          "description": "Workers that embedded the same text differently. Reported only: nothing acts on it. Empty until two workers have been compared."
                         }
                       }
                     },
@@ -715,6 +726,13 @@
                         },
                         "workersTotal": {
                           "type": "integer"
+                        },
+                        "embedDisagreement": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          },
+                          "description": "Workers that embedded the same text differently. Reported only: nothing acts on it. Empty until two workers have been compared."
                         }
                       }
                     },
@@ -2296,9 +2314,14 @@
                     "jobs",
                     "classes",
                     "workers",
-                    "persistence"
+                    "persistence",
+                    "deadLetters"
                   ],
                   "properties": {
+                    "deadLetters": {
+                      "type": "integer",
+                      "description": "Documents set aside because no worker could embed them. See `GET /queue/dead-letters`."
+                    },
                     "persistence": {
                       "type": "object",
                       "required": [
@@ -2408,6 +2431,191 @@
                           }
                         }
                       }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/queue/dead-letters": {
+      "get": {
+        "summary": "Documents set aside",
+        "tags": [
+          "index"
+        ],
+        "description": "Documents a worker refused or could not embed while it could embed a known-good text. They are recorded once and later jobs skip them, so they stay out of vector search until cleared. A changed document is tried afresh, and a force job retries them. They can still be found lexically.",
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "documents"
+                  ],
+                  "properties": {
+                    "documents": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "hash",
+                          "path",
+                          "reason",
+                          "at"
+                        ],
+                        "properties": {
+                          "hash": {
+                            "type": "string"
+                          },
+                          "path": {
+                            "type": "string"
+                          },
+                          "reason": {
+                            "type": "string"
+                          },
+                          "at": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/queue/dead-letters:clear": {
+      "post": {
+        "summary": "Try set-aside documents again",
+        "tags": [
+          "index"
+        ],
+        "description": "Let every set-aside document embed again, and queue a job for it. For after a worker or model has been fixed.",
+        "responses": {
+          "202": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "documents",
+                    "job"
+                  ],
+                  "properties": {
+                    "documents": {
+                      "type": "integer"
+                    },
+                    "job": {
+                      "$ref": "#/components/schemas/Job"
                     }
                   }
                 }
@@ -2681,6 +2889,7 @@
                           "state",
                           "circuit",
                           "circuits",
+                          "embedDisagrees",
                           "capabilities",
                           "priority",
                           "maxConcurrent",
@@ -2725,8 +2934,10 @@
                             "required": [
                               "embed",
                               "rerank",
-                              "generate"
+                              "generate",
+                              "documents"
                             ],
+                            "description": "`documents` is document embedding, kept apart from `embed`, which is query vectors.",
                             "properties": {
                               "embed": {
                                 "type": "string",
@@ -2751,8 +2962,20 @@
                                   "open",
                                   "half_open"
                                 ]
+                              },
+                              "documents": {
+                                "type": "string",
+                                "enum": [
+                                  "closed",
+                                  "open",
+                                  "half_open"
+                                ]
                               }
                             }
+                          },
+                          "embedDisagrees": {
+                            "type": "boolean",
+                            "description": "This worker embedded the same text differently from another. Reported only: nothing acts on it."
                           },
                           "capabilities": {
                             "type": "array",
@@ -2805,99 +3028,6 @@
                           }
                         }
                       }
-                    }
-                  }
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Default Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Default Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Default Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Default Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Default Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/workers/{name}:purge-vectors": {
-      "post": {
-        "summary": "Undo a worker's embeddings",
-        "tags": [
-          "workers"
-        ],
-        "description": "Remove every vector this worker wrote, whole documents at a time, and queue a job to embed them again. Works for a worker no longer in the pool, and for one that lied about its model. Clears the identity probe's reference if this worker set it. The documents stay findable lexically meanwhile.",
-        "parameters": [
-          {
-            "schema": {
-              "type": "string"
-            },
-            "in": "path",
-            "name": "name",
-            "required": true
-          }
-        ],
-        "responses": {
-          "202": {
-            "description": "Default Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "required": [
-                    "documents",
-                    "job"
-                  ],
-                  "properties": {
-                    "documents": {
-                      "type": "integer"
-                    },
-                    "job": {
-                      "$ref": "#/components/schemas/Job"
                     }
                   }
                 }

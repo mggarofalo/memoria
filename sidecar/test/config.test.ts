@@ -56,9 +56,9 @@ test("remote mode needs a clean worker URL and, off loopback, a token", () => {
   for (const url of [`http://me:${TOKEN}@127.0.0.1:1`, `not a url ${TOKEN}`]) {
     assert.throws(() => remote({ MEMORIA_QMD_WORKER_URL: url }), (err: Error) => !err.message.includes(TOKEN));
   }
-  assert.deepEqual(remote({ MEMORIA_QMD_WORKER_URL: "http://127.0.0.1:8383" }).llm, { mode: "remote", workers: one("http://127.0.0.1:8383", undefined), fallback: true, embedDimensions: 768, pollMs: 10_000, embedBatchBytes: 262_144, rerankTimeoutMs: 20_000 });
+  assert.deepEqual(remote({ MEMORIA_QMD_WORKER_URL: "http://127.0.0.1:8383" }).llm, { mode: "remote", workers: one("http://127.0.0.1:8383", undefined), fallback: true, embedDimensions: 768, pollMs: 10_000, embedBatchBytes: 262_144, rerankTimeoutMs: 20_000, searchDeadlineMs: 60_000 });
   assert.deepEqual(remote({ MEMORIA_QMD_WORKER_URL: "http://[::1]:8383" }).llm.mode, "remote");
-  assert.deepEqual(remote({ MEMORIA_QMD_WORKER_URL: "http://192.168.1.20:8383", MEMORIA_QMD_WORKER_TOKEN: TOKEN, MEMORIA_QMD_LLM_FALLBACK: "0", MEMORIA_QMD_EMBED_DIMENSIONS: "0", MEMORIA_QMD_WORKER_POLL_MS: "500", MEMORIA_QMD_EMBED_BATCH_BYTES: "2048" }).llm, { mode: "remote", workers: one("http://192.168.1.20:8383", TOKEN), fallback: false, embedDimensions: 0, pollMs: 500, embedBatchBytes: 2048, rerankTimeoutMs: 20_000 });
+  assert.deepEqual(remote({ MEMORIA_QMD_WORKER_URL: "http://192.168.1.20:8383", MEMORIA_QMD_WORKER_TOKEN: TOKEN, MEMORIA_QMD_LLM_FALLBACK: "0", MEMORIA_QMD_EMBED_DIMENSIONS: "0", MEMORIA_QMD_WORKER_POLL_MS: "500", MEMORIA_QMD_EMBED_BATCH_BYTES: "2048" }).llm, { mode: "remote", workers: one("http://192.168.1.20:8383", TOKEN), fallback: false, embedDimensions: 0, pollMs: 500, embedBatchBytes: 2048, rerankTimeoutMs: 20_000, searchDeadlineMs: 60_000 });
 });
 
 test("a worker list names each token's environment variable and holds no secrets itself", () => {

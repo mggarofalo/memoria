@@ -12,10 +12,11 @@ import { WorkerError } from "./client.ts";
  * stand until a new set is ready for that document. The index stays the record of
  * progress, so a re-run asks what is still pending and carries on.
  *
- * **One bad chunk costs one document.** A failed batch is retried with a short
- * backoff, in case the failure was brief, then split to isolate what the worker
- * refuses. Documents left over are reported in `docsPending`, and the job does not
- * end as a success.
+ * **One bad chunk costs one document, once.** A failed batch is retried with a short
+ * backoff, in case the failure was brief. Then a known-good text decides what failed.
+ * If no worker can embed that, it is an outage and the job waits. If one can, the
+ * batch is at fault: it is split until what cannot be embedded is alone, and that
+ * document is dead-lettered so it stops failing every later job.
  */
 
 export interface PendingDoc {
@@ -30,9 +31,19 @@ export interface FarmChunk {
   vector: number[];
 }
 
+/** The index is held by someone else. A write that can wait for later. */
+export class IndexBusy extends Error {
+  constructor() {
+    super("The index is busy; the documents stay pending and this job will retry.");
+    this.name = "IndexBusy";
+  }
+}
+
 export interface FarmDeps {
-  /** Can any worker take embedding now? */
+  /** Is some worker's document circuit open to calls? A quick check, and not proof. */
   canEmbed(): boolean;
+  /** Can a worker embed a known-good text? Proof, at the cost of a call. */
+  confirmWorkers(): Promise<boolean>;
   /** Batches to run at once. */
   capacity(): number;
   /** With `redoBefore`, also documents last embedded before that time: a force job's list. */
@@ -45,8 +56,12 @@ export interface FarmDeps {
   vectorDimensions(): number | null;
   /** Drop every vector. Only ever called holding a real embedding of a new length. */
   resetVectors(): void;
-  /** Replace all of one document's vectors, atomically. */
-  replaceDocument(hash: string, chunks: FarmChunk[], totalChunks: number, workers: readonly string[]): void;
+  /** Replace all of one document's vectors, atomically. This and the other writes throw `IndexBusy`. */
+  replaceDocument(hash: string, chunks: FarmChunk[], totalChunks: number): void;
+  /** Set a document aside, so later jobs skip it until an operator clears it. */
+  deadLetter(hash: string, path: string, reason: string): void;
+  /** Remove vectors of documents no longer in the index. */
+  removeOrphans(): void;
   embed(texts: string[]): Promise<{ vectors: number[][]; worker: string }>;
   sleep(ms: number): Promise<void>;
 }
@@ -62,7 +77,7 @@ export interface FarmOptions {
   onProgress?: () => void;
   maxBatchBytes: number;
   maxBatchChunks: number;
-  /** Tries of a failed batch before it is split. */
+  /** Tries of a failed batch before it is examined. */
   retries?: number;
   retryBaseMs?: number;
   now?: () => number;
@@ -77,12 +92,14 @@ interface Item {
 
 interface DocState {
   hash: string;
+  path: string;
   total: number;
   chunks: FarmChunk[];
-  workers: Set<string>;
   failed: boolean;
 }
 
+/** Codes for a call that no worker saw. */
+const NEVER_ASKED: ReadonlySet<string> = new Set(["no_worker", "saturated"]);
 const NO_WORKER = "No worker can embed right now; the documents stay pending and this job will retry.";
 const DEFAULT_RETRIES = 3;
 const DEFAULT_RETRY_BASE_MS = 500;
@@ -96,7 +113,9 @@ class Farm {
   #errors = 0;
   #docsWritten = 0;
   #docsSkipped = 0;
+  #docsDeadLettered = 0;
   #outage = false;
+  #busy = false;
   #reset = false;
 
   constructor(deps: FarmDeps, options: FarmOptions) {
@@ -107,7 +126,7 @@ class Farm {
   }
 
   get #stopping(): boolean {
-    return this.#options.signal.aborted || this.#outage;
+    return this.#options.signal.aborted || this.#outage || this.#busy;
   }
 
   async run(docs: PendingDoc[]): Promise<EmbedSummary> {
@@ -121,15 +140,15 @@ class Farm {
     await source.return(undefined);
     const failure = outcomes.find((o) => o.status === "rejected");
     if (failure) throw failure.reason;
+    this.#throwIfStopped();
+    const docsPending = docs.length - this.#docsWritten - this.#docsSkipped;
+    return { docsProcessed: docs.length, chunksEmbedded: this.#chunksEmbedded, errors: this.#errors, durationMs: now() - started, docsPending, docsDeadLettered: this.#docsDeadLettered };
+  }
+
+  #throwIfStopped(): void {
     if (this.#options.signal.aborted) throw new JobCancelled();
+    if (this.#busy) throw new JobDeferred(new IndexBusy().message);
     if (this.#outage) throw new JobDeferred(NO_WORKER);
-    return {
-      docsProcessed: docs.length,
-      chunksEmbedded: this.#chunksEmbedded,
-      errors: this.#errors,
-      durationMs: now() - started,
-      docsPending: docs.length - this.#docsWritten - this.#docsSkipped,
-    };
   }
 
   /** Chunking runs one document at a time and pauses whenever no lane wants a batch. */
@@ -160,62 +179,85 @@ class Farm {
       this.#docsSkipped++;
       return [];
     }
+    const state: DocState = { hash: doc.hash, path: doc.path, total: 0, chunks: [], failed: false };
     let chunks: Array<{ text: string; pos: number }>;
     try {
       chunks = await this.#deps.chunk(body, doc.path, this.#options.signal);
     } catch (err) {
-      this.#noteFailure(err);
-      this.#errors++;
+      if (!(err instanceof WorkerError)) throw err;
+      if (await this.#workersAlive()) this.#setAside(state, err);
       return [];
     }
-    const state: DocState = { hash: doc.hash, total: chunks.length, chunks: [], workers: new Set(), failed: false };
+    state.total = chunks.length;
     return chunks.map((chunk, seq) => ({ doc: state, seq, pos: chunk.pos, text: this.#deps.format(chunk.text, body, doc.path) }));
-  }
-
-  /** Only worker failures are survivable. Anything else is a bug or a broken disk. */
-  #noteFailure(err: unknown): void {
-    if (!(err instanceof WorkerError)) throw err;
-    if (!this.#deps.canEmbed()) this.#outage = true;
   }
 
   async #lane(source: AsyncGenerator<Item[]>): Promise<void> {
     while (!this.#stopping) {
       // Async generators queue concurrent next() calls, so lanes never share a batch.
-      const { value: batch, done } = await source.next();
-      if (done) return;
-      if (this.#options.signal.aborted) return;
-      await this.#embed(batch, this.#retries);
+      try {
+        const { value: batch, done } = await source.next();
+        if (done || this.#options.signal.aborted) return;
+        await this.#embed(batch, this.#retries);
+      } catch (err) {
+        if (!(err instanceof IndexBusy)) throw err;
+        this.#busy = true;
+      }
     }
   }
 
-  /** Retry a brief failure, then split, until what cannot be embedded is alone. */
   async #embed(items: Item[], triesLeft: number): Promise<void> {
     if (this.#stopping) return;
     try {
       const { vectors, worker } = await this.#deps.embed(items.map((item) => item.text));
       this.#options.onWorker(worker);
-      this.#accept(items, vectors, worker);
+      this.#accept(items, vectors);
     } catch (err) {
-      this.#noteFailure(err);
-      await this.#recover(items, triesLeft, err as WorkerError);
+      if (!(err instanceof WorkerError)) throw err;
+      await this.#recover(items, triesLeft, err);
     }
   }
 
+  /** Retry a brief failure. Past that, find out whether the batch or the worker is at fault. */
   async #recover(items: Item[], triesLeft: number, err: WorkerError): Promise<void> {
-    if (this.#stopping) return;
     if (triesLeft > 1 && err.code !== "rejected") {
       await this.#deps.sleep(this.#retryBaseMs * 2 ** (this.#retries - triesLeft));
       await this.#embed(items, triesLeft - 1);
       return;
     }
+    if (!(await this.#workersAlive())) return;
     if (items.length > 1) {
       const middle = Math.ceil(items.length / 2);
-      await this.#embed(items.slice(0, middle), 1);
-      await this.#embed(items.slice(middle), 1);
+      await this.#embedPart(items.slice(0, middle));
+      await this.#embedPart(items.slice(middle));
       return;
     }
+    this.#setAside(items[0]!.doc, err);
+  }
+
+  async #workersAlive(): Promise<boolean> {
+    const alive = await this.#deps.confirmWorkers();
+    if (!alive) this.#outage = true;
+    return alive;
+  }
+
+  /** A lone chunk gets the brief-failure retries again, as one blip must not condemn a document. */
+  #embedPart(items: Item[]): Promise<void> {
+    return this.#embed(items, items.length === 1 ? this.#retries : 1);
+  }
+
+  /**
+   * Workers can embed, and this could not be. An error that never reached a worker
+   * proves nothing about the document, such as another lane having opened the circuit
+   * just now, so that document only stays pending.
+   */
+  #setAside(doc: DocState, err: WorkerError): void {
+    if (doc.failed) return;
     this.#errors++;
-    this.#failDoc(items[0]!.doc);
+    this.#failDoc(doc);
+    if (NEVER_ASKED.has(err.code)) return;
+    this.#deps.deadLetter(doc.hash, doc.path, err.message);
+    this.#docsDeadLettered++;
   }
 
   #failDoc(doc: DocState): void {
@@ -223,23 +265,18 @@ class Farm {
     doc.chunks = [];
   }
 
-  #accept(items: Item[], vectors: number[][], worker: string): void {
+  #accept(items: Item[], vectors: number[][]): void {
     for (const [i, item] of items.entries()) {
       const { doc } = item;
       if (doc.failed) continue;
       doc.chunks.push({ seq: item.seq, pos: item.pos, vector: vectors[i]! });
-      doc.workers.add(worker);
       if (doc.chunks.length === doc.total) this.#write(doc);
     }
   }
 
   #write(doc: DocState): void {
-    if (!this.#fitsIndex(doc.chunks[0]!.vector.length)) {
-      this.#errors++;
-      this.#failDoc(doc);
-      return;
-    }
-    this.#deps.replaceDocument(doc.hash, doc.chunks, doc.total, [...doc.workers]);
+    this.#checkFitsIndex(doc.chunks[0]!.vector.length);
+    this.#deps.replaceDocument(doc.hash, doc.chunks, doc.total);
     this.#chunksEmbedded += doc.chunks.length;
     this.#docsWritten++;
     doc.chunks = [];
@@ -247,23 +284,38 @@ class Farm {
   }
 
   /**
-   * A new length can only go in by dropping every old vector, which only a force
-   * job may do, and only now that a real vector of that length is in hand.
+   * A new length can only go in by dropping every vector in the index. So only a force
+   * job over everything may do it, which redoes all of them, and only now that a real
+   * vector of that length is in hand. Any other job is refused outright: it would
+   * silently cost every other collection its vectors, or never finish.
    */
-  #fitsIndex(length: number): boolean {
+  #checkFitsIndex(length: number): void {
     const existing = this.#deps.vectorDimensions();
-    if (existing === null || existing === length) return true;
-    if (!this.#options.force) return false;
-    if (!this.#reset) this.#deps.resetVectors();
+    if (existing === null || existing === length || this.#reset) return;
+    if (!this.#options.force || this.#options.collection !== undefined) {
+      throw new Error(`Workers return vectors of length ${length} and the index holds ${existing}. Changing length drops every vector, so it takes a force embed with no collection. Nothing was changed.`);
+    }
+    this.#deps.resetVectors();
     this.#reset = true;
-    return true;
   }
+}
+
+async function embedPending(deps: FarmDeps, options: FarmOptions, docs: PendingDoc[]): Promise<EmbedSummary> {
+  if (docs.length === 0) return { docsProcessed: 0, chunksEmbedded: 0, errors: 0, durationMs: 0, docsPending: 0 };
+  // An open circuit may only mean the last job met a bad chunk, so ask before waiting.
+  if (!deps.canEmbed() && !(await deps.confirmWorkers())) throw new JobDeferred(NO_WORKER);
+  return new Farm(deps, options).run(docs);
 }
 
 export async function runEmbedFarm(deps: FarmDeps, options: FarmOptions): Promise<EmbedSummary> {
   const redoBefore = options.force ? (options.forceSince ?? new Date().toISOString()) : undefined;
-  const docs = deps.pendingDocs(options.collection, redoBefore);
-  if (docs.length === 0) return { docsProcessed: 0, chunksEmbedded: 0, errors: 0, durationMs: 0, docsPending: 0 };
-  if (!deps.canEmbed()) throw new JobDeferred(NO_WORKER);
-  return new Farm(deps, options).run(docs);
+  try {
+    const summary = await embedPending(deps, options, deps.pendingDocs(options.collection, redoBefore));
+    // Only a force job over everything has looked at all of them.
+    if (options.force && options.collection === undefined && !summary.docsPending) deps.removeOrphans();
+    return summary;
+  } catch (err) {
+    if (err instanceof IndexBusy) throw new JobDeferred(err.message);
+    throw err;
+  }
 }

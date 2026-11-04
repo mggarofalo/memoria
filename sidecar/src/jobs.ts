@@ -52,8 +52,10 @@ export interface EmbedSummary {
   chunksEmbedded: number;
   errors: number;
   durationMs: number;
-  /** Documents this run could not finish. They stay pending. */
+  /** Documents this run could not finish, including any it set aside. */
   docsPending?: number;
+  /** Of those, how many were set aside for good. Later jobs skip them: see `GET /queue/dead-letters`. */
+  docsDeadLettered?: number;
 }
 
 export interface JobResult {

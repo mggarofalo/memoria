@@ -1,7 +1,7 @@
-import { existsSync, renameSync } from "node:fs";
+import { existsSync, readdirSync, renameSync, rmSync } from "node:fs";
+import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { Job, JobStore, PersistedJob } from "./jobs.ts";
-import type { ProbeReference, ProvenanceStore } from "./llm/types.ts";
 
 /**
  * Jobs in their own SQLite file beside the index, never inside QMD's schema, so
@@ -12,11 +12,12 @@ import type { ProbeReference, ProvenanceStore } from "./llm/types.ts";
  * document content or credentials: the reason names a file path at most, and
  * errors are built from fixed text (src/llm/client.ts).
  *
- * The same file records which worker embedded which document. That sits outside
- * QMD's schema for the same reason, and lets one worker's vectors be removed.
- *
  * This file only holds job records, so it must never stop search: a bad row is
- * set aside, and `openJobStore` moves a corrupt file out of the way.
+ * set aside, `openJobStore` moves a truly corrupt file out of the way, and any other
+ * trouble leaves the sidecar running with jobs in memory.
+ *
+ * One sidecar owns the file at a time. SQLite's exclusive locking mode does that,
+ * and the operating system releases the lock if the process dies.
  */
 
 const SCHEMA_VERSION = 1;
@@ -27,7 +28,11 @@ export function queueDbPathFor(indexPath: string): string {
   return `${indexPath}.queue.sqlite`;
 }
 
+/** How many moved-aside corrupt files to keep. */
+const KEEP_CORRUPT_FILES = 3;
+
 interface Row {
+  row_id: number;
   id: string;
   seq: number;
   state: string;
@@ -53,6 +58,7 @@ interface Row {
 }
 
 function jobFromRow(row: Row): PersistedJob {
+  if (typeof row.id !== "string") throw new Error("a job row with no id");
   if (!JOB_STATES.has(row.state)) throw new Error(`unknown state ${row.state}`);
   const job: Job = {
     id: row.id,
@@ -85,7 +91,7 @@ function jobFromRow(row: Row): PersistedJob {
   };
 }
 
-export class SqliteJobStore implements JobStore, ProvenanceStore {
+export class SqliteJobStore implements JobStore {
   readonly #db: DatabaseSync;
   readonly #upsert: ReturnType<DatabaseSync["prepare"]>;
   readonly #delete: ReturnType<DatabaseSync["prepare"]>;
@@ -109,16 +115,15 @@ export class SqliteJobStore implements JobStore, ProvenanceStore {
   }
 
   #prepareFile(path: string): void {
+    this.#db.exec("PRAGMA busy_timeout = 0");
+    this.#db.exec("PRAGMA locking_mode = EXCLUSIVE");
     this.#db.exec("PRAGMA journal_mode = WAL");
     // A job acknowledged with a 202 has to survive the machine going down.
     this.#db.exec("PRAGMA synchronous = FULL");
-    // Synchronous calls run on the event loop, so waiting on a lock would freeze
-    // the sidecar. Nothing else should hold this file; if something does, the
-    // write fails at once and the queue carries on in memory.
-    this.#db.exec("PRAGMA busy_timeout = 0");
     const { user_version: version } = this.#db.prepare("PRAGMA user_version").get() as { user_version: number };
     if (version > SCHEMA_VERSION) throw new Error(`The job queue at ${path} is from a newer version of memoria-qmd.`);
     this.#createTables();
+    // A write, so under exclusive locking this is what takes the lock: a second sidecar finds out now.
     this.#db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
   }
 
@@ -149,14 +154,12 @@ export class SqliteJobStore implements JobStore, ProvenanceStore {
         error TEXT
       );
       CREATE TABLE IF NOT EXISTS jobs_quarantine (id TEXT, data TEXT NOT NULL, reason TEXT NOT NULL, at TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS vector_provenance (hash TEXT NOT NULL, worker TEXT NOT NULL, embedded_at TEXT NOT NULL, PRIMARY KEY (hash, worker));
-      CREATE TABLE IF NOT EXISTS probe_reference (id INTEGER PRIMARY KEY CHECK (id = 1), worker TEXT NOT NULL, vector TEXT NOT NULL);
     `);
   }
 
   /** One unreadable row must not cost the rest: it is set aside, with what it held. */
   load(): PersistedJob[] {
-    const rows = this.#db.prepare("SELECT * FROM jobs ORDER BY seq").all() as unknown as Row[];
+    const rows = this.#db.prepare("SELECT rowid AS row_id, * FROM jobs ORDER BY seq").all() as unknown as Row[];
     const out: PersistedJob[] = [];
     for (const row of rows) {
       try {
@@ -172,7 +175,8 @@ export class SqliteJobStore implements JobStore, ProvenanceStore {
     this.quarantined++;
     const reason = err instanceof Error ? err.message : "unreadable";
     this.#db.prepare("INSERT INTO jobs_quarantine (id, data, reason, at) VALUES (?, ?, ?, ?)").run(row.id, JSON.stringify(row), reason, new Date().toISOString());
-    this.#delete.run(row.id);
+    // By rowid: a bad row's id can be NULL, which no `id = ?` would ever match.
+    this.#db.prepare("DELETE FROM jobs WHERE rowid = ?").run(row.row_id);
   }
 
   save(entry: PersistedJob): void {
@@ -207,36 +211,6 @@ export class SqliteJobStore implements JobStore, ProvenanceStore {
     this.#delete.run(id);
   }
 
-  // --- provenance ------------------------------------------------------------
-
-  /** A document's vectors are replaced whole, so its earlier record goes with them. */
-  recordDocument(hash: string, workers: readonly string[]): void {
-    const at = new Date().toISOString();
-    this.#db.prepare("DELETE FROM vector_provenance WHERE hash = ?").run(hash);
-    const insert = this.#db.prepare("INSERT INTO vector_provenance (hash, worker, embedded_at) VALUES (?, ?, ?)");
-    for (const worker of workers) insert.run(hash, worker, at);
-  }
-
-  documentsBy(worker: string): string[] {
-    const rows = this.#db.prepare("SELECT hash FROM vector_provenance WHERE worker = ?").all(worker) as unknown as Array<{ hash: string }>;
-    return rows.map((row) => row.hash);
-  }
-
-  forgetDocuments(hashes: readonly string[]): void {
-    const remove = this.#db.prepare("DELETE FROM vector_provenance WHERE hash = ?");
-    for (const hash of hashes) remove.run(hash);
-  }
-
-  probeReference(): ProbeReference | null {
-    const row = this.#db.prepare("SELECT worker, vector FROM probe_reference WHERE id = 1").get() as { worker: string; vector: string } | undefined;
-    return row ? { worker: row.worker, vector: JSON.parse(row.vector) as number[] } : null;
-  }
-
-  setProbeReference(reference: ProbeReference | null): void {
-    this.#db.prepare("DELETE FROM probe_reference").run();
-    if (reference) this.#db.prepare("INSERT INTO probe_reference (id, worker, vector) VALUES (1, ?, ?)").run(reference.worker, JSON.stringify(reference.vector));
-  }
-
   close(): void {
     this.#db.close();
   }
@@ -249,8 +223,19 @@ export interface OpenedJobStore {
   movedTo: string | null;
 }
 
-function tryOpen(path: string): SqliteJobStore {
-  const store = new SqliteJobStore(path);
+const SQLITE_CORRUPT = 11;
+const SQLITE_NOTADB = 26;
+
+/** Only damage justifies moving a file. Locked, newer or unwritable files are someone's data. */
+function isCorruption(err: unknown): boolean {
+  const code = (err as { errcode?: unknown }).errcode;
+  if (typeof code !== "number") return false;
+  const primary = code % 256;
+  return primary === SQLITE_CORRUPT || primary === SQLITE_NOTADB;
+}
+
+function tryOpen(file: string): SqliteJobStore {
+  const store = new SqliteJobStore(file);
   try {
     store.load();
     return store;
@@ -260,32 +245,53 @@ function tryOpen(path: string): SqliteJobStore {
   }
 }
 
-function moveAside(path: string, stamp: number): string {
-  const target = `${path}.corrupt-${stamp}`;
-  renameSync(path, target);
+function moveAside(file: string, stamp: number): string {
+  const target = `${file}.corrupt-${stamp}`;
+  renameSync(file, target);
   for (const suffix of ["-wal", "-shm"]) {
-    if (existsSync(path + suffix)) renameSync(path + suffix, target + suffix);
+    if (existsSync(file + suffix)) renameSync(file + suffix, target + suffix);
   }
   return target;
 }
 
+/** They hold job records nobody is reading. A few are enough to look into what happened. */
+function pruneCorruptFiles(file: string): void {
+  const directory = path.dirname(file);
+  const pattern = new RegExp(`^${path.basename(file).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.corrupt-(\\d+)`);
+  const stamps = new Set<number>();
+  for (const name of readdirSync(directory)) {
+    const match = pattern.exec(name);
+    if (match) stamps.add(Number(match[1]));
+  }
+  for (const stamp of [...stamps].sort((a, b) => b - a).slice(KEEP_CORRUPT_FILES)) {
+    for (const suffix of ["", "-wal", "-shm"]) rmSync(`${file}.corrupt-${stamp}${suffix}`, { force: true });
+  }
+}
+
+function inMemory(warn: (message: string) => void, err: unknown): OpenedJobStore {
+  warn(`Running with jobs in memory only, so they will not survive a restart: ${err instanceof Error ? err.message : "unknown error"}`);
+  return { store: null, movedTo: null };
+}
+
 /**
- * Open the queue, or get out of the way. A file that cannot be read is renamed,
- * not deleted, and a new one started. If even that fails, the sidecar runs with
- * jobs in memory: search matters more than this file.
+ * Open the queue, or get out of the way. Only real corruption moves the file, which
+ * is renamed, not deleted. Anything else, such as another sidecar holding it or a
+ * file from a newer version, leaves it untouched and runs with jobs in memory: search
+ * matters more than this file.
  */
-export function openJobStore(path: string, warn: (message: string) => void, now: () => number = Date.now): OpenedJobStore {
+export function openJobStore(file: string, warn: (message: string) => void, now: () => number = Date.now): OpenedJobStore {
   try {
-    return { store: tryOpen(path), movedTo: null };
+    return { store: tryOpen(file), movedTo: null };
   } catch (err) {
-    warn(`The job queue at ${path} could not be opened: ${err instanceof Error ? err.message : "unknown error"}`);
+    if (!isCorruption(err)) return inMemory(warn, err);
+    warn(`The job queue at ${file} is corrupt: ${err instanceof Error ? err.message : "unknown error"}`);
   }
   try {
-    const movedTo = moveAside(path, now());
+    const movedTo = moveAside(file, now());
     warn(`Moved the unreadable job queue to ${movedTo}. Jobs it held will not run.`);
-    return { store: tryOpen(path), movedTo };
+    pruneCorruptFiles(file);
+    return { store: tryOpen(file), movedTo };
   } catch (err) {
-    warn(`Running with jobs in memory only: ${err instanceof Error ? err.message : "unknown error"}`);
-    return { store: null, movedTo: null };
+    return inMemory(warn, err);
   }
 }

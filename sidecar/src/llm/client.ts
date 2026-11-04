@@ -17,7 +17,8 @@ export type WorkerErrorCode =
   | "invalid_response"
   | "model_mismatch"
   | "no_worker"
-  | "saturated";
+  | "saturated"
+  | "deadline";
 
 export class WorkerError extends Error {
   readonly code: WorkerErrorCode;
@@ -46,11 +47,7 @@ export interface OperationTimeouts {
   status: number;
 }
 
-/**
- * The search-time figures have to add up to well under `Memoria.Api`'s 2-minute
- * client timeout, even with one retry each, or a hung worker would turn what
- * should be a degraded answer into a timeout: (10 + 20 + 10) × 2 = 80 s at worst.
- */
+/** Per call. A search as a whole has its own, shorter deadline: see `DEFAULT_SEARCH_DEADLINE_MS`. */
 export const DEFAULT_TIMEOUTS: OperationTimeouts = { embed: 120_000, embedQuery: 10_000, rerank: 20_000, complete: 10_000, tokenize: 15_000, status: 5_000 };
 
 /** Larger than any legitimate response: 256 embeddings of 4096 numbers, as JSON. */
@@ -96,21 +93,22 @@ export class WorkerClient {
     this.#onCall = options.onCall;
   }
 
-  post(operation: string, timeout: keyof OperationTimeouts, path: string, body: unknown, batchSize: number): Promise<unknown> {
-    return this.#request(operation, timeout, path, batchSize, { method: "POST", body: JSON.stringify(body) });
+  /** `withinMs` shortens the deadline, for a search with only so long left. */
+  post(operation: string, timeout: keyof OperationTimeouts, path: string, body: unknown, batchSize: number, withinMs?: number | null): Promise<unknown> {
+    const ms = Math.min(this.#timeouts[timeout], withinMs ?? Infinity);
+    if (ms <= 0) return Promise.reject(new WorkerError("deadline", operation, this.name, "the search's time ran out first"));
+    return this.#request(operation, ms, path, batchSize, { method: "POST", body: JSON.stringify(body) });
   }
 
   get(operation: string, path: string): Promise<unknown> {
-    return this.#request(operation, "status", path, 0, { method: "GET" });
+    return this.#request(operation, this.#timeouts.status, path, 0, { method: "GET" });
   }
 
-  async #request(operation: string, timeout: keyof OperationTimeouts, path: string, batchSize: number, init: { method: string; body?: string }): Promise<unknown> {
+  async #request(operation: string, timeoutMs: number, path: string, batchSize: number, init: { method: string; body?: string }): Promise<unknown> {
     const started = Date.now();
     let status: number | undefined;
     try {
-      const headers: Record<string, string> = { accept: "application/json" };
-      if (init.body !== undefined) headers["content-type"] = "application/json";
-      if (this.#token !== undefined) headers.authorization = `Bearer ${this.#token}`;
+      const headers = this.#headers(init.body !== undefined);
       let response: Response;
       try {
         response = await this.#fetch(new URL(path.replace(/^\//, ""), this.#withTrailingSlash()), {
@@ -118,7 +116,7 @@ export class WorkerClient {
           headers,
           // A redirect would resend the bearer token to wherever it points.
           redirect: "error",
-          signal: AbortSignal.timeout(this.#timeouts[timeout]),
+          signal: AbortSignal.timeout(timeoutMs),
         });
       } catch (err) {
         throw this.#networkError(operation, err);
@@ -138,6 +136,13 @@ export class WorkerClient {
       this.#onCall?.({ worker: this.name, operation, batchSize, durationMs: Date.now() - started, ok: false, ...(status !== undefined ? { status } : {}), errorCode: code });
       throw err;
     }
+  }
+
+  #headers(hasBody: boolean): Record<string, string> {
+    const headers: Record<string, string> = { accept: "application/json" };
+    if (hasBody) headers["content-type"] = "application/json";
+    if (this.#token !== undefined) headers.authorization = `Bearer ${this.#token}`;
+    return headers;
   }
 
   #withTrailingSlash(): URL {

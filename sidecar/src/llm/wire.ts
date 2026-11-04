@@ -1,10 +1,11 @@
-import { readdirSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import type { EmbedSummary } from "../jobs.ts";
+import { isBusy, withShortBusyTimeout } from "../sqlite-busy.ts";
 import type { BackendEmbedOptions, BackendSearchOptions, LlmOptions, OpenBackendOptions, SearchHit, SearchOutcome } from "../store.ts";
 import { searchDegradable, type QueryValidators } from "./degraded-search.ts";
-import { runEmbedFarm, type FarmChunk, type FarmDeps, type PendingDoc } from "./embed-farm.ts";
-import { acceptedEmbedFiles, RemoteLlm } from "./remote.ts";
-import type { LlmSurface, LocalFallback, ProbeReference, ProvenanceStore } from "./types.ts";
+import { IndexBusy, runEmbedFarm, type FarmChunk, type FarmDeps, type PendingDoc } from "./embed-farm.ts";
+import { RemoteLlm } from "./remote.ts";
+import type { DeadLetter, LlmSurface, LocalFallback } from "./types.ts";
 
 /**
  * Connects `RemoteLlm` and the embedding farm to the SDK's store. Everything here
@@ -20,7 +21,7 @@ interface Statement {
 
 export interface SdkDb {
   prepare(sql: string): Statement;
-  exec(sql: string): void;
+  exec(sql: string): unknown;
 }
 
 export interface SdkHandles {
@@ -37,7 +38,6 @@ export interface SdkHandles {
   title(body: string, path: string): string;
   clearVectors(): void;
   modelCacheDir: string;
-  /** How much a fallback loading on this host matters is decided in `store.ts`. */
   setDefaultLlm(llm: unknown): void;
 }
 
@@ -49,7 +49,15 @@ const CACHE_SWEEP_MS = 60 * 60 * 1000;
 const DEFAULT_EMBED_BATCH_BYTES = 256 * 1024;
 const EMBED_BATCH_CHUNKS = 32;
 
-/** Mirrors the SDK's private getPendingEmbeddingDocs, with a way to include stale documents; the surface test pins it. */
+/** Beside QMD's tables, not part of them. Keyed by content, so a changed document is tried afresh. */
+const DEAD_LETTER_TABLE = "CREATE TABLE IF NOT EXISTS memoria_dead_letters (hash TEXT PRIMARY KEY, path TEXT NOT NULL, reason TEXT NOT NULL, at TEXT NOT NULL)";
+
+/**
+ * Mirrors the SDK's private getPendingEmbeddingDocs, plus a force job's stale documents
+ * and minus what has been dead-lettered, which a force job retries. A time ahead of now
+ * means the clock moved back since it was written, so it says nothing about order and is
+ * redone. The surface test pins this.
+ */
 const PENDING_DOCS = `
   SELECT d.hash, MIN(d.path) as path, length(CAST(c.doc AS BLOB)) as bytes
   FROM documents d
@@ -61,7 +69,8 @@ const PENDING_DOCS = `
     GROUP BY hash, model, embed_fingerprint
   ) v ON d.hash = v.hash
   WHERE d.active = 1
-    AND (v.hash IS NULL OR v.chunk_count < v.expected_chunks OR (? IS NOT NULL AND v.last_embedded < ?))
+    AND (v.hash IS NULL OR v.chunk_count < v.expected_chunks OR (? IS NOT NULL AND (v.last_embedded < ? OR v.last_embedded > ?)))
+    AND (? IS NOT NULL OR d.hash NOT IN (SELECT hash FROM memoria_dead_letters))
     AND (? IS NULL OR d.collection = ?)
   GROUP BY d.hash
   ORDER BY MIN(d.path)
@@ -85,9 +94,18 @@ function inTransaction(db: SdkDb, work: () => void): void {
   }
 }
 
+/** A write the farm can put off: it does not wait on a lock, and tells the farm so with `IndexBusy`. */
+function politeWrite<T>(db: SdkDb, work: () => T): T {
+  try {
+    return withShortBusyTimeout(db, work);
+  } catch (err) {
+    if (isBusy(err)) throw new IndexBusy();
+    throw err;
+  }
+}
+
 function deleteVectors(db: SdkDb, hash: string): void {
-  const hasTable = indexDimensions(db) !== null;
-  if (hasTable) {
+  if (indexDimensions(db) !== null) {
     const remove = db.prepare("DELETE FROM vectors_vec WHERE hash_seq = ?");
     for (const row of db.prepare("SELECT seq FROM content_vectors WHERE hash = ?").all(hash) as Array<{ seq: number }>) remove.run(`${hash}_${row.seq}`);
   }
@@ -97,15 +115,34 @@ function deleteVectors(db: SdkDb, hash: string): void {
 /**
  * The SDK writes two tables with no transaction, so a kill between them would
  * leave a row claiming a vector that does not exist. Here a document's vectors
- * replace its old ones in one transaction.
+ * replace its old ones in one transaction. Another process holding the index is not
+ * a failure, and waiting for it would freeze the event loop, so that defers the job.
  */
 export function replaceDocumentVectors(handles: SdkHandles, model: string, fingerprint: string, hash: string, chunks: readonly FarmChunk[], total: number): void {
-  inTransaction(handles.db, () => {
-    if (indexDimensions(handles.db) === null) handles.ensureVecTable(chunks[0]!.vector.length);
-    deleteVectors(handles.db, hash);
-    const at = new Date().toISOString();
-    for (const chunk of chunks) handles.insertEmbedding(hash, chunk.seq, chunk.pos, new Float32Array(chunk.vector), model, at, total, fingerprint);
-  });
+  politeWrite(handles.db, () =>
+    inTransaction(handles.db, () => {
+      if (indexDimensions(handles.db) === null) handles.ensureVecTable(chunks[0]!.vector.length);
+      deleteVectors(handles.db, hash);
+      const at = new Date().toISOString();
+      for (const chunk of chunks) handles.insertEmbedding(hash, chunk.seq, chunk.pos, new Float32Array(chunk.vector), model, at, total, fingerprint);
+      handles.db.exec(DEAD_LETTER_TABLE);
+      handles.db.prepare("DELETE FROM memoria_dead_letters WHERE hash = ?").run(hash);
+    }),
+  );
+}
+
+/**
+ * The name the SDK's model loader looks for in its cache. Anything else, including a
+ * file with the plain model name, sends it to Hugging Face. Mirrors node-llama-cpp's
+ * `buildHuggingFaceFilePrefix`; a test holds it to the real function.
+ */
+export function sdkCacheFileName(uri: string): string | null {
+  const parts = /^hf:([^/]+)\/([^/]+)\/([^/]+)$/.exec(uri);
+  if (!parts) return null;
+  const [, user, repo, file] = parts as unknown as [string, string, string, string];
+  const stem = /-gguf$/i.test(repo) ? repo.slice(0, -"-gguf".length).toLowerCase() : null;
+  const repoInName = stem === null || !file.toLowerCase().startsWith(stem);
+  return repoInName ? `hf_${user}_${repo}_${file}` : `hf_${user}_${file}`;
 }
 
 /**
@@ -114,10 +151,12 @@ export function replaceDocumentVectors(handles: SdkHandles, model: string, finge
  * in the middle of an outage. So the fallback only works if the file is already here.
  */
 export function guardedFallback(local: LocalFallback, cacheDir: string, modelUri: string, list: (dir: string) => string[] = readdirSync): LocalFallback {
-  const accepted = new Set(acceptedEmbedFiles(modelUri));
+  const cached = sdkCacheFileName(modelUri);
   const present = (): boolean => {
+    // Two letters or more, because a Windows path starts with a drive letter and a colon.
+    if (cached === null) return !/^[a-z][a-z0-9+.-]+:/i.test(modelUri) && existsSync(modelUri);
     try {
-      return list(cacheDir).some((name) => accepted.has(name.toLowerCase()));
+      return list(cacheDir).includes(cached);
     } catch {
       return false;
     }
@@ -130,65 +169,53 @@ export function guardedFallback(local: LocalFallback, cacheDir: string, modelUri
   };
 }
 
-/** A failing provenance write must not lose a vector that is already safely written. */
-function safely(work: () => void, onError: (message: string) => void): void {
-  try {
-    work();
-  } catch (err) {
-    onError(err instanceof Error ? err.message : "provenance store failure");
-  }
-}
-
-function probeReferenceFrom(store: ProvenanceStore | undefined): { get(): ProbeReference | null; set(reference: ProbeReference): void } {
-  let held: ProbeReference | null = null;
-  return {
-    get: () => {
-      if (held) return held;
-      try {
-        held = store?.probeReference() ?? null;
-      } catch {
-        held = null;
-      }
-      return held;
-    },
-    set: (reference) => {
-      held = reference;
-      safely(() => store?.setProbeReference(reference), () => {});
-    },
-  };
-}
-
 export interface WiredRemote {
   llm: RemoteLlm;
   embed(options: BackendEmbedOptions): Promise<EmbedSummary>;
   search(run: (options: BackendSearchOptions) => Promise<SearchHit[]>, options: BackendSearchOptions): Promise<SearchOutcome>;
-  /** Remove every vector one worker wrote, so those documents embed again. */
-  purgeWorkerVectors(worker: string): number;
+  deadLetters(): DeadLetter[];
+  clearDeadLetters(): number;
   close(): void;
 }
 
-function farmDeps(handles: SdkHandles, llm: RemoteLlm, provenance: ProvenanceStore | undefined, model: string, fingerprint: string, onError: (message: string) => void): FarmDeps {
+/** Vectors of documents gone from the index. Only a full force job can see all of them as stale. */
+function removeOrphanVectors(db: SdkDb): void {
+  politeWrite(db, () =>
+    inTransaction(db, () => {
+      const orphans = db.prepare("SELECT DISTINCT hash FROM content_vectors WHERE hash NOT IN (SELECT hash FROM documents WHERE active = 1)").all() as Array<{ hash: string }>;
+      for (const { hash } of orphans) deleteVectors(db, hash);
+      db.prepare("DELETE FROM memoria_dead_letters WHERE hash NOT IN (SELECT hash FROM documents WHERE active = 1)").run();
+    }),
+  );
+}
+
+function farmDeps(handles: SdkHandles, llm: RemoteLlm, model: string, fingerprint: string): FarmDeps {
   const { db } = handles;
   const pending = (collection: string | undefined, redoBefore: string | undefined): PendingDoc[] => {
-    handles.migrateVectors(model);
+    politeWrite(db, () => {
+      handles.migrateVectors(model);
+      db.exec(DEAD_LETTER_TABLE);
+    });
     const c = collection ?? null;
     const before = redoBefore ?? null;
     // Prepared here, after the migration: on an older index these columns do not exist before it.
-    return db.prepare(PENDING_DOCS).all(model, fingerprint, before, before, c, c) as PendingDoc[];
+    return db.prepare(PENDING_DOCS).all(model, fingerprint, before, before, new Date().toISOString(), before, c, c) as PendingDoc[];
   };
   return {
-    canEmbed: () => llm.canServe("embed"),
+    canEmbed: () => llm.canServe("embed", "background"),
+    confirmWorkers: () => llm.pool.confirmDocuments(),
     capacity: () => llm.pool.backgroundCapacity("embed"),
     pendingDocs: pending,
     readBody: (hash) => (db.prepare("SELECT doc FROM content WHERE hash = ?").get(hash) as { doc?: string } | undefined)?.doc ?? "",
     chunk: handles.chunk,
     format: (text, body, path) => handles.format(text, handles.title(body, path), model),
     vectorDimensions: () => indexDimensions(db),
-    resetVectors: handles.clearVectors,
-    replaceDocument: (hash, chunks, total, workers) => {
-      replaceDocumentVectors(handles, model, fingerprint, hash, chunks, total);
-      safely(() => provenance?.recordDocument(hash, workers), onError);
+    resetVectors: () => politeWrite(db, handles.clearVectors),
+    replaceDocument: (hash, chunks, total) => replaceDocumentVectors(handles, model, fingerprint, hash, chunks, total),
+    deadLetter: (hash, path, reason) => {
+      politeWrite(db, () => db.prepare("INSERT OR REPLACE INTO memoria_dead_letters (hash, path, reason, at) VALUES (?, ?, ?, ?)").run(hash, path, reason, new Date().toISOString()));
     },
+    removeOrphans: () => removeOrphanVectors(db),
     embed: (texts) => llm.embedDocuments(texts),
     sleep: (ms) =>
       new Promise((resolve) => {
@@ -197,16 +224,25 @@ function farmDeps(handles: SdkHandles, llm: RemoteLlm, provenance: ProvenanceSto
   };
 }
 
-function sweepExpiredCache(db: SdkDb): void {
-  db.prepare("DELETE FROM llm_cache WHERE created_at < ?").run(new Date(Date.now() - WORKER_CACHE_TTL_MS).toISOString());
+/** Housekeeping: it can run next hour, so it must never crash the process or wait on a lock. */
+export function sweepExpiredCache(db: SdkDb, onWarning: (message: string) => void): void {
+  try {
+    withShortBusyTimeout(db, () => db.prepare("DELETE FROM llm_cache WHERE created_at < ?").run(new Date(Date.now() - WORKER_CACHE_TTL_MS).toISOString()));
+  } catch (err) {
+    onWarning(`Could not sweep expired cache entries, and will try again: ${err instanceof Error ? err.message : "unknown error"}`);
+  }
+}
+
+function hasDeadLetterTable(db: SdkDb): boolean {
+  return db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='memoria_dead_letters'").get() !== undefined;
 }
 
 export function wireRemote(handles: SdkHandles, config: RemoteLlmConfig, options: OpenBackendOptions): WiredRemote {
   const { db, local } = handles;
   const model = local.embedModelName;
   const fingerprint = handles.fingerprint(model);
-  const provenance = options.provenance;
-  const onError = options.onProvenanceError ?? (() => {});
+  const warn = options.onLlmWarning ?? (() => {});
+  const timeouts = config.rerankTimeoutMs !== undefined ? { timeouts: { rerank: config.rerankTimeoutMs } } : {};
   const llm = new RemoteLlm({
     workers: config.workers,
     embedDimensions: config.embedDimensions,
@@ -215,20 +251,17 @@ export function wireRemote(handles: SdkHandles, config: RemoteLlmConfig, options
     fallback: config.fallback ? guardedFallback(local, handles.modelCacheDir, model) : null,
     statusPollMs: config.statusPollMs ?? 10_000,
     indexDimensions: () => indexDimensions(db),
-    probeReference: probeReferenceFrom(provenance),
-    ...(config.probeEveryMs !== undefined ? { probeEveryMs: config.probeEveryMs } : {}),
-    ...(config.rerankTimeoutMs !== undefined ? { timeouts: { rerank: config.rerankTimeoutMs } } : {}),
-    ...(config.breaker ? { breaker: config.breaker } : {}),
-    ...(options.onLlmCall ? { onCall: options.onLlmCall } : {}),
-    ...(options.onLlmDegraded ? { onDegraded: options.onLlmDegraded } : {}),
+    onDisagreement: (workers) => warn(workers.length > 0 ? `Workers ${workers.join(", ")} embedded the same text differently, so their vectors may not be comparable. Check they run the same model build.` : "Workers embed alike again."),
+    ...timeouts,
+    ...optionalRemote(config, options),
   });
   // The chunker ignores store.llm and asks for this process-wide singleton, so
   // embedding documents would otherwise load a model on this host just to count tokens.
   handles.setDefaultLlm(llm);
-  sweepExpiredCache(db);
-  const sweep = setInterval(() => sweepExpiredCache(db), CACHE_SWEEP_MS);
+  sweepExpiredCache(db, warn);
+  const sweep = setInterval(() => sweepExpiredCache(db, warn), CACHE_SWEEP_MS);
   sweep.unref();
-  const deps = farmDeps(handles, llm, provenance, model, fingerprint, onError);
+  const deps = farmDeps(handles, llm, model, fingerprint);
   return {
     llm,
     embed: (o) =>
@@ -243,7 +276,8 @@ export function wireRemote(handles: SdkHandles, config: RemoteLlmConfig, options
         maxBatchChunks: EMBED_BATCH_CHUNKS,
       }),
     search: (run, o) => searchDegradable(llm, handles.validators, run, o),
-    purgeWorkerVectors: (worker) => purgeWorker(handles, provenance, worker),
+    deadLetters: () => (hasDeadLetterTable(db) ? (db.prepare("SELECT hash, path, reason, at FROM memoria_dead_letters ORDER BY at").all() as DeadLetter[]) : []),
+    clearDeadLetters: () => (hasDeadLetterTable(db) ? Number(db.prepare("DELETE FROM memoria_dead_letters").run().changes) : 0),
     close: () => {
       clearInterval(sweep);
       llm.pool.stop();
@@ -252,13 +286,8 @@ export function wireRemote(handles: SdkHandles, config: RemoteLlmConfig, options
   };
 }
 
-function purgeWorker(handles: SdkHandles, provenance: ProvenanceStore | undefined, worker: string): number {
-  if (!provenance) return 0;
-  const hashes = provenance.documentsBy(worker);
-  inTransaction(handles.db, () => {
-    for (const hash of hashes) deleteVectors(handles.db, hash);
-  });
-  provenance.forgetDocuments(hashes);
-  if (provenance.probeReference()?.worker === worker) provenance.setProbeReference(null);
-  return hashes.length;
+function optionalRemote(config: RemoteLlmConfig, options: OpenBackendOptions) {
+  return Object.fromEntries(
+    Object.entries({ probeEveryMs: config.probeEveryMs, breaker: config.breaker, searchDeadlineMs: config.searchDeadlineMs, onCall: options.onLlmCall, onDegraded: options.onLlmDegraded }).filter(([, value]) => value !== undefined),
+  );
 }
