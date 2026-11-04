@@ -2,7 +2,7 @@
 
 Runs on a GPU machine and serves QMD's three models to the Memoria sidecar. It launches one `llama-server` per model, restarts them if they crash or hang, and puts a small authenticated HTTP API in front of them.
 
-**None of this has run with real models or a real `llama-server` yet.** [`docs/workers.md`](../docs/workers.md) lists what has and has not been verified, and describes the open question about reranker scores. Start with the smoke script below.
+This has run on a Windows desktop with an RTX 5080 and llama.cpp b12110. [`docs/workers.md`](../docs/workers.md) has the measurements, the reranker decision, and what has not been verified. Start with the smoke script below.
 
 ## Requirements
 

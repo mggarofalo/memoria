@@ -39,7 +39,7 @@ export class MockWorker {
 
   constructor(dimensions = 8, embedFile = EMBED_FILE) {
     this.handlers = new Map<string, MockHandler>([
-      ["GET /capabilities", () => ({ body: { operations: ["embed", "rerank", "complete", "tokenize", "detokenize"], models: { embed: embedFile, rerank: "r.gguf", generate: "g.gguf" }, rerankTransport: "llama-server-rerank" } })],
+      ["GET /capabilities", () => ({ body: { operations: ["embed", "rerank", "complete", "tokenize", "detokenize"], models: { embed: embedFile, rerank: "r.gguf", generate: "g.gguf" }, rerankTransport: "llama-server-qmd-tokens" } })],
       ["GET /health", () => ({ body: { status: "ok", queueDepth: 0, models: { embed: { loaded: true }, rerank: { loaded: true }, generate: { loaded: true } } } })],
       ["POST /v1/embed", (b) => ({ body: { model: embedFile, embeddings: (b.texts as string[]).map((t) => vectorFor(t, dimensions)) } })],
       ["POST /v1/rerank", (b) => ({ body: { results: (b.documents as string[]).map((_, index) => ({ index, score: 1 / (index + 2) })) } })],

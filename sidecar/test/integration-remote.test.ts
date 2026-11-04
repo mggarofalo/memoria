@@ -154,7 +154,7 @@ test("a reranked search runs the whole pipeline remotely and caches apart from l
     assert.equal(models.resident, false, "the status poll is off here");
     assert.ok(models.rerank.startsWith("hf:") && !models.rerank.includes("#worker"));
     assert.equal(r.backend.llm.mode, "remote");
-    assert.equal(r.backend.llm.rerankTransport, "llama-server-rerank");
+    assert.equal(r.backend.llm.rerankTransport, "worker-rerank");
   } finally {
     await r.done();
   }

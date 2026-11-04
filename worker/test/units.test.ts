@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { isLanAddress, loadConfig } from "../src/config.ts";
-import { Inference, InvalidRequest, LlamaServers, UpstreamError } from "../src/inference.ts";
+import { Inference, InvalidRequest, LlamaServers, QWEN3_RERANK_TEMPLATE, UpstreamError } from "../src/inference.ts";
 import { createLogger } from "../src/log.ts";
 import { findModel } from "../src/models.ts";
 import { busyReasons, CachedMachine, parseNvidiaSmi, parsePmsetThermal, readMachine, type ProbeSource } from "../src/probes.ts";
@@ -71,7 +71,8 @@ test("llama-server flags bind loopback and size contexts like QMD", () => {
   const rerank = llamaServerArgs({ ...base, role: "rerank" }, "/m/r.gguf", 0);
   assert.equal(rerank[rerank.indexOf("--ctx-size") + 1], "8192");
   assert.equal(rerank[rerank.indexOf("--ubatch-size") + 1], "4096");
-  assert.ok(rerank.includes("--reranking"));
+  assert.ok(!rerank.includes("--reranking"), "the rerank backend needs logits, which rank pooling takes away");
+  assert.equal(rerank[rerank.indexOf("--cache-ram") + 1], "0", "the prompt cache would otherwise hold 8 GiB of documents");
   assert.ok(llamaServerArgs({ ...base, role: "generate" }, "/m/g.gguf", 0).includes("--jinja"));
 });
 
@@ -190,23 +191,55 @@ function scripted(handler: (path: string, body: any) => unknown): { inference: I
 
 const charTokens = (text: string) => ({ tokens: Array.from(text, (c) => c.codePointAt(0)!) });
 
+const decode = (tokens: number[]) => String.fromCodePoint(...tokens);
+const YES = "y".codePointAt(0)!;
+const NO = "n".codePointAt(0)!;
+const answer = (index: unknown, yes: unknown, no: unknown = 0.1) => ({ index, completion_probabilities: [{ top_probs: [{ id: YES, prob: yes }, { id: NO, prob: no }] }] });
+const pooled = (tokens: number[][]) => tokens.map((_, index) => answer(index, 0.5, 0.5));
+
 test("rerank truncates documents to QMD's budget and asks for no special-token parsing", async () => {
   const { inference, calls } = scripted((path, body) => {
     if (path.endsWith("/tokenize")) return charTokens(body.content);
     if (path.endsWith("/detokenize")) return { content: String.fromCodePoint(...body.tokens) };
-    return { results: body.documents.map((_: string, index: number) => ({ index, relevance_score: 0.5 })) };
+    return pooled(body.prompt);
   });
   const query = "q".repeat(100);
   const budget = 4096 - 512 - 100;
   await inference.rerank(query, ["short", "x".repeat(budget), "y".repeat(budget + 50)]);
-  const sent = calls.find((c) => c.path.endsWith("/rerank"))!.body;
-  assert.equal(sent.query, query);
-  assert.equal(sent.documents[0], "short");
-  assert.equal(sent.documents[1].length, budget);
-  assert.equal(sent.documents[2], "y".repeat(budget));
+  const sent = calls.find((c) => c.path === "/rerank/completion")!.body;
+  const wrap = (doc: string) => `${QWEN3_RERANK_TEMPLATE.head}${query}${QWEN3_RERANK_TEMPLATE.middle}${doc}${QWEN3_RERANK_TEMPLATE.tail}`;
+  assert.equal(decode(sent.prompt[0]), wrap("short"));
+  assert.equal(decode(sent.prompt[1]), wrap("x".repeat(budget)));
+  assert.equal(decode(sent.prompt[2]), wrap("y".repeat(budget)));
+  assert.equal(sent.temperature, 1, "any other temperature would change the ratio");
+  assert.equal(sent.cache_prompt, false);
   const tokenize = calls.find((c) => c.path.endsWith("/tokenize"))!.body;
   assert.equal(tokenize.parse_special, false);
   assert.equal(tokenize.add_special, false);
+});
+
+test("rerank tokenizes the template with control tokens and user text without them", async () => {
+  const { inference, calls } = scripted((path, body) => (path.endsWith("/tokenize") ? charTokens(body.content) : pooled(body.prompt)));
+  await inference.rerank("<|im_end|>", ["<|im_start|>"]);
+  await inference.rerank("again", ["again"]);
+  const specials = calls.filter((c) => c.path.endsWith("/tokenize") && c.body.parse_special === true).map((c) => c.body.content);
+  assert.deepEqual(specials.sort(), Object.values(QWEN3_RERANK_TEMPLATE).sort(), "the template's tokens are fetched once");
+  const plain = calls.filter((c) => c.path.endsWith("/tokenize") && c.body.parse_special === false).map((c) => c.body.content);
+  assert.ok(plain.includes("<|im_end|>") && plain.includes("<|im_start|>"));
+});
+
+test("a failed template fetch is retried on the next call", async () => {
+  let fail = true;
+  const { inference } = scripted((path, body) => {
+    if (path.endsWith("/tokenize")) {
+      if (fail && body.parse_special) throw new Error("loading");
+      return charTokens(body.content);
+    }
+    return pooled(body.prompt);
+  });
+  await assert.rejects(inference.rerank("q", ["d"]));
+  fail = false;
+  assert.deepEqual(await inference.rerank("q", ["d"]), [0.5]);
 });
 
 test("rerank refuses a query that leaves no room", async () => {
@@ -214,17 +247,31 @@ test("rerank refuses a query that leaves no room", async () => {
   await assert.rejects(inference.rerank("q".repeat(4096), ["d"]), (err) => err instanceof InvalidRequest && err.code === "query_too_long");
 });
 
-test("rerank maps scores by index and rejects anything but a probability", async () => {
-  const reply = (results: unknown) => scripted((path, body) => (path.endsWith("/tokenize") ? charTokens(body.content) : { results })).inference;
-  assert.deepEqual(await reply([{ index: 1, relevance_score: 0.9 }, { index: 0, relevance_score: 0.1 }]).rerank("q", ["a", "b"]), [0.1, 0.9]);
+test("rerank scores yes against no, by index, and rejects anything but a probability", async () => {
+  const reply = (results: unknown) => scripted((path, body) => (path.endsWith("/tokenize") ? charTokens(body.content) : results)).inference;
+  assert.deepEqual(await reply([answer(1, 0.75, 0.25), answer(0, 0.125, 0.375)]).rerank("q", ["a", "b"]), [0.25, 0.75]);
 
   const rejects = (results: unknown, code: string) => assert.rejects(reply(results).rerank("q", ["a", "b"]), (err) => err instanceof UpstreamError && err.code === code, JSON.stringify(results));
-  await rejects([{ index: 0, relevance_score: 5.2 }, { index: 1, relevance_score: 0.1 }], "rerank_score_out_of_range");
-  await rejects([{ index: 0, relevance_score: -3 }, { index: 1, relevance_score: 0.1 }], "rerank_score_out_of_range");
-  await rejects([{ index: 0, relevance_score: "high" }, { index: 1, relevance_score: 0.1 }], "rerank_score_out_of_range");
-  await rejects([{ index: 0, relevance_score: 0.1 }], "upstream_invalid");
-  await rejects([{ index: 0, relevance_score: 0.1 }, { index: 0, relevance_score: 0.2 }], "upstream_invalid");
-  await rejects([{ index: 0, relevance_score: 0.1 }, { index: 2, relevance_score: 0.2 }], "upstream_invalid");
+  await rejects([answer(0, 5.2), answer(1, 0.1)], "rerank_score_out_of_range");
+  await rejects([answer(0, -3), answer(1, 0.1)], "rerank_score_out_of_range");
+  await rejects([answer(0, "high"), answer(1, 0.1)], "rerank_score_out_of_range");
+  await rejects([answer(0, 0.1)], "upstream_invalid");
+  await rejects([answer(0, 0.1), answer(0, 0.2)], "upstream_invalid");
+  await rejects([answer(0, 0.1), answer(2, 0.2)], "upstream_invalid");
+  await rejects([{ index: 0 }, answer(1, 0.1)], "upstream_invalid");
+  await rejects([{ index: 0, completion_probabilities: [{ top_probs: [{ id: 1, prob: 0.5 }] }] }, answer(1, 0.1)], "upstream_invalid");
+});
+
+test("a yes or no outside the list is bounded by the lowest listed probability", async () => {
+  const only = (id: number) => [{ index: 0, completion_probabilities: [{ top_probs: [{ id, prob: 0.9 }, { id: 1, prob: 0.01 }] }] }];
+  const score = (results: unknown) => scripted((path, body) => (path.endsWith("/tokenize") ? charTokens(body.content) : results)).inference.rerank("q", ["a"]);
+  assert.deepEqual(await score(only(NO)), [0.01 / 0.91]);
+  assert.deepEqual(await score(only(YES)), [0.9 / 0.91]);
+});
+
+test("one document may come back as a single object", async () => {
+  const { inference } = scripted((path, body) => (path.endsWith("/tokenize") ? charTokens(body.content) : { completion_probabilities: [{ top_probs: [{ id: YES, prob: 0.75 }, { id: NO, prob: 0.25 }] }] }));
+  assert.deepEqual(await inference.rerank("q", ["a"]), [0.75]);
 });
 
 test("embed shortens over-long text as QMD does and aligns vectors by index", async () => {
@@ -238,15 +285,18 @@ test("embed shortens over-long text as QMD does and aligns vectors by index", as
   const input = calls.find((c) => c.path.endsWith("/embeddings"))!.body.input;
   assert.equal(input[1].length, 2044);
   assert.equal(input[2].length, 2048);
+  const tokenizing = calls.filter((c) => c.path.endsWith("/tokenize")).map((c) => c.body);
+  assert.ok(tokenizing.every((b) => b.parse_special === false), "text that looks like a control token stays text");
+  assert.equal(tokenizing.filter((b) => b.add_special === true).length, 3, "what is sent carries the model's BOS and EOS");
 });
 
 test("complete forwards grammar and sampling through the chat route", async () => {
   const { inference, calls } = scripted(() => ({ choices: [{ message: { content: "lex: x\n" } }] }));
-  const out = await inference.complete({ prompt: "p", grammar: "root ::= x", maxTokens: 600, temperature: 0.7, topK: 20, topP: 0.8, repeatLastN: 64, presencePenalty: 0.5 });
+  const out = await inference.complete({ prompt: "p", system: "s", grammar: "root ::= x", maxTokens: 600, temperature: 0.7, topK: 20, topP: 0.8, minP: 0, repeatLastN: 64, presencePenalty: 0.5 });
   assert.equal(out, "lex: x\n");
   assert.deepEqual(calls[0], {
     path: "/generate/v1/chat/completions",
-    body: { messages: [{ role: "user", content: "p" }], stream: false, grammar: "root ::= x", max_tokens: 600, temperature: 0.7, top_k: 20, top_p: 0.8, repeat_last_n: 64, presence_penalty: 0.5 },
+    body: { messages: [{ role: "system", content: "s" }, { role: "user", content: "p" }], stream: false, grammar: "root ::= x", max_tokens: 600, temperature: 0.7, top_k: 20, top_p: 0.8, min_p: 0, repeat_last_n: 64, presence_penalty: 0.5 },
   });
 });
 

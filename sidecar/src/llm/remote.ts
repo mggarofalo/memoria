@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { WorkerError, type OperationTimeouts, workerName } from "./client.ts";
-import { EXPANSION_GRAMMAR, EXPANSION_SAMPLING, expansionFailure, expansionPrompt, parseExpansion } from "./expansion.ts";
+import { EXPANSION_GRAMMAR, EXPANSION_SAMPLING, EXPANSION_SYSTEM_PROMPT, expansionFailure, expansionPrompt, parseExpansion } from "./expansion.ts";
 import { WorkerPool, type BreakerOptions, type DispatchTarget } from "./pool.ts";
 import { WorkerRerankTransport, type RerankTransport } from "./rerank-transport.ts";
 import type {
@@ -355,7 +355,7 @@ export class RemoteLlm implements LlmSurface {
   async #expand(query: string, includeLexical: boolean): Promise<Queryable[]> {
     try {
       const output = await this.pool.dispatch("generate", "interactive", "complete", async ({ client }) => {
-        const raw = await client.post("complete", "complete", "/v1/complete", { prompt: expansionPrompt(query), grammar: EXPANSION_GRAMMAR, ...EXPANSION_SAMPLING }, 1, this.#remainingMs());
+        const raw = await client.post("complete", "complete", "/v1/complete", { prompt: expansionPrompt(query), system: EXPANSION_SYSTEM_PROMPT, grammar: EXPANSION_GRAMMAR, ...EXPANSION_SAMPLING }, 1, this.#remainingMs());
         return this.#validated(client.name, "complete", () => parseText(raw, MAX_EXPANSION_CHARS));
       });
       const expanded = parseExpansion(query, output, includeLexical);

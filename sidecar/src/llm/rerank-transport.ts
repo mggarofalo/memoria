@@ -4,8 +4,7 @@ import { parseRerankResults, ResponseViolation } from "./validate.ts";
 
 /**
  * How a query and documents become relevance scores. This is the seam for the
- * main open risk (docs/workers.md): if llama-server's `/rerank` turns out not
- * to match in-process scoring, a replacement implements this interface and
+ * main risk (docs/workers.md): a replacement implements this interface and
  * nothing else changes. `RemoteLlm` and the store do not know which is in use.
  */
 export interface RerankTransport {
@@ -16,12 +15,12 @@ export interface RerankTransport {
 }
 
 /**
- * Scores through a worker's `POST /v1/rerank`, which forwards to llama-server's
- * `/rerank`. The server applies the model's own rerank template. A bad answer is
- * an error inside the dispatch, so it fails over to another worker.
+ * Scores through a worker's `POST /v1/rerank`. Which backend the worker uses is
+ * its own business; `GET /capabilities` names it. A bad answer is an error inside
+ * the dispatch, so it fails over to another worker.
  */
 export class WorkerRerankTransport implements RerankTransport {
-  readonly name = "llama-server-rerank";
+  readonly name = "worker-rerank";
   readonly #pool: WorkerPool;
   readonly #remainingMs: () => number | null;
 
