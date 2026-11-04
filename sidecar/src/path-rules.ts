@@ -1,3 +1,5 @@
+import picomatch from "picomatch";
+
 /**
  * The names a document path may use. These rules are lexical and identical on
  * every platform, so a path accepted on one host is also valid on the others
@@ -13,6 +15,13 @@ export const QMD_EXCLUDED_DIRS: readonly string[] = ["node_modules", ".git", ".c
 
 /** Longest segment that fits on NTFS (255 UTF-16 units), ext4 and APFS (255 bytes). */
 const MAX_SEGMENT_BYTES = 255;
+
+/**
+ * Far deeper than any corpus needs. It also bounds the cost of matching a glob
+ * against a request's path, which grows with how many places a pattern's literal
+ * parts can land.
+ */
+export const MAX_PATH_SEGMENTS = 32;
 
 /** Windows device names. The superscript digits are devices too. */
 const RESERVED_NAME = /^(?:CON|PRN|AUX|NUL|COM[0-9¹²³]|LPT[0-9¹²³]|CONIN\$|CONOUT\$|CLOCK\$)$/i;
@@ -56,6 +65,45 @@ const SEGMENT_RULES: readonly SegmentRule[] = [
 /** Why this path segment is refused, or undefined when it is acceptable. */
 export function segmentProblem(segment: string): string | undefined {
   return SEGMENT_RULES.find((rule) => rule.breaks(segment))?.message;
+}
+
+/** Extglob groups can backtrack exponentially. A leading `!` inverts a rule, which an ignore list has no use for. */
+const UNSUPPORTED_IGNORE_SYNTAX = /[@!+*?]\(|^!/;
+/** Each wildcard adds a power to the worst-case regex cost, and the subject is a request's path. See the timing test. */
+const MAX_IGNORE_WILDCARDS = 3;
+
+/**
+ * The first ignore pattern this sidecar will not evaluate, or undefined. The
+ * patterns come only from QMD's operator-written collection config, but each
+ * compiles to a regex that runs against a caller-supplied path, so a pattern
+ * that could backtrack badly is refused rather than run or skipped. Skipping one
+ * would bring back the 202 for a document that is never indexed.
+ */
+export function unsupportedIgnorePattern(patterns: readonly string[]): string | undefined {
+  return patterns.find((p) => UNSUPPORTED_IGNORE_SYNTAX.test(p) || (p.match(/\*+/g)?.length ?? 0) > MAX_IGNORE_WILDCARDS);
+}
+
+/**
+ * The same test fast-glob applies when deciding not to enter a directory: the
+ * pattern ends in a globstar, or its last part has no wildcard. `a/*` hides the
+ * files directly in `a` but not what is below `a/b`.
+ */
+function skipsMatchingDirectories(pattern: string): boolean {
+  return pattern.endsWith("/**") || !/[*?[\]{}()!]/.test(pattern.slice(pattern.lastIndexOf("/") + 1));
+}
+
+/**
+ * Whether QMD's scan would skip this path because of an ignore pattern. The scan
+ * passes the patterns to fast-glob, so that is the behaviour to match, including
+ * skipping everything below a matching directory. A test compares this with
+ * fast-glob itself.
+ */
+export function matchesIgnorePattern(segments: readonly string[], patterns: readonly string[]): boolean {
+  return patterns.map((p) => p.replace(/^\.\//, "")).some((pattern) => {
+    const matches = picomatch(pattern, { dot: true, posix: true });
+    if (matches(segments.join("/"))) return true;
+    return skipsMatchingDirectories(pattern) && segments.slice(0, -1).some((_, i) => matches(segments.slice(0, i + 1).join("/")));
+  });
 }
 
 const EXCLUDED_FOLDED = new Set(QMD_EXCLUDED_DIRS.map(foldName));

@@ -16,6 +16,63 @@ import { authHeaders, tempDir, testConfig } from "./helpers.ts";
 
 const enabled = process.env.MEMORIA_QMD_INTEGRATION === "1";
 
+test("the real SDK skips temp files and ignored paths, and the sidecar agrees with its scan", { skip: enabled ? false : "set MEMORIA_QMD_INTEGRATION=1" }, async () => {
+  const root = await tempDir("memoria-qmd-it-");
+  // A pattern as wide as they come, so only the temp file's hidden name keeps it out.
+  const corpus = path.join(root, "loose");
+  await mkdir(corpus, { recursive: true });
+  const dbPath = path.join(root, "index.sqlite");
+  await writeFile(path.join(corpus, "keep.md"), "# Keep\n\nkeptmarker\n", "utf8");
+  // What a crash mid-write leaves, with a body worth finding.
+  const crashed = ".memoria-0123456789abcdef01234567.tmp";
+  await writeFile(path.join(corpus, crashed), "# Crashed\n\ncrashmarker partial\n", "utf8");
+  await mkdir(path.join(corpus, "drafts"));
+  await writeFile(path.join(corpus, "drafts", "planted.md"), "# Planted\n\nignoredmarker\n", "utf8");
+
+  const qmd = await import("@tobilu/qmd");
+  const ignore = ["drafts", "**/*.secret.md"];
+  const builder = await qmd.createStore({ dbPath, config: { collections: { loose: { path: corpus, pattern: "**/*", ignore } } } });
+  const built = await builder.update();
+  assert.equal(built.indexed, 1, "only keep.md");
+  await builder.close();
+
+  const backend = await openBackend({ dbPath, keepWarm: false });
+  const app = await buildApp({ backend, config: testConfig(), logger: false });
+  try {
+    await app.ready();
+    assert.deepEqual(backend.ignorePatterns("loose"), ignore);
+    assert.deepEqual(backend.ignorePatterns("no-such-collection"), []);
+
+    const search = (query: string) => app.inject({ method: "POST", url: "/search", headers: authHeaders, payload: { searches: [{ type: "lex", query }], rerank: false } });
+    assert.equal((await search("keptmarker")).json().total, 1);
+    assert.equal((await search("crashmarker")).json().total, 0, "a temp file is not searchable");
+    assert.equal((await search("ignoredmarker")).json().total, 0);
+
+    // Get and multi-get reach neither, by exact name or by glob.
+    assert.equal((await app.inject({ method: "GET", url: `/docs/loose/${crashed}`, headers: authHeaders })).statusCode, 404);
+    const multi = (payload: object) => app.inject({ method: "POST", url: "/docs:multiGet", headers: authHeaders, payload });
+    const everything = await multi({ pattern: "loose/**" });
+    assert.deepEqual(everything.json().docs.map((d: { path: string }) => d.path), ["keep.md"]);
+    assert.deepEqual((await multi({ pattern: "loose/.memoria-*" })).json().docs, []);
+    assert.deepEqual((await multi({ ids: [`loose/${crashed}`] })).json().docs, []);
+
+    // Ingest refuses what the scan would skip, and the rest does index.
+    for (const p of ["drafts/x.md", "a.secret.md"]) {
+      const refused = await app.inject({ method: "POST", url: "/documents", headers: authHeaders, payload: { collection: "loose", path: p, content: "# x\n", embed: false } });
+      assert.equal(refused.statusCode, 400, p);
+      assert.equal(refused.json().error, "ignored_path");
+    }
+    const accepted = await app.inject({ method: "POST", url: "/documents", headers: authHeaders, payload: { collection: "loose", path: "fresh.md", content: "# Fresh\n\nfreshmarker\n", embed: false, overwrite: false } });
+    assert.equal(accepted.statusCode, 202, accepted.body);
+    await app.ctx.jobs.idle();
+    assert.equal((await search("freshmarker")).json().total, 1);
+    assert.equal((await search("crashmarker")).json().total, 0, "still not after a rescan");
+  } finally {
+    await app.close();
+    await backend.close();
+  }
+});
+
 test("sidecar serves a real QMD index end to end", { skip: enabled ? false : "set MEMORIA_QMD_INTEGRATION=1" }, async () => {
   const root = await tempDir("memoria-qmd-it-");
   const corpus = path.join(root, "sessions");

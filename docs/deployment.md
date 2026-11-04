@@ -118,6 +118,29 @@ These need a real install, and none has been done:
 - The launchd script on a Mac: `launchctl bootstrap` with the mode 600 plist, the
   `Umask` key's effect on the log files, and the worker reading the token file.
 
+## Collection root permissions
+
+**A local user with write access to a collection root is outside the threat these
+checks defend against.** Restrict each root so only the sidecar's account and the
+people who administer it can write there, and do not point a collection at a
+directory other accounts share.
+
+The sidecar's path checks stop a remote caller from leaving the root, and they
+narrow what a local user can do, but they cannot finish the job. Node has no
+`openat` or `renameat`, so every filesystem call resolves its path again, and
+someone who can swap a directory for a junction can still race those calls. Such a
+user can:
+
+- win the gap inside a rename and overwrite a file outside the root, if the
+  sidecar's account can write to it;
+- leave an empty file outside the root;
+- make a delete rename an outside file to a `.memoria-*.tmp` name beside its old
+  one, and a later write in that directory may then remove it if it is over an hour
+  old and another swap lands at the right moment.
+
+The sidecar's account limits the damage, which is one more reason not to run it
+as LocalSystem. `sidecar/README.md` lists the rules a document path must meet.
+
 ## The image
 
 `ghcr.io/mggarofalo/memoria` is published by `.github/workflows/docker.yml`:

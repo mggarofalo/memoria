@@ -1,10 +1,10 @@
 import { randomBytes } from "node:crypto";
 import { constants, type Stats } from "node:fs";
-import { lstat, mkdir, open, readdir, realpath, rename, unlink } from "node:fs/promises";
+import { link, lstat, mkdir, open, readdir, realpath, rename, unlink } from "node:fs/promises";
 import path from "node:path";
 import picomatch from "picomatch";
 import { HttpError } from "./errors.ts";
-import { foldName, segmentProblem, unindexableProblem } from "./path-rules.ts";
+import { MAX_PATH_SEGMENTS, foldName, matchesIgnorePattern, segmentProblem, unindexableProblem, unsupportedIgnorePattern } from "./path-rules.ts";
 
 /**
  * Ingest and delete by value: the caller names a path, the sidecar changes the
@@ -27,8 +27,8 @@ import { foldName, segmentProblem, unindexableProblem } from "./path-rules.ts";
  * moment the temp file is created can leave an empty file outside the root. A
  * delete's rename aside can land on a file outside the root; it is put back when
  * the swap is still in place, and otherwise is left under a `.memoria-*.tmp`
- * name, never unlinked. Treat write access to a collection root as trust in that
- * account (sidecar/README.md).
+ * name. A local user with write access to a collection root is outside the threat
+ * this defends (docs/deployment.md).
  */
 
 export interface ResolvedTarget {
@@ -53,7 +53,9 @@ function normalizeRelative(requestedPath: string): string {
   if (relative.startsWith("/") || WINDOWS_DRIVE_RE.test(relative)) {
     throw invalidPath("path must be relative to the collection root");
   }
-  for (const segment of relative.split("/")) {
+  const segments = relative.split("/");
+  if (segments.length > MAX_PATH_SEGMENTS) throw invalidPath(`path must not have more than ${MAX_PATH_SEGMENTS} segments`);
+  for (const segment of segments) {
     const problem = segmentProblem(segment);
     if (problem) throw invalidPath(problem);
   }
@@ -68,8 +70,9 @@ function normalizeRelative(requestedPath: string): string {
  *
  * This is lexical and gives the same answer on every platform. `assertSafePath`
  * covers what only the filesystem knows, and runs before any write or delete.
+ * `ignore` is the collection's own ignore list from QMD's configuration.
  */
-export function resolveTarget(collectionRoot: string, pattern: string, requestedPath: string): ResolvedTarget {
+export function resolveTarget(collectionRoot: string, pattern: string, requestedPath: string, ignore: readonly string[] = []): ResolvedTarget {
   const relative = normalizeRelative(requestedPath);
   const segments = relative.split("/");
   const root = path.resolve(collectionRoot);
@@ -84,7 +87,18 @@ export function resolveTarget(collectionRoot: string, pattern: string, requested
   }
   const unindexable = unindexableProblem(segments);
   if (unindexable) throw invalidPath(unindexable);
+  assertNotIgnored(segments, ignore);
   return { relative, absolute, root };
+}
+
+function assertNotIgnored(segments: readonly string[], ignore: readonly string[]): void {
+  const unsupported = unsupportedIgnorePattern(ignore);
+  if (unsupported !== undefined) {
+    throw new HttpError(500, "unsupported_ignore_pattern", `this collection's ignore pattern "${unsupported}" uses syntax the sidecar will not evaluate against request paths: extglobs, a leading "!", or more than three wildcards. Simplify it in QMD's configuration`);
+  }
+  if (matchesIgnorePattern(segments, ignore)) {
+    throw new HttpError(400, "ignored_path", "path matches one of this collection's ignore patterns, so QMD would never index it");
+  }
 }
 
 function codeOf(err: unknown): string | undefined {
@@ -217,6 +231,9 @@ export async function retryTransient<T>(operation: () => Promise<T>, delaysMs: r
   return operation();
 }
 
+const SCRATCH_NAME = /^\.memoria-[0-9a-f]{24}\.tmp$/;
+const STALE_SCRATCH_MS = 60 * 60 * 1000;
+
 /** A hidden name, so QMD's scan skips it even if a crash leaves it behind. */
 function scratchPath(target: ResolvedTarget): string {
   return path.join(path.dirname(target.absolute), `.memoria-${randomBytes(12).toString("hex")}.tmp`);
@@ -231,6 +248,8 @@ export type IngestStep = "ready" | "opened" | "written" | "checked" | "renamed" 
 
 export interface IngestHooks {
   onStep?: (step: IngestStep) => Promise<void>;
+  /** Stands in for `fs.link`, so tests can act as a filesystem with no hard links. */
+  link?: (existing: string, created: string) => Promise<void>;
 }
 
 export interface WriteResult {
@@ -268,7 +287,65 @@ async function ensureParents(target: ResolvedTarget): Promise<void> {
 // O_EXCL already refuses a link at the last segment. O_NOFOLLOW states it twice where it exists; Windows has no such flag.
 const CREATE_FLAGS = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0);
 
-async function writeAndCommit(target: ResolvedTarget, scratch: string, content: string, mode: number, hooks: IngestHooks): Promise<void> {
+/**
+ * Put the finished temp file at the target. A rename replaces whatever is there,
+ * so `overwrite: false` links instead, which fails if the name is taken. That is
+ * atomic on NTFS and POSIX filesystems. There is no fallback where hard links are
+ * unavailable: quietly replacing a document is what the caller asked not to happen.
+ */
+async function publish(target: ResolvedTarget, scratch: string, overwrite: boolean, hooks: IngestHooks): Promise<void> {
+  if (overwrite) {
+    await rename(scratch, target.absolute);
+    return;
+  }
+  await (hooks.link ?? link)(scratch, target.absolute);
+  // The document is in place. A leftover temp name is harmless and the sweep removes it.
+  await unlink(scratch).catch(() => undefined);
+}
+
+function exclusiveCreateFailure(err: unknown): unknown {
+  if (err instanceof HttpError || isMissing(err)) return err;
+  if (codeOf(err) === "EEXIST") return new HttpError(409, "exists", "document already exists and overwrite is false");
+  return new HttpError(500, "exclusive_create_failed", `overwrite=false needs a hard link in the collection directory, and creating one failed (${codeOf(err) ?? "unknown error"}). This filesystem may not support them; retry with overwrite=true if replacing an existing document is acceptable`);
+}
+
+async function commit(target: ResolvedTarget, scratch: string, overwrite: boolean, hooks: IngestHooks): Promise<void> {
+  try {
+    await retryTransient(async () => {
+      await assertSafePath(target);
+      await assertScratchInRoot(target, scratch);
+      await hooks.onStep?.("checked");
+      await publish(target, scratch, overwrite, hooks);
+    });
+  } catch (err) {
+    throw overwrite ? err : exclusiveCreateFailure(err);
+  }
+}
+
+/**
+ * Remove temp files a crash left in the target's directory. QMD never sees them,
+ * since their names are hidden, so this is only tidiness, except that a crash
+ * between link and unlink leaves a document looking hard-linked, which would
+ * block overwriting it. The age limit keeps it off another request's live temp
+ * file. Best effort: a failure here must not fail the write.
+ */
+async function sweepStaleScratch(target: ResolvedTarget): Promise<void> {
+  const dir = path.dirname(target.absolute);
+  const names = await namesIn(dir).catch(() => undefined);
+  for (const name of names?.filter((n) => SCRATCH_NAME.test(n)) ?? []) {
+    const file = path.join(dir, name);
+    await removeIfStale(target, file).catch(() => undefined);
+  }
+}
+
+async function removeIfStale(target: ResolvedTarget, file: string): Promise<void> {
+  const stats = await lstat(file);
+  if (!stats.isFile() || Date.now() - stats.mtimeMs < STALE_SCRATCH_MS) return;
+  await assertScratchInRoot(target, file);
+  await unlink(file);
+}
+
+async function writeAndCommit(target: ResolvedTarget, scratch: string, content: string, mode: number, overwrite: boolean, hooks: IngestHooks): Promise<void> {
   await hooks.onStep?.("ready");
   // The file stays empty until it is known to be inside the root, so a swapped directory receives no content.
   const handle = await open(scratch, CREATE_FLAGS, mode);
@@ -282,12 +359,7 @@ async function writeAndCommit(target: ResolvedTarget, scratch: string, content: 
     await handle.close();
   }
   await hooks.onStep?.("written");
-  await retryTransient(async () => {
-    await assertSafePath(target);
-    await assertScratchInRoot(target, scratch);
-    await hooks.onStep?.("checked");
-    await rename(scratch, target.absolute);
-  });
+  await commit(target, scratch, overwrite, hooks);
   await hooks.onStep?.("renamed");
   // Too late to undo, but a caller must not be told a swapped write went where it asked.
   await assertContained(target);
@@ -297,6 +369,7 @@ export async function writeDocument(target: ResolvedTarget, content: string, ove
   // QMD skips a blank file without touching its row, so the old text would stay searchable.
   if (content.trim() === "") throw new HttpError(400, "empty_content", "content must not be blank; QMD does not index blank documents");
   await assertSafePath(target);
+  await sweepStaleScratch(target);
   const existing = await inspectExisting(target, overwrite);
   await ensureParents(target);
   await assertContained(target);
@@ -304,7 +377,7 @@ export async function writeDocument(target: ResolvedTarget, content: string, ove
   // An overwrite keeps the old permission bits, so it cannot widen access to the document.
   const mode = existing ? existing.mode & 0o777 : 0o666;
   try {
-    await writeAndCommit(target, scratch, content, mode, hooks);
+    await writeAndCommit(target, scratch, content, mode, overwrite, hooks);
   } catch (err) {
     await unlink(scratch).catch(() => undefined);
     throw isMissing(err) ? pathChanged() : err;

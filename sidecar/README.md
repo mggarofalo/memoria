@@ -134,7 +134,7 @@ A frontmatter block that does not close within the first 8192 characters has no 
 - Any of `< > : " | ? *`, control characters, Unicode format characters (which include bidi overrides and zero-width characters), and lone surrogates.
 - 8.3 short name shapes such as `hidden~1.md`, which on NTFS can be another name for `.hidden.md`. A `~` followed by anything other than digits and then a dot or the end of the segment is fine.
 - Text not in Unicode normalization form NFC. NTFS keeps NFC and NFD spellings as two files, while APFS treats them as one.
-- Segments over 255 bytes.
+- Segments over 255 bytes, and paths with more than 32 segments.
 - Paths QMD will never index, because they would return 202 and then never appear: `node_modules`, `.git`, `.cache`, `vendor`, `dist` or `build` at any depth and in any case, and hidden names. A test pins this list to the installed SDK.
 - A symlink or junction anywhere under the root, even one that points back inside it, since QMD's scan does not follow links.
 
@@ -147,13 +147,18 @@ These return 409:
 - `not_a_directory`, `is_directory`, `exists`: what they say.
 - `path_changed`: a directory on the path changed during the operation.
 
-A write goes to a hidden temp file in the target's directory, is flushed, and is renamed over the target after containment has been checked again. A reader never sees half a document, and a hard link or symlink at the target is replaced rather than written through. An overwrite keeps the old file's POSIX permission bits. On Windows the new file takes its ACL from the directory, so an ACL set on the old file alone is lost. A crash can leave a `.memoria-*.tmp` file behind; QMD ignores it and it is safe to delete. A delete renames the file aside and checks again before unlinking it.
+A write goes to a hidden temp file in the target's directory, is flushed, and is renamed over the target after containment has been checked again. A reader never sees half a document, and a hard link or symlink at the target is replaced rather than written through. An overwrite keeps the old file's POSIX permission bits. On Windows the new file takes its ACL from the directory, so an ACL set on the old file alone is lost. A delete renames the file aside and checks again before unlinking it.
 
 Remaining limits:
 
 - Node has no `openat` or `renameat`, so each call resolves its path afresh. A local user with write access to the collection root can still win the gap inside the rename itself, between the kernel resolving the source and the destination. Swapping a directory at any earlier point makes the temp file's name unresolvable, and the write fails. A swap after the rename is reported as an error but cannot be undone. A swap at the moment the temp file is created can leave an empty file outside the root. A delete's rename aside can land on a file outside the root: it is put back when the swap is still in place, and otherwise stays under a `.memoria-*.tmp` name beside its old one. It is never unlinked, and a flip test reproduces this outcome. Restrict write access to collection roots to the service account.
-- Two simultaneous `POST`s of the same new path with `overwrite: false` can both succeed, and the later rename wins.
-- Per-collection `ignore` patterns in QMD's configuration are not checked, so a path they match still returns 202 and is never indexed.
+- These are accepted limits: [`docs/deployment.md`](../docs/deployment.md#collection-root-permissions) states the boundary.
+
+`overwrite: false` publishes with a hard link, which fails if the name is taken, so of several simultaneous creates exactly one succeeds and the rest get 409 `exists`. On a filesystem without hard links it returns 500 `exclusive_create_failed` rather than giving up exclusivity. `overwrite: true` does not need them.
+
+Paths matching the collection's `ignore` patterns in QMD's configuration return 400 `ignored_path`, including a path below an ignored directory, as QMD's scan treats it. Patterns are read only from that configuration. Each compiles to a regex that runs on a request's path, so a pattern with an extglob, a leading `!`, or more than three wildcards returns 500 `unsupported_ignore_pattern` for the whole collection until it is simplified. It is neither run nor skipped.
+
+A temp file is never indexed: QMD's scan skips hidden names whatever the collection's pattern, so a crash mid-write cannot put a partial document in search, `GET /docs` or multi-get. A write removes any `.memoria-*.tmp` over an hour old from its own directory, so a directory no write reaches keeps its leftovers. They are harmless and safe to delete. A crash in the moment between linking and unlinking leaves the document looking hard-linked, so overwriting it returns 409 `hard_link` until that sweep runs.
 
 ### Reindex scheduling
 

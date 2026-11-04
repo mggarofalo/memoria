@@ -108,6 +108,8 @@ export interface QmdBackend extends MetadataSource {
   getDocumentBody(filepath: string, options: { fromLine?: number; maxLines?: number }): Promise<string | null>;
   multiGet(pattern: string, options: { includeBody: boolean; maxBytes: number }): Promise<{ docs: MultiGetEntry[]; errors: string[] }>;
   listCollections(): Promise<CollectionRow[]>;
+  /** The collection's operator-configured ignore patterns, which QMD's scan applies. */
+  ignorePatterns(collection: string): string[];
   listContexts(): Promise<ContextRow[]>;
   getDefaultCollectionNames(): Promise<string[]>;
   update(options: { collections?: string[] }): Promise<UpdateSummary>;
@@ -233,6 +235,8 @@ export async function openBackend(options: OpenBackendOptions): Promise<OpenedBa
      FROM documents d JOIN content c ON c.hash = d.hash
      WHERE d.active = 1`,
   );
+  // store.listCollections() drops this column. The integration test pins it to the SDK.
+  const ignoreStatement = db.prepare(`SELECT ignore_patterns AS patterns FROM store_collections WHERE name = ?`);
 
   return {
     dbPath: store.dbPath,
@@ -263,6 +267,10 @@ export async function openBackend(options: OpenBackendOptions): Promise<OpenedBa
     getDocumentBody: (filepath, o) => store.getDocumentBody(filepath, o),
     multiGet: (pattern, o) => store.multiGet(pattern, o),
     listCollections: () => store.listCollections(),
+    ignorePatterns: (collection) => {
+      const row = ignoreStatement.get(collection) as { patterns: string | null } | undefined;
+      return row?.patterns ? (JSON.parse(row.patterns) as string[]) : [];
+    },
     listContexts: () => store.listContexts(),
     getDefaultCollectionNames: () => store.getDefaultCollectionNames(),
     update: async (o) => {

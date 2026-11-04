@@ -592,7 +592,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       const { collection, path, content, embed, overwrite } = request.body;
       const row = (await backend.listCollections()).find((c) => c.name === collection);
       if (!row) throw new HttpError(404, "unknown_collection", `Unknown collection: ${collection}`);
-      const target = resolveTarget(row.pwd, row.glob_pattern, path);
+      const target = resolveTarget(row.pwd, row.glob_pattern, path, backend.ignorePatterns(collection));
       const written = await writeDocument(target, content, overwrite);
       const file = `${collection}/${target.relative}`;
       const metadata = ctx.metadata.set(file, content) ?? null;
@@ -642,7 +642,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       const { collection, path } = request.query;
       const row = (await backend.listCollections()).find((c) => c.name === collection);
       if (!row) throw new HttpError(404, "unknown_collection", `Unknown collection: ${collection}`);
-      const target = resolveTarget(row.pwd, row.glob_pattern, path);
+      const target = resolveTarget(row.pwd, row.glob_pattern, path, backend.ignorePatterns(collection));
       const deleted = await removeDocument(target);
       const file = `${collection}/${target.relative}`;
       ctx.metadata.delete(file);
