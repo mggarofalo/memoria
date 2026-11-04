@@ -72,6 +72,7 @@ test("llama-server flags bind loopback and size contexts like QMD", () => {
   assert.equal(rerank[rerank.indexOf("--ctx-size") + 1], "8192");
   assert.equal(rerank[rerank.indexOf("--ubatch-size") + 1], "4096");
   assert.ok(!rerank.includes("--reranking"), "the rerank backend needs logits, which rank pooling takes away");
+  assert.equal(rerank[rerank.indexOf("--cache-ram") + 1], "0", "the prompt cache would otherwise hold 8 GiB of documents");
   assert.ok(llamaServerArgs({ ...base, role: "generate" }, "/m/g.gguf", 0).includes("--jinja"));
 });
 

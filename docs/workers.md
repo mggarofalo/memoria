@@ -2,9 +2,9 @@
 
 The sidecar can send its model work to another machine. QMD still owns retrieval on the node that holds the index: full-text search, vector lookup, fusion and caching all stay in the sidecar's process. Only the three model operations move: embedding, reranking and query expansion.
 
-**Status: delivered, not yet proven.** None of this has run on real hardware or with real models. Every test so far uses fakes, as listed under [What has and has not been verified](#what-has-and-has-not-been-verified). `MEMORIA_QMD_LLM=local` remains the default, and local mode loads none of this code.
+**Status: run on one real GPU.** The worker and the parity benchmark have run on a Windows desktop with an RTX 5080, using real models and a real index. The Mac, the services and the sidecar's API on top have not; see [What has and has not been verified](#what-has-and-has-not-been-verified). `MEMORIA_QMD_LLM=local` remains the default, and local mode loads none of this code.
 
-**The choice of reranker transport is pending a real-hardware run** of the parity benchmark. No decision has been made.
+**The reranker transport is decided:** llama-server, given the exact tokens in-process QMD would score. [The decision](#the-decision) has the numbers.
 
 ```
 Memoria.Api
@@ -178,42 +178,92 @@ QMD does not format the reranker's prompt or read the yes and no logits itself. 
 
 The yes and no logits are therefore read inside llama.cpp, not in QMD or node-llama-cpp.
 
-### What the worker does
+### The decision
 
-The implemented transport is **`llama-server-rerank`**: the worker truncates documents to QMD's budget, then calls llama-server's `/rerank`. As documented upstream, that endpoint also formats pairs with the model's rerank template and uses rank pooling. So the two paths share a model and, in principle, a template and a pooling method. They are not the same code, and these differences could change scores:
+**The worker builds node-llama-cpp's tokens itself and sends them to llama-server's `/completion`** (`QmdTokensRerank`, reported as `llama-server-qmd-tokens`). It reads the probabilities of "yes" and "no" after the prompt, and their ratio is the score. This is the second of the three options the design left open, and it was chosen on these measurements, from llama.cpp build b12110 and `@tobilu/qmd` 2.8.3 on 24 fixed queries against the real index.
 
-| Difference | Why it could matter |
-|---|---|
-| **Tokenization.** node-llama-cpp tokenizes template pieces separately. llama-server is expected to tokenize one formatted string. | Token boundaries can differ around the joins, which changes model input. |
-| **A quirk in node-llama-cpp.** When the input does not already end in the end token, `_getEvaluationInput` calls `unshift`, which puts that token at the *start* of the input. | If this runs for this model, the in-process input carries an extra leading token that llama-server will not add. Scores might shift, and in-process would be the odd one out. Not checked against the model's metadata. |
-| **llama.cpp version.** node-llama-cpp bundles its own build. The worker runs whatever llama-server you install. | Pooling or template handling may differ between builds. |
-| **Score scale.** llama-server's `relevance_score` is expected to be the pooled value unchanged. | If so it is already 0 to 1 for this model. This has not been seen on a real server, so the worker rejects anything outside 0 to 1 instead of rescaling it. |
-| **Context handling.** QMD evaluates in 4096-token contexts. The worker sets `--ctx-size` to 4096 per slot and `--ubatch-size` to 4096. | Flags come from upstream documentation. They have not been run. |
+The comparison is always against in-process QMD on the same candidate chunks, 532 of them. Rank correlation is Spearman, mean over the queries.
 
-The flags and routes in `worker/src/supervisor.ts` and `worker/src/inference.ts` come from upstream documentation as remembered, not from a running server. A llama-server release may differ, and the smoke script is the first place that would show.
+| Against in-process QMD on Vulkan | Rank correlation | Top-10 overlap | Mean score difference | Largest difference |
+|---|---|---|---|---|
+| In-process, run again | 1.000 | 1.000 | 0 | 0 |
+| In-process on CUDA: no transport involved, only the GPU backend | 0.991 | 0.979 | 0.0027 | 0.082 |
+| llama-server `/rerank` on CUDA: the original design | 0.970 | 0.942 | 0.0092 | 0.185 |
+| llama-server `/rerank` on Vulkan | 0.974 | 0.950 | 0.0096 | 0.221 |
+| Exact tokens, `/embeddings` on CUDA: rejected, it crashes | 0.989 | 0.967 | 0.0031 | 0.072 |
+| Exact tokens, `/embeddings` on Vulkan: rejected, it crashes | 0.999 | 0.988 | 0.0008 | 0.021 |
+| **Exact tokens, `/completion` on CUDA: chosen, full benchmark** | **0.985** | **0.967** | **0.0028** | **0.060** |
 
-### If the transport has to change
+Reading those rows:
 
-Two seams exist so the store never needs changing:
+- **Tokens were the gap.** node-llama-cpp tokenizes the template's pieces, the query and the document separately, so `<Query>: ` and the query become `:`, a space and `how`. `/rerank` tokenizes one string and gets `:` and ` how`. Rebuilding the input by the first method matched node-llama-cpp token for token on all 532 chunks.
+- **The rest is the GPU backend.** Once the tokens match, the difference is the size of the difference between in-process QMD on Vulkan and on CUDA. With both sides on Vulkan and exact tokens it nearly vanishes, at 0.999. A node-llama-cpp wrapper would land on the same floor on CUDA, so its native dependency buys nothing here.
+- **In-process QMD on this desktop runs on Vulkan, not CUDA.** node-llama-cpp's automatic choice needs the CUDA runtime on `PATH`. So the baseline a worker has to match depends on the machine.
+- **The quirk suspected in node-llama-cpp does not fire.** Its `unshift` of an end token does not run for this model, whose metadata asks for no end token. The input starts with `<|im_start|>`.
+
+**Why not `/embeddings`?** It takes token arrays on a rank-pooled server and gave the best numbers, but its output carries memory past the two scores, as values like `-1.4e-36`, and on real data the server died twice with an access violation (exit `0xC0000005`) in one benchmark run. The read past the buffer is the likely cause, inferred from those values and not traced in llama.cpp's source.
+
+**What is weaker about `/completion`.**
+
+- It is slower than `/rerank`: about 1.2 s for 40 long documents, against about 0.7 s.
+- "yes" can fall outside the 200 listed probabilities when "no" dominates. Such a document scores below the lowest listed probability, and order among documents that far down is lost. That is where the lower rank correlation comes from; those scores are far from the top 10.
+- The template is written into the worker, so a different rerank model needs a change there.
+- One clean full benchmark is the evidence so far: 49 rerank calls with no errors or restarts. It has not had a long soak.
+
+### Full benchmark on the chosen code
+
+One run of `bench/parity.ts` with the same flags as `npm run bench:parity`, with no errors and no worker restarts. Latency was measured with other builds running on the machine, at below-normal priority, so treat it as a rough guide.
+
+| Measurement | Mean | Minimum | Median | Worst query |
+|---|---|---|---|---|
+| Rerank rank correlation | 0.985 | 0.922 | 0.992 | |
+| Rerank top-10 overlap | 0.967 | 0.900 | 1.000 | |
+| Rerank mean score difference | 0.0028 | | 0.0013 | 0.0115 |
+| Rerank largest score difference | 0.019 | | 0.008 | 0.060 |
+| End-to-end top-10 overlap | 0.983 | 0.800 | 1.000 | |
+| End-to-end rank correlation | 0.983 | 0.879 | 0.988 | |
+| Embedding cosine | 0.9998 | 0.9997 | 0.9998 | |
+
+| Latency, ms | Mean | Median | 95th percentile |
+|---|---|---|---|
+| Rerank, in-process | 2058 | 1728 | 3348 |
+| Rerank, worker | 1011 | 939 | 1656 |
+| Search with rerank, in-process | 4330 | 2912 | 9448 |
+| Search with rerank, worker | 3941 | 1937 | 10665 |
+
+On the GPU, with no sidecar involved: one short embedding takes about 77 ms, a batch of 32 about 170 ms, reranking 10 long documents about 345 ms, and expansion a median of about 270 ms. All three models take about 4.4 GB of VRAM. During requests the card reached 80% utilization and about 200 W, from 12 W idle.
+
+### Seams
 
 - **Sidecar:** `RerankTransport` in `sidecar/src/llm/rerank-transport.ts`. `RemoteLlm` takes any implementation and validates its output the same way.
 - **Worker:** `RerankBackend` in `worker/src/inference.ts`.
 
-The options the benchmark has to choose between:
+## Other differences from in-process
 
-1. **llama-server as it is.** Implemented. Simplest, if the numbers hold up.
-2. **llama-server with QMD's prompt formatting.** Build the prompt ourselves to match node-llama-cpp's tokens. Only useful if the benchmark traces a gap to tokenization. Not implemented.
-3. **A node-llama-cpp wrapper in the worker.** `rankAll` on the same library gives parity by construction, at the price of a native dependency in the worker. Not implemented.
+**Query expansion.** Measured, and three real differences were found and fixed. In-process, `LlamaChatSession` adds node-llama-cpp's default system prompt, which the server's template does not. QMD's presence penalty never applies in-process, because with no `penalty` value node-llama-cpp leaves out the whole penalty stage. And llama-server's `min_p` defaults to 0.05 where in-process it is off. The worker now sends the system prompt with the penalty and `min_p` off. The rendered prompt matches node-llama-cpp's tokens on the three strings checked, and tests pin these facts to the installed libraries.
 
-## Other known differences from in-process
+Sampling is random on both sides, so the number to read is how much runs agree across sides compared with within a side, as Jaccard overlap of sub-queries:
 
-**Query expansion.** The worker sends QMD's exact prompt, grammar and sampling values to llama-server's chat route. A test pins those values to the installed SDK. Three things still differ:
+| Mean over 24 queries | In-process with itself | Across sides | Worker with itself | Exact match across sides |
+|---|---|---|---|---|
+| Before the fixes | 0.194 | 0.094 | 0.134 | 0.015 |
+| After | 0.221 | 0.196 | 0.166 | 0.045 |
 
-- QMD formats the chat through node-llama-cpp's `LlamaChatSession`, and the server uses its own template engine, so the prompt the model sees could differ.
-- QMD's penalty settings map onto the server's `presence_penalty` and `repeat_last_n` by name only. Whether they behave identically is untested.
-- Sampling at temperature 0.7 is random in both, so identical output is not expected even in-process. The benchmark measures in-process against itself to give a baseline.
+Across-sides agreement now sits between the two within-side figures, so the remote path no longer behaves differently. node-llama-cpp also leaves newlines out of penalties, which no longer matters with penalties off.
 
-**Embeddings.** The server's `/v1/embeddings` route may normalize vectors where the in-process path may not. QMD's vector index uses cosine distance, which ignores length, so this should not change results. The benchmark reports the cosine between the two sides for the same text, which should be close to 1 apart from CPU and GPU rounding.
+**Embeddings.** Cosine against in-process is 0.9998 on CUDA and 0.999997 on a Vulkan llama-server, so this too is the GPU backend. It is small enough not to matter for search, and the index's stored vectors need no re-embed. The server's vectors are normalized and in-process ones are not, which cosine distance ignores.
+
+**Control tokens in document text.** llama-server parses them in strings. On synthetic text, a document with `<|im_end|>` and a fake answer scored 0.64 through `/rerank`, against 0.49 with the same text kept as text, and 0.03 for the same words with the markers removed. `/v1/embeddings` parses them too, moving the vector to a cosine of 0.92. In-process QMD keeps them as text, and the worker now does as well for both, by sending tokens. A document can still argue for itself in plain words, in-process or not.
+
+**Build and version.** node-llama-cpp bundles llama.cpp b10361; the worker ran b12110. Results above include any effect of that gap. Another llama-server release can change the routes this relies on, and the smoke script is the first place that would show.
+
+## Memory
+
+**A search can allocate over 4 GB of JavaScript heap.** QMD's vector lookup reads a document's whole body once per matching chunk, and this corpus has documents up to 21 MB. One query reached 4.1 GB and, at Node's default limit, the benchmark died of it. That is QMD's behaviour, in-process or remote. `bench:parity` now raises the limit to 6 GiB. The sidecar service does not yet, and it needs to.
+
+**The benchmark can leave index copies behind.** It deletes them on any normal exit, but a fatal crash skips that. The copies hold real transcripts, so after a crash delete the `memoria-parity-*` directory from the temporary directory.
+
+**llama-server's prompt cache is off.** It defaults to 8 GiB of system memory and reached that on the rerank server, starving the machine until allocations failed. It also held real documents, for no benefit, because these requests do not repeat.
 
 ## Design decisions
 
@@ -256,7 +306,7 @@ With no worker URL it does nothing and exits 0.
 | End to end | Typed sub-queries through each side's own pipeline, caches cleared. Reports top-10 overlap, correlation and latency. | What a caller would see, without expansion's randomness. |
 | Expansion | Five runs per side per query. Reports overlap of sub-queries within and across sides, and the exact-match rate. | Compare local-versus-remote with local-versus-local. Only a gap between those two means the remote path behaves differently. |
 
-The benchmark reports numbers and sets no thresholds. A run's results and the decision they support belong in this file.
+The benchmark reports numbers and sets no thresholds. [The decision](#the-decision) records the results it supported.
 
 CI does not run it yet, since CI configuration is outside this change. Whoever wires it in should gate the job on a worker URL being available and leave it out of the required checks.
 
@@ -276,8 +326,11 @@ CI does not run it yet, since CI configuration is outside this change. Whoever w
 | The farm matches the SDK's output | Run: both paths on a fake model, comparing rows and vector bytes. |
 | An index from before the newer vector columns works | Run: a fixture rebuilt to the old shape, not a real old index. |
 | Interactive latency under real embedding load | **Not measured.** The priority logic is tested; its effect on a GPU is not. |
-| llama-server accepts these flags and routes | **Not run.** From upstream documentation; the fixture only reflects that understanding. |
-| Scores match in-process QMD | **No evidence.** The in-process path was read, not measured. The benchmark has never run. |
-| GPU loading, on CUDA or Metal | **Not run.** |
+| llama-server accepts these flags and routes | Run on Windows with llama.cpp b12110 on CUDA: smoke script and `npm run test:live`. |
+| Scores match in-process QMD | Run: the benchmark above, on one machine. Close, not identical. |
+| GPU loading on CUDA | Run: `nvidia-smi` shows VRAM, utilization and power rising during requests. |
+| GPU loading on Metal | **Not run.** |
+| A worker pool, or a worker on another machine | **Not run for real.** Everything here was one worker on loopback. |
 | The NSSM and launchd scripts work | **Not run for real.** Dry-run plans and ACL helpers are tested; see [what is unconfirmed](deployment.md#not-yet-confirmed). |
-| Windows VRAM and macOS thermal readings | Parsing tested against sample output, not against real tools. |
+| Windows VRAM reading | Run: the parser's result matched real `nvidia-smi` output on one GPU. |
+| macOS thermal reading | Parsing tested against sample output, not against the real tool. |

@@ -82,6 +82,9 @@ export function llamaServerArgs(role: RoleConfig, modelPath: string, gpuLayers: 
     "--n-gpu-layers", String(gpuLayers),
     "--parallel", String(role.parallel),
     "--ctx-size", String(perSlot * role.parallel),
+    // The prompt cache defaults to 8 GiB of system memory and kept real documents
+    // there. Requests here do not repeat, so it only costs.
+    "--cache-ram", "0",
   ];
   if (role.role === "embed") args.push("--embeddings", "--batch-size", String(perSlot), "--ubatch-size", String(perSlot));
   // An ordinary server, not `--reranking`: see QmdTokensRerank.
