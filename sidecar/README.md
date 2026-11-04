@@ -167,3 +167,19 @@ Layout:
 - QMD has no authentication and the corpus contains credentials. The sidecar refuses to start on a non-loopback address without a secret, and compares bearer tokens in constant time.
 - `POST /documents` and `DELETE /documents` change files. Paths are normalised, must stay inside the collection root, and must match the collection's glob. Symlinks and junctions cannot be followed out of the root, and segments that Windows would silently rewrite (trailing dots and spaces, colons) are refused on every platform. Redaction is the caller's job and must happen before the call.
 - The sidecar is not a public surface. `Memoria.Api` is the only intended caller; expose nothing beyond the LAN.
+
+## Dependency audit
+
+`npm audit --omit=dev` reports no findings, and there are no accepted risks. Getting there takes three `overrides` in `package.json`, because QMD 2.8.3, the latest release, pins exact versions of vulnerable packages. npm's own suggestion of downgrading to QMD 2.5.3 fixes nothing: that release audits worse, with 7 findings including 2 critical and 4 high.
+
+| Override | Replaces | Advisories | What QMD uses it for | Can the sidecar reach it? |
+|---|---|---|---|---|
+| `simple-git` 4.0.2, which brings `@simple-git/argv-parser` 2.0.1 | 3.36.0, 1.1.1 | GHSA-v5rq-49vh-5v5c | Cloning llama.cpp when `node-llama-cpp` has to build from source | The module loads with the local LLM runtime. The flaw is not reachable: it needs attacker-influenced values passed through simple-git's `.env()` and a git command that opens an editor, and `node-llama-cpp` does neither. |
+| `@modelcontextprotocol/server` 2.4.0, which brings `core` 2.4.0 | 2.0.0 | GHSA-jm63-cq47-j5jp, GHSA-46jr-4wx8-v453, GHSA-rvq5-wwqv-78pq, GHSA-f897-62hf-6gxq | QMD's own MCP server | No. Only `dist/mcp/server.js` imports it, and only `qmd mcp` imports that file. The sidecar serves REST through Fastify. |
+| `zod` 4.6.7 | 4.2.1 | GHSA-mrhx-c7xc-m3w5 | Tool schemas in the same MCP server | No, for the same reason. The sidecar validates requests with Fastify's JSON schemas. |
+
+Three limits to keep in mind:
+
+- **A clean audit does not harden `qmd mcp --http`.** The fix for GHSA-46jr-4wx8-v453 is an opt-in option, `maxToolInputElements`, that QMD does not set, so that memory-exhaustion flaw remains in QMD's HTTP transport even on the patched package. The sidecar never starts that transport. Do not start it either; see the invariants in `AGENTS.md`.
+- **Overrides cover this package only.** A `qmd` CLI installed with `npm i -g @tobilu/qmd` keeps the vulnerable versions. `qmd update` and `qmd embed` load neither the MCP server nor zod, but never serve QMD's HTTP transport from that install.
+- **Overrides outlive their reason.** They also hold back anything a later QMD asks for. On every QMD bump, remove all three, run `npm audit --omit=dev`, and put back only what the new release still needs. Then read what QMD does with each package again, since `simple-git` 4 is a major version above the `^3.36.0` that `node-llama-cpp` declares.

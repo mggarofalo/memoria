@@ -119,6 +119,31 @@ should until two things land:
 Until both are done: keep the compose port on `127.0.0.1` or the LAN address,
 do not create the proxy host entry, and do not forward a router port.
 
+## Deployment checklist
+
+Run these from the commit you are about to deploy, before starting or
+restarting the sidecar or a worker:
+
+```bash
+(cd sidecar && npm ci && npm audit --omit=dev --audit-level=high)
+(cd worker && npm audit --omit=dev --audit-level=high)
+```
+
+Both must exit 0. A critical or high finding stops the deployment until it is
+fixed, or until `sidecar/README.md` records it as an accepted risk with an
+argument for why it cannot be reached. Do not silence a finding with an audit
+exclusion. Findings appear without any change to this repository, because new
+advisories are published against versions already in the lockfile, so a result
+from an earlier deployment does not carry over.
+
+The audit reads the lockfile, so it covers what `npm ci` installs and nothing
+else. It says nothing about a `qmd` CLI installed globally on the host, which
+is one more reason never to serve QMD's HTTP transport from one.
+`sidecar/README.md` lists the current overrides and what to do with them on a
+QMD bump.
+
+Then check the network boundary, below.
+
 ## The loopback invariant
 
 QMD itself is never reachable from anywhere. The sidecar is the only process

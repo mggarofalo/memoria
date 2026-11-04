@@ -34,6 +34,11 @@
     "@types/picomatch": "^4.0.2",
     "typescript": "^5.9.3"
   },
+  "overrides": {
+    "@modelcontextprotocol/server": "2.4.0",
+    "simple-git": "4.0.2",
+    "zod": "4.6.7"
+  },
   "allowScripts": {
     "node-llama-cpp@3.20.0": true,
     "tree-sitter-go@0.25.0": true,
