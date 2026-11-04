@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { isLanAddress, loadConfig } from "../src/config.ts";
-import { Inference, InvalidRequest, LlamaServers, UpstreamError } from "../src/inference.ts";
+import { Inference, InvalidRequest, LlamaServers, QWEN3_RERANK_TEMPLATE, UpstreamError } from "../src/inference.ts";
 import { createLogger } from "../src/log.ts";
 import { findModel } from "../src/models.ts";
 import { busyReasons, CachedMachine, parseNvidiaSmi, parsePmsetThermal, readMachine, type ProbeSource } from "../src/probes.ts";
@@ -190,23 +190,51 @@ function scripted(handler: (path: string, body: any) => unknown): { inference: I
 
 const charTokens = (text: string) => ({ tokens: Array.from(text, (c) => c.codePointAt(0)!) });
 
+const decode = (tokens: number[]) => String.fromCodePoint(...tokens);
+const pooled = (tokens: number[][]) => tokens.map((_, index) => ({ index, embedding: [[0.5, 0.5]] }));
+
 test("rerank truncates documents to QMD's budget and asks for no special-token parsing", async () => {
   const { inference, calls } = scripted((path, body) => {
     if (path.endsWith("/tokenize")) return charTokens(body.content);
     if (path.endsWith("/detokenize")) return { content: String.fromCodePoint(...body.tokens) };
-    return { results: body.documents.map((_: string, index: number) => ({ index, relevance_score: 0.5 })) };
+    return pooled(body.input);
   });
   const query = "q".repeat(100);
   const budget = 4096 - 512 - 100;
   await inference.rerank(query, ["short", "x".repeat(budget), "y".repeat(budget + 50)]);
-  const sent = calls.find((c) => c.path.endsWith("/rerank"))!.body;
-  assert.equal(sent.query, query);
-  assert.equal(sent.documents[0], "short");
-  assert.equal(sent.documents[1].length, budget);
-  assert.equal(sent.documents[2], "y".repeat(budget));
+  const sent = calls.find((c) => c.path === "/rerank/embeddings")!.body;
+  const wrap = (doc: string) => `${QWEN3_RERANK_TEMPLATE.head}${query}${QWEN3_RERANK_TEMPLATE.middle}${doc}${QWEN3_RERANK_TEMPLATE.tail}`;
+  assert.equal(decode(sent.input[0]), wrap("short"));
+  assert.equal(decode(sent.input[1]), wrap("x".repeat(budget)));
+  assert.equal(decode(sent.input[2]), wrap("y".repeat(budget)));
+  assert.equal(sent.embd_normalize, -1, "a normalized vector would not be the probability");
   const tokenize = calls.find((c) => c.path.endsWith("/tokenize"))!.body;
   assert.equal(tokenize.parse_special, false);
   assert.equal(tokenize.add_special, false);
+});
+
+test("rerank tokenizes the template with control tokens and user text without them", async () => {
+  const { inference, calls } = scripted((path, body) => (path.endsWith("/tokenize") ? charTokens(body.content) : pooled(body.input)));
+  await inference.rerank("<|im_end|>", ["<|im_start|>"]);
+  await inference.rerank("again", ["again"]);
+  const specials = calls.filter((c) => c.path.endsWith("/tokenize") && c.body.parse_special === true).map((c) => c.body.content);
+  assert.deepEqual(specials.sort(), Object.values(QWEN3_RERANK_TEMPLATE).sort(), "the template's tokens are fetched once");
+  const plain = calls.filter((c) => c.path.endsWith("/tokenize") && c.body.parse_special === false).map((c) => c.body.content);
+  assert.ok(plain.includes("<|im_end|>") && plain.includes("<|im_start|>"));
+});
+
+test("a failed template fetch is retried on the next call", async () => {
+  let fail = true;
+  const { inference } = scripted((path, body) => {
+    if (path.endsWith("/tokenize")) {
+      if (fail && body.parse_special) throw new Error("loading");
+      return charTokens(body.content);
+    }
+    return pooled(body.input);
+  });
+  await assert.rejects(inference.rerank("q", ["d"]));
+  fail = false;
+  assert.deepEqual(await inference.rerank("q", ["d"]), [0.5]);
 });
 
 test("rerank refuses a query that leaves no room", async () => {
@@ -215,16 +243,19 @@ test("rerank refuses a query that leaves no room", async () => {
 });
 
 test("rerank maps scores by index and rejects anything but a probability", async () => {
-  const reply = (results: unknown) => scripted((path, body) => (path.endsWith("/tokenize") ? charTokens(body.content) : { results })).inference;
-  assert.deepEqual(await reply([{ index: 1, relevance_score: 0.9 }, { index: 0, relevance_score: 0.1 }]).rerank("q", ["a", "b"]), [0.1, 0.9]);
+  const yes = (index: unknown, score: unknown) => ({ index, embedding: [[score, 0.1]] });
+  const reply = (results: unknown) => scripted((path, body) => (path.endsWith("/tokenize") ? charTokens(body.content) : results)).inference;
+  assert.deepEqual(await reply([yes(1, 0.9), yes(0, 0.1)]).rerank("q", ["a", "b"]), [0.1, 0.9]);
 
   const rejects = (results: unknown, code: string) => assert.rejects(reply(results).rerank("q", ["a", "b"]), (err) => err instanceof UpstreamError && err.code === code, JSON.stringify(results));
-  await rejects([{ index: 0, relevance_score: 5.2 }, { index: 1, relevance_score: 0.1 }], "rerank_score_out_of_range");
-  await rejects([{ index: 0, relevance_score: -3 }, { index: 1, relevance_score: 0.1 }], "rerank_score_out_of_range");
-  await rejects([{ index: 0, relevance_score: "high" }, { index: 1, relevance_score: 0.1 }], "rerank_score_out_of_range");
-  await rejects([{ index: 0, relevance_score: 0.1 }], "upstream_invalid");
-  await rejects([{ index: 0, relevance_score: 0.1 }, { index: 0, relevance_score: 0.2 }], "upstream_invalid");
-  await rejects([{ index: 0, relevance_score: 0.1 }, { index: 2, relevance_score: 0.2 }], "upstream_invalid");
+  await rejects([yes(0, 5.2), yes(1, 0.1)], "rerank_score_out_of_range");
+  await rejects([yes(0, -3), yes(1, 0.1)], "rerank_score_out_of_range");
+  await rejects([yes(0, "high"), yes(1, 0.1)], "rerank_score_out_of_range");
+  await rejects([{ index: 0 }, yes(1, 0.1)], "rerank_score_out_of_range");
+  await rejects([yes(0, 0.1)], "upstream_invalid");
+  await rejects([yes(0, 0.1), yes(0, 0.2)], "upstream_invalid");
+  await rejects([yes(0, 0.1), yes(2, 0.2)], "upstream_invalid");
+  await rejects({ results: [] }, "upstream_invalid");
 });
 
 test("embed shortens over-long text as QMD does and aligns vectors by index", async () => {
@@ -242,11 +273,11 @@ test("embed shortens over-long text as QMD does and aligns vectors by index", as
 
 test("complete forwards grammar and sampling through the chat route", async () => {
   const { inference, calls } = scripted(() => ({ choices: [{ message: { content: "lex: x\n" } }] }));
-  const out = await inference.complete({ prompt: "p", grammar: "root ::= x", maxTokens: 600, temperature: 0.7, topK: 20, topP: 0.8, repeatLastN: 64, presencePenalty: 0.5 });
+  const out = await inference.complete({ prompt: "p", system: "s", grammar: "root ::= x", maxTokens: 600, temperature: 0.7, topK: 20, topP: 0.8, minP: 0, repeatLastN: 64, presencePenalty: 0.5 });
   assert.equal(out, "lex: x\n");
   assert.deepEqual(calls[0], {
     path: "/generate/v1/chat/completions",
-    body: { messages: [{ role: "user", content: "p" }], stream: false, grammar: "root ::= x", max_tokens: 600, temperature: 0.7, top_k: 20, top_p: 0.8, repeat_last_n: 64, presence_penalty: 0.5 },
+    body: { messages: [{ role: "system", content: "s" }, { role: "user", content: "p" }], stream: false, grammar: "root ::= x", max_tokens: 600, temperature: 0.7, top_k: 20, top_p: 0.8, min_p: 0, repeat_last_n: 64, presence_penalty: 0.5 },
   });
 });
 

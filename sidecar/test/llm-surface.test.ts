@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
-import { EXPANSION_GRAMMAR, EXPANSION_SAMPLING, expansionPrompt } from "../src/llm/expansion.ts";
+import { EXPANSION_GRAMMAR, EXPANSION_SAMPLING, EXPANSION_SYSTEM_PROMPT, SDK_REPEAT_PENALTY_OPTIONS, expansionPrompt } from "../src/llm/expansion.ts";
 import { RemoteLlm } from "../src/llm/remote.ts";
 
 /**
@@ -99,8 +99,27 @@ test("expansion's prompt, grammar and sampling match the SDK's inline values", a
   assert.equal(number("temperature"), EXPANSION_SAMPLING.temperature);
   assert.equal(number("topK"), EXPANSION_SAMPLING.topK);
   assert.equal(number("topP"), EXPANSION_SAMPLING.topP);
-  assert.equal(number("lastTokens"), EXPANSION_SAMPLING.repeatLastN);
-  assert.equal(number("presencePenalty"), EXPANSION_SAMPLING.presencePenalty);
+  assert.equal(number("lastTokens"), SDK_REPEAT_PENALTY_OPTIONS.lastTokens);
+  assert.equal(number("presencePenalty"), SDK_REPEAT_PENALTY_OPTIONS.presencePenalty);
+  assert.doesNotMatch(options, /\bpenalty:/, "the SDK now sets a penalty, so the in-process penalty stage runs and the worker must match it");
+});
+
+test("the system prompt sent to the worker is node-llama-cpp's default, which QMD's session uses", async () => {
+  const llm = await read("llm.js");
+  assert.match(llm, /new LlamaChatSession\(\{ contextSequence: sequence \}\)/, "QMD sets no system prompt of its own");
+  const { defaultChatSystemPrompt } = (await import(new URL("../node_modules/node-llama-cpp/dist/config.js", import.meta.url).href)) as { defaultChatSystemPrompt: string };
+  assert.equal(EXPANSION_SYSTEM_PROMPT, defaultChatSystemPrompt);
+});
+
+test("node-llama-cpp skips the penalty stage and min-p for the options the SDK passes", async () => {
+  const sampler = await readFile(new URL("../node_modules/node-llama-cpp/llama/addon/AddonSampler.cpp", import.meta.url), "utf8");
+  assert.match(sampler, /config\.Get\("repeatPenalty"\)\.As<Napi::Number>\(\)\.FloatValue\(\)\s*: 1;/);
+  assert.match(sampler, /repeatPenaltyEnabled = repeatPenalty != 1 && /);
+  const context = await readFile(new URL("../node_modules/node-llama-cpp/dist/evaluator/LlamaContext/LlamaContext.js", import.meta.url), "utf8");
+  assert.match(context, /_resolveSamplerConfig\(\{ temperature = 0, minP = 0,/);
+  assert.equal(EXPANSION_SAMPLING.minP, 0);
+  assert.equal(EXPANSION_SAMPLING.repeatLastN, 0);
+  assert.equal(EXPANSION_SAMPLING.presencePenalty, 0);
 });
 
 test("the embedding farm's assumptions about the SDK hold", async () => {

@@ -13,13 +13,36 @@ export const EXPANSION_GRAMMAR = `
         content ::= [^\\n]+
       `;
 
+/**
+ * `LlamaChatSession` adds node-llama-cpp's default system prompt when the caller
+ * sets none, and QMD sets none. llama-server's template renders no system
+ * message by itself, so the worker has to be sent this.
+ */
+export const EXPANSION_SYSTEM_PROMPT =
+  "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible.\n" +
+  "If a question does not make any sense, or is not factually coherent, explain why instead of answering something incorrectly. " +
+  "If you don't know the answer to a question, don't share false information.";
+
+/**
+ * What the SDK passes as `repeatPenalty`. It has no effect in-process: with no
+ * `penalty` value, node-llama-cpp's sampler treats the penalty as 1 and leaves
+ * the whole penalty stage out, presence penalty included.
+ */
+export const SDK_REPEAT_PENALTY_OPTIONS = { lastTokens: 64, presencePenalty: 0.5 } as const;
+
+/**
+ * Sampling that behaves like the in-process path. llama-server would apply a
+ * presence penalty the in-process path skips, and its `min_p` defaults to 0.05
+ * where node-llama-cpp's is off, so both are turned off here.
+ */
 export const EXPANSION_SAMPLING = {
   maxTokens: 600,
   temperature: 0.7,
   topK: 20,
   topP: 0.8,
-  repeatLastN: 64,
-  presencePenalty: 0.5,
+  minP: 0,
+  repeatLastN: 0,
+  presencePenalty: 0,
 } as const;
 
 export function expansionPrompt(query: string): string {

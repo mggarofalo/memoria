@@ -5,8 +5,8 @@ import { CONTEXT_SIZE, type Role } from "./config.ts";
  * truncation rules copy QMD's in-process path, because llama-server rejects
  * input past its context size where QMD would have shortened it.
  *
- * `RERANK_BACKEND` names what scores documents. Swapping it means implementing
- * `RerankBackend` and changing nothing else here or in the server.
+ * `RerankBackend` is what scores documents. Swapping it means implementing that
+ * interface and changing nothing else here or in the server.
  */
 
 /** QMD's budget for the reranker's prompt template. */
@@ -37,11 +37,14 @@ export class InvalidRequest extends Error {
 
 export interface CompleteRequest {
   prompt: string;
+  /** System message. Without one, llama-server's template renders none. */
+  system?: string;
   grammar?: string;
   maxTokens?: number;
   temperature?: number;
   topK?: number;
   topP?: number;
+  minP?: number;
   repeatLastN?: number;
   presencePenalty?: number;
 }
@@ -91,9 +94,9 @@ export class LlamaServers {
     }
   }
 
-  /** `parse_special: false` matches QMD: text that looks like a control token stays text. */
-  async tokenize(role: Role, text: string): Promise<number[]> {
-    const raw = (await this.post(role, "tokenize", { content: text, add_special: false, parse_special: false })) as { tokens?: unknown };
+  /** `parseSpecial` stays false for user text, as in QMD: what looks like a control token stays text. */
+  async tokenize(role: Role, text: string, parseSpecial = false): Promise<number[]> {
+    const raw = (await this.post(role, "tokenize", { content: text, add_special: false, parse_special: parseSpecial })) as { tokens?: unknown };
     if (!Array.isArray(raw.tokens) || !raw.tokens.every((t) => Number.isSafeInteger(t))) {
       throw new UpstreamError("upstream_invalid", "llama-server returned malformed tokens");
     }
@@ -121,30 +124,59 @@ async function mapLimited<T, R>(items: readonly T[], limit: number, run: (item: 
 }
 
 /**
- * Scores with llama-server's `/rerank`. The server formats each pair with the
- * model's rerank template and returns the pooled rank output. Qwen3's is a
- * softmax, so it should already be a probability; nothing is rescaled here, and
- * anything outside 0 to 1 is an error rather than a number to guess about.
+ * The rerank template in `qwen3-reranker-0.6b-q8_0.gguf`'s
+ * `tokenizer.chat_template.rerank` metadata. This backend is specific to that
+ * model, which is the one QMD ships.
  */
-export class LlamaServerRerank implements RerankBackend {
-  readonly name = "llama-server-rerank";
+export const QWEN3_RERANK_TEMPLATE = {
+  head: '<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be "yes" or "no".<|im_end|>\n<|im_start|>user\n<Instruct>: Given a web search query, retrieve relevant passages that answer the query\n<Query>: ',
+  middle: "\n<Document>: ",
+  tail: "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+} as const;
+
+/**
+ * Scores exactly the tokens in-process QMD scores. node-llama-cpp tokenizes the
+ * template's pieces, the query and the document separately and joins the tokens;
+ * llama-server's `/rerank` tokenizes one formatted string, which on real data
+ * moved scores by up to 0.22 (docs/workers.md). So this builds the input itself
+ * and sends token arrays to the same rank-pooled model through `/embeddings`,
+ * whose output is the softmax of yes and no with yes first. Query and document
+ * text never parse as control tokens, as in-process.
+ */
+export class QmdTokensRerank implements RerankBackend {
+  readonly name = "llama-server-qmd-tokens";
   readonly #servers: LlamaServers;
+  #template: Promise<[number[], number[], number[]]> | undefined;
 
   constructor(servers: LlamaServers) {
     this.#servers = servers;
   }
 
+  #templateTokens(): Promise<[number[], number[], number[]]> {
+    const special = (text: string) => this.#servers.tokenize("rerank", text, true);
+    this.#template ??= Promise.all([special(QWEN3_RERANK_TEMPLATE.head), special(QWEN3_RERANK_TEMPLATE.middle), special(QWEN3_RERANK_TEMPLATE.tail)]).catch((err: unknown) => {
+      this.#template = undefined; // a server still loading must not poison later calls
+      throw err;
+    });
+    return this.#template;
+  }
+
   async score(query: string, documents: string[]): Promise<number[]> {
-    const raw = (await this.#servers.post("rerank", "rerank", { query, documents })) as { results?: unknown };
-    if (!Array.isArray(raw.results) || raw.results.length !== documents.length) {
+    const [head, middle, tail] = await this.#templateTokens();
+    const queryTokens = await this.#servers.tokenize("rerank", query);
+    const documentTokens = await mapLimited(documents, TOKENIZE_CONCURRENCY, (text) => this.#servers.tokenize("rerank", text));
+    const input = documentTokens.map((tokens) => [...head, ...queryTokens, ...middle, ...tokens, ...tail]);
+    const raw = await this.#servers.post("rerank", "embeddings", { input, embd_normalize: -1 });
+    if (!Array.isArray(raw) || raw.length !== documents.length) {
       throw new UpstreamError("upstream_invalid", "llama-server returned the wrong number of rerank results");
     }
     const scores = new Array<number | undefined>(documents.length).fill(undefined);
-    for (const item of raw.results as Array<{ index?: unknown; relevance_score?: unknown }>) {
-      const { index, relevance_score: score } = item;
+    for (const item of raw as Array<{ index?: unknown; embedding?: unknown }>) {
+      const { index, embedding } = item;
       if (typeof index !== "number" || !Number.isInteger(index) || index < 0 || index >= documents.length || scores[index] !== undefined) {
         throw new UpstreamError("upstream_invalid", "llama-server returned a bad rerank index");
       }
+      const score = (embedding as unknown[][] | undefined)?.[0]?.[0];
       if (typeof score !== "number" || !Number.isFinite(score) || score < 0 || score > 1) {
         throw new UpstreamError("rerank_score_out_of_range", "llama-server returned a rerank score outside 0 to 1");
       }
@@ -158,7 +190,7 @@ export class Inference {
   readonly #servers: LlamaServers;
   readonly #rerank: RerankBackend;
 
-  constructor(servers: LlamaServers, rerank: RerankBackend = new LlamaServerRerank(servers)) {
+  constructor(servers: LlamaServers, rerank: RerankBackend = new QmdTokensRerank(servers)) {
     this.#servers = servers;
     this.#rerank = rerank;
   }
@@ -210,13 +242,14 @@ export class Inference {
    */
   async complete(request: CompleteRequest): Promise<string> {
     const raw = (await this.#servers.post("generate", "v1/chat/completions", {
-      messages: [{ role: "user", content: request.prompt }],
+      messages: [...(request.system !== undefined ? [{ role: "system", content: request.system }] : []), { role: "user", content: request.prompt }],
       stream: false,
       ...(request.grammar !== undefined ? { grammar: request.grammar } : {}),
       ...(request.maxTokens !== undefined ? { max_tokens: request.maxTokens } : {}),
       ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
       ...(request.topK !== undefined ? { top_k: request.topK } : {}),
       ...(request.topP !== undefined ? { top_p: request.topP } : {}),
+      ...(request.minP !== undefined ? { min_p: request.minP } : {}),
       ...(request.repeatLastN !== undefined ? { repeat_last_n: request.repeatLastN } : {}),
       ...(request.presencePenalty !== undefined ? { presence_penalty: request.presencePenalty } : {}),
     })) as { choices?: Array<{ message?: { content?: unknown } }> };

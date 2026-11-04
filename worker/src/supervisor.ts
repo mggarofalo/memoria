@@ -38,11 +38,17 @@ export interface SupervisorTimings {
   stopTimeoutMs: number;
 }
 
+/**
+ * A restart throws away in-flight work and costs a model load, so "hung" means
+ * about 90 seconds without an answer. On the real desktop, a 3 s timeout and 3
+ * failures killed healthy servers while the machine was busy, and the reload
+ * then took minutes (docs/workers.md).
+ */
 export const DEFAULT_TIMINGS: SupervisorTimings = {
   pollMs: 500,
   healthyPollMs: 5_000,
-  healthTimeoutMs: 3_000,
-  hungAfter: 3,
+  healthTimeoutMs: 10_000,
+  hungAfter: 6,
   backoffBaseMs: 1_000,
   backoffMaxMs: 30_000,
   stableMs: 60_000,

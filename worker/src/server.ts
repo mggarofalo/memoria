@@ -126,13 +126,16 @@ function optionalNumber(body: Record<string, unknown>, field: string, min: numbe
 function parseComplete(body: Record<string, unknown>): CompleteRequest {
   if (typeof body.prompt !== "string" || body.prompt === "") throw new HttpFailure(400, "invalid_body", "prompt must be a non-empty string");
   if (body.grammar !== undefined && typeof body.grammar !== "string") throw new HttpFailure(400, "invalid_body", "grammar must be a string");
+  if (body.system !== undefined && typeof body.system !== "string") throw new HttpFailure(400, "invalid_body", "system must be a string");
   const request: CompleteRequest = { prompt: body.prompt };
+  if (typeof body.system === "string") request.system = body.system;
   if (typeof body.grammar === "string") request.grammar = body.grammar;
   const numbers: Array<[keyof CompleteRequest & string, number, number]> = [
     ["maxTokens", 1, 8192],
     ["temperature", 0, 5],
     ["topK", 0, 1000],
     ["topP", 0, 1],
+    ["minP", 0, 1],
     ["repeatLastN", -1, 8192],
     ["presencePenalty", -2, 2],
   ];

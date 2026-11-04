@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { WorkerClient, WorkerError } from "../src/llm/client.ts";
-import { EXPANSION_GRAMMAR, EXPANSION_SAMPLING, parseExpansion } from "../src/llm/expansion.ts";
+import { EXPANSION_GRAMMAR, EXPANSION_SAMPLING, EXPANSION_SYSTEM_PROMPT, parseExpansion } from "../src/llm/expansion.ts";
 import { acceptedEmbedFiles, RemoteLlm, WORKER_CACHE_MARK, type RemoteLlmOptions } from "../src/llm/remote.ts";
 import type { RerankTransport } from "../src/llm/rerank-transport.ts";
 import type { LlmCallLog, LocalFallback } from "../src/llm/types.ts";
@@ -118,7 +118,7 @@ test("expansion sends QMD's prompt, grammar and sampling, and returns Queryables
     const out = await h.llm.expandQuery("api keys");
     assert.deepEqual(out, [{ type: "lex", text: "api keys" }, { type: "vec", text: "about api keys" }, { type: "hyde", text: "a passage on api keys" }]);
     const sent = h.worker.requests.find((r) => r.path === "/v1/complete")!.body;
-    assert.deepEqual(sent, { prompt: "/no_think Expand this search query: api keys", grammar: EXPANSION_GRAMMAR, ...EXPANSION_SAMPLING });
+    assert.deepEqual(sent, { prompt: "/no_think Expand this search query: api keys", system: EXPANSION_SYSTEM_PROMPT, grammar: EXPANSION_GRAMMAR, ...EXPANSION_SAMPLING });
     assert.deepEqual((await h.llm.expandQuery("api keys", { includeLexical: false })).map((q) => q.type), ["vec", "hyde"]);
   } finally {
     await h.done();

@@ -50,7 +50,7 @@ test("every endpoint answers, and the smoke script passes against a running work
     const caps = await json(fetch(`${w.url}/capabilities`, { headers: auth }));
     assert.deepEqual(caps.operations, ["embed", "tokenize", "detokenize", "rerank", "complete"]);
     assert.equal(caps.models.embed, "embeddinggemma-300M-Q8_0.gguf");
-    assert.equal(caps.rerankTransport, "llama-server-rerank");
+    assert.equal(caps.rerankTransport, "llama-server-qmd-tokens");
 
     const health = await json(fetch(`${w.url}/health`, { headers: auth }));
     assert.equal(health.status, "ok");
@@ -122,7 +122,7 @@ test("rerank scores align with the documents, whatever order the server returns"
     assert.equal(r.status, 200);
     const body = await json(r);
     assert.deepEqual(body.results, [{ index: 0, score: 0 }, { index: 1, score: 1 }, { index: 2, score: 0.5 }]);
-    assert.equal(body.transport, "llama-server-rerank");
+    assert.equal(body.transport, "llama-server-qmd-tokens");
   }));
 
 test("a server that returns raw logits is an error, not a score to rescale", () =>
