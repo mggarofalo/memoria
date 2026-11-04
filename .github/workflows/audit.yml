@@ -1,0 +1,86 @@
+name: Dependency Audit
+
+# Deliberately not required: a new advisory should raise a flag, not block
+# unrelated pull requests. It runs daily and when a dependency file changes.
+on:
+  schedule:
+    - cron: "41 5 * * *"
+  pull_request:
+    branches: ["main"]
+    paths:
+      - .github/workflows/audit.yml
+      - package-lock.json
+      - sidecar/package-lock.json
+      - worker/package-lock.json
+      - cli/go.sum
+      - "**/*.csproj"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+jobs:
+  npm:
+    name: npm audit (${{ matrix.package }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [sidecar, worker]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Audit production dependencies
+        working-directory: ${{ matrix.package }}
+        run: npm audit --omit=dev --audit-level=high
+
+  # Dev tools run on developer machines and in CI, so every severity counts.
+  npm-dev-tools:
+    name: npm audit (dev tools)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Audit the root dev tooling
+        run: npm audit --audit-level=moderate
+
+  go:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: cli/go.mod
+          cache-dependency-path: cli/go.sum
+      - name: Run govulncheck
+        working-directory: cli
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
+  dotnet:
+    name: dotnet vulnerable packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup .NET
+        uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        with:
+          dotnet-version: "10.0.x"
+          cache: true
+          cache-dependency-path: "**/*.csproj"
+      - name: Restore
+        run: dotnet restore Memoria.slnx
+      # `dotnet list package --vulnerable` exits 0 even when it finds something.
+      - name: List vulnerable packages
+        run: |
+          dotnet list Memoria.slnx package --vulnerable --include-transitive | tee vulnerable.txt
+          if grep -q "has the following vulnerable packages" vulnerable.txt; then
+            exit 1
+          fi

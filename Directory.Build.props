@@ -8,4 +8,8 @@
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
+  <!-- The Docker build copies this file but not the metrics file, hence the condition. -->
+  <ItemGroup Condition="Exists('$(MSBuildThisFileDirectory)CodeMetricsConfig.txt')">
+    <AdditionalFiles Include="$(MSBuildThisFileDirectory)CodeMetricsConfig.txt" />
+  </ItemGroup>
 </Project>

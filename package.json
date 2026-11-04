@@ -1,0 +1,29 @@
+{
+  "name": "memoria-dev-tools",
+  "private": true,
+  "description": "Developer tooling only: git hooks, linting, and mutation testing. Nothing here ships.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "lint": "eslint sidecar worker scripts/release"
+  },
+  "allowScripts": {
+    "lefthook": true
+  },
+  "devDependencies": {
+    "@stryker-mutator/core": "10.1.1",
+    "@stryker-mutator/tap-runner": "10.1.1",
+    "@typescript-eslint/parser": "8.72.1",
+    "c8": "12.0.0",
+    "eslint": "10.14.0",
+    "lefthook": "2.2.2",
+    "typescript": "5.9.3"
+  },
+  "overrides": {
+    "glob": "14.0.3",
+    "minimatch": "11.0.4",
+    "qs": "6.17.1"
+  }
+}

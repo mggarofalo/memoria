@@ -6,26 +6,107 @@ on:
   pull_request:
     branches: ["main"]
 
+# A new push to a pull request replaces its running checks. Pushes to main finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
 env:
   DOTNET_NOLOGO: true
   DOTNET_CLI_TELEMETRY_OPTOUT: true
 
+# Build & Test, Code Formatting, CLI Build & Test, and CLI Lint are required by
+# the `main protection` ruleset, so their names must not change, and they must
+# always report. That is why path filtering is done here, per job, and never
+# under `on:` above: a job skipped by its `if` still reports and satisfies the
+# ruleset, but a workflow skipped by `on.paths` reports nothing and blocks merges.
+#
+# The `if` runs the job unless the filter positively said "false". The filter
+# only runs on pull requests, and if it fails its output is empty, so pushes to
+# main and filter failures both run everything.
 jobs:
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      dotnet: ${{ steps.filter.outputs.dotnet }}
+      cli: ${{ steps.filter.outputs.cli }}
+      sidecar: ${{ steps.filter.outputs.sidecar }}
+      worker: ${{ steps.filter.outputs.worker }}
+    steps:
+      - name: Filter paths
+        id: filter
+        if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          # Cross-language contracts are listed on purpose: the C# tests pin
+          # sidecar/openapi.json, and the Go client is generated from the API's.
+          filters: |
+            dotnet:
+              - .github/workflows/ci.yml
+              - src/**
+              - tests/**
+              - sidecar/openapi.json
+              - Memoria.slnx
+              - Directory.Build.props
+              - .editorconfig
+              - .gitattributes
+              - .spectral.yaml
+              - CodeMetricsConfig.txt
+              - coverage.runsettings
+              - dotnet-tools.json
+              - scripts/coverage-dotnet.sh
+            cli:
+              - .github/workflows/ci.yml
+              - cli/**
+              - src/Memoria.Api/openapi.json
+              - .gitattributes
+              - scripts/coverage-go.sh
+            sidecar:
+              - .github/workflows/ci.yml
+              - sidecar/**
+              - worker/**
+              - scripts/release/**
+              - package.json
+              - package-lock.json
+              - eslint.config.mjs
+              - .gitattributes
+            worker:
+              - .github/workflows/ci.yml
+              - worker/**
+              - package.json
+              - package-lock.json
+              - eslint.config.mjs
+              - .gitattributes
+
   build:
     name: Build & Test
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.dotnet != 'false' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
           dotnet-version: "10.0.x"
+          cache: true
+          cache-dependency-path: "**/*.csproj"
       - name: Restore
-        run: dotnet restore Memoria.slnx
+        run: |
+          dotnet restore Memoria.slnx
+          dotnet tool restore
+      # CA1502 (cyclomatic complexity) is an error, so this is the complexity gate.
       - name: Build
         run: dotnet build Memoria.slnx --no-restore -p:TreatWarningsAsErrors=true
-      - name: Test
-        run: dotnet test Memoria.slnx --no-build --verbosity normal
+      - name: Test and branch coverage
+        run: sh scripts/coverage-dotnet.sh
       # The served document is pinned to src/Memoria.Api/openapi.json by
       # OpenApiContractTests above; this lints the committed copy.
       - name: OpenAPI lint
@@ -33,13 +114,17 @@ jobs:
 
   format:
     name: Code Formatting
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.dotnet != 'false' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
           dotnet-version: "10.0.x"
+          cache: true
+          cache-dependency-path: "**/*.csproj"
       - name: Restore
         run: dotnet restore Memoria.slnx
       - name: Check formatting
@@ -47,61 +132,34 @@ jobs:
 
   cli:
     name: CLI Build & Test
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.cli != 'false' }}
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: cli
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: cli/go.mod
           cache-dependency-path: cli/go.sum
       - name: Build
+        working-directory: cli
         run: go build ./...
-      - name: Test
-        run: go test ./... -race
-
-  sidecar:
-    name: Sidecar Build & Test
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: sidecar
-    steps:
-      - uses: actions/checkout@v4
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: sidecar/package-lock.json
-      - name: Install
-        run: npm ci --no-fund --no-audit
-      - name: Typecheck
-        run: npm run typecheck
-      - name: Unit tests
-        run: npm test
-      - name: OpenAPI drift
-        run: npm run openapi:check
-      - name: Build
-        run: npm run build
-      - name: Integration test (real SDK, fixture index, no models)
-        run: npm run test:integration
-        env:
-          MEMORIA_QMD_INTEGRATION: "1"
+      - name: Test and coverage
+        run: sh scripts/coverage-go.sh -race
 
   cli-lint:
     name: CLI Lint
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.cli != 'false' }}
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: cli
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: cli/go.mod
           cache-dependency-path: cli/go.sum
@@ -115,6 +173,12 @@ jobs:
           fi
       - name: go vet
         run: go vet ./...
+      # Cyclomatic complexity (gocyclo). The version also appears in scripts/check-go.sh.
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.15.0
+          working-directory: cli
       - name: Tidy check
         run: |
           go mod tidy
@@ -123,3 +187,74 @@ jobs:
         run: |
           go generate ./...
           git diff --exit-code internal/api
+
+  sidecar:
+    name: Sidecar Build & Test
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.sidecar != 'false' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sidecar
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            sidecar/package-lock.json
+      - name: Install
+        run: |
+          npm ci --no-fund --no-audit --prefix ..
+          npm ci --no-fund --no-audit
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Complexity
+        run: npx eslint sidecar scripts/release
+        working-directory: .
+      - name: Unit tests and coverage
+        run: npm run test:coverage
+      - name: Release script tests and coverage
+        run: npm run test:coverage
+        working-directory: scripts/release
+      - name: OpenAPI drift
+        run: npm run openapi:check
+      - name: Build
+        run: npm run build
+      - name: Integration test (real SDK, fixture index, no models)
+        run: npm run test:integration
+        env:
+          MEMORIA_QMD_INTEGRATION: "1"
+
+  worker:
+    name: Worker Build & Test
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.worker != 'false' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: worker
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            worker/package-lock.json
+      - name: Install
+        run: |
+          npm ci --no-fund --no-audit --prefix ..
+          npm ci --no-fund --no-audit
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Complexity
+        run: npx eslint worker
+        working-directory: .
+      - name: Unit tests and coverage
+        run: npm run test:coverage

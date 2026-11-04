@@ -4,6 +4,11 @@ root = true
 # C# files
 [*.cs]
 
+#### Quality gates ####
+
+# Cyclomatic complexity. The limit lives in CodeMetricsConfig.txt.
+dotnet_diagnostic.CA1502.severity = error
+
 #### Core EditorConfig Options ####
 
 # Indentation and spacing

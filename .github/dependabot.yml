@@ -1,0 +1,54 @@
+version: 2
+
+# Weekly, one pull request per ecosystem, so that routine bumps stay quiet.
+# Major versions arrive on their own because they usually need real work.
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directories:
+      - /
+      - /sidecar
+      - /worker
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+    # test/llm-surface.test.ts pins remote mode to the exact QMD version, so
+    # upgrading it is a deliberate job and not a routine bump.
+    ignore:
+      - dependency-name: "@tobilu/qmd"
+    groups:
+      npm:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  - package-ecosystem: nuget
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+    groups:
+      nuget:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  - package-ecosystem: gomod
+    directory: /cli
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+    groups:
+      go:
+        patterns: ["*"]
+        update-types: [minor, patch]

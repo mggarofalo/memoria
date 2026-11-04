@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Coverage scope for scripts/coverage-dotnet.sh. Source generators (System.Text.Json,
+  OpenAPI) are left out. Do not add CompilerGeneratedAttribute here: async methods
+  compile to state machines carrying that attribute, so it silently drops real code.
+-->
+<RunSettings>
+  <DataCollectionRunSettings>
+    <DataCollectors>
+      <DataCollector friendlyName="XPlat Code Coverage">
+        <Configuration>
+          <Format>cobertura</Format>
+          <Include>[Memoria.Api]*,[Memoria.Core]*</Include>
+          <ExcludeByAttribute>GeneratedCodeAttribute</ExcludeByAttribute>
+          <ExcludeByFile>**/*.g.cs</ExcludeByFile>
+          <SkipAutoProps>true</SkipAutoProps>
+        </Configuration>
+      </DataCollector>
+    </DataCollectors>
+  </DataCollectionRunSettings>
+</RunSettings>

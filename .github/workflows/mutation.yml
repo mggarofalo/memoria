@@ -1,0 +1,146 @@
+name: Mutation
+
+# Slow, so it is not a required check. Pull requests mutate only what changed;
+# the nightly run mutates everything and uploads the reports. Thresholds live
+# in stryker/*.json, sidecar/stryker*.json, worker/stryker*.json, and
+# cli/.gremlins.yaml.
+on:
+  pull_request:
+    branches: ["main"]
+    paths:
+      - .github/workflows/mutation.yml
+      - scripts/mutation-*.sh
+      - stryker/**
+      - dotnet-tools.json
+      - src/**
+      - tests/**
+      - sidecar/src/**
+      - sidecar/test/**
+      - sidecar/stryker*.json
+      - worker/src/**
+      - worker/test/**
+      - worker/stryker*.json
+      - cli/**
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  MUTATION_BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || '' }}
+
+jobs:
+  dotnet:
+    name: Mutation (.NET)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Setup .NET
+        uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        with:
+          dotnet-version: "10.0.x"
+          cache: true
+          cache-dependency-path: "**/*.csproj"
+      - name: Mutate
+        run: sh scripts/mutation-dotnet.sh
+      - name: Upload report
+        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mutation-dotnet
+          path: StrykerOutput/*/reports/
+          retention-days: 30
+
+  node:
+    name: Mutation (${{ matrix.package }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [sidecar, worker]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            ${{ matrix.package }}/package-lock.json
+      - name: Install
+        run: |
+          npm ci --no-fund --no-audit
+          npm ci --no-fund --no-audit --prefix ${{ matrix.package }}
+      - name: Mutate
+        run: sh scripts/mutation-js.sh ${{ matrix.package }}
+      - name: Upload report
+        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mutation-${{ matrix.package }}
+          path: ${{ matrix.package }}/reports/
+          retention-days: 30
+
+  cli:
+    name: Mutation (CLI)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: cli/go.mod
+          cache-dependency-path: cli/go.sum
+      - name: Mutate
+        run: sh scripts/mutation-go.sh
+      - name: Upload report
+        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mutation-cli
+          path: cli/reports/
+          retention-days: 30
+
+  # Real Go branch coverage. A slow report, never a gate: statement coverage in
+  # CI is what blocks. gobco has no per-file exclusion or threshold of its own,
+  # so scripts/coverage-go-branch.sh does that part.
+  cli-branch:
+    name: Go Branch Coverage (report)
+    if: ${{ github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: cli/go.mod
+          cache-dependency-path: cli/go.sum
+      - name: Measure
+        run: sh scripts/coverage-go-branch.sh
+      - name: Upload report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: go-branch-coverage
+          path: cli/reports/gobco.txt
+          retention-days: 30
