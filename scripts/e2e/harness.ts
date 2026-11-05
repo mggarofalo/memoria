@@ -160,6 +160,18 @@ export class Harness {
     return spawn(this.cli, args, { stdio: "ignore", env: { ...this.isolated, ...env } });
   }
 
+  /** Runs the CLI while this process keeps serving, for a check whose server lives here too. */
+  memoriaAsync(args: string[], key: string): Promise<CliResult> {
+    return new Promise((resolve) => {
+      const child = spawn(this.cli, args, { stdio: ["ignore", "pipe", "pipe"], env: { ...this.isolated, MEMORIA_API_KEY: key } });
+      let out = "";
+      let err = "";
+      child.stdout.setEncoding("utf8").on("data", (text: string) => (out += text));
+      child.stderr.setEncoding("utf8").on("data", (text: string) => (err += text));
+      child.once("close", (code) => resolve({ code: code ?? -1, out, err }));
+    });
+  }
+
   memoria(args: string[], options: CliOptions = {}): CliResult {
     const env: NodeJS.ProcessEnv = { ...this.isolated };
     if (!options.noUrl) env["MEMORIA_URL"] = this.apiUrl;

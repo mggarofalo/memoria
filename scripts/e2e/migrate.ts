@@ -96,7 +96,7 @@ function toolAlone(h: Harness, tool: string, notes: string, secret: string): voi
 
 /** A file gone by the time it is read is counted and not named, and does not end the report. */
 function missingFile(h: Harness, tool: string, notes: string): void {
-  const input = JSON.stringify([[path.join(notes, "gone-secretfilename.md"), path.join(notes, "plain.md")]]);
+  const input = JSON.stringify([{ paths: [path.join(notes, "gone-secretfilename.md"), path.join(notes, "plain.md")] }]);
   const run = spawnSync("dotnet", [tool, "--json", "--no-gitleaks", "--lists-on-stdin"], { input, encoding: "utf8", timeout: 120_000 });
   const row = (JSON.parse(run.stdout || "[{}]") as Array<{ files?: number; skipped?: number }>)[0];
   h.check("redaction check: a file it cannot read is counted, the rest are read, and it exits 1", run.status === 1 && row?.files === 2 && row.skipped === 1, run.stdout + run.stderr);
@@ -108,7 +108,7 @@ function wideName(h: Harness, tool: string, secret: string): void {
   const folder = h.privatePath("migrate-wide");
   const names = ["caf\u00e9", "na\u00efve", "\u00fcber", "ma\u00f1ana", "stra\u00dfe", "\u6587\u4ef6", "\u65e5\u672c\u8a9e", "\u041f\u0440\u0438\u0432\u0435\u0442", "\ud55c\uae00", "\u4e2d\u6587"];
   for (const name of names) write(folder, `${name}.md`, `# Doc\n\nthe key is ${secret} here\n`);
-  const input = JSON.stringify([names.map((name) => path.join(folder, `${name}.md`))]);
+  const input = JSON.stringify([{ paths: names.map((name) => path.join(folder, `${name}.md`)) }]);
   const read = (label: string, run: { stdout: string; stderr: string }): void => {
     const row = (JSON.parse(run.stdout || "[{}]") as Array<{ changed?: number; skipped?: number }>)[0];
     h.check(`redaction check: file names outside ASCII are read, not skipped, ${label}`, row?.changed === names.length && row.skipped === 0, run.stdout + run.stderr);
@@ -147,7 +147,7 @@ func main() {
   const built = spawnSync("go", ["build", "-o", path.join(folder, process.platform === "win32" ? "gitleaks.exe" : "gitleaks"), source], { encoding: "utf8", timeout: 120_000 });
   h.check("redaction check: a fake gitleaks was built", built.status === 0, built.stderr);
   const name = Object.keys(process.env).find((key) => key.toUpperCase() === "PATH") ?? "PATH";
-  const input = JSON.stringify([[path.join(notes, "plain.md")]]);
+  const input = JSON.stringify([{ paths: [path.join(notes, "plain.md")] }]);
   for (const mode of ["stops", "exits", "garbage"]) {
     const env = { ...process.env, FAKE_GITLEAKS: mode, [name]: folder + path.delimiter + (process.env[name] ?? "") };
     const run = spawnSync("dotnet", [tool, "--json", "--lists-on-stdin"], { input, env, encoding: "utf8", timeout: 120_000 });
@@ -183,7 +183,7 @@ function gitleaksReads(h: Harness, tool: string): void {
 
 /** Forces the unexpected: a NUL in a path. The Windows event log gets what an unhandled exception says. */
 function crash(h: Harness, tool: string): void {
-  const input = JSON.stringify([["secretfilename\0.md"]]);
+  const input = JSON.stringify([{ paths: ["secretfilename\0.md"] }]);
   const run = spawnSync("dotnet", [tool, "--no-gitleaks", "--lists-on-stdin"], { input, encoding: "utf8", timeout: 120_000 });
   const all = run.stdout + run.stderr;
   h.check("redaction check: when it cannot finish it exits 3, with no stack and no file name", run.status === 3 && all.includes("could not finish") && !all.includes("secretfilename") && !all.includes("   at "), all.slice(0, 400));
@@ -269,6 +269,9 @@ function conformanceTree(root: string): void {
   for (const name of ["a.md", "b.txt", "c.org", "ab.md", "sub/d.md", "sub/e.txt", "sub/ax.md", "sub/deep/f.md", "deep/g.md", "my dir/h.md", ".hidden/i.md", "node_modules/j.md", "sub/build/k.md", "C++/l.md", "docs@v2/x/m.md", "a&b/n.md", "#x/o.md", "$y/p.md", "~z/q.md", "solo", "sx.md", "e/f/deep"]) {
     write(root, name, `# ${name}\n\nsome text so it is indexed\n`);
   }
+  // QMD does not index these, which is why a plan leaves them out.
+  write(root, "empty.md", "");
+  write(root, "spaces.md", " \n\t\n");
 }
 
 type Form = { pattern: string; ignore?: string[] };
@@ -353,7 +356,7 @@ function agree(h: Harness, root: string, forms: Form[], tag: string, offset: num
   forms.forEach((form, index) => {
     const run = h.memoria(["migrate", "plan", "--qmd-config", planConfig(h, root, form, offset + index), "--format", "json"]);
     const planned = (JSON.parse(run.out || "{}") as PlanResult).collections?.[0]?.files;
-    h.check(`selection: plan and the real QMD agree on ${JSON.stringify(form)}: QMD ${counts[index]}, plan ${planned}`, run.code === 0 && counts[index] !== undefined && planned === counts[index], { qmd: counts[index], plan: planned, err: run.err });
+    h.check(`selection: plan and the real QMD agree on ${JSON.stringify(form)}: QMD ${counts[index]}, plan ${planned}`, !run.err.includes("refused") && counts[index] !== undefined && planned === counts[index], { qmd: counts[index], plan: planned, err: run.err });
   });
 }
 

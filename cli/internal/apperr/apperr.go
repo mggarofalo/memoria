@@ -50,6 +50,7 @@ const (
 type Error struct {
 	Kind       Kind
 	Status     int           // HTTP status, when there was a response.
+	Code       string        // The server's own code for a refusal, when it gave one.
 	Message    string        // Safe to display after redaction and sanitizing.
 	RetryAfter time.Duration // Zero when the server gave no usable value.
 	TraceID    string
@@ -115,7 +116,7 @@ func FromResponse(status int, header http.Header, body []byte) *Error {
 	if !ok {
 		class = statusClass{kind: KindGeneric, message: "request failed"}
 	}
-	e := &Error{Kind: class.kind, Status: status, TraceID: firstNonEmpty(p.TraceID, header.Get("X-Trace-Id"))}
+	e := &Error{Kind: class.kind, Status: status, Code: p.Code, TraceID: firstNonEmpty(p.TraceID, header.Get("X-Trace-Id"))}
 
 	hint := class.hint
 	if status == http.StatusForbidden {

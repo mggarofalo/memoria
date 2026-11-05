@@ -16,6 +16,8 @@ const OPEN = "open";
 const TYPO = "typo";
 const CLOSED = "closed";
 const FILLED = "filled";
+/** Targets of `migrate push`, each opened and empty, so a count of what is on disk means something. */
+const MIGRATED = ["migrated", "migrated-resume", "migrated-refusing", "migrated-killed", "migrated-rules", "migrated-takeover", "migrated-trust", "migrated-spelling", "migrated-decomposed", "migrated-credential", "migrated-older"];
 const VERSION = "2026-02-01T00:00:00Z";
 const LATER = "2026-02-02T00:00:00Z";
 const ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -23,7 +25,7 @@ export const SESSION_DAY = "2026-01-15";
 
 /** A debounce far longer than the run: nothing reaches the index unless something forces it. */
 export const INGEST_SERVER: HarnessOptions = {
-  extraCollections: [SAFE, OPEN, TYPO, CLOSED],
+  extraCollections: [SAFE, OPEN, TYPO, CLOSED, ...MIGRATED],
   filledCollections: [FILLED],
   sidecarEnv: { MEMORIA_QMD_REINDEX_DEBOUNCE_MS: "600000", MEMORIA_QMD_REINDEX_MAX_WAIT_MS: "600000", MEMORIA_QMD_LOG_LEVEL: "debug", NODE_OPTIONS: `--import=${pathToFileURL(path.join(import.meta.dirname, "stall-writes.mjs")).href}` },
   // The most anyone could ask of the log: nothing below may depend on a settings file keeping it quiet.
@@ -35,7 +37,7 @@ export const INGEST_SERVER: HarnessOptions = {
     [`Memoria__Ingest__Collections__${OPEN}__Redaction`]: "Disabled",
     [`Memoria__Ingest__Collections__${TYPO}__Redaction`]: "disabled",
     Memoria__Ingest__MinReindexInterval: "00:00:00",
-    ...Object.fromEntries([SAFE, OPEN, TYPO, FILLED].map((name) => [`Memoria__Ingest__Collections__${name}__Enabled`, "true"])),
+    ...Object.fromEntries([SAFE, OPEN, TYPO, FILLED, ...MIGRATED].map((name) => [`Memoria__Ingest__Collections__${name}__Enabled`, "true"])),
     // Short, so the check that the API gives up on a stalled write does not take two minutes.
     Memoria__Sidecar__Timeout: "00:00:15",
   },

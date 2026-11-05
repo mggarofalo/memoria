@@ -1,11 +1,13 @@
 package migrate
 
 import (
+	"io"
 	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -13,11 +15,17 @@ import (
 // can be set differently, so a plan only flags files past it.
 const DefaultMaxDocumentBytes = 2 * 1024 * 1024
 
+const (
+	maxCheckedBytes = 64 * 1024 * 1024
+	// A server refuses a version more than this ahead of its clock.
+	maxFutureSkew = time.Hour
+)
+
 // QMD never indexes these, whatever the pattern says.
 var excludedDirectories = map[string]bool{"node_modules": true, ".git": true, ".cache": true, "vendor": true, "dist": true, "build": true}
 
 // Plan is what a collection holds, and where it would go. It holds counts and sizes, and
-// reads no file's text.
+// no text. BlankNames is for a push's private report, and never reaches any output.
 type Plan struct {
 	Name       string `json:"name"`
 	Target     string `json:"target"`
@@ -28,6 +36,13 @@ type Plan struct {
 	Largest    int64  `json:"largestBytes"`
 	OverLimit  int    `json:"overDefaultLimit"`
 	Unreadable int    `json:"unreadable"`
+	// Unstorable is the selected files a server would always refuse at their path, by reason.
+	Unstorable map[string]int `json:"unstorable,omitempty"`
+	// Blank is the files the pattern takes that hold nothing but space. QMD does not index them, so they are not selected.
+	Blank      int      `json:"blank,omitempty"`
+	BlankNames []string `json:"-"`
+	// Decomposed is the selected files stored under a composed spelling of their name, as a server refuses any other.
+	Decomposed int    `json:"decomposedNames,omitempty"`
 	Problem    string `json:"problem,omitempty"`
 }
 
@@ -42,8 +57,8 @@ type RawSessions struct {
 }
 
 // Inventory counts what QMD would index in a collection, and returns those files' paths.
-// It selects as QMD does: the pattern and ignore rules, with no links followed, and no
-// hidden file or folder.
+// It selects as QMD does: the pattern and ignore rules, with no links followed, no hidden
+// file or folder, and no blank file.
 func Inventory(collection Collection, target string) (Plan, []string) {
 	plan := Plan{Name: collection.Name, Target: target, Path: collection.Path, Pattern: collection.Pattern}
 	if !filepath.IsAbs(collection.Path) {
@@ -62,10 +77,12 @@ func Inventory(collection Collection, target string) (Plan, []string) {
 		plan.Problem = err.Error()
 		return plan, nil
 	}
-	var files []string
+	var files, names []string
+	local := map[string]string{}
 	err = walk(root, func(name string, info fs.FileInfo) {
-		if selection.Takes(name) {
+		if selection.Takes(name) && plan.keep(root, name, info, local) {
 			plan.add(info.Size())
+			names = append(names, name)
 			files = append(files, filepath.Join(collection.Path, filepath.FromSlash(name)))
 		}
 	}, func(name string) {
@@ -75,7 +92,72 @@ func Inventory(collection Collection, target string) (Plan, []string) {
 	if err != nil {
 		plan.Problem = "its folder cannot be read"
 	}
+	plan.noteNames(names, local)
 	return plan, files
+}
+
+// keep looks at what only this machine can see. It reads the file to judge it, and keeps none of it.
+func (p *Plan) keep(root *os.Root, name string, info fs.FileInfo, local map[string]string) bool {
+	switch textOf(root, name, info.Size()) {
+	case textBlank:
+		p.Blank++
+		p.BlankNames = append(p.BlankNames, name)
+		return false
+	case textUnreadable:
+		p.Unreadable++
+		return false
+	case textInvalid:
+		local[name] = ReasonNotUTF8
+	}
+	if info.ModTime().After(time.Now().Add(maxFutureSkew)) {
+		local[name] = ReasonFutureTime
+	}
+	return true
+}
+
+func (p *Plan) noteNames(names []string, local map[string]string) {
+	p.Unstorable = Unstorable(names)
+	for name, reason := range local {
+		if PathProblem(name) == "" {
+			p.Unstorable[reason]++
+		}
+	}
+	for _, name := range names {
+		if ServerPath(name) != name {
+			p.Decomposed++
+		}
+	}
+}
+
+type textKind int
+
+const (
+	textFine textKind = iota
+	textBlank
+	textInvalid
+	textUnreadable
+)
+
+// textOf judges a file's text. A file past any server's cap is not read, as it will be refused for its size anyway.
+func textOf(root *os.Root, name string, size int64) textKind {
+	if size > maxCheckedBytes {
+		return textFine
+	}
+	file, err := root.Open(filepath.FromSlash(name))
+	if err != nil {
+		return textUnreadable
+	}
+	defer func() { _ = file.Close() }()
+	data, err := io.ReadAll(file)
+	switch {
+	case err != nil:
+		return textUnreadable
+	case !utf8.Valid(data):
+		return textInvalid
+	case strings.TrimFunc(string(data), isJSSpace) == "":
+		return textBlank
+	}
+	return textFine
 }
 
 func (p *Plan) add(size int64) {

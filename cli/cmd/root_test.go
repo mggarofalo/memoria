@@ -13,11 +13,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/mggarofalo/memoria/cli/internal/apperr"
 	"github.com/mggarofalo/memoria/cli/internal/auth"
+	"github.com/mggarofalo/memoria/cli/internal/migrate"
 	"github.com/mggarofalo/memoria/cli/internal/selfupdate"
 	"github.com/mggarofalo/memoria/cli/internal/transport"
 )
@@ -82,6 +84,7 @@ type harness struct {
 	checkLists    *[][]string
 	checkArgs     []string
 	checkDuring   func()
+	sleptMu       sync.Mutex
 }
 
 func newHarness(t *testing.T) *harness {
@@ -118,6 +121,8 @@ func (h *harness) app() *app {
 	a.selfUpdate.executable = func() (string, error) { return "memoria-test-exe", nil }
 	a.redactionCheck = h.fakeRedactionCheck
 	a.sleep = func(_ context.Context, wait time.Duration) error {
+		h.sleptMu.Lock()
+		defer h.sleptMu.Unlock()
 		h.slept = append(h.slept, wait)
 		return h.sleepErr
 	}
@@ -131,8 +136,12 @@ func (h *harness) fakeRedactionCheck(_ context.Context, args []string, stdin []b
 		h.checkDuring()
 	}
 	if h.checkLists != nil {
-		if err := json.Unmarshal(stdin, h.checkLists); err != nil {
+		var lists []migrate.CheckList
+		if err := json.Unmarshal(stdin, &lists); err != nil {
 			return nil, err
+		}
+		for _, list := range lists {
+			*h.checkLists = append(*h.checkLists, list.Paths)
 		}
 	}
 	return []byte(h.checkOutput), h.checkErr

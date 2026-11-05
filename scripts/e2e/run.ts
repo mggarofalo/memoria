@@ -10,6 +10,7 @@ import { Harness } from "./harness.ts";
 import { skillMatchesTheServer } from "./skill.ts";
 import { ingest, INGEST_SERVER, keyMaker } from "./ingest.ts";
 import { migrate } from "./migrate.ts";
+import { migratePush } from "./migrate-push.ts";
 import { ingestConnection } from "./ingest-connection.ts";
 import { filters } from "./filters.ts";
 import { ingestRendered } from "./ingest-rendered.ts";
@@ -69,6 +70,7 @@ async function runIngest(h: Harness): Promise<void> {
   await ingestRendered(h, keyMaker(h, admin));
   await sourcesSync(h, admin);
   await migrate(h);
+  await migratePush(h, admin);
   noModels(h);
 }
 

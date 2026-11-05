@@ -25,15 +25,16 @@ const (
 func newMigrateCmd(a *app) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "migrate",
-		Short: "Plan moving a local QMD setup to a Memoria server. Read-only",
-		Long: `Look at a local QMD setup before moving it to a Memoria server.
+		Short: "Move a local QMD setup to a Memoria server",
+		Long: `Move a local QMD setup to a Memoria server.
 
-These commands only read, and only the paths you give them. They have no default
-location, need no key or server, and never open QMD's index.sqlite.`,
+These commands only read your files, and only the paths you give them. They have no
+default location, and never open QMD's index.sqlite. Only 'push --apply' needs a key
+or a server, and it is the only one that sends anything.`,
 		Args: noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() },
 	}
-	cmd.AddCommand(newMigratePlanCmd(a), newMigrateReportCmd(a))
+	cmd.AddCommand(newMigratePlanCmd(a), newMigrateReportCmd(a), newMigratePushCmd(a))
 	return cmd
 }
 
@@ -52,14 +53,22 @@ func newMigratePlanCmd(a *app) *cobra.Command {
 		Short: "Count what each QMD collection holds, and where it would go",
 		Long: `Read QMD's index.yml and count what QMD would index in each collection: files, bytes,
 the largest file, and how many are over a server's default 2 MiB limit on a document.
-No file's text is read.
+It reads each selected file to judge it, and keeps none of its text. A blank file is left
+out and counted, as QMD does not index one.
 
 A migration will need each target collection to be empty, so choose names that are.
 
 A pattern or ignore rule this cannot read the way QMD would, such as an extglob, a
 negation or brackets, is refused rather than guessed at. This exits 1 if any collection
 could not be counted, or if anything was skipped, unless you pass --accept-skips for
-the skips.`,
+the skips.
+
+It also counts the selected files a server would always refuse at their path, by reason:
+characters or device names Windows forbids, invisible characters, a name not ending in
+.md, a folder QMD excludes, names differing only in case, text that is not valid UTF-8, or
+a modification time over an hour ahead. Those exit 1 as well, and
+--accept-skips does not excuse them, as they will not be stored. A name that looks like a
+credential needs the server's own rules, so 'migrate report' counts those.`,
 		Example: `  memoria migrate plan --qmd-config ~/.config/qmd/index.yml
   memoria migrate plan --qmd-config index.yml --target notes=archive-notes --codex-sessions ~/.codex/sessions`,
 		Args: noArgs,
@@ -206,7 +215,24 @@ func planOutcome(result migratePlanResult, acceptSkips bool) error {
 		}
 		skipped += result.Codex.Unreadable
 	}
+	if err := unstorableError(result.Collections); err != nil {
+		return err
+	}
 	return skipsError(skipped, acceptSkips)
+}
+
+// unstorableError says before any push what no push can store.
+func unstorableError(plans []migrate.Plan) error {
+	total := 0
+	for i := range plans {
+		for _, count := range plans[i].Unstorable {
+			total += count
+		}
+	}
+	if total == 0 {
+		return nil
+	}
+	return apperr.New(apperr.KindGeneric, "%d selected file(s) cannot be stored as they are; see the reasons above. Fix them, or exclude them with an ignore rule", total)
 }
 
 // skipsError is one rule for both commands: something unread is not something clean.
@@ -298,7 +324,7 @@ func uncleanError(reports []migrate.Report, acceptSkips bool) error {
 	skipped := 0
 	for i := range reports {
 		if !reports[i].Clean() {
-			return apperr.New(apperr.KindGeneric, "a document was refused, or gitleaks found something in the redacted text or could not read it; see the counts above")
+			return apperr.New(apperr.KindGeneric, "a document was refused, a file's name looks like a credential, or gitleaks found something in the redacted text or could not read it; see the counts above")
 		}
 		skipped += reports[i].Skipped
 	}
@@ -326,14 +352,14 @@ func (a *app) runRedactionCheck(ctx context.Context, o migrateReportOptions, col
 	}
 	reports := make([]migrate.Report, 0, len(collections))
 	unread := make([]int, 0, len(collections))
-	lists := make([][]string, 0, len(collections))
+	lists := make([]migrate.CheckList, 0, len(collections))
 	for _, collection := range collections {
 		plan, files := migrate.Inventory(collection, collection.Name)
 		if plan.Problem != "" {
 			return nil, apperr.New(apperr.KindUsage, "collection %s: %s", collection.Name, plan.Problem)
 		}
 		unread = append(unread, plan.Unreadable)
-		lists = append(lists, append([]string{}, files...))
+		lists = append(lists, migrate.CheckList{Root: collection.Path, Paths: append([]string{}, files...)})
 		reports = append(reports, migrate.Report{Name: collection.Name})
 	}
 	stdin, err := json.Marshal(lists)
