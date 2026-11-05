@@ -9,7 +9,7 @@ MIN_BRANCH=90
 MIN_BRANCH_CORE=95
 
 out=TestResults/coverage
-rm -rf "$out"
+rm -rf TestResults/coverage
 dotnet test Memoria.slnx --no-build --nologo --verbosity minimal \
   --settings coverage.runsettings \
   --collect:"XPlat Code Coverage" \
