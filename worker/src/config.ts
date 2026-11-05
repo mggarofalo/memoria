@@ -126,8 +126,8 @@ function checkTokenStrength(token: string): void {
 }
 
 function checkPlaintextOptIn(host: string, env: NodeJS.ProcessEnv): void {
-  if (isLoopback(host) || ["1", "true", "yes", "on"].includes((env.MEMORIA_WORKER_ALLOW_PLAINTEXT_LAN ?? "").trim().toLowerCase())) return;
-  throw new Error(`The worker serves plain http, and MEMORIA_WORKER_HOST (${host}) is not loopback, so its token and every text it embeds would cross the network in clear. Use a private link such as WireGuard and set MEMORIA_WORKER_ALLOW_PLAINTEXT_LAN=1 to say so.`);
+  if (isLoopback(host) || ["1", "true", "yes", "on"].includes((env.MEMORIA_WORKER_ALLOW_HTTP_ON_PRIVATE_NETWORK ?? "").trim().toLowerCase())) return;
+  throw new Error(`The worker serves plain http, and MEMORIA_WORKER_HOST (${host}) is not loopback, so its token and every text it embeds are in clear unless the network itself is encrypted. On a WireGuard tunnel, which is the intended setup, set MEMORIA_WORKER_ALLOW_HTTP_ON_PRIVATE_NETWORK=1. See docs/deployment.md.`);
 }
 
 function readAllowedHosts(env: NodeJS.ProcessEnv): ReadonlySet<string> {

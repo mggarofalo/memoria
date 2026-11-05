@@ -2,7 +2,7 @@
 # Install memoria-worker as a launchd agent, for a Mac with Metal.
 #
 #   MEMORIA_WORKER_TOKEN=... ./scripts/install-launchd.sh \
-#     --llama-server /opt/homebrew/bin/llama-server --host 192.168.1.30 --allow-plaintext-lan
+#     --llama-server /opt/homebrew/bin/llama-server --host 192.168.1.30 --allow-http-on-private-network
 #
 # Or pass --token-file <path> instead of the environment variable.
 #
@@ -27,7 +27,7 @@ umask 077
 
 label="com.memoria.worker"
 host="127.0.0.1"
-allow_plaintext=0
+allow_http_on_private_network=0
 port="8383"
 llama_server=""
 model_dir=""
@@ -39,7 +39,7 @@ root="${HOME:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --host) host="$2"; shift 2 ;;
-    --allow-plaintext-lan) allow_plaintext=1; shift ;;
+    --allow-http-on-private-network) allow_http_on_private_network=1; shift ;;
     --port) port="$2"; shift 2 ;;
     --llama-server) llama_server="$2"; shift 2 ;;
     --model-dir) model_dir="$2"; shift 2 ;;
@@ -141,7 +141,7 @@ install_private "$plist" <<PLIST
   <key>EnvironmentVariables</key>
   <dict>
     <key>MEMORIA_WORKER_HOST</key><string>$(xml "$host")</string>
-    <key>MEMORIA_WORKER_ALLOW_PLAINTEXT_LAN</key><string>$allow_plaintext</string>
+    <key>MEMORIA_WORKER_ALLOW_HTTP_ON_PRIVATE_NETWORK</key><string>$allow_http_on_private_network</string>
     <key>MEMORIA_WORKER_PORT</key><string>$(xml "$port")</string>
     <key>MEMORIA_WORKER_LLAMA_SERVER</key><string>$(xml "$llama_server")</string>
     <key>MEMORIA_WORKER_MODEL_DIR</key><string>$(xml "$model_dir")</string>

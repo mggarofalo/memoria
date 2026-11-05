@@ -211,13 +211,13 @@ function checkSecretStrength(secret: string, setting: string): void {
 }
 
 /**
- * The shared secret and whole transcripts would cross the network in clear. That can be
- * a fair choice on a link that is already private, such as WireGuard, but it has to be
- * someone's choice. See docs/deployment.md.
+ * The services speak plain http, which is the intended setup on a WireGuard tunnel: the
+ * tunnel does the encrypting. Nothing here can tell a tunnel from an open LAN, so whoever
+ * deploys it has to say which this is. See docs/deployment.md.
  */
 function requirePlaintextOptIn(env: NodeJS.ProcessEnv, what: string): void {
-  if (readBool(env.MEMORIA_QMD_ALLOW_PLAINTEXT_LAN, false)) return;
-  throw new Error(`${what}, so the secret and transcripts would cross the network in clear. Use TLS, or a private link such as WireGuard and set MEMORIA_QMD_ALLOW_PLAINTEXT_LAN=1 to say so.`);
+  if (readBool(env.MEMORIA_QMD_ALLOW_HTTP_ON_PRIVATE_NETWORK, false)) return;
+  throw new Error(`${what}, so the secret and transcripts are in clear unless the network itself is encrypted. On a WireGuard tunnel, which is the intended setup, set MEMORIA_QMD_ALLOW_HTTP_ON_PRIVATE_NETWORK=1. See docs/deployment.md.`);
 }
 
 const LOOPBACK_HOSTS = new Set(["localhost", "::1", "0:0:0:0:0:0:0:1"]);

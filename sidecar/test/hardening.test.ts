@@ -367,15 +367,15 @@ test("weak or placeholder secrets are refused, without repeating them", () => {
 test("plain http beyond loopback needs an explicit opt-in, with a message that says what to do", () => {
   const secret = { MEMORIA_QMD_SECRET: "Xk29vQmB7fLp3ZtRw" };
   const lan = { ...secret, MEMORIA_QMD_HOST: "192.168.1.20" };
-  assert.throws(() => loadConfig(lan), /in clear.*MEMORIA_QMD_ALLOW_PLAINTEXT_LAN=1/);
-  assert.equal(loadConfig({ ...lan, MEMORIA_QMD_ALLOW_PLAINTEXT_LAN: "1" }).host, "192.168.1.20");
-  assert.throws(() => loadConfig({ ...lan, MEMORIA_QMD_ALLOW_PLAINTEXT_LAN: "0" }), /in clear/);
+  assert.throws(() => loadConfig(lan), /in clear.*MEMORIA_QMD_ALLOW_HTTP_ON_PRIVATE_NETWORK=1/);
+  assert.equal(loadConfig({ ...lan, MEMORIA_QMD_ALLOW_HTTP_ON_PRIVATE_NETWORK: "1" }).host, "192.168.1.20");
+  assert.throws(() => loadConfig({ ...lan, MEMORIA_QMD_ALLOW_HTTP_ON_PRIVATE_NETWORK: "0" }), /in clear/);
   assert.equal(loadConfig(secret).host, "127.0.0.1");
 
   const token = { MEMORIA_QMD_LLM: "remote", MEMORIA_QMD_WORKER_TOKEN: "worker-token-0123456789" };
-  assert.throws(() => loadConfig({ ...token, MEMORIA_QMD_WORKER_URL: "http://192.168.1.30:8383" }), /MEMORIA_QMD_WORKER_URL is plain http.*MEMORIA_QMD_ALLOW_PLAINTEXT_LAN/);
+  assert.throws(() => loadConfig({ ...token, MEMORIA_QMD_WORKER_URL: "http://192.168.1.30:8383" }), /MEMORIA_QMD_WORKER_URL is plain http.*MEMORIA_QMD_ALLOW_HTTP_ON_PRIVATE_NETWORK/);
   assert.equal(loadConfig({ ...token, MEMORIA_QMD_WORKER_URL: "https://192.168.1.30:8383" }).llm.mode, "remote");
-  assert.equal(loadConfig({ ...token, MEMORIA_QMD_WORKER_URL: "http://192.168.1.30:8383", MEMORIA_QMD_ALLOW_PLAINTEXT_LAN: "1" }).llm.mode, "remote");
+  assert.equal(loadConfig({ ...token, MEMORIA_QMD_WORKER_URL: "http://192.168.1.30:8383", MEMORIA_QMD_ALLOW_HTTP_ON_PRIVATE_NETWORK: "1" }).llm.mode, "remote");
   assert.equal(loadConfig({ ...token, MEMORIA_QMD_WORKER_URL: "http://[::1]:8383" }).llm.mode, "remote");
   const list = JSON.stringify([{ name: "a", url: "http://10.0.0.2:8383", tokenEnv: "T" }]);
   assert.throws(() => loadConfig({ MEMORIA_QMD_LLM: "remote", MEMORIA_QMD_WORKERS: list, T: "worker-token-0123456789" }), /in clear/);

@@ -242,16 +242,52 @@ own scoped keys with it; see [configuration.md](configuration.md#memoriaauth--ap
 Everything else has a default. Pass secrets through the environment or a
 Docker secret; never bake them into the image or commit them.
 
-## Plain http between machines
+## Traffic between hosts: WireGuard
 
-The sidecar and worker speak plain http, so anything off loopback sends the shared secret and whole transcripts in clear. They refuse to start that way unless told otherwise.
+Traffic between the API, the sidecar and workers runs over a WireGuard tunnel. The services speak plain http on tunnel addresses, and the tunnel does the encrypting, including of the shared secret and whole transcripts.
 
-- **Sidecar bound beyond loopback, or a worker URL on `http://` to another machine:** set `MEMORIA_QMD_ALLOW_PLAINTEXT_LAN=1`, or pass `-AllowPlaintextLan` to the install script. It states that the link is already private. Without it the start fails with a message naming the setting.
-- **The choice:** a WireGuard tunnel between the machines keeps the addresses and needs no changes here, and the setting still applies because the tunnel's address is not loopback. A TLS reverse proxy in front means binding loopback, so the setting is not needed for the sidecar, and pointing clients at `https://`.
+The addresses here are examples:
 
-**Upgrading a LAN install:** it stops starting until one of these is chosen.
+| Host | Tunnel address | Serves | Port |
+|---|---|---|---|
+| API | `10.0.0.1` | | |
+| Sidecar | `10.0.0.2` | `Memoria.Api` | 8282 |
+| Worker | `10.0.0.3` | the sidecar | 8383 |
 
-**Host names.** A request must arrive under an IP address, `localhost`, or a name in `MEMORIA_QMD_ALLOWED_HOSTS`, and any request carrying an `Origin` is refused. That stops a web page reaching the service through DNS rebinding. A deployment calling by name, such as `host.docker.internal`, must list it or gets a 421 that says so.
+**Bind each service to its tunnel address, and tell it this is intended.** Nothing detects a tunnel, so the setting is what states it. Without it, a non-loopback bind or a plain http worker URL on another machine stops the start, with a message naming the setting.
+
+```sh
+# Sidecar. The install script's -AllowHttpOnPrivateNetwork sets the first of these.
+MEMORIA_QMD_ALLOW_HTTP_ON_PRIVATE_NETWORK=1
+MEMORIA_QMD_HOST=10.0.0.2
+MEMORIA_QMD_WORKER_URL=http://10.0.0.3:8383
+MEMORIA_QMD_API_ADDRESSES=10.0.0.1
+
+# Worker. Its installers take -AllowHttpOnPrivateNetwork or --allow-http-on-private-network.
+MEMORIA_WORKER_ALLOW_HTTP_ON_PRIVATE_NETWORK=1
+MEMORIA_WORKER_HOST=10.0.0.3
+
+# API
+Memoria__Sidecar__BaseUrl=http://10.0.0.2:8282
+```
+
+**Firewall each port to the tunnel,** so nothing reaches it from the LAN even by mistake. For example:
+
+```sh
+ufw allow in on wg0 to any port 8282 proto tcp
+```
+
+```powershell
+New-NetFirewallRule -DisplayName "memoria-qmd" -Direction Inbound -Protocol TCP -LocalPort 8282 -LocalAddress 10.0.0.2 -RemoteAddress 10.0.0.1 -Action Allow
+```
+
+**Start order.** The tunnel must be up before a service binds its address, or the service fails to start. Make the service depend on the tunnel, or let it restart until the address exists.
+
+**Upgrading a LAN install:** it stops starting until the setting is added. Move it onto the tunnel first, because the setting does not encrypt anything.
+
+TLS is not the chosen setup. A TLS reverse proxy would also work, with the sidecar on loopback behind it, and clients pointed at `https://`.
+
+**Host names.** A request must arrive under an IP address, `localhost`, or a name in `MEMORIA_QMD_ALLOWED_HOSTS`, and any request carrying an `Origin` is refused. That stops a web page reaching the service through DNS rebinding. Tunnel addresses need no listing. A deployment calling by name, such as `host.docker.internal`, must list it or gets a 421 that says so. The worker has the same rule, with `MEMORIA_WORKER_ALLOWED_HOSTS`.
 
 **Secrets.** With no secret set, each run makes its own and nothing else can call it. Placeholders, the old README example and repeated characters are refused.
 

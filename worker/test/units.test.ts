@@ -36,7 +36,7 @@ test("the bind address must be loopback or a private LAN address", () => {
 test("a LAN bind needs a token of real length", () => {
   assert.throws(() => loadConfig({ MEMORIA_WORKER_HOST: "192.168.1.20" }), /MEMORIA_WORKER_TOKEN is required/);
   assert.throws(() => loadConfig({ MEMORIA_WORKER_TOKEN: "short" }), /at least 16/);
-  assert.equal(loadConfig({ MEMORIA_WORKER_HOST: "192.168.1.20", MEMORIA_WORKER_ALLOW_PLAINTEXT_LAN: "1", MEMORIA_WORKER_TOKEN: GOOD_TOKEN }).token, GOOD_TOKEN);
+  assert.equal(loadConfig({ MEMORIA_WORKER_HOST: "192.168.1.20", MEMORIA_WORKER_ALLOW_HTTP_ON_PRIVATE_NETWORK: "1", MEMORIA_WORKER_TOKEN: GOOD_TOKEN }).token, GOOD_TOKEN);
 });
 
 test("roles, model paths and external servers are configurable, and bad values fail", () => {
@@ -332,9 +332,9 @@ test("a worker token cannot be a placeholder or a pattern, and random ones pass"
 
 test("binding beyond loopback needs an explicit opt-in to plain http, and host names can be listed", () => {
   const lan = { MEMORIA_WORKER_HOST: "192.168.1.20", MEMORIA_WORKER_TOKEN: GOOD_TOKEN };
-  assert.throws(() => loadConfig(lan), /in clear.*MEMORIA_WORKER_ALLOW_PLAINTEXT_LAN=1/);
-  assert.throws(() => loadConfig({ ...lan, MEMORIA_WORKER_ALLOW_PLAINTEXT_LAN: "0" }), /in clear/);
-  assert.equal(loadConfig({ ...lan, MEMORIA_WORKER_ALLOW_PLAINTEXT_LAN: "yes" }).host, "192.168.1.20");
+  assert.throws(() => loadConfig(lan), /in clear.*MEMORIA_WORKER_ALLOW_HTTP_ON_PRIVATE_NETWORK=1/);
+  assert.throws(() => loadConfig({ ...lan, MEMORIA_WORKER_ALLOW_HTTP_ON_PRIVATE_NETWORK: "0" }), /in clear/);
+  assert.equal(loadConfig({ ...lan, MEMORIA_WORKER_ALLOW_HTTP_ON_PRIVATE_NETWORK: "yes" }).host, "192.168.1.20");
   assert.equal(loadConfig({}).host, "127.0.0.1");
   assert.deepEqual([...loadConfig({ MEMORIA_WORKER_ALLOWED_HOSTS: " GPU.lan, ," }).allowedHosts], ["localhost", "gpu.lan"]);
 });
