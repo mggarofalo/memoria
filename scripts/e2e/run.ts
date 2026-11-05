@@ -55,6 +55,7 @@ try {
   crashed = true;
   console.error(h.scrub(String(error instanceof Error ? error.stack : error)));
 } finally {
+  if (crashed || h.results.some((result) => !result.ok)) h.dumpLogs();
   await h.cleanUp();
 }
 

@@ -122,6 +122,17 @@ export class Harness {
     }
   }
 
+  /** The end of every service's log, for a failed run. They live in a directory cleanUp removes. CI logs are public, so every known secret comes out. */
+  dumpLogs(maxLines = 200): void {
+    for (const name of readdirSync(this.dir).filter((file) => file.endsWith(".log")).sort()) {
+      const text = this.sensitiveValues().reduce((so, far) => so.replaceAll(far, "[SECRET]"), readFileSync(path.join(this.dir, name), "utf8"));
+      const lines = this.scrub(text).split("\n");
+      console.log(`::group::${name} (last ${Math.min(maxLines, lines.length)} of ${lines.length} lines)`);
+      console.log(lines.slice(-maxLines).join("\n"));
+      console.log("::endgroup::");
+    }
+  }
+
   /** The whole key and its secret part alone, plus the sidecar's secret: none may be stored or logged. */
   sensitiveValues(): string[] {
     return [...this.secrets, ...this.secrets.map((key) => key.split("_")[2] ?? key), this.sidecarSecret];
