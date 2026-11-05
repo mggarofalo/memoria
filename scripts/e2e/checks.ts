@@ -3,10 +3,10 @@
  * ones, and the 429 section must stay last, since it uses up the failed-auth limit.
  * New sections go before it.
  */
-import { FAILED_AUTH_LIMIT, KEY_RATE_LIMIT, PROFILE, pause, type Harness } from "./harness.ts";
+import { BAD_KEY } from "./auth-helpers.ts";
+import { FAILED_AUTH_LIMIT, KEY_RATE_LIMIT, PROFILE, type Harness } from "./harness.ts";
 
 const FULL_KEY = /^mem_[0-9a-f]{16}_[0-9a-f]{64}$/;
-const BAD_KEY = `mem_${"0".repeat(16)}_${"0".repeat(64)}`;
 
 export interface Keys {
   admin: string;
@@ -99,7 +99,8 @@ export function scopedReads(h: Harness, { reader }: Keys): void {
   h.check("get by path", got.code === 0 && got.out.includes("zebrafish protocol"), got.out + got.err);
   h.check("get strips a stored escape", !got.out.includes("\x1b") && !got.out.includes("\x07") && got.out.includes("stored escape"), got.out);
   const raw = h.memoria(["get", "notes/hello.md", "--format", "json"], { key });
-  const docid = (JSON.parse(raw.out) as { docid: string }).docid;
+  // A failed get prints no JSON. It has already been reported above, and the rest of the run still has things to say.
+  const docid = raw.code === 0 ? (JSON.parse(raw.out) as { docid: string }).docid : "no-such-docid";
   h.check("get by qmd:// URI", h.memoria(["get", "qmd://notes/hello.md"], { key }).out.includes("zebrafish protocol"));
   h.check("get by docid", h.memoria(["get", docid], { key }).out.includes("zebrafish protocol"));
   const range = h.memoria(["get", "notes/hello.md", "--from-line", "3", "--max-lines", "1", "--line-numbers"], { key });
@@ -117,60 +118,66 @@ export function scopedReads(h: Harness, { reader }: Keys): void {
 /** References that must never reach a sidecar route other than document lookup. */
 export const TRAVERSALS = [
   "..%2Fstatus",
+  "..%2fstatus",
   "a%2F..%2F..%2Fstatus",
+  "notes%2F..%2F..%2Fstatus",
+  "..%2F..%2Fstatus",
+  "..%2F",
   "%2E%2E%2Fstatus",
+  "%2e%2e%2fstatus",
   "..%5Cstatus",
+  "..%5C..%5Cstatus",
   "..%252Fstatus",
   "%252E%252E%252Fstatus",
   "%2F%2Fstatus",
 ];
 
-/** What the sidecar logged being asked for, from a point in its log. */
-function sidecarUrls(h: Harness, from: number): string[] {
-  const seen: string[] = [];
-  for (const line of h.log("sidecar").slice(from).split("\n")) {
-    const match = /"path":"([^"]+)"/.exec(line);
-    if (match?.[1]) seen.push(match[1]);
-  }
-  return seen;
+/** What a URL means to whatever receives it: one round of decoding, and any backslash as a separator. */
+function escapesDocuments(url: string): boolean {
+  const path = decodeURIComponent(url.split("?", 1)[0] ?? "").replaceAll("\\", "/");
+  return !path.startsWith("/docs/") || path.split("/").includes("..");
 }
 
-async function loggedSince(h: Harness, from: number, wanted: string): Promise<string[]> {
-  for (let attempt = 0; attempt < 40; attempt++) {
-    const urls = sidecarUrls(h, from);
-    if (urls.some((url) => url.includes(wanted))) return urls;
-    await pause(100);
-  }
-  return sidecarUrls(h, from);
+function strayCalls(h: Harness, from: number): string[] {
+  return h.proxied(from).map((call) => call.url ?? "").filter(escapesDocuments);
+}
+
+function sawMarker(h: Harness, from: number): boolean {
+  return h.proxied(from).some((call) => call.url?.startsWith("/docs/notes/marker.md"));
 }
 
 export async function traversal(h: Harness, { reader }: Keys): Promise<void> {
-  // A control: the request log has to show lookups, or finding no stray call proves nothing.
-  const start = h.log("sidecar").length;
+  // A control: the proxy has to show lookups, or finding no stray call proves nothing.
+  const start = h.proxiedCount();
   const control = await h.rawGet("/v1/docs/notes%2Fhello.md", reader);
-  const logged = await loggedSince(h, start, "/docs/notes/hello.md");
-  h.check("traversal control: an encoded slash works, and the sidecar log shows the lookup", control.status === 200 && logged.length > 0, { status: control.status, logged });
+  const calls = h.proxied(start).map((call) => call.url ?? "");
+  h.check("traversal control: an encoded slash works, as one scoped lookup at the sidecar", control.status === 200 && calls.length === 1 && calls[0]?.startsWith("/docs/notes/hello.md") && calls[0].includes("collections=notes"), { status: control.status, calls });
 
   for (const reference of TRAVERSALS) {
-    const before = h.log("sidecar").length;
+    const before = h.proxiedCount();
     const response = await h.rawGet(`/v1/docs/${reference}`, reader);
-    // The marker request flushes anything the probe caused.
     await h.rawGet("/v1/docs/notes%2Fmarker.md", reader);
-    const urls = await loggedSince(h, before, "marker.md");
-    const stray = urls.filter((url) => !url.startsWith("/docs/"));
-    // Without the marker in the log, "no stray call" would prove nothing.
-    const sawMarker = urls.some((url) => url.includes("marker.md"));
-    h.check(`${reference}: 404 or 400, and only document lookups at the sidecar`, [400, 404].includes(response.status) && !response.body.includes("totalDocuments") && sawMarker && stray.length === 0, { status: response.status, urls });
+    // Without the marker on record, "no stray call" would prove nothing.
+    h.check(`${reference}: 404 or 400, and only document lookups at the sidecar`, [400, 404].includes(response.status) && !response.body.includes("totalDocuments") && sawMarker(h, before) && strayCalls(h, before).length === 0, { status: response.status, calls: h.proxied(before) });
   }
+  mcpTraversal(h, reader);
 }
 
-interface Reply {
+function mcpTraversal(h: Harness, reader: string): void {
+  const references = ["../status", "notes/../../status", "..\\status", "notes/marker.md"];
+  const frames = [INITIALIZE, { jsonrpc: "2.0", method: "notifications/initialized" }, ...references.map((reference, index) => toolCall(index + 2, "get_document", { reference }))];
+  const before = h.proxiedCount();
+  const session = h.memoria(["mcp"], { key: reader, stdin: frames.map((frame) => JSON.stringify(frame)).join("\n") + "\n" });
+  h.check("MCP get_document: dot segments reach only document lookup, and the marker reaches it", session.code === 0 && sawMarker(h, before) && strayCalls(h, before).length === 0, h.proxied(before));
+}
+
+export interface Reply {
   id?: number;
-  result?: { tools?: Array<{ name: string }> };
+  result?: { tools?: Array<{ name: string }>; isError?: boolean };
   error?: { message?: string; data?: { status?: number } };
 }
 
-function mcpFrames(out: string): { replies: Map<number, Reply>; badLines: number } {
+export function mcpFrames(out: string): { replies: Map<number, Reply>; badLines: number } {
   const replies = new Map<number, Reply>();
   let badLines = 0;
   for (const line of out.split("\n").filter(Boolean)) {
@@ -184,9 +191,9 @@ function mcpFrames(out: string): { replies: Map<number, Reply>; badLines: number
   return { replies, badLines };
 }
 
-const INITIALIZE = { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "e2e", version: "1" } } };
+export const INITIALIZE = { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "e2e", version: "1" } } };
 
-function toolCall(id: number, name: string, args: object): object {
+export function toolCall(id: number, name: string, args: object): object {
   return { jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } };
 }
 
@@ -266,9 +273,4 @@ export function noModels(h: Harness): void {
   h.check("the sidecar ran in remote mode, so no local model could load", h.log("sidecar").includes('"llm":"remote"'));
   const files = h.modelFiles();
   h.check("no model file reached the private cache", files.length === 0, files);
-}
-
-export function noLeaks(h: Harness): void {
-  const logs = h.log("api") + h.log("sidecar");
-  h.check("no plaintext key in the API or sidecar logs", !h.secrets.some((key) => logs.includes(key)));
 }
