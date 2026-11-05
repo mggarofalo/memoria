@@ -140,10 +140,11 @@ public sealed class SessionIngestor(
 		try
 		{
 			jobId = await WritePartsAsync(input.Collection, identity, claim, session, parts, cancellationToken);
-			if (AllWritten(parts))
+			// A part that stays deleted is settled too, so what the session no longer has still goes. The session is just not complete.
+			if (parts.TrueForAll(static part => part.State is SessionPartState.Written or SessionPartState.Deleted))
 			{
 				superseded = await RemoveSupersededAsync(input.Collection, session, claim.PreviousPaths, cancellationToken);
-				state = superseded.Finished ? IngestStateName.Complete : IngestStateName.Partial;
+				state = superseded.Finished && AllWritten(parts) ? IngestStateName.Complete : IngestStateName.Partial;
 			}
 		}
 		finally

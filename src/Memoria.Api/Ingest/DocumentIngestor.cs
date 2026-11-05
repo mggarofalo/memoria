@@ -84,7 +84,12 @@ public sealed class DocumentIngestor(
 			Encoding.UTF8.GetByteCount(text),
 			() => disabled is null ? redactor.Redact(RenderedDocument.ForRedaction(text)) : RenderedDocument.WithoutRedactionForDisabledCollection(text, disabled),
 			cancellationToken);
-		RequireFits(Encoding.UTF8.GetByteCount(decided.Text), "A document once redacted");
+		int limit = options.Value.Ingest.MaxDocumentBytes;
+		if (Encoding.UTF8.GetByteCount(decided.Text) > limit)
+		{
+			throw IngestRules.TooLarge($"A document once redacted can be at most {limit} bytes.");
+		}
+
 
 		string identity = IdentityOf(collection, path);
 		IngestClaimRequest claiming = new(identity, collection, updated, timeProvider.GetUtcNow(), [path], Lookup: RenderedDocument.SessionIdOf(decided.Text) is { } sessionId ? IngestIdentity.ForRenderedSession(collection, sessionId) : null, MessageCount: RenderedDocument.MessagesThroughOf(decided.Text), ContentHash: digests.Of(decided.Text), IsSameContent: stored => digests.Matches(stored, decided.Text));
@@ -106,7 +111,7 @@ public sealed class DocumentIngestor(
 		IngestRecord? record = await ledger.FindAsync(IdentityOf(collection, path), cancellationToken);
 		return record is null
 			? new RenderedDocumentStatus(collection, path, IngestStateName.None, null)
-			: new RenderedDocumentStatus(collection, path, ledger.EffectiveState(record, timeProvider.GetUtcNow()), record.Version);
+			: new RenderedDocumentStatus(collection, path, ledger.EffectiveState(record, timeProvider.GetUtcNow()), record.Version.UtcTicks == 0 ? null : record.Version);
 	}
 
 	/// <summary>

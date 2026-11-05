@@ -29,18 +29,24 @@ public static partial class RenderedDocument
 		return found.Success ? found.Groups[1].Value : null;
 	}
 
-	/// <summary>How many of its session's messages come up to the end of this document. A later copy with fewer has lost some. Null when it does not say.</summary>
+	/// <summary>
+	/// How many of its session's messages come up to the end of this document, so a later copy with fewer has lost some. <c>message_count</c> counts one part alone, so a part's
+	/// <c>message_start</c> goes with it. Codex documents also have <c>message_end</c>. Null when it does not say.
+	/// </summary>
 	public static long? MessagesThroughOf(string text)
 	{
 		string block = FrontmatterBlock(text);
-		Match end = MessageEndField().Match(block);
-		if (end.Success)
+		if (MessageCountField().Match(block) is { Success: true } count)
 		{
-			return long.Parse(end.Groups[1].ValueSpan, CultureInfo.InvariantCulture) + 1;
+			return Number(MessageStartField().Match(block)) + Number(count);
 		}
 
-		Match count = MessageCountField().Match(block);
-		return count.Success ? long.Parse(count.Groups[1].ValueSpan, CultureInfo.InvariantCulture) : null;
+		return MessageEndField().Match(block) is { Success: true } end ? Number(end) + 1 : null;
+	}
+
+	private static long Number(Match field)
+	{
+		return field.Success ? long.Parse(field.Groups[1].ValueSpan, CultureInfo.InvariantCulture) : 0;
 	}
 
 	private static string FrontmatterBlock(string text)
@@ -57,6 +63,9 @@ public static partial class RenderedDocument
 
 	[GeneratedRegex(@"^session_id:[ \t]*""?([^""\r\n]+?)""?[ \t]*\r?$", RegexOptions.Multiline, 1000)]
 	private static partial Regex SessionIdField();
+
+	[GeneratedRegex(@"^message_start:[ \t]*(\d{1,18})[ \t]*\r?$", RegexOptions.Multiline, 1000)]
+	private static partial Regex MessageStartField();
 
 	[GeneratedRegex(@"^message_end:[ \t]*(\d{1,18})[ \t]*\r?$", RegexOptions.Multiline, 1000)]
 	private static partial Regex MessageEndField();

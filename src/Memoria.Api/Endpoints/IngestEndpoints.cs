@@ -459,10 +459,12 @@ internal static class IngestValidation
 	/// <summary>The sidecar checks this as well. Dot segments are refused there by design: QMD never indexes them, and they are things like <c>.git/config</c>.</summary>
 	private static void RequireRelativePath(Dictionary<string, string[]> errors, string path)
 	{
-		string[] segments = path.Replace('\\', '/').Split('/');
-		if (path.Length > IngestRules.MaxIdentityChars || path.Contains(NoCharacter) || path.StartsWith('/') || segments.Any(static segment => segment.Length == 0 || segment.StartsWith('.')))
+		string[] segments = path.Split('/');
+
+		// The sidecar reads a backslash as a separator, so it would be a second name for the same file, with a ledger record of its own.
+		if (path.Length > IngestRules.MaxIdentityChars || path.Contains(NoCharacter) || path.Contains('\\') || path.StartsWith('/') || segments.Any(static segment => segment.Length == 0 || segment.StartsWith('.')))
 		{
-			errors["path"] = ["path must be relative to the collection, with no empty segment and none starting with a dot."];
+			errors["path"] = ["path must be relative to the collection, with forward slashes, no empty segment and none starting with a dot."];
 		}
 		else if (Redactor.HoldsCredential(path))
 		{

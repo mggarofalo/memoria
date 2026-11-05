@@ -62,6 +62,9 @@ async function refusals(h: Harness, key: string, token: string): Promise<void> {
   h.check("rendered: over the cap gets 413, and nothing is written", over.status === 413 && !existsSync(path.join(folder(h), "old-export", "too-big.md")), over.status);
   const off = await post(h, key, "off.md", `---\na: "${token}"\n---\n\nbody\n`, "open");
   h.check("rendered: a collection with redaction off follows its switch and says so", off.status === 202 && field(off, "redaction") === "disabled", off.text);
+  const slash = await post(h, key, "old-export/spelled.md", "first spelling\n");
+  const backslash = await post(h, key, "old-export\\spelled.md", "second spelling\n");
+  h.check("rendered: a backslash is refused rather than overwriting another document", slash.status === 202 && backslash.status === 400 && readFileSync(path.join(folder(h), "old-export", "spelled.md"), "utf8") === "first spelling\n", backslash.text);
   const traversal = await post(h, key, "../outside.md", "body\n");
   h.check("rendered: a path out of the collection is refused", traversal.status === 400, traversal.status);
   const closed = await post(h, key, "x.md", "body\n", "closed");

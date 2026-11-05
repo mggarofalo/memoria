@@ -325,7 +325,8 @@ public sealed class SqliteIngestLedger(ControlDatabase database) : IIngestLedger
 		return soFar with
 		{
 			Version = record.Version > soFar.Version ? record.Version : soFar.Version,
-			MessageCount = record.MessageCount > (soFar.MessageCount ?? 0) ? record.MessageCount : soFar.MessageCount,
+			// A document that does not say how many it holds refuses a takeover rather than guess: allowShrink is how someone says the session really is the whole of it.
+			MessageCount = (record.MessageCount ?? long.MaxValue) > (soFar.MessageCount ?? 0) ? record.MessageCount ?? long.MaxValue : soFar.MessageCount,
 			Paths = [.. soFar.Paths.Union(record.Paths, StringComparer.Ordinal)],
 			LeaseUntil = record.LeaseOwner is null ? soFar.LeaseUntil : record.LeaseUntil,
 			LeaseOwner = record.LeaseOwner ?? soFar.LeaseOwner,

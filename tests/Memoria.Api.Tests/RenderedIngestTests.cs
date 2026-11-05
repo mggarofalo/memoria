@@ -315,6 +315,107 @@ public sealed class RenderedIngestTests(AuthApiFactory factory) : IClassFixture<
 
 		Assert.Equal([SessionPartState.Deleted], States(session));
 		Assert.Empty(corpus.Files);
+
+		// Still a tombstone, so the next upload gets the same answer.
+		JsonElement resumed = await ReadAsync(await PostSessionAsync(client, ClaudeLine("user", "holds a credential") + ClaudeLine("assistant", "more", 1), sessionId: id, updated: DateTimeOffset.UtcNow.AddMinutes(40)));
+		Assert.Equal([SessionPartState.Deleted], States(resumed));
+		Assert.Empty(corpus.Files);
+
+		// And so a rendered copy sent again stays out too.
+		HttpResponseMessage rendered = await PostAsync(client, path, RenderedPart(id, "holds a credential", 0), updated: DateTimeOffset.UtcNow.AddMinutes(50));
+		Assert.Equal("stale_version", (await ReadAsync(rendered)).GetProperty("code").GetString());
+		Assert.Empty(corpus.Files);
+	}
+
+	[Fact]
+	public async Task With_its_first_part_deleted_the_other_parts_still_go_so_nothing_stays_beside_the_session()
+	{
+		FakeCorpus corpus = new(factory.Sidecar);
+		HttpClient client = await WriterAsync();
+		string id = Guid.NewGuid().ToString();
+		string first = $"2026-01-15_{id[..8]}.md", second = $"2026-01-15_{id[..8]}_part-002.md", third = $"2026-01-15_{id[..8]}_part-003.md";
+		await PostAsync(client, first, RenderedPart(id, "one", 0));
+		await PostAsync(client, second, RenderedPart(id, "two", 0));
+		await PostAsync(client, third, RenderedPart(id, "three", 0));
+		await client.DeleteAsync($"/v1/documents?collection=c&path={first}");
+
+		JsonElement session = await ReadAsync(await PostSessionAsync(client, ClaudeLine("user", "one"), sessionId: id, updated: DateTimeOffset.UtcNow.AddMinutes(30)));
+
+		Assert.Equal([SessionPartState.Deleted], States(session));
+		Assert.False(session.GetProperty("complete").GetBoolean());
+		Assert.Empty(corpus.Files);
+	}
+
+	[Fact]
+	public async Task A_document_that_does_not_say_how_many_it_holds_is_not_replaced_on_a_guess()
+	{
+		FakeCorpus corpus = new(factory.Sidecar);
+		HttpClient client = await WriterAsync();
+		string id = Guid.NewGuid().ToString();
+		string path = $"2026-01-15_{id[..8]}.md";
+		await PostAsync(client, path, $"---\nsession_id: \"{id}\"\n---\n\nmigrated\n");
+
+		HttpResponseMessage refused = await PostSessionAsync(client, ClaudeLine("user", "x"), sessionId: id, updated: Stamp.AddHours(1));
+		HttpResponseMessage allowed = await PostSessionAsync(client, ClaudeLine("user", "x"), sessionId: id, updated: Stamp.AddHours(1), allowShrink: true);
+
+		Assert.Equal("session_shrank", (await ReadAsync(refused)).GetProperty("code").GetString());
+		Assert.Equal(HttpStatusCode.Accepted, allowed.StatusCode);
+		Assert.DoesNotContain("migrated", corpus.Files[path], StringComparison.Ordinal);
+	}
+
+	[Fact]
+	public async Task A_path_with_a_backslash_is_refused_so_one_file_has_one_name()
+	{
+		FakeCorpus corpus = new(factory.Sidecar);
+		HttpClient client = await WriterAsync();
+		string folder = Guid.NewGuid().ToString("N");
+
+		HttpResponseMessage slash = await PostAsync(client, $"{folder}/b.md", "first\n");
+		HttpResponseMessage backslash = await PostAsync(client, $"{folder}\\b.md", "second\n");
+		HttpResponseMessage delete = await client.DeleteAsync($"/v1/documents?collection=c&path={Uri.EscapeDataString($"{folder}\\b.md")}");
+
+		Assert.Equal(HttpStatusCode.Accepted, slash.StatusCode);
+		Assert.Equal(HttpStatusCode.BadRequest, backslash.StatusCode);
+		Assert.Equal(HttpStatusCode.BadRequest, delete.StatusCode);
+		Assert.Equal("first\n", corpus.Files[$"{folder}/b.md"]);
+	}
+
+	[Fact]
+	public async Task A_row_nothing_landed_for_has_no_date()
+	{
+		FakeCorpus corpus = new(factory.Sidecar);
+		HttpClient client = await WriterAsync();
+		string path = UniquePath();
+		corpus.OnWrite = static _ => Busy();
+		await PostAsync(client, path, "body\n");
+		corpus.OnWrite = static _ => null;
+
+		JsonElement status = await ReadAsync(await client.GetAsync($"/v1/ingest/rendered?collection=c&path={Uri.EscapeDataString(path)}"));
+
+		Assert.Equal(IngestStateName.Partial, status.GetProperty("state").GetString());
+		Assert.Equal(JsonValueKind.Null, status.GetProperty("updated").ValueKind);
+	}
+
+	[Fact]
+	public async Task A_document_that_only_passes_the_limit_once_redacted_is_refused_without_telling_it_to_split()
+	{
+		await using WebApplicationFactory<Program> app = factory.WithWebHostBuilder(static builder => builder.UseSetting("Memoria:Ingest:MaxDocumentBytes", "65536"));
+		FakeCorpus corpus = new(factory.Sidecar);
+		(_, string key) = await factory.IssueAsync([MemoriaScopes.Ingest], ["c"]);
+		const string Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+		StringBuilder text = new();
+		for (int i = 0; text.Length < 65000; i++)
+		{
+			text.Append("AK").Append("IA").Append(string.Concat(Enumerable.Range(0, 16).Select(n => Alphabet[(i >> (n % 12)) % Alphabet.Length ^ 0]))).Append(' ');
+		}
+
+		HttpResponseMessage response = await PostAsync(AuthApiFactory.Authorized(app.CreateClient(), key), UniquePath(), text.ToString());
+		JsonElement refused = await ReadAsync(response);
+
+		Assert.Equal(HttpStatusCode.RequestEntityTooLarge, response.StatusCode);
+		Assert.Equal("document_too_large", refused.GetProperty("code").GetString());
+		Assert.DoesNotContain("Split", refused.GetProperty("detail").GetString(), StringComparison.Ordinal);
+		Assert.Empty(corpus.Calls);
 	}
 
 	[Theory]
@@ -378,7 +479,9 @@ public sealed class RenderedIngestTests(AuthApiFactory factory) : IClassFixture<
 		Assert.Null(RenderedDocument.SessionIdOf("session_id: \"no block\"\n"));
 		Assert.Null(RenderedDocument.SessionIdOf("---\nsession_id: \"never closes\"\n"));
 		Assert.Equal("abc", RenderedDocument.SessionIdOf($"---\nfiles_touched: [\"{new string('x', 9000)}\"]\nsession_id: \"abc\"\n---\n"));
-		Assert.Equal(6, RenderedDocument.MessagesThroughOf("---\nmessage_count: 2\nmessage_end: 5\n---\n"));
+		Assert.Equal(6, RenderedDocument.MessagesThroughOf("---\nmessage_end: 5\n---\n"));
+		Assert.Equal(6, RenderedDocument.MessagesThroughOf("---\nmessage_start: 4\nmessage_end: 5\nmessage_count: 2\n---\n"));
+		Assert.Equal(7, RenderedDocument.MessagesThroughOf("---\nchunk_index: 2\nmessage_start: 5\nmessage_count: 2\n---\n"));
 		Assert.Equal(2, RenderedDocument.MessagesThroughOf("---\nmessage_count: 2\n---\n"));
 		Assert.Null(RenderedDocument.MessagesThroughOf("---\ntitle: x\n---\n"));
 	}
