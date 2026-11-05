@@ -37,6 +37,8 @@ const (
 	ActionWait
 	// ActionPause holds every worker, as the server is out of room for now.
 	ActionPause
+	// ActionHold holds every worker for a key's rate limit, which says nothing about the document, so it has its own long budget.
+	ActionHold
 	// ActionResend is a lost answer or a server away. Sending again is always safe, and if it never answers the run ends.
 	ActionResend
 	// ActionResendThenReport is a failure that may be this document's own, so it cannot end the run forever.
@@ -56,8 +58,7 @@ func Classify(status int, code string) Action {
 	case http.StatusRequestEntityTooLarge:
 		return ActionOverCap
 	case http.StatusTooManyRequests:
-		// A limit on the key, so it holds every worker, not just this document.
-		return ActionPause
+		return ActionHold
 	case http.StatusServiceUnavailable:
 		if code == "ingest_busy" {
 			return ActionPause
@@ -83,8 +84,12 @@ func classifyConflict(code string) Action {
 
 var safeCode = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 
-// StateTakenOver is the state a path's ledger entry has once its session owns it.
-const StateTakenOver = "taken_over"
+// The states of a path's ledger entry that mean the server holds it. Complete means a write of it landed, and taken over
+// means its session now owns it.
+const (
+	StateComplete  = "complete"
+	StateTakenOver = "taken_over"
+)
 
 // MayBeTakenOver is whether a refusal is what a re-push of a taken-over path gets. Only the path's own state can say that it was.
 func MayBeTakenOver(code string) bool {
@@ -93,6 +98,24 @@ func MayBeTakenOver(code string) bool {
 
 // ReasonOlderThanSent is a local copy older than one already stored, which this does not send.
 const ReasonOlderThanSent = "older_than_sent"
+
+// ReasonSecondSpelling is a file with the same composed name as one before it. Sent, it would replace that one, and one document
+// would be lost with no refusal from anyone, so it stays here until the owner renames it.
+const ReasonSecondSpelling = "second_spelling"
+
+// SecondSpellings is the paths whose composed name an earlier path already has.
+func SecondSpellings(names []string) map[string]bool {
+	seen := make(map[string]bool, len(names))
+	second := map[string]bool{}
+	for _, name := range names {
+		sent := ServerPath(name)
+		if seen[sent] {
+			second[name] = true
+		}
+		seen[sent] = true
+	}
+	return second
+}
 
 // Reason names a refusal for the summary. A server's code is only repeated if it looks like one, as a summary goes to logs.
 func Reason(status int, code string) string {
@@ -203,6 +226,8 @@ const (
 	ProblemUnreadable  = "unreadable"
 	ProblemNotReached  = "not_reached"
 	ProblemFrontmatter = "frontmatter"
+	ProblemBlank       = "blank"
+	ProblemLocalEdits  = "taken_over_local_changes_not_sent"
 )
 
 // PushSummary is one collection's run. It holds counts, and reasons a server gave as codes, and names no file.
@@ -215,7 +240,11 @@ type PushSummary struct {
 	Sent             int    `json:"sent"`
 	AlreadySent      int    `json:"alreadySent"`
 	// TakenOver is documents whose session has since replaced them, which the server confirmed. They are migrated, not failed.
-	TakenOver        int            `json:"takenOver"`
+	TakenOver int `json:"takenOver"`
+	// TakenOverEdited is those of TakenOver with a local copy different from what was migrated. Those changes were not sent.
+	TakenOverEdited int `json:"takenOverWithLocalChanges"`
+	// Blank is files left out of Selected, as QMD does not index a blank file.
+	Blank            int            `json:"blank"`
 	Refused          map[string]int `json:"refused"`
 	OverCap          int            `json:"overCap"`
 	Unreadable       int            `json:"unreadable"`

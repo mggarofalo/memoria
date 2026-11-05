@@ -53,7 +53,8 @@ func newMigratePlanCmd(a *app) *cobra.Command {
 		Short: "Count what each QMD collection holds, and where it would go",
 		Long: `Read QMD's index.yml and count what QMD would index in each collection: files, bytes,
 the largest file, and how many are over a server's default 2 MiB limit on a document.
-No file's text is read.
+It reads each selected file to judge it, and keeps none of its text. A blank file is left
+out and counted, as QMD does not index one.
 
 A migration will need each target collection to be empty, so choose names that are.
 
@@ -64,7 +65,8 @@ the skips.
 
 It also counts the selected files a server would always refuse at their path, by reason:
 characters or device names Windows forbids, invisible characters, a name not ending in
-.md, a folder QMD excludes, or names differing only in case. Those exit 1 as well, and
+.md, a folder QMD excludes, names differing only in case, text that is not valid UTF-8, or
+a modification time over an hour ahead. Those exit 1 as well, and
 --accept-skips does not excuse them, as they will not be stored. A name that looks like a
 credential needs the server's own rules, so 'migrate report' counts those.`,
 		Example: `  memoria migrate plan --qmd-config ~/.config/qmd/index.yml
@@ -230,7 +232,7 @@ func unstorableError(plans []migrate.Plan) error {
 	if total == 0 {
 		return nil
 	}
-	return apperr.New(apperr.KindGeneric, "%d selected file(s) cannot be stored at their path; see the reasons above. Rename them, or exclude them with an ignore rule", total)
+	return apperr.New(apperr.KindGeneric, "%d selected file(s) cannot be stored as they are; see the reasons above. Fix them, or exclude them with an ignore rule", total)
 }
 
 // skipsError is one rule for both commands: something unread is not something clean.

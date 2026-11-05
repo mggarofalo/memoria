@@ -29,7 +29,7 @@ func TestClassifyFollowsTheRoutesTable(t *testing.T) {
 		{http.StatusUnprocessableEntity, "", ActionReport},
 		{http.StatusRequestEntityTooLarge, "", ActionOverCap},
 		{http.StatusConflict, "ingest_in_progress", ActionWait},
-		{http.StatusTooManyRequests, "", ActionPause},
+		{http.StatusTooManyRequests, "", ActionHold},
 		{http.StatusServiceUnavailable, "ingest_busy", ActionPause},
 		{http.StatusBadGateway, "", ActionResend},
 		{http.StatusServiceUnavailable, "", ActionResend},

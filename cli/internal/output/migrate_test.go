@@ -50,6 +50,8 @@ func TestAPushWithEverythingWrongSaysSo(t *testing.T) {
 func TestACleanPushAndADryRunSaySo(t *testing.T) {
 	clean := &migrate.PushResult{Collections: []migrate.PushSummary{{Name: "notes", Target: "notes", Selected: 1, Sent: 1}}}
 	checkHolds(t, renderedBy(t, func(w io.Writer) error { return MigratePushTable(w, clean) }), "Every selected document is stored")
+	edited := &migrate.PushResult{Collections: []migrate.PushSummary{{Name: "notes", Target: "notes", Selected: 1, TakenOver: 1, TakenOverEdited: 1, Blank: 2}}}
+	checkHolds(t, renderedBy(t, func(w io.Writer) error { return MigratePushTable(w, edited) }), "local changes that were not sent", "2 blank file(s)")
 	dry := &migrate.PushResult{DryRun: true, Collections: []migrate.PushSummary{{Name: "notes", Target: "notes", Selected: 2, Unstorable: map[string]int{"short": 1}}}}
 	checkHolds(t, renderedBy(t, func(w io.Writer) error { return MigratePushTable(w, dry) }), "Dry run", "WOULD SEND", "CANNOT BE STORED", "cannot be stored at its path, short: 1")
 }

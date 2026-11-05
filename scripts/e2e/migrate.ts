@@ -269,6 +269,9 @@ function conformanceTree(root: string): void {
   for (const name of ["a.md", "b.txt", "c.org", "ab.md", "sub/d.md", "sub/e.txt", "sub/ax.md", "sub/deep/f.md", "deep/g.md", "my dir/h.md", ".hidden/i.md", "node_modules/j.md", "sub/build/k.md", "C++/l.md", "docs@v2/x/m.md", "a&b/n.md", "#x/o.md", "$y/p.md", "~z/q.md", "solo", "sx.md", "e/f/deep"]) {
     write(root, name, `# ${name}\n\nsome text so it is indexed\n`);
   }
+  // QMD does not index these, which is why a plan leaves them out.
+  write(root, "empty.md", "");
+  write(root, "spaces.md", " \n\t\n");
 }
 
 type Form = { pattern: string; ignore?: string[] };

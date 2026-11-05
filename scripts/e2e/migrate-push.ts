@@ -18,6 +18,10 @@ const REFUSING_TARGET = "migrated-refusing";
 const KILLED_TARGET = "migrated-killed";
 const RULES_TARGET = "migrated-rules";
 const TAKEOVER_TARGET = "migrated-takeover";
+const TRUST_TARGET = "migrated-trust";
+const SPELLING_TARGET = "migrated-spelling";
+/** What the first cwd of a session's lines encodes to, which a session must send to take over its own documents. */
+const OWN_FOLDER = "-srv-demo";
 const DECOMPOSED_TARGET = "migrated-decomposed";
 const CREDENTIAL_TARGET = "migrated-credential";
 const OLDER_TARGET = "migrated-older";
@@ -44,6 +48,7 @@ interface Summary {
   selected: number;
   sent: number;
   alreadySent: number;
+  takenOver: number;
   overCap: number;
   notReached: number;
   refused: Record<string, number>;
@@ -292,14 +297,20 @@ async function takenOver(h: Harness, key: string): Promise<void> {
   const s = setup(h, key, "takeover", TAKEOVER_TARGET, { "2026-01-15_dededede.md": text });
   const first = push(s, h.apiUrl, "--apply", "--format", "json");
   const session = async (sessionId: string, ...words: string[]): Promise<number> => {
-    const query = new URLSearchParams({ collection: TAKEOVER_TARGET, format: "claude", sessionId, updated: new Date(Date.now() + 60_000).toISOString() });
+    const query = new URLSearchParams({ collection: TAKEOVER_TARGET, format: "claude", sessionId, projectDirectory: OWN_FOLDER, updated: new Date(Date.now() + 60_000).toISOString() });
     const answer = await fetch(`${h.apiUrl}/v1/ingest/session?${query}`, { method: "POST", headers: { authorization: `Bearer ${key}`, "content-type": "application/x-ndjson" }, body: words.map((word, index) => line(index % 2 === 0 ? "user" : "assistant", word)).join("") });
     await answer.arrayBuffer();
     return answer.status;
   };
   const took = await session(id, "one", "two");
   const repush = push(s, h.apiUrl, "--apply", "--ignore-state", "--format", "json");
-  h.check("push: a path its session took over counts as migrated, not as a failure", first.code === 0 && took === 202 && repush.code === 0 && (rowOf(repush) as unknown as { takenOver: number }).takenOver === 1 && rowOf(repush).sent === 0, { first: first.code, took, out: repush.out, err: repush.err });
+  h.check("push: a path its session took over counts as migrated, not as a failure", first.code === 0 && took === 202 && repush.code === 0 && rowOf(repush).takenOver === 1 && rowOf(repush).sent === 0, { first: first.code, took, out: repush.out, err: repush.err });
+  const again = push(s, h.apiUrl, "--apply", "--format", "json");
+  h.check("push: a run with saved progress asks the server, and says taken over", again.code === 0 && rowOf(again).takenOver === 1 && rowOf(again).alreadySent === 0, again.out + again.err);
+  const file = path.join(s.root, "2026-01-15_dededede.md");
+  writeFileSync(file, `${text}\nedited\n`);
+  const edited = push(s, h.apiUrl, "--apply");
+  h.check("push: a local edit after a takeover is said not to have been sent", edited.code === 0 && edited.out.includes("local changes that were not sent") && !edited.out.includes("The server confirmed each one"), edited.out + edited.err);
 
   const before = new Set(storedFiles(h, TAKEOVER_TARGET));
   const owned = await session("efefefef-1111-2222-3333-444444444444", "mine");
@@ -307,6 +318,28 @@ async function takenOver(h: Harness, key: string): Promise<void> {
   const other = setup(h, key, "takeover-owned", TAKEOVER_TARGET, { [name]: "---\ndate: \"2024-03-01\"\n---\n\nanother\n" });
   const refused = push(other, h.apiUrl, "--apply", "--format", "json");
   h.check("push: a path a session owns, with no takeover, stays a reported problem", owned === 202 && name !== "" && refused.code === 1 && rowOf(refused).refused?.["path_owned"] === 1, { owned, name, out: refused.out, err: refused.err });
+}
+
+/** Saved progress is only a note: what the server no longer holds is not called stored. */
+async function trustNoNote(h: Harness, key: string): Promise<void> {
+  const s = setup(h, key, "trust", TRUST_TARGET, { "kept.md": "---\ndate: \"2024-03-01\"\n---\n\nkept\n", "gone.md": "---\ndate: \"2024-03-01\"\n---\n\ngone\n" });
+  const first = push(s, h.apiUrl, "--apply", "--format", "json");
+  const removed = await fetch(`${h.apiUrl}/v1/documents?${new URLSearchParams({ collection: TRUST_TARGET, path: "gone.md" })}`, { method: "DELETE", headers: { authorization: `Bearer ${key}` } });
+  await removed.arrayBuffer();
+  const second = push(s, h.apiUrl, "--apply", "--format", "json");
+  const row = rowOf(second);
+  h.check("push: a document deleted on the server is not called stored, whatever the progress file says", first.code === 0 && removed.status < 300 && second.code === 1 && row.alreadySent === 1 && Object.values(row.refused ?? {}).reduce((a, b) => a + b, 0) === 1, second.out + second.err);
+}
+
+/** Two spellings of one name would be one document, and the second would replace the first with nobody saying so. */
+function spellings(h: Harness, key: string): void {
+  const s = setup(h, key, "spellings", SPELLING_TARGET, { "cafe\u0301.md": "first spelling\n", "caf\u00e9.md": "second spelling\n" });
+  if (readdirSync(s.root).length !== 2) {
+    console.log("NOT RUN push: two spellings of a name (this filesystem keeps one)");
+    return;
+  }
+  const run = push(s, h.apiUrl, "--apply", "--format", "json");
+  h.check("push: a second spelling is refused locally, overwrites nothing, and fails the run", run.code === 1 && rowOf(run).sent === 1 && rowOf(run).refused?.["second_spelling"] === 1 && storedFiles(h, SPELLING_TARGET).length === 1, run.out + run.err);
 }
 
 /** The moves that lose an answer, and the ones a server says itself, on real writes. */
@@ -384,7 +417,7 @@ function stops(h: Harness, key: string, narrow: string): void {
 
 /** Runs against a server started with INGEST_SERVER, where these targets are opened and empty. */
 export async function migratePush(h: Harness, admin: string): Promise<void> {
-  const collections = [TARGET, SECOND_TARGET, REFUSING_TARGET, KILLED_TARGET, RULES_TARGET, TAKEOVER_TARGET, DECOMPOSED_TARGET, CREDENTIAL_TARGET, OLDER_TARGET, FILLED, CLOSED];
+  const collections = [TARGET, SECOND_TARGET, REFUSING_TARGET, KILLED_TARGET, RULES_TARGET, TAKEOVER_TARGET, TRUST_TARGET, SPELLING_TARGET, DECOMPOSED_TARGET, CREDENTIAL_TARGET, OLDER_TARGET, FILLED, CLOSED];
   // A key has a budget of requests a minute, and this should not spend its time waiting out a window. A real push does, and goes at that rate.
   const fresh = async (label: string): Promise<string> => (await issueKey(h, admin, { label, scopes: ["ingest", "read"], collections })).token;
   await dryRunAndSend(h, await fresh("push"));
@@ -395,6 +428,9 @@ export async function migratePush(h: Harness, admin: string): Promise<void> {
   credentialNames(h, other);
   olderCopy(h, other);
   await takenOver(h, await fresh("push-takeover"));
+  const trust = await fresh("push-trust");
+  await trustNoNote(h, trust);
+  spellings(h, trust);
   await lostAnswers(h, await fresh("push-lost"));
   await killed(h, await fresh("push-killed"));
   refusals(h, await fresh("push-refusals"));

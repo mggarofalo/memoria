@@ -35,22 +35,27 @@ type pushAnswer struct {
 	frontmatter string
 	drop        bool
 	collection  string
+	path        string
 }
 
 type pushServer struct {
 	*httptest.Server
-	state   atomic.Value
-	t       *testing.T
-	mu      sync.Mutex
-	calls   []pushCall
-	running int
-	most    int
-	answer  func(call pushCall, attempt int) pushAnswer
+	// ledger is what a real server would answer GET with: the updated of each path it stored.
+	ledger      map[string]string
+	faultAnswer pushAnswer
+	faultsLeft  int
+	state       atomic.Value
+	t           *testing.T
+	mu          sync.Mutex
+	calls       []pushCall
+	running     int
+	most        int
+	answer      func(call pushCall, attempt int) pushAnswer
 }
 
 func newPushServer(t *testing.T, answer func(pushCall, int) pushAnswer) *pushServer {
 	t.Helper()
-	s := &pushServer{t: t, answer: answer}
+	s := &pushServer{t: t, answer: answer, ledger: map[string]string{}}
 	s.Server = httptest.NewServer(http.HandlerFunc(s.serve))
 	t.Cleanup(s.Close)
 	return s
@@ -98,18 +103,45 @@ func (s *pushServer) serve(w http.ResponseWriter, r *http.Request) {
 	case answer.status != 0:
 		writeProblem(w, answer)
 	default:
+		s.mu.Lock()
+		s.ledger[call.path] = call.updated
+		s.mu.Unlock()
 		writeStored(w, call, answer)
 	}
 }
 
+// forget is a server that lost everything it was sent.
+func (s *pushServer) forget() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ledger = map[string]string{}
+}
+
 func (s *pushServer) serveStatus(w http.ResponseWriter, r *http.Request) {
-	state, known := s.state.Load().(string)
-	if !known {
-		writeProblem(w, pushAnswer{status: http.StatusServiceUnavailable})
+	if fault, due := s.takeStatusFault(); due {
+		writeProblem(w, fault)
 		return
 	}
+	path := r.URL.Query().Get("path")
+	s.mu.Lock()
+	updated, stored := s.ledger[path]
+	s.mu.Unlock()
+	state, chosen := s.state.Load().(string)
+	switch {
+	case chosen && state == "unanswered":
+		writeProblem(w, pushAnswer{status: http.StatusBadRequest})
+		return
+	case !chosen && stored:
+		state = "complete"
+	case !chosen:
+		state = "none"
+	}
+	version := "null"
+	if stored {
+		version = fmt.Sprintf("%q", updated)
+	}
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = fmt.Fprintf(w, `{"collection":"notes","path":%q,"state":%q,"updated":null}`, r.URL.Query().Get("path"), state)
+	_, _ = fmt.Fprintf(w, `{"collection":"notes","path":%q,"state":%q,"updated":%s}`, path, state, version)
 }
 
 func writeProblem(w http.ResponseWriter, answer pushAnswer) {
@@ -122,7 +154,10 @@ func writeProblem(w http.ResponseWriter, answer pushAnswer) {
 }
 
 func writeStored(w http.ResponseWriter, call pushCall, answer pushAnswer) {
-	frontmatter, collection := answer.frontmatter, answer.collection
+	frontmatter, collection, path := answer.frontmatter, answer.collection, answer.path
+	if path == "" {
+		path = call.path
+	}
 	if frontmatter == "" {
 		frontmatter = "read"
 	}
@@ -131,7 +166,7 @@ func writeStored(w http.ResponseWriter, call pushCall, answer pushAnswer) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
-	_, _ = fmt.Fprintf(w, `{"collection":%q,"path":%q,"file":%q,"bytes":1,"created":true,"redaction":"applied","redactions":{"github_token":1},"frontmatter":%q,"jobId":"j"}`, collection, call.path, call.path, frontmatter)
+	_, _ = fmt.Fprintf(w, `{"collection":%q,"path":%q,"file":%q,"bytes":1,"created":true,"redaction":"applied","redactions":{"github_token":1},"frontmatter":%q,"jobId":"j"}`, collection, path, path, frontmatter)
 }
 
 func (s *pushServer) callsFor(path string) int {
@@ -941,7 +976,7 @@ func checkTakeover(t *testing.T, reason string) {
 }
 
 func TestAnOwnedPathThatWasNotTakenOverStaysAProblem(t *testing.T) {
-	for name, state := range map[string]any{"complete": "complete", "none": "none", "no answer": nil} {
+	for name, state := range map[string]any{"complete": "complete", "none": "none", "no answer": "unanswered"} {
 		t.Run(name, func(t *testing.T) {
 			f := newPushFixture(t)
 			server := newPushServer(t, func(call pushCall, _ int) pushAnswer {
@@ -950,9 +985,7 @@ func TestAnOwnedPathThatWasNotTakenOverStaysAProblem(t *testing.T) {
 				}
 				return pushAnswer{}
 			})
-			if state != nil {
-				server.state.Store(state)
-			}
+			server.state.Store(state)
 			summary, code, report := f.result(t, server)
 			checkPush(t, summary, code, apperr.ExitGeneric, 2, 0)
 			checkOneProblem(t, report, "a.md", migrate.ProblemRefused, "path_owned")
@@ -993,4 +1026,252 @@ func TestADecomposedNameIsSentInComposedForm(t *testing.T) {
 	summary, code, _ := f.result(t, server)
 	checkPush(t, summary, code, 0, 4, 0)
 	checkCalls(t, server, "caf\u00e9.md", 1)
+}
+
+func TestASecondSpellingIsRefusedAndOverwritesNothing(t *testing.T) {
+	f := newPushFixture(t)
+	writeFile(t, filepath.Join(f.notes, "cafe\u0301.md"), "decomposed copy")
+	writeFile(t, filepath.Join(f.notes, "caf\u00e9.md"), "composed copy")
+	if entries := namesIn(t, f.notes); !slices.Contains(entries, "cafe\u0301.md") || !slices.Contains(entries, "caf\u00e9.md") {
+		t.Skip("this filesystem keeps one spelling")
+	}
+	server := newPushServer(t, nil)
+	summary, code, report := f.result(t, server)
+	checkPush(t, summary, code, apperr.ExitGeneric, 4, 0)
+	checkCalls(t, server, "caf\u00e9.md", 1)
+	if summary.Refused["second_spelling"] != 1 {
+		t.Fatalf("summary = %+v", summary)
+	}
+	problems := readProblems(t, report)
+	if len(problems) != 1 || problems[0].Reason != "second_spelling" {
+		t.Fatalf("problems = %+v", problems)
+	}
+}
+
+func namesIn(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	return names
+}
+
+func TestAServerThatLostItAllGetsEverythingAgain(t *testing.T) {
+	f := newPushFixture(t)
+	server := newPushServer(t, nil)
+	summary, code, _ := f.result(t, server)
+	checkPush(t, summary, code, 0, 3, 0)
+	server.forget()
+	summary, code, _ = f.result(t, server)
+	checkPush(t, summary, code, 0, 3, 0)
+	checkCalls(t, server, "a.md", 2)
+}
+
+func TestAHandEditedOrDeletedDocumentIsNotCalledStored(t *testing.T) {
+	f := newPushFixture(t)
+	server := newPushServer(t, nil)
+	summary, code, _ := f.result(t, server)
+	checkPush(t, summary, code, 0, 3, 0)
+	server.mu.Lock()
+	server.ledger["a.md"] = "2001-01-01T00:00:00Z"
+	delete(server.ledger, "sub/d.md")
+	server.mu.Unlock()
+	summary, code, _ = f.result(t, server)
+	checkPush(t, summary, code, 0, 2, 1)
+	checkCalls(t, server, "a.md", 2)
+	checkCalls(t, server, "sub/d.md", 2)
+	checkCalls(t, server, "my dir/b+c.md", 1)
+}
+
+func TestAStateCheckRidesOutTheServer(t *testing.T) {
+	for name, answer := range map[string]pushAnswer{
+		"lost":  {status: http.StatusBadGateway},
+		"limit": {status: http.StatusTooManyRequests, retryAfter: "3"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newPushFixture(t)
+			server := newPushServer(t, nil)
+			summary, code, _ := f.result(t, server)
+			checkPush(t, summary, code, 0, 3, 0)
+			server.statusFaults(answer, 2)
+			summary, code, _ = f.result(t, server, "--workers", "1")
+			checkPush(t, summary, code, 0, 0, 3)
+			checkCalls(t, server, "a.md", 1)
+		})
+	}
+}
+
+func TestAStateCheckRefusedStopsTheRunAndClaimsNothing(t *testing.T) {
+	f := newPushFixture(t)
+	server := newPushServer(t, nil)
+	summary, code, _ := f.result(t, server)
+	checkPush(t, summary, code, 0, 3, 0)
+	server.statusFaults(pushAnswer{status: http.StatusForbidden}, 100)
+	summary, code, _ = f.result(t, server, "--workers", "1")
+	if code == 0 || summary.AlreadySent != 0 || summary.NotReached != 3 {
+		t.Fatalf("code = %d, summary = %+v", code, summary)
+	}
+}
+
+func TestAStopClaimsNothingAboutWhatItDidNotCheck(t *testing.T) {
+	f := newPushFixture(t)
+	server := newPushServer(t, nil)
+	summary, code, _ := f.result(t, server)
+	checkPush(t, summary, code, 0, 3, 0)
+	server.statusFaults(pushAnswer{status: http.StatusBadGateway}, 1000)
+	summary, code, _ = f.result(t, server, "--workers", "1")
+	if code != apperr.ExitUnavailable || summary.AlreadySent != 0 || summary.NotReached != 3 {
+		t.Fatalf("code = %d, summary = %+v", code, summary)
+	}
+}
+
+func TestA202ForAnotherPathIsNotRecordedAsStored(t *testing.T) {
+	f := newPushFixture(t)
+	server := newPushServer(t, func(pushCall, int) pushAnswer { return pushAnswer{path: "elsewhere.md"} })
+	summary, code, _ := f.result(t, server, "--workers", "1")
+	if code == 0 || summary.Sent != 0 || summary.NotReached != 3 {
+		t.Fatalf("code = %d, summary = %+v", code, summary)
+	}
+}
+
+func TestEachKindOfAnswerHasItsOwnBudget(t *testing.T) {
+	for name, script := range map[string][]pushAnswer{
+		"limits then a 500":              {{status: 429}, {status: 429}, {status: 429}, {status: 500}, {}},
+		"writes in progress then a loss": repeatThen(pushAnswer{status: 409, code: "ingest_in_progress"}, 8, pushAnswer{drop: true}),
+		"limits past the resend budget":  repeatThen(pushAnswer{status: 429}, 20, pushAnswer{status: 502}),
+	} {
+		t.Run(name, func(t *testing.T) { checkBudget(t, script) })
+	}
+}
+
+func repeatThen(answer pushAnswer, times int, last pushAnswer) []pushAnswer {
+	script := make([]pushAnswer, 0, times+1)
+	for range times {
+		script = append(script, answer)
+	}
+	return append(script, last)
+}
+
+func checkBudget(t *testing.T, script []pushAnswer) {
+	t.Helper()
+	f := newPushFixture(t)
+	server := newPushServer(t, func(call pushCall, attempt int) pushAnswer {
+		if call.path == "a.md" && attempt < len(script) {
+			return script[attempt]
+		}
+		return pushAnswer{}
+	})
+	summary, code, _ := f.result(t, server, "--workers", "1")
+	checkPush(t, summary, code, 0, 3, 0)
+}
+
+func TestNothingSelectedSaysSo(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "notes", "a.txt"), "not markdown")
+	config := filepath.Join(dir, "index.yml")
+	writeFile(t, config, fmt.Sprintf("collections:\n  notes:\n    path: %q\n", filepath.Join(dir, "notes")))
+	h := newHarness(t)
+	h.login(newPushServer(t, nil).URL)
+	if code := h.run("migrate", "push", "--qmd-config", config, "--apply"); code != 0 {
+		t.Fatalf("code = %d", code)
+	}
+	if out := h.stdout.String(); !strings.Contains(out, "Nothing was selected") || strings.Contains(out, "Every selected") {
+		t.Fatalf("stdout = %q", out)
+	}
+}
+
+func TestPlanCountsWhatOnlyThisMachineCanSee(t *testing.T) {
+	f := newPushFixture(t)
+	writeFile(t, filepath.Join(f.notes, "latin.md"), "caf\xe9")
+	ahead := filepath.Join(f.notes, "ahead.md")
+	writeFile(t, ahead, "text")
+	later := time.Now().Add(2 * time.Hour)
+	if err := os.Chtimes(ahead, later, later); err != nil {
+		t.Fatal(err)
+	}
+	if code := f.h.run("migrate", "plan", "--qmd-config", f.config, "--format", "json"); code != apperr.ExitGeneric {
+		t.Fatalf("code = %d, stderr = %q", code, f.h.stderr.String())
+	}
+	var result migratePlanResult
+	if err := json.Unmarshal(f.h.stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if got := result.Collections[0].Unstorable; got[migrate.ReasonNotUTF8] != 1 || got[migrate.ReasonFutureTime] != 1 {
+		t.Fatalf("unstorable = %v", got)
+	}
+}
+
+func TestABlankFileIsCountedAndNeitherSentNorAFailure(t *testing.T) {
+	f := newPushFixture(t)
+	writeFile(t, filepath.Join(f.notes, "empty.md"), "")
+	writeFile(t, filepath.Join(f.notes, "spaces.md"), " \n\t\n")
+	if code := f.h.run("migrate", "plan", "--qmd-config", f.config); code != 0 || !strings.Contains(f.h.stdout.String(), "2 blank file(s)") {
+		t.Fatalf("plan: code = %d, stdout = %q", code, f.h.stdout.String())
+	}
+	server := newPushServer(t, nil)
+	summary, code, report := f.result(t, server)
+	checkPush(t, summary, code, 0, 3, 0)
+	if summary.Blank != 2 || summary.Selected != 3 || server.callsFor("empty.md") != 0 {
+		t.Fatalf("summary = %+v", summary)
+	}
+	if problems := readProblems(t, report); len(problems) != 2 || problems[0].Status != migrate.ProblemBlank {
+		t.Fatalf("problems = %+v", problems)
+	}
+}
+
+func TestALocalEditAfterATakeoverIsNotCalledStored(t *testing.T) {
+	f := newPushFixture(t)
+	server := newPushServer(t, nil)
+	summary, code, _ := f.result(t, server)
+	checkPush(t, summary, code, 0, 3, 0)
+	server.state.Store(migrate.StateTakenOver)
+	summary, code, _ = f.result(t, server)
+	if code != 0 || summary.TakenOver != 3 || summary.TakenOverEdited != 0 || server.total() != 3 {
+		t.Fatalf("unchanged, and taken over: code = %d, calls = %d, summary = %+v", code, server.total(), summary)
+	}
+	checkEditAfterTakeover(t, f, server)
+}
+
+func checkEditAfterTakeover(t *testing.T, f *pushFixture, server *pushServer) {
+	t.Helper()
+	later := time.Now().Add(time.Minute)
+	if err := os.Chtimes(filepath.Join(f.notes, "a.md"), later, later); err != nil {
+		t.Fatal(err)
+	}
+	server.answer = func(call pushCall, _ int) pushAnswer {
+		if call.path == "a.md" {
+			return pushAnswer{status: http.StatusConflict, code: "path_owned"}
+		}
+		return pushAnswer{}
+	}
+	summary, code, report := f.result(t, server)
+	if code != 0 || summary.TakenOver != 3 || summary.TakenOverEdited != 1 {
+		t.Fatalf("code = %d, summary = %+v", code, summary)
+	}
+	checkOneProblem(t, report, "a.md", migrate.ProblemLocalEdits, "")
+	if code := f.push(server); code != 0 || !strings.Contains(f.h.stdout.String(), "local changes that were not sent") {
+		t.Fatalf("code = %d, stdout = %q", code, f.h.stdout.String())
+	}
+}
+
+// statusFaults makes the next GETs answer this.
+func (s *pushServer) statusFaults(answer pushAnswer, times int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.faultAnswer, s.faultsLeft = answer, times
+}
+
+func (s *pushServer) takeStatusFault() (pushAnswer, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.faultsLeft == 0 {
+		return pushAnswer{}, false
+	}
+	s.faultsLeft--
+	return s.faultAnswer, true
 }

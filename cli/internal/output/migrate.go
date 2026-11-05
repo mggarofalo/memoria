@@ -33,7 +33,7 @@ func MigratePlanTable(w io.Writer, plans []migrate.Plan, raw *migrate.RawSession
 	var b strings.Builder
 	fmt.Fprintf(&b, "total: %d files, %d bytes\n", files, total)
 	for i := range plans {
-		for _, line := range unstorableLines(plans[i].Name, plans[i].Unstorable, plans[i].Decomposed) {
+		for _, line := range unstorableLines(plans[i].Name, plans[i].Unstorable, plans[i].Decomposed, plans[i].Blank) {
 			b.WriteString(row(line) + "\n")
 		}
 	}
@@ -56,7 +56,7 @@ func MigratePlanMarkdown(w io.Writer, plans []migrate.Plan, raw *migrate.RawSess
 	for i := range plans {
 		p := &plans[i]
 		fmt.Fprintf(&b, "- **%s** to %s: %d files, %d bytes, largest %d, %d over 2 MiB, %d unreadable; %s\n", inlineText(p.Name), inlineText(p.Target), p.Files, p.Bytes, p.Largest, p.OverLimit, p.Unreadable, inlineText(planProblem(p)))
-		for _, line := range unstorableLines(p.Name, p.Unstorable, p.Decomposed) {
+		for _, line := range unstorableLines(p.Name, p.Unstorable, p.Decomposed, p.Blank) {
 			b.WriteString("  - " + inlineText(line) + "\n")
 		}
 	}
@@ -150,10 +150,13 @@ func MigrateReportMarkdown(w io.Writer, reports []migrate.Report) error {
 }
 
 // unstorableLines says what a plan knows will be refused, by reason, and names no file.
-func unstorableLines(name string, unstorable map[string]int, decomposed int) []string {
+func unstorableLines(name string, unstorable map[string]int, decomposed, blank int) []string {
 	var lines []string
 	for _, reason := range ruleNames(unstorable) {
 		lines = append(lines, fmt.Sprintf("%s: cannot be stored at its path, %s: %d", name, reason, unstorable[reason]))
+	}
+	if blank > 0 {
+		lines = append(lines, fmt.Sprintf("%s: %d blank file(s) left out, as QMD does not index them", name, blank))
 	}
 	if decomposed > 0 {
 		lines = append(lines, fmt.Sprintf("%s: %d decomposed name(s) go in composed form, so they are stored under that spelling", name, decomposed))
@@ -167,14 +170,21 @@ func pushVerdict(result *migrate.PushResult) string {
 	if result.DryRun {
 		return "Dry run: nothing was sent. Pass --apply to send."
 	}
-	unstored := 0
+	unstored, selected, edited := 0, 0, 0
 	for i := range result.Collections {
 		unstored += result.Collections[i].NotStored() + result.Collections[i].OverCap + result.Collections[i].FoldersSkipped
+		selected += result.Collections[i].Selected
+		edited += result.Collections[i].TakenOverEdited
 	}
-	if unstored > 0 {
+	switch {
+	case unstored > 0:
 		return fmt.Sprintf("NOT everything was stored: %d not stored or not read. The local report names them, and these counts do not.", unstored)
+	case selected == 0:
+		return "Nothing was selected, so nothing was sent."
+	case edited > 0:
+		return fmt.Sprintf("Every selected document is stored, but %d taken over by their session have local changes that were not sent.", edited)
 	}
-	return "Every selected document is stored."
+	return "Every selected document is stored. The server confirmed each one."
 }
 
 func sum(counts map[string]int) int {
@@ -187,7 +197,7 @@ func sum(counts map[string]int) int {
 
 func pushDetails(summary *migrate.PushSummary) []string {
 	var lines []string
-	lines = append(lines, unstorableLines(summary.Name, summary.Unstorable, summary.DecomposedNames)...)
+	lines = append(lines, unstorableLines(summary.Name, summary.Unstorable, summary.DecomposedNames, summary.Blank)...)
 	for _, reason := range ruleNames(summary.Refused) {
 		lines = append(lines, fmt.Sprintf("%s: refused, %s: %d", summary.Name, reason, summary.Refused[reason]))
 	}
@@ -199,6 +209,9 @@ func pushDetails(summary *migrate.PushSummary) []string {
 	}
 	if summary.StoredUnredacted > 0 {
 		lines = append(lines, fmt.Sprintf("%s: %d stored unredacted, as the server's setting for this collection says", summary.Name, summary.StoredUnredacted))
+	}
+	if summary.TakenOverEdited > 0 {
+		lines = append(lines, fmt.Sprintf("%s: %d taken over by their session, with local changes that were not sent", summary.Name, summary.TakenOverEdited))
 	}
 	if summary.NoLongerSelected > 0 {
 		lines = append(lines, fmt.Sprintf("%s: %d sent earlier and no longer selected, and left on the server", summary.Name, summary.NoLongerSelected))
@@ -229,7 +242,7 @@ func MigratePushTable(w io.Writer, result *migrate.PushResult) error {
 		s := &result.Collections[i]
 		if result.DryRun {
 			rows = append(rows, row(s.Name, s.Target, s.Selected, s.Bytes, s.OverDefaultLimit, sum(s.Unstorable), s.FoldersSkipped))
-			for _, line := range unstorableLines(s.Name, s.Unstorable, s.DecomposedNames) {
+			for _, line := range unstorableLines(s.Name, s.Unstorable, s.DecomposedNames, s.Blank) {
 				b.WriteString(row(line) + "\n")
 			}
 			continue

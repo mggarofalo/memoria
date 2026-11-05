@@ -30,6 +30,7 @@ const (
 	pushSaveAfter = 5 * time.Second
 
 	pauseAttempts  = 60
+	holdAttempts   = 240
 	resendAttempts = 8
 	reportAttempts = 3
 
@@ -69,6 +70,11 @@ An interrupted run continues where it left off when you run it again, and sendin
 same document twice is safe: its path is its identity. Progress is kept in a private file
 holding paths and progress, and no text. A file changed since it was sent goes again.
 
+That file is only a note. Before skipping a document, a run asks the server for its state,
+one request each, and anything the server does not confirm goes again. So a document counts
+as stored only when the server says so, and "already sent" takes as long as the key's rate
+limit allows.
+
 This exits 1 if anything was not stored, and says how many, by the reason the server gave.
 Only a private local report names the files, as this summary may reach shared logs. The
 server's cap on a document's size refuses it with 413, and --accept-over-cap lets the exit
@@ -79,11 +85,17 @@ A file the server would always refuse at its path is still sent, as the server d
 is reported with its reason. 'migrate plan' counts those beforehand. A decomposed name, as a
 Mac can hold, goes in composed form, the same every time, as the server refuses any other.
 
+Two files whose names differ only in their Unicode form would be one document, so the first
+is sent and the second is refused as second_spelling, until you rename one.
+
 It always sends the newest copy of a file, and sends again until the server answers. A copy
-older than the one it already sent is not sent, as it would replace the newer one.
+older than one the server confirms it holds is not sent, as it would replace the newer one.
 
 A document its session has since taken over is counted as migrated, not failed, once the
-server confirms that state for its path.
+server confirms that state for its path. If the local copy has changed since, the summary
+says those changes were not sent.
+
+A blank file is left out and counted, as QMD does not index one.
 
 A document whose frontmatter the server could not read is stored and searchable, but
 matches no date, project or tag filter. Those are counted and named in the report.`,
@@ -109,6 +121,8 @@ type pushJob struct {
 	target     string
 	plan       migrate.Plan
 	paths      []string
+	// secondSpellings would replace a file before them, so they are refused here.
+	secondSpellings map[string]bool
 }
 
 func selectForPush(collections []migrate.Collection, targets map[string]string) ([]pushJob, error) {
@@ -127,7 +141,7 @@ func selectForPush(collections []migrate.Collection, targets map[string]string) 
 			}
 			paths = append(paths, filepath.ToSlash(relative))
 		}
-		jobs = append(jobs, pushJob{collection: collection, target: target, plan: plan, paths: paths})
+		jobs = append(jobs, pushJob{collection: collection, target: target, plan: plan, paths: paths, secondSpellings: migrate.SecondSpellings(paths)})
 	}
 	return jobs, nil
 }
@@ -160,7 +174,7 @@ func (a *app) migratePush(ctx context.Context, o migratePushOptions) error {
 func summaryOf(job pushJob) migrate.PushSummary {
 	return migrate.PushSummary{
 		Name: job.collection.Name, Target: job.target, Selected: job.plan.Files, Bytes: job.plan.Bytes,
-		OverDefaultLimit: job.plan.OverLimit, FoldersSkipped: job.plan.Unreadable, Unstorable: job.plan.Unstorable, DecomposedNames: job.plan.Decomposed,
+		OverDefaultLimit: job.plan.OverLimit, FoldersSkipped: job.plan.Unreadable, Unstorable: job.plan.Unstorable, DecomposedNames: job.plan.Decomposed, Blank: job.plan.Blank,
 		Refused: map[string]int{}, Frontmatter: map[string]int{}, Redactions: map[string]int{},
 	}
 }
@@ -299,8 +313,10 @@ type pushCollection struct {
 	summary  migrate.PushSummary
 	problems []migrate.PushProblem
 	finished map[string]bool
-	unsaved  int
-	saved    time.Time
+	// held is what the server has said it holds on this run, which is all a summary may call stored.
+	held    map[string]bool
+	unsaved int
+	saved   time.Time
 }
 
 // collection sends one collection. A run already stopped still accounts for what it did not reach.
@@ -314,7 +330,10 @@ func (r *pushRun) collection(job pushJob, origin string) (migrate.PushSummary, [
 		return migrate.PushSummary{}, nil, apperr.New(apperr.KindUsage, "collection %s: its folder cannot be opened", job.collection.Name)
 	}
 	defer func() { _ = root.Close() }()
-	c := &pushCollection{job: job, root: root, state: state, summary: summaryOf(job), finished: make(map[string]bool, len(job.paths)), saved: time.Now()}
+	c := &pushCollection{job: job, root: root, state: state, summary: summaryOf(job), finished: make(map[string]bool, len(job.paths)), held: map[string]bool{}, saved: time.Now()}
+	for _, name := range job.plan.BlankNames {
+		c.addProblem(name, migrate.ProblemBlank, "")
+	}
 	r.a.warnIfNoFiles(job.collection.Name, job.plan.Files, job.plan.Unreadable)
 	if err := state.Save(); err != nil {
 		return migrate.PushSummary{}, nil, apperr.Wrap(apperr.KindGeneric, err, err.Error())
@@ -354,7 +373,7 @@ func (c *pushCollection) finish() {
 	selected := make(map[string]bool, len(c.job.paths))
 	for _, name := range c.job.paths {
 		selected[name] = true
-		if !c.finished[name] && !c.heldAlready(name) {
+		if !c.finished[name] {
 			c.summary.NotReached++
 			c.addProblem(name, migrate.ProblemNotReached, "")
 			continue
@@ -368,19 +387,9 @@ func (c *pushCollection) finish() {
 	}
 }
 
-// heldAlready counts what an earlier run stored, when a stop came before this run looked at it.
-func (c *pushCollection) heldAlready(name string) bool {
-	updated, size, err := fileVersion(c.root, name)
-	if err != nil || !c.state.IsSent(name, updated, size) {
-		return false
-	}
-	c.summary.AlreadySent++
-	return true
-}
-
 func (c *pushCollection) noteStored(name string) {
 	entry, stored := c.state.Files[name]
-	if !stored {
+	if !stored || !c.held[name] {
 		return
 	}
 	if entry.Frontmatter != migrate.FrontmatterRead {
@@ -408,6 +417,8 @@ type pushed struct {
 	unreadable bool
 	// takenOver is a refusal the server confirmed means its session now owns this path.
 	takenOver bool
+	// edited is a taken-over path whose local copy is not the one that was migrated.
+	edited bool
 }
 
 func (r *pushRun) document(c *pushCollection, name string) {
@@ -422,17 +433,107 @@ func (r *pushRun) document(c *pushCollection, name string) {
 		})
 		return
 	}
-	c.mu.Lock()
-	sent := c.state.IsSent(name, updated, size)
-	c.mu.Unlock()
-	if sent {
-		c.record(name, func() { c.summary.AlreadySent++ })
+	if c.job.secondSpellings[name] {
+		c.record(name, func() { c.refuse(name, migrate.ReasonSecondSpelling) })
+		return
+	}
+	if step := r.checkSaved(c, name, updated, size); step != stepAgain {
 		return
 	}
 	outcome, finished := r.deliver(c, name)
 	if finished {
 		r.settle(c, name, outcome)
 	}
+}
+
+func (c *pushCollection) refuse(name, reason string) {
+	c.summary.Refused[reason]++
+	c.addProblem(name, migrate.ProblemRefused, reason)
+}
+
+// checkSaved asks the server about anything saved progress would skip, as that progress is only a note this machine made. A
+// server wiped, or a document deleted there, is seen here. stepAgain means send it.
+func (r *pushRun) checkSaved(c *pushCollection, name string, updated time.Time, size int64) pushStep {
+	c.mu.Lock()
+	entry, known := c.state.Files[name]
+	same := c.state.IsSent(name, updated, size)
+	c.mu.Unlock()
+	older := known && updated.Before(entry.Updated)
+	if !same && !older {
+		return stepAgain
+	}
+	state, held, answered := r.serverStatus(c, name)
+	switch {
+	case !answered:
+		return stepAbandoned
+	case older:
+		return c.settleOlder(name, state, held, entry.Updated)
+	case held == nil || !held.Equal(updated):
+		return stepAgain
+	case state == migrate.StateComplete:
+		c.record(name, func() {
+			c.summary.AlreadySent++
+			c.held[name] = true
+		})
+		return stepFinished
+	case state == migrate.StateTakenOver:
+		c.record(name, func() { c.summary.TakenOver++ })
+		return stepFinished
+	}
+	return stepAgain
+}
+
+// settleOlder keeps back a copy older than one the server confirms it holds, which could replace it. With nothing confirmed, it goes.
+func (c *pushCollection) settleOlder(name, state string, held *time.Time, sent time.Time) pushStep {
+	if state != migrate.StateComplete || held == nil || held.Before(sent) {
+		return stepAgain
+	}
+	c.record(name, func() { c.refuse(name, migrate.ReasonOlderThanSent) })
+	return stepFinished
+}
+
+// serverStatus reads a path's ledger entry, riding out what a send would. False means the run stopped. A refusal that is not a
+// stop leaves nothing confirmed, so the document goes, and the send decides.
+func (r *pushRun) serverStatus(c *pushCollection, name string) (string, *time.Time, bool) {
+	tries := retries{}
+	for {
+		if r.waitForPause() != nil {
+			return "", nil, false
+		}
+		answer, err := r.getStatus(c, name)
+		if err != nil {
+			if !r.retryAfterLoss(err, tries) {
+				return "", nil, false
+			}
+			continue
+		}
+		if answer.JSON200 != nil {
+			return answer.JSON200.State, answer.JSON200.Updated, true
+		}
+		again, answered := r.statusRefused(c, answer, tries)
+		if !again {
+			return "", nil, answered
+		}
+	}
+}
+
+func (r *pushRun) statusRefused(c *pushCollection, answer *api.GetRenderedIngestStatusResponse, tries retries) (again, answered bool) {
+	refused := apperr.FromResponse(answer.StatusCode(), answer.HTTPResponse.Header, answer.Body)
+	action := migrate.Classify(answer.StatusCode(), refused.Code)
+	switch action {
+	case migrate.ActionStop:
+		r.stop(stopFor(c.job.target, refused))
+		return false, false
+	case migrate.ActionHold, migrate.ActionPause, migrate.ActionResend, migrate.ActionResendThenReport:
+		outcome, retry := r.retryAnswer(pushed{action: action}, answer.HTTPResponse, tries)
+		return retry, outcome.action != migrate.ActionStop
+	}
+	return false, true
+}
+
+func (r *pushRun) getStatus(c *pushCollection, name string) (*api.GetRenderedIngestStatusResponse, error) {
+	sent := migrate.ServerPath(name)
+	return r.session.client.GetRenderedIngestStatusWithResponse(r.ctx, &api.GetRenderedIngestStatusParams{Collection: &c.job.target, Path: &sent})
 }
 
 // fileVersion is the `updated` sent each time, as the route asks: the same value for the same file.
@@ -462,14 +563,14 @@ func (r *pushRun) settle(c *pushCollection, name string, outcome pushed) {
 			c.addProblem(name, migrate.ProblemUnreadable, "")
 		case outcome.takenOver:
 			c.summary.TakenOver++
+			c.noteEdited(name, outcome.edited)
 		case outcome.action == migrate.ActionStored:
 			c.stored(name, outcome.updated, outcome.size, outcome.result)
 		case outcome.action == migrate.ActionOverCap:
 			c.summary.OverCap++
 			c.addProblem(name, migrate.ProblemOverCap, "")
 		default:
-			c.summary.Refused[outcome.reason]++
-			c.addProblem(name, migrate.ProblemRefused, outcome.reason)
+			c.refuse(name, outcome.reason)
 		}
 	})
 	if err := c.saveIfDue(); err != nil {
@@ -477,7 +578,15 @@ func (r *pushRun) settle(c *pushCollection, name string, outcome pushed) {
 	}
 }
 
+func (c *pushCollection) noteEdited(name string, edited bool) {
+	if edited {
+		c.summary.TakenOverEdited++
+		c.addProblem(name, migrate.ProblemLocalEdits, "")
+	}
+}
+
 func (c *pushCollection) stored(name string, updated time.Time, size int64, result *api.RenderedDocumentResult) {
+	c.held[name] = true
 	c.state.Files[name] = migrate.PushEntry{Updated: updated, Bytes: size, Frontmatter: result.Frontmatter, Redaction: result.Redaction}
 	c.summary.Sent++
 	c.unsaved++
@@ -499,7 +608,8 @@ func (c *pushCollection) saveIfDue() error {
 // deliver sends until the document has an end. The boolean is false when the run stopped first, and it is left for a later run.
 func (r *pushRun) deliver(c *pushCollection, name string) (pushed, bool) {
 	var waited time.Duration
-	for attempt := 0; ; attempt++ {
+	tries := retries{}
+	for {
 		if err := r.waitForPause(); err != nil {
 			return pushed{}, false
 		}
@@ -508,15 +618,15 @@ func (r *pushRun) deliver(c *pushCollection, name string) (pushed, bool) {
 		if err != nil {
 			return pushed{unreadable: true}, true
 		}
-		if c.olderThanSent(name, updated) {
-			return pushed{action: migrate.ActionReport, reason: migrate.ReasonOlderThanSent}, true
-		}
-		outcome, step := r.sendOnce(c, name, updated, size, attempt, &waited)
+		outcome, step := r.sendOnce(c, name, updated, size, tries, &waited)
 		if step != stepAgain {
 			return outcome, step == stepFinished
 		}
 	}
 }
+
+// retries counts one document's tries by the kind of answer, so one kind cannot spend what another is owed.
+type retries map[migrate.Action]int
 
 // What one send leaves a document's delivery to do next.
 type pushStep int
@@ -527,13 +637,13 @@ const (
 	stepAbandoned
 )
 
-func (r *pushRun) sendOnce(c *pushCollection, name string, updated time.Time, size int64, attempt int, waited *time.Duration) (pushed, pushStep) {
+func (r *pushRun) sendOnce(c *pushCollection, name string, updated time.Time, size int64, tries retries, waited *time.Duration) (pushed, pushStep) {
 	answer, err := r.post(c, name, updated, size)
 	if errors.Is(err, errFileUnreadable) {
 		return pushed{unreadable: true}, stepFinished
 	}
 	if err != nil {
-		if r.retryAfterLoss(err, attempt) {
+		if r.retryAfterLoss(err, tries) {
 			return pushed{}, stepAgain
 		}
 		return pushed{}, stepAbandoned
@@ -546,7 +656,7 @@ func (r *pushRun) sendOnce(c *pushCollection, name string, updated time.Time, si
 		}
 		return pushed{}, stepAgain
 	}
-	outcome, again := r.judge(c, name, answer, attempt)
+	outcome, again := r.judge(c, name, updated, answer, tries)
 	outcome.updated, outcome.size = updated, size
 	switch {
 	case again:
@@ -555,14 +665,6 @@ func (r *pushRun) sendOnce(c *pushCollection, name string, updated time.Time, si
 		return outcome, stepAbandoned
 	}
 	return outcome, stepFinished
-}
-
-// olderThanSent is a copy older than one the server holds. Sent again it could replace the newer one, so it stays here.
-func (c *pushCollection) olderThanSent(name string, updated time.Time) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	entry, known := c.state.Files[name]
-	return known && updated.Before(entry.Updated)
 }
 
 func (r *pushRun) post(c *pushCollection, name string, updated time.Time, size int64) (*api.IngestRenderedResponse, error) {
@@ -580,13 +682,15 @@ func (r *pushRun) post(c *pushCollection, name string, updated time.Time, size i
 }
 
 // retryAfterLoss handles a request with no answer, which may have landed. Sending it again is always safe.
-func (r *pushRun) retryAfterLoss(err error, attempt int) bool {
+func (r *pushRun) retryAfterLoss(err error, tries retries) bool {
 	classified := apperr.FromTransport(err)
 	var known *apperr.Error
 	if r.ctx.Err() != nil || (errors.As(classified, &known) && known.Kind == apperr.KindInsecure) {
 		r.stop(apperr.Wrap(apperr.KindGeneric, classified, "stopped before the end: "+classified.Error()+". Progress is saved, so run this again to continue"))
 		return false
 	}
+	attempt := tries[migrate.ActionResend]
+	tries[migrate.ActionResend]++
 	if attempt+1 >= resendAttempts {
 		r.stop(apperr.New(apperr.KindUnavailable, "the server stopped answering. Progress is saved, so run this again to continue"))
 		return false
@@ -604,7 +708,6 @@ func (r *pushRun) sleep(wait time.Duration) bool {
 	return r.a.sleep(r.ctx, wait) == nil
 }
 
-// judge reads one answer. The boolean says to send it again, after any wait.
 // inProgressWait is how long to give a write of this path that is still running, or 0 if this answer is not that.
 func inProgressWait(answer *api.IngestRenderedResponse) time.Duration {
 	refused := apperr.FromResponse(answer.StatusCode(), answer.HTTPResponse.Header, answer.Body)
@@ -615,34 +718,40 @@ func inProgressWait(answer *api.IngestRenderedResponse) time.Duration {
 	return min(max(named, minServerWait), maxRetryWait)
 }
 
-func (r *pushRun) judge(c *pushCollection, name string, answer *api.IngestRenderedResponse, attempt int) (pushed, bool) {
+// judge reads one answer. The boolean says to send it again, after any wait.
+func (r *pushRun) judge(c *pushCollection, name string, updated time.Time, answer *api.IngestRenderedResponse, tries retries) (pushed, bool) {
 	status := answer.StatusCode()
 	refused := apperr.FromResponse(status, answer.HTTPResponse.Header, answer.Body)
 	action := migrate.Classify(status, refused.Code)
 	outcome := pushed{action: action, reason: migrate.Reason(status, refused.Code)}
 	switch action {
 	case migrate.ActionStored:
-		return r.acceptAnswer(c, answer)
+		return r.acceptAnswer(c, name, answer)
 	case migrate.ActionStop:
 		r.stop(stopFor(c.job.target, refused))
 		return pushed{action: migrate.ActionStop}, false
 	case migrate.ActionReport, migrate.ActionOverCap:
-		outcome.takenOver = migrate.MayBeTakenOver(refused.Code) && r.isTakenOver(c, name)
+		if migrate.MayBeTakenOver(refused.Code) {
+			outcome.takenOver, outcome.edited = r.isTakenOver(c, name, updated)
+		}
 		return outcome, false
 	}
-	return r.retryAnswer(outcome, answer.HTTPResponse, attempt)
+	return r.retryAnswer(outcome, answer.HTTPResponse, tries)
 }
 
-// isTakenOver asks the server what a refused path is. Anything short of a clear yes leaves it a reported problem.
-func (r *pushRun) isTakenOver(c *pushCollection, name string) bool {
-	sent := migrate.ServerPath(name)
-	answer, err := r.session.client.GetRenderedIngestStatusWithResponse(r.ctx, &api.GetRenderedIngestStatusParams{Collection: &c.job.target, Path: &sent})
-	return err == nil && answer.JSON200 != nil && answer.JSON200.State == migrate.StateTakenOver
+// isTakenOver asks the server what a refused path is. Anything short of a clear yes leaves it a reported problem. The second
+// answer is whether this local copy differs from the version that was taken over, whose changes then went nowhere.
+func (r *pushRun) isTakenOver(c *pushCollection, name string, updated time.Time) (taken, edited bool) {
+	answer, err := r.getStatus(c, name)
+	if err != nil || answer.JSON200 == nil || answer.JSON200.State != migrate.StateTakenOver {
+		return false, false
+	}
+	return true, answer.JSON200.Updated != nil && !answer.JSON200.Updated.Equal(updated)
 }
 
-// acceptAnswer takes a 202 only if it is about this document's collection. Saying otherwise would record it as stored.
-func (r *pushRun) acceptAnswer(c *pushCollection, answer *api.IngestRenderedResponse) (pushed, bool) {
-	if answer.JSON202 == nil || answer.JSON202.Path == "" || answer.JSON202.Collection != c.job.target {
+// acceptAnswer takes a 202 only if it is about this very document. Anything else would record it as stored.
+func (r *pushRun) acceptAnswer(c *pushCollection, name string, answer *api.IngestRenderedResponse) (pushed, bool) {
+	if answer.JSON202 == nil || answer.JSON202.Path != migrate.ServerPath(name) || answer.JSON202.Collection != c.job.target {
 		r.stop(errBadResponse)
 		return pushed{action: migrate.ActionStop}, false
 	}
@@ -657,11 +766,13 @@ func stopFor(target string, refused *apperr.Error) error {
 
 // retryAnswer waits as the answer's kind asks, up to that kind's limit. Past it, what may be this document's own trouble is
 // reported, and a server out of room ends the run, as every document would meet the same.
-func (r *pushRun) retryAnswer(outcome pushed, resp *http.Response, attempt int) (pushed, bool) {
+func (r *pushRun) retryAnswer(outcome pushed, resp *http.Response, tries retries) (pushed, bool) {
 	named := apperr.ParseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
+	attempt := tries[outcome.action]
+	tries[outcome.action]++
 	wait, limit := retryPlan(outcome.action, named, attempt)
 	if outcome.action != migrate.ActionWait && attempt+1 < limit && wait <= maxRetryWait {
-		if outcome.action == migrate.ActionPause {
+		if outcome.action == migrate.ActionPause || outcome.action == migrate.ActionHold {
 			r.pauseFor(wait)
 		} else if !r.sleep(wait) {
 			r.stopForInterrupt()
@@ -685,6 +796,8 @@ func (r *pushRun) stopForInterrupt() {
 // retryPlan is how long to wait, and how many tries to allow. A server's named time is honoured, with a floor so a zero does not spin.
 func retryPlan(action migrate.Action, named time.Duration, attempt int) (time.Duration, int) {
 	switch action {
+	case migrate.ActionHold:
+		return max(named, pauseDefault), holdAttempts
 	case migrate.ActionPause:
 		if named > 0 {
 			return max(named, minServerWait), pauseAttempts

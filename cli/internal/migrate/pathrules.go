@@ -30,6 +30,8 @@ const (
 	ReasonExcludedFolder = "folder_qmd_excludes"
 	ReasonNotMarkdown    = "not_ending_in_md"
 	ReasonCaseConflict   = "differs_only_in_case"
+	ReasonNotUTF8        = "text_not_valid_utf8"
+	ReasonFutureTime     = "modified_over_an_hour_ahead"
 )
 
 const (
