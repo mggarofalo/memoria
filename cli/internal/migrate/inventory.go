@@ -28,6 +28,10 @@ type Plan struct {
 	Largest    int64  `json:"largestBytes"`
 	OverLimit  int    `json:"overDefaultLimit"`
 	Unreadable int    `json:"unreadable"`
+	// Unstorable is the selected files a server would always refuse at their path, by reason.
+	Unstorable map[string]int `json:"unstorable,omitempty"`
+	// Decomposed is the selected files stored under a composed spelling of their name, as a server refuses any other.
+	Decomposed int    `json:"decomposedNames,omitempty"`
 	Problem    string `json:"problem,omitempty"`
 }
 
@@ -62,10 +66,11 @@ func Inventory(collection Collection, target string) (Plan, []string) {
 		plan.Problem = err.Error()
 		return plan, nil
 	}
-	var files []string
+	var files, names []string
 	err = walk(root, func(name string, info fs.FileInfo) {
 		if selection.Takes(name) {
 			plan.add(info.Size())
+			names = append(names, name)
 			files = append(files, filepath.Join(collection.Path, filepath.FromSlash(name)))
 		}
 	}, func(name string) {
@@ -75,7 +80,17 @@ func Inventory(collection Collection, target string) (Plan, []string) {
 	if err != nil {
 		plan.Problem = "its folder cannot be read"
 	}
+	plan.noteNames(names)
 	return plan, files
+}
+
+func (p *Plan) noteNames(names []string) {
+	p.Unstorable = Unstorable(names)
+	for _, name := range names {
+		if ServerPath(name) != name {
+			p.Decomposed++
+		}
+	}
 }
 
 func (p *Plan) add(size int64) {

@@ -13,6 +13,8 @@ type CheckResult struct {
 	Changed int `json:"changed"`
 	Refused int `json:"refused"`
 	Skipped int `json:"skipped"`
+	// CredentialNames is the files whose path itself looks like a credential, which a server refuses to store or log.
+	CredentialNames int `json:"credentialNames"`
 	// Unscanned is the documents gitleaks was meant to read and did not, as it stopped or gave nothing usable.
 	Unscanned       int            `json:"gitleaksUnscanned"`
 	Replacements    map[string]int `json:"replacements"`
@@ -31,7 +33,7 @@ type Report struct {
 // Clean reports whether nothing was refused and gitleaks, if it ran, read everything and found nothing. Even so,
 // gitleaks is best effort: it can miss a token at a chunk boundary, so this is no proof that nothing is left.
 func (r CheckResult) Clean() bool {
-	return r.Refused == 0 && r.Unscanned == 0 && len(r.GitleaksResults) == 0
+	return r.Refused == 0 && r.CredentialNames == 0 && r.Unscanned == 0 && len(r.GitleaksResults) == 0
 }
 
 // ParseCheck reads the tool's output: one JSON line, the last on stdout, with one result for
@@ -47,4 +49,11 @@ func ParseCheck(stdout []byte, lists int) ([]CheckResult, error) {
 		return nil, errors.New("the redaction check did not report on every collection")
 	}
 	return results, nil
+}
+
+// CheckList is one collection for the redaction check, sent on its standard input. Root is so it can judge each file's path
+// as a server would see it, relative to the collection.
+type CheckList struct {
+	Root  string   `json:"root"`
+	Paths []string `json:"paths"`
 }

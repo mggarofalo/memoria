@@ -144,7 +144,8 @@ func (g *guard) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	start := time.Now()
 	if g.verbose != nil {
-		fmt.Fprintf(g.verbose, "> %s %s\n", req.Method, req.URL.RequestURI())
+		// The path alone: a query can hold a search's words or a file's name, and this log may be shared.
+		fmt.Fprintf(g.verbose, "> %s %s\n", req.Method, req.URL.EscapedPath())
 	}
 	resp, err := g.base.RoundTrip(out)
 	if err != nil {

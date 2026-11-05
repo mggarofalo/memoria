@@ -18,6 +18,7 @@ import (
 
 	"github.com/mggarofalo/memoria/cli/internal/apperr"
 	"github.com/mggarofalo/memoria/cli/internal/auth"
+	"github.com/mggarofalo/memoria/cli/internal/migrate"
 	"github.com/mggarofalo/memoria/cli/internal/selfupdate"
 	"github.com/mggarofalo/memoria/cli/internal/transport"
 )
@@ -131,8 +132,12 @@ func (h *harness) fakeRedactionCheck(_ context.Context, args []string, stdin []b
 		h.checkDuring()
 	}
 	if h.checkLists != nil {
-		if err := json.Unmarshal(stdin, h.checkLists); err != nil {
+		var lists []migrate.CheckList
+		if err := json.Unmarshal(stdin, &lists); err != nil {
 			return nil, err
+		}
+		for _, list := range lists {
+			*h.checkLists = append(*h.checkLists, list.Paths)
 		}
 	}
 	return []byte(h.checkOutput), h.checkErr

@@ -5,7 +5,7 @@
 // scripts/redaction-report.sh or `memoria migrate report`, on a local machine: it reads real
 // content, so it does not belong in CI.
 //
-// Each list of files is a directory, or with --lists-on-stdin a JSON array of arrays of paths on its standard
+// Each list of files is a directory, or with --lists-on-stdin a JSON array of { root, paths } on its standard
 // input, so a list of names is never on disk. With --json it prints one line, an array with one result per
 // list, in the order given.
 //
@@ -53,18 +53,19 @@ internal static class RedactionReport
 	private static Result Check(FileList list, bool gitleaks)
 	{
 		using Gitleaks? scan = gitleaks ? Gitleaks.Start() : null;
-		Summary summary = Redact(list.Files(), scan);
+		Summary summary = Redact(list, scan);
 		Dictionary<string, int> findings = scan?.Finish() ?? [];
-		return new Result(summary.Files, summary.Changed, summary.Refused, summary.Skipped, scan?.Unscanned ?? 0, summary.Counts, summary.FilesByRule, gitleaks, findings);
+		return new Result(summary.Files, summary.Changed, summary.Refused, summary.Skipped, summary.CredentialNames, scan?.Unscanned ?? 0, summary.Counts, summary.FilesByRule, gitleaks, findings);
 	}
 
-	private static Summary Redact(IEnumerable<string> files, Gitleaks? scan)
+	private static Summary Redact(FileList list, Gitleaks? scan)
 	{
 		Redactor redactor = new();
 		Summary summary = new();
-		foreach (string file in files)
+		foreach (string file in list.Files())
 		{
 			summary.Files++;
+			summary.CredentialNames += Redactor.HoldsCredential(list.NameOf(file)) ? 1 : 0;
 			if (Read(file) is not { } text)
 			{
 				summary.Skipped++;
@@ -120,6 +121,7 @@ internal static class RedactionReport
 		Console.WriteLine($"documents changed: {result.Changed}");
 		Console.WriteLine($"documents refused: {result.Refused}");
 		Console.WriteLine($"files skipped: {result.Skipped}");
+		Console.WriteLine($"file names that look like a credential, which a server refuses: {result.CredentialNames}");
 		Console.WriteLine("replacements by rule:");
 		foreach ((string rule, int count) in result.Replacements.OrderByDescending(static pair => pair.Value))
 		{
@@ -258,8 +260,15 @@ internal sealed class Gitleaks : IDisposable
 	}
 }
 
-internal sealed record FileList(string? Directory, IReadOnlyList<string>? Paths)
+internal sealed record FileList(string? Root, string? Directory, IReadOnlyList<string>? Paths)
 {
+	/// <summary>The path as a server would see it, relative to the collection.</summary>
+	public string NameOf(string file)
+	{
+		string? root = Root ?? Directory;
+		return (root is null ? file : Path.GetRelativePath(root, file)).Replace('\\', '/');
+	}
+
 	public IEnumerable<string> Files()
 	{
 		return Paths ?? System.IO.Directory.EnumerateFiles(Directory!, "*.md", SearchOption.AllDirectories);
@@ -291,7 +300,7 @@ internal sealed record Options(bool Json, bool Gitleaks, List<FileList> Lists)
 						return null;
 					}
 
-					lists.Add(new FileList(args[i], null));
+					lists.Add(new FileList(null, args[i], null));
 					break;
 			}
 		}
@@ -303,16 +312,19 @@ internal sealed record Options(bool Json, bool Gitleaks, List<FileList> Lists)
 	private static IEnumerable<FileList> ReadLists()
 	{
 		using Stream input = Console.OpenStandardInput();
-		List<List<string>> lists = JsonSerializer.Deserialize<List<List<string>>>(input) ?? [];
-		return lists.Select(static paths => new FileList(null, paths));
+		List<ListOnStdin> lists = JsonSerializer.Deserialize<List<ListOnStdin>>(input, new JsonSerializerOptions(JsonSerializerDefaults.Web)) ?? [];
+		return lists.Select(static list => new FileList(list.Root, null, list.Paths));
 	}
 }
+
+internal sealed record ListOnStdin(string? Root, List<string> Paths);
 
 internal sealed record Result(
 	int Files,
 	int Changed,
 	int Refused,
 	int Skipped,
+	int CredentialNames,
 	int GitleaksUnscanned,
 	Dictionary<string, int> Replacements,
 	Dictionary<string, int> FilesByRule,
@@ -320,7 +332,7 @@ internal sealed record Result(
 	Dictionary<string, int> GitleaksFindings)
 {
 	[JsonIgnore]
-	public bool IsClean => GitleaksFindings.Count == 0 && GitleaksUnscanned == 0 && Refused == 0 && Skipped == 0;
+	public bool IsClean => GitleaksFindings.Count == 0 && GitleaksUnscanned == 0 && CredentialNames == 0 && Refused == 0 && Skipped == 0;
 }
 
 internal sealed class Summary
@@ -332,6 +344,8 @@ internal sealed class Summary
 	public int Refused { get; set; }
 
 	public int Skipped { get; set; }
+
+	public int CredentialNames { get; set; }
 
 	public Dictionary<string, int> Counts { get; } = [];
 
