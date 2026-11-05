@@ -50,6 +50,7 @@ type app struct {
 	readPassword    func() ([]byte, error)
 	openKeyring     func() (auth.SecretStore, error)
 	selfUpdate      selfUpdateDeps
+	sleep           func(context.Context, time.Duration) error
 
 	flags rootFlags
 }
@@ -68,6 +69,7 @@ type rootFlags struct {
 var commandFactories = []func(*app) *cobra.Command{
 	newAuthCmd,
 	newKeysCmd,
+	newSourcesCmd,
 	newQueryCmd,
 	newGetCmd,
 	newMultiGetCmd,
@@ -225,6 +227,18 @@ func newApp(stdin io.Reader, stdout, stderr io.Writer) *app {
 		readPassword:    func() ([]byte, error) { return term.ReadPassword(int(os.Stdin.Fd())) },
 		openKeyring:     auth.NewKeyringStore,
 		selfUpdate:      defaultSelfUpdateDeps(),
+		sleep:           sleepUntilDone,
+	}
+}
+
+func sleepUntilDone(ctx context.Context, wait time.Duration) error {
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 

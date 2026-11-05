@@ -8,6 +8,7 @@ import { issueScopeKeys, mcpScope, multiGetLimits, scopeMatrix, secretsAbsent, s
 import { bootstrap, keyManagement, login, mcp, noModels, rateLimits, scopedReads, scopeErrors, traversal, type Keys } from "./checks.ts";
 import { Harness } from "./harness.ts";
 import { ingest, INGEST_SERVER } from "./ingest.ts";
+import { sourcesSync } from "./sources.ts";
 
 async function runAll(h: Harness): Promise<void> {
   h.seedIndex();
@@ -47,6 +48,7 @@ async function authChecks(h: Harness, { admin, reader }: Keys): Promise<void> {
 
 /** On a server of its own, because it needs settings of its own and uses a different rate budget. */
 async function runIngest(h: Harness): Promise<void> {
+  h.buildCli();
   h.seedIndex();
   await h.choosePorts();
   await h.startSidecar();
@@ -54,6 +56,7 @@ async function runIngest(h: Harness): Promise<void> {
   const admin = bootstrap(h);
   await h.startApi();
   await ingest(h, admin);
+  await sourcesSync(h, admin);
   noModels(h);
 }
 

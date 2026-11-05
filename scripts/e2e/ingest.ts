@@ -9,7 +9,7 @@ import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { pause, type Harness, type HarnessOptions } from "./harness.ts";
 
-const SAFE = "safe";
+export const SAFE = "safe";
 const OPEN = "open";
 const TYPO = "typo";
 const VERSION = "2026-02-01T00:00:00Z";
@@ -111,7 +111,7 @@ function holdsAny(text: string, secrets: readonly string[]): boolean {
   return secrets.some((secret) => text.includes(secret));
 }
 
-async function waitForJob(c: Context, id: string): Promise<void> {
+async function waitForJob(c: Pick<Context, "h">, id: string): Promise<void> {
   for (let attempt = 0; attempt < 240; attempt++) {
     const answer = await c.h.sidecar("GET", `/reindex/jobs/${id}`);
     const state = (JSON.parse(answer.text) as { job: { state: string } }).job.state;
@@ -121,7 +121,7 @@ async function waitForJob(c: Context, id: string): Promise<void> {
   throw new Error("an index job never finished");
 }
 
-async function forceIndex(c: Context): Promise<void> {
+export async function forceIndex(c: Pick<Context, "h">): Promise<void> {
   const answer = await c.h.sidecar("POST", "/reindex", { embed: false });
   await waitForJob(c, (JSON.parse(answer.text) as { job: { id: string } }).job.id);
 }

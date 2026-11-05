@@ -170,6 +170,26 @@ memoria auth login --profile reader --api-url https://memoria.example.com
 
 `revoke` refuses the key the command is using unless you pass `--force`, since that can lock you out. `rotate` on that key warns you to log in again with the new one.
 
+## Sync local folders
+
+`sources` keeps local folders of Markdown in the corpus. It needs a key with the `ingest` scope and the target collection in its list. The server redacts everything it stores.
+
+```sh
+memoria sources add notes --path ~/notes --collection notes
+memoria sources list
+memoria sources sync notes           # the first run only reports what it would send
+memoria sources sync notes --apply   # sends, and from now on a plain sync sends too
+```
+
+- **The first run for a source on a server is a dry run.** It needs no key and no network, and it records nothing. `--apply` sends. `--dry-run` reports at any time.
+- **Only what changed is sent.** Content is compared by hash, so touching a file sends nothing. The cursor lives in `sources-state/` beside the config, holds paths and hashes and no text, and is kept per server, so another server starts with its own first run.
+- **It is safe to stop.** A run stops at the first sign the server cannot be reached, and at a `401` or `403`, and saves its place. Running it again continues, and sending a file twice does no harm. With nothing to send, it works offline and with no key. A server that asks a client to wait up to 2 minutes is waited for, and a longer wait stops the run with exit code 6.
+- **A file the server refuses does not stop the others.** It is named on stderr, tried again next time, and the run exits 1. This happens for a file too large to store, or when the server holds a newer version or has deleted the document. A deleted document stays deleted unless the file changes afterward.
+- **It never deletes anything on the server.** A file gone from the folder counts as `MISSING LOCALLY`, because an unmounted drive looks just like every file deleted. To remove a document, use `DELETE /v1/documents`.
+- **Only Markdown is sent.** Files ending in `.md` are sent. Hidden files and folders are left out without comment. Links are never followed, and those ending in `.md` are named as left out, along with files that are not UTF-8 or are over 16 MiB.
+
+A document's identity is the source's name and the file's path within the folder. Renaming a source or moving a file stores it again under a new identity, and the old copy stays until you delete it. The file's modification time orders versions, so a file edited on another machine with an older time is refused unless this machine's cursor has seen it.
+
 ## Exit codes
 
 | Code | Meaning |
