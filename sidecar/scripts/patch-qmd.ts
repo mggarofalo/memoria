@@ -1,8 +1,11 @@
 /**
  * Fixes scans in the QMD SDK that let one large document freeze or kill the
  * process. They sit inside functions the SDK calls directly, so no wrapper can reach
- * them. The results do not change: test/hardening.test.ts holds the patched code to the
+ * them. Those results do not change: test/hardening.test.ts holds the patched code to the
  * original's output. Drop this when the SDK has the fixes.
+ *
+ * Also carries the reranker blend fix from upstream tobi/qmd#1032, which does change
+ * results, on purpose: test/rerank-blend.test.ts.
  *
  * A plain script rather than patch-package, which would add a dozen runtime dependencies
  * to run one replacement. It stops the install if the SDK's text has moved, so a version
@@ -30,7 +33,69 @@ function firstAtLeast(items, target, keyOf) {
 const letOthersRun = () => new Promise((resolve) => setImmediate(resolve));
 `;
 
+// The stretch before the blend, the same in hybridQuery and structuredSearch.
+const BEFORE_BLEND = `    const candidateMap = new Map(candidates.map(c => [c.file, {
+            displayPath: c.displayPath, title: c.title, body: c.body,
+        }]));
+    const rrfRankMap = new Map(candidates.map((c, i) => [c.file, i + 1]));
+    const blended = reranked.map(r => {
+        const rrfRank = rrfRankMap.get(r.file) || candidateLimit;
+        let rrfWeight;
+        if (rrfRank <= 3)
+            rrfWeight = 0.75;
+        else if (rrfRank <= 10)
+            rrfWeight = 0.60;
+        else
+            rrfWeight = 0.40;
+        const rrfScore = 1 / rrfRank;
+`;
+const STOCK_BLEND = `        const blendedScore = rrfWeight * rrfScore + (1 - rrfWeight) * r.score;`;
+const FIXED_BLEND = `        const blendedScore = r.score;`;
+const STOCK_SORT = `    }).sort((a, b) => b.score - a.score);`;
+const FIXED_SORT = `    }).sort((a, b) => b.score - a.score || (rrfRankMap.get(a.file) ?? candidateLimit) - (rrfRankMap.get(b.file) ?? candidateLimit));`;
+const BLEND_WHY = "The tiered blend is not monotonic in rank: at one reranker score, rank 11 outscores rank 3.";
+
+// The replacement text is what tobi/qmd#1032 compiles to, comments included, so a release
+// holding that change as it stands passes through untouched. Any other form of the fix
+// matches neither side and stops the install.
+const BLEND_EDITS = [
+  {
+    why: BLEND_WHY,
+    from: `    // Step 7: Blend RRF position score with reranker score
+    // Position-aware weights: top retrieval results get more protection from reranker disagreement
+${BEFORE_BLEND}${STOCK_BLEND}`,
+    to: `    // Step 7: Order by reranker score; RRF rank breaks ties.
+    // The previous position-aware blend (tiered weight × 1/rank) was not monotonic in rank:
+    // at equal reranker score, a candidate at RRF rank 11-40 outscored one at rank 3-10
+    // (rank 3 → 0.75/3 + 0.25·s, rank 11 → 0.40/11 + 0.60·s), so strong reranker
+    // judgments pushed mid-ranked hits below deep candidates.
+${BEFORE_BLEND}${FIXED_BLEND}`,
+  },
+  {
+    why: BLEND_WHY,
+    from: `    // Step 6: Blend RRF position score with reranker score
+${BEFORE_BLEND}${STOCK_BLEND}`,
+    to: `    // Step 6: Blend RRF position score with reranker score
+${BEFORE_BLEND}${FIXED_BLEND}`,
+  },
+  {
+    why: "Equal reranker scores must keep their rank-fusion order.",
+    from: `${STOCK_SORT}
+    // Step 8: Dedup by file (safety net`,
+    to: `${FIXED_SORT}
+    // Step 8: Dedup by file (safety net`,
+  },
+  {
+    why: "The same, in structured search.",
+    from: `${STOCK_SORT}
+    // Step 7: Dedup by file`,
+    to: `${FIXED_SORT}
+    // Step 7: Dedup by file`,
+  },
+];
+
 const EDITS = [
+  ...BLEND_EDITS,
   {
     why: "A linear search of every fence, for every break point: fences are sorted and do not overlap.",
     from: `export function isInsideCodeFence(pos, fences) {

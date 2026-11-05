@@ -1,8 +1,8 @@
 /**
  * Is the SDK's patch really in the code that will run? `npm ci --ignore-scripts` leaves it
- * out without a word, and a search then freezes on a large document, so the sidecar
- * refuses to start. This looks at the functions rather than any marker. The two scans are
- * judged by how many items they read, which depends on no clock.
+ * out without a word, and a search then freezes on a large document or ranks worse, so the
+ * sidecar refuses to start. This looks at the functions rather than any marker. The two
+ * scans are judged by how many items they read, which depends on no clock.
  */
 
 interface Fence {
@@ -67,6 +67,12 @@ function cutoffScanIsLinear(sdk: SdkStoreFunctions): boolean {
 
 const yields = (fn: unknown): boolean => String(fn).includes("letOthersRun()");
 
+/** Both halves of the blend fix must be there: the score, and the order among equal scores. */
+function ordersByReranker(fn: unknown): boolean {
+  const source = String(fn);
+  return source.includes("const blendedScore = r.score;") && source.includes("b.score - a.score || (rrfRankMap.get(a.file)");
+}
+
 /** Names what is missing. Empty means every fix is in place. */
 export function missingSdkFixes(sdk: SdkStoreFunctions): string[] {
   const vec = String(sdk.searchVec);
@@ -77,6 +83,8 @@ export function missingSdkFixes(sdk: SdkStoreFunctions): string[] {
     ["searchVec reads the body once per chunk", /content\.doc as body\s+FROM content_vectors/.test(vec)],
     ["hybridQuery does not yield", !yields(sdk.hybridQuery)],
     ["structuredSearch does not yield", !yields(sdk.structuredSearch)],
+    ["hybridQuery has the stock rerank blend", !ordersByReranker(sdk.hybridQuery)],
+    ["structuredSearch has the stock rerank blend", !ordersByReranker(sdk.structuredSearch)],
   ];
   return checks.filter(([, missing]) => missing).map(([name]) => name);
 }
