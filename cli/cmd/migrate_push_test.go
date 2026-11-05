@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -976,4 +977,20 @@ func TestOtherRefusalsDoNotAskWhetherAPathWasTakenOver(t *testing.T) {
 	if summary.TakenOver != 0 {
 		t.Fatalf("summary = %+v", summary)
 	}
+}
+
+func TestADecomposedNameIsSentInComposedForm(t *testing.T) {
+	f := newPushFixture(t)
+	writeFile(t, filepath.Join(f.notes, "cafe\u0301.md"), "text")
+	entries, err := os.ReadDir(f.notes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(entries, func(entry os.DirEntry) bool { return entry.Name() == "cafe\u0301.md" }) {
+		t.Skip("this filesystem composes names itself")
+	}
+	server := newPushServer(t, nil)
+	summary, code, _ := f.result(t, server)
+	checkPush(t, summary, code, 0, 4, 0)
+	checkCalls(t, server, "caf\u00e9.md", 1)
 }
