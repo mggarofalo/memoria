@@ -32,6 +32,10 @@ function randomText(length: number): string {
   return Array.from({ length }, () => ALPHABET[randomInt(ALPHABET.length)]).join("");
 }
 
+function randomLetters(length: number): string {
+  return Array.from({ length }, () => ALPHABET[randomInt(52)]).join("");
+}
+
 function randomUpper(length: number): string {
   return randomText(length * 3).replace(/[a-z]/g, "").padEnd(length, "A").slice(0, length).toUpperCase();
 }
@@ -42,6 +46,10 @@ function tokens(): Record<string, string> {
     github: "gh" + "p_" + randomText(36),
     aws: "AK" + "IA" + randomUpper(16),
     gitlab: "gl" + "pat-" + randomText(20),
+    // A real token can hold no digit, and its own alphabet can split it into short pieces. These are here so that
+    // every run covers what a random token only reaches now and then.
+    gitlabLetters: "gl" + "pat-" + randomLetters(20),
+    gitlabPieces: "gl" + "pat-" + `${randomLetters(7)}-${randomLetters(6)}_${randomLetters(5)}`.toLowerCase(),
     anthropic: "sk-" + "ant-" + "api03-" + randomText(80),
     openai: "s" + "k-" + randomText(48),
     slack: "xo" + "xb-" + "1234567890" + "12-" + "1234567890" + "12-" + randomText(24),

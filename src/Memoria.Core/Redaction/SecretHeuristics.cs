@@ -71,7 +71,25 @@ internal static class SecretHeuristics
 		return entropy;
 	}
 
-	/// <summary>The rule shared by distinctive token formats: anything but a sample.</summary>
+	/// <summary>
+	/// For a value carrying a provider's own prefix, at that provider's length: it has earned its match, so it need not look
+	/// random as well. A real token can be all letters, or split by the provider's own separators into short pieces. Only a
+	/// value recognizably a sample or a mask gets out. Redacting a name that happens to start with a prefix costs little,
+	/// and storing a live credential does not.
+	/// </summary>
+	public static bool IsPrefixedToken(SecretCandidate candidate)
+	{
+		return !ValueShapes.IsPlaceholder(candidate.JudgedValue);
+	}
+
+	/// <summary>The value after an access key id: token-like, and not a commit or other hex.</summary>
+	public static bool IsAwsSecretNearId(SecretCandidate candidate)
+	{
+		string value = candidate.Value;
+		return !value.All(char.IsAsciiHexDigit) && !ValueShapes.IsPlaceholder(value) && IsTokenValue(value);
+	}
+
+	/// <summary>For a value with no prefix of its own, whose format ordinary text can also fit: it must not read as words.</summary>
 	public static bool IsRealToken(SecretCandidate candidate)
 	{
 		string value = candidate.JudgedValue;
@@ -230,7 +248,8 @@ internal static class SecretHeuristics
 
 	private static bool HasPasswordShape(string value)
 	{
-		bool enoughShape = value.Any(char.IsAsciiDigit) || value.Any(static c => !char.IsAsciiLetterOrDigit(c) && c != '_');
+		// A run of letters this long is not a name, so it needs no digit or symbol to be a password.
+		bool enoughShape = value.Length >= HighInformationLength || value.Any(char.IsAsciiDigit) || value.Any(static c => !char.IsAsciiLetterOrDigit(c) && c != '_');
 		return enoughShape
 			&& value.Length >= PasswordLength
 			&& !value.Contains('\\')
@@ -315,7 +334,7 @@ internal static class SecretHeuristics
 		return value.Length >= SessionCookieLength && !ValueShapes.IsPlaceholder(value) && ShannonEntropy(value) >= StrictEntropy;
 	}
 
-	/// <summary>OpenAI keys: named prefixes are distinctive; a bare <c>sk-</c> needs a random-looking body to rule out <c>sk-learn-style</c> names.</summary>
+	/// <summary>OpenAI keys: a named prefix is distinctive, as a provider's prefix is. A bare <c>sk-</c> needs a random-looking body to rule out <c>sk-learn-style</c> names.</summary>
 	public static bool IsOpenAiKey(string value)
 	{
 		if (ValueShapes.IsPlaceholder(value))
@@ -327,12 +346,12 @@ internal static class SecretHeuristics
 			|| value.StartsWith("sk-svcacct-", StringComparison.Ordinal)
 			|| value.StartsWith("sk-admin-", StringComparison.Ordinal);
 		ReadOnlySpan<char> body = value.AsSpan(3);
-		if (!named && !body.ContainsAny('-', '_'))
+		if (named || !body.ContainsAny('-', '_'))
 		{
 			return true;
 		}
 
-		return !ValueShapes.IsWordy(value) && (named || (ShannonEntropy(body) >= StrictEntropy && !IsPackageName(value)));
+		return !ValueShapes.IsWordy(value) && ShannonEntropy(body) >= StrictEntropy && !IsPackageName(value);
 	}
 
 	/// <summary>Memoria keys are <c>mem_&lt;id&gt;_&lt;secret&gt;</c>, with a 64 character secret. A long unbroken segment separates them from names like <c>mem_total_bytes_per_node</c>.</summary>

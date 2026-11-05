@@ -6,6 +6,7 @@ This runs the real `memoria` CLI against a real `Memoria.Api` and a real `memori
 (cd sidecar && npm ci)
 node scripts/e2e/run.ts              # builds the CLI, API and sidecar first
 node scripts/e2e/run.ts --no-build   # reuses a built API and sidecar
+node scripts/e2e/run.ts --no-build --only-ingest   # only the second server: the redaction proof, for running it many times
 ```
 
 It needs Node 22.18+, Go and the .NET SDK. It exits non-zero if any check fails. It connects from loopback addresses such as `127.0.0.2`, which Linux and Windows answer without setup. macOS does not, so the auth checks fail there.

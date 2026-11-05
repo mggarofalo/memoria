@@ -75,10 +75,13 @@ async function guarded(h: Harness, body: (h: Harness) => Promise<void>): Promise
 const started = Date.now();
 const h = new Harness();
 const ingestServer = new Harness(INGEST_SERVER);
+// `--only-ingest` is for running the redaction proof many times over.
 let crashed = await guarded(h, async (first) => {
-  first.buildCli();
   if (!process.argv.includes("--no-build")) first.buildServers();
-  await runAll(first);
+  if (!process.argv.includes("--only-ingest")) {
+    first.buildCli();
+    await runAll(first);
+  }
 });
 crashed = (await guarded(ingestServer, runIngest)) || crashed;
 

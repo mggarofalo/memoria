@@ -82,11 +82,11 @@ public sealed class DocumentIngestTests(AuthApiFactory factory) : IClassFixture<
 		Assert.DoesNotContain(token, Assert.Single(corpus.Files).Value, StringComparison.Ordinal);
 	}
 
-	/// <summary>What an encoding does to redaction, stated rather than hidden. Invisible characters are seen through. The forms marked false are known gaps: a rule reads text and decodes nothing, so a credential encoded this way is stored as it came.</summary>
+	/// <summary>What an encoding does to redaction, stated rather than hidden. Invisible characters are seen through, and base64 and percent-encoding are decoded to check them. The forms marked false are known gaps, stored as they came.</summary>
 	[Theory]
 	[InlineData("zero-width-joined", true)]
-	[InlineData("base64", false)]
-	[InlineData("url-encoded", false)]
+	[InlineData("base64", true)]
+	[InlineData("url-encoded", true)]
 	[InlineData("literal-json-escapes", false)]
 	[InlineData("reversed", false)]
 	public async Task What_an_encoding_does_to_redaction_is_pinned(string encoding, bool caught)

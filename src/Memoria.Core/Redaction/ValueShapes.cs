@@ -9,6 +9,7 @@ internal static class ValueShapes
 {
 	private const int ShortTokenLength = 16;
 	private const int LongestMarkerSegment = 12;
+	private const int SegmentsPerMarker = 6;
 	private const int MaxCloserDistance = 200;
 	private const int LongSegment = 20;
 	private const int MediumSegment = 12;
@@ -132,20 +133,40 @@ internal static class ValueShapes
 			return false;
 		}
 
-		if (value.AsSpan().ContainsAny('-', '_', '.'))
+		// Each part has to read as a word by itself: a short random run of mixed case does not become one by having a dash beside it.
+		return value.Split('-', '_', '.').All(ReadsAsWord);
+	}
+
+	private static bool ReadsAsWord(string segment)
+	{
+		int uppers = segment.Count(char.IsAsciiLetterUpper);
+		if (uppers == 0 || uppers == segment.Length)
 		{
-			return value.Split('-', '_', '.').All(segment => segment.Length <= 20);
+			return segment.Length < LongSegment;
 		}
 
-		int uppers = value.Count(char.IsAsciiLetterUpper);
-		if (uppers == 0 || uppers == value.Length)
+		// Natural camelCase averages several letters per hump; random mixed case averages about two. A random run can
+		// reach that average by chance, but then it still has many humps of a letter or two, which names rarely do.
+		int humps = char.IsAsciiLetterUpper(segment[0]) ? uppers : uppers + 1;
+		return (double)segment.Length / humps >= 3 && ShortHumps(segment) <= 1 + (humps / 5);
+	}
+
+	private static int ShortHumps(string segment)
+	{
+		int shortHumps = 0;
+		int length = 0;
+		foreach (char c in segment)
 		{
-			return value.Length < 20;
+			if (char.IsAsciiLetterUpper(c) && length > 0)
+			{
+				shortHumps += length < 3 ? 1 : 0;
+				length = 0;
+			}
+
+			length++;
 		}
 
-		// Natural camelCase averages several letters per hump; random mixed case averages about two.
-		int humps = char.IsAsciiLetterUpper(value[0]) ? uppers : uppers + 1;
-		return (double)value.Length / humps >= 3;
+		return shortHumps + (length < 3 ? 1 : 0);
 	}
 
 	/// <summary>A segment that reads as random text and so can never be an identifier: long and mixed, or medium with digits and high entropy.</summary>
@@ -332,7 +353,8 @@ internal static class ValueShapes
 
 	/// <summary>
 	/// A marker counts only when the whole value reads as a sample: short plain words and nothing else.
-	/// <c>your_api_key_here</c> does, while <c>Hidden-Here-42</c> and <c>Foo!9921</c> are passwords.
+	/// <c>your_api_key_here</c> does, while <c>Hidden-Here-42</c> and <c>Foo!9921</c> are passwords. Every part has to read as a
+	/// word and markers have to be common, because a long random token can hold <c>BaR</c> between two separators by chance.
 	/// </summary>
 	private static bool ReadsAsSample(string text)
 	{
@@ -342,7 +364,8 @@ internal static class ValueShapes
 		}
 
 		string[] segments = text.Split(['-', '_', '.', ' '], StringSplitOptions.RemoveEmptyEntries);
-		return segments.All(segment => segment.Length <= LongestMarkerSegment) && segments.Any(MarkerWords.Contains);
+		return segments.All(segment => segment.Length <= LongestMarkerSegment && ReadsAsWord(segment))
+			&& segments.Count(MarkerWords.Contains) * SegmentsPerMarker >= segments.Length;
 	}
 
 	/// <summary>A name before <c>(...)</c> or <c>[...]</c>, closed, with generic arguments allowed: <c>table.Column&lt;string&gt;(type: "x")</c>.</summary>
@@ -420,7 +443,7 @@ internal static class ValueShapes
 		bool hasUpper = value.Any(char.IsAsciiLetterUpper);
 		if (value.Contains('_') || !hasLower)
 		{
-			return true;
+			return IsWordy(value);
 		}
 
 		return hasUpper && char.IsAsciiLetterLower(value[0]) && IsWordy(value);

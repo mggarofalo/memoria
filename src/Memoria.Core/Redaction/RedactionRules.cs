@@ -153,11 +153,17 @@ internal static class RedactionRules
 			+ @"|(?:AKIA|ASIA)[A-Z0-9]{16}[""']?(?:[:,;/|\s]|\\+[nt]){1,6}[""']?(?<secret>[A-Za-z0-9/+]{36,44})" + Right + ")"),
 		c => !ValueShapes.IsPlaceholder(c.Value));
 
+	/// <summary>A value shaped like an AWS secret soon after an access key id, in prose or on the next line, with no name to go by. A 40-digit hex value there is more likely a commit.</summary>
+	public static readonly RedactionRule AwsSecretNearId = new(
+		"aws-secret-near-id",
+		Pattern(@"(?:AKIA|ASIA)[A-Z0-9]{16}(?:[^\r\n]|\r?\n){1,160}?[^A-Za-z0-9/+](?<secret>[A-Za-z0-9/+]{40})(?:$|[^A-Za-z0-9/+=])"),
+		SecretHeuristics.IsAwsSecretNearId);
+
 	/// <summary>Anthropic API, admin, and OAuth keys: <c>sk-ant-api03-</c>, <c>sk-ant-admin01-</c>, <c>sk-ant-oat01-</c>.</summary>
 	public static readonly RedactionRule AnthropicKey = new(
 		"anthropic-key",
 		Pattern(@"sk-ant-[A-Za-z0-9_\-]{20,}"),
-		SecretHeuristics.IsRealToken,
+		SecretHeuristics.IsPrefixedToken,
 		literal: "sk-ant-");
 
 	/// <summary>OpenAI <c>sk-</c>, <c>sk-proj-</c>, <c>sk-svcacct-</c>, and <c>sk-admin-</c> keys. The left boundary keeps <c>task-</c> and <c>disk-</c> out, and the judge keeps <c>sk-learn-*</c> names out.</summary>
@@ -192,7 +198,7 @@ internal static class RedactionRules
 	public static readonly RedactionRule SlackToken = new(
 		"slack-token",
 		Pattern(@"(?:xoxd-(?:[A-Za-z0-9\-+/=]|%[0-9A-Fa-f]{2}){10,}|xox[a-ce-z]-[A-Za-z0-9\-]{10,}|xapp-[0-9]-[A-Za-z0-9\-]{10,})"),
-		SecretHeuristics.IsRealToken);
+		SecretHeuristics.IsPrefixedToken);
 
 	/// <summary>Slack incoming webhook paths, which authorize posting with no other credential. Escaped and encoded slashes included. The host stays readable.</summary>
 	public static readonly RedactionRule SlackWebhook = new(
@@ -256,7 +262,7 @@ internal static class RedactionRules
 	public static readonly RedactionRule GitLabToken = new(
 		"gitlab-token",
 		Pattern(@"(?:gl(?:pat|dt|rt|ptt|soat|cbt|oas|agent|imt)-|GR1348941)[A-Za-z0-9_\-]{20,}(?:\.[A-Za-z0-9_\-]+)*"),
-		SecretHeuristics.IsRealToken);
+		SecretHeuristics.IsPrefixedToken);
 
 	/// <summary>This project's own API keys, <c>mem_&lt;id&gt;_&lt;secret&gt;</c>. Metric names such as <c>mem_total_bytes</c> are rejected by shape.</summary>
 	public static readonly RedactionRule MemoriaApiKey = new(
@@ -448,7 +454,8 @@ internal static class RedactionRules
 		Provider("pypi-token", "pypi-", @"pypi-[A-Za-z0-9_\-]{32,}"),
 		Provider("docker-token", "dckr_pat_", @"dckr_pat_[A-Za-z0-9_\-]{20,}"),
 		Provider("telegram-token", null, @"[0-9]{8,10}:[A-Za-z0-9_\-]{35}", fixedLength: true),
-		Provider("discord-token", null, @"[MNO][A-Za-z0-9_\-]{23,27}\.[A-Za-z0-9_\-]{6}\.[A-Za-z0-9_\-]{27,}"),
+		// No real prefix: this format also fits a dotted name like ModelContextProtocolServer.Server.AspNetCoreHttpTransportExtensions.
+		new("discord-token", Pattern(Left + @"(?<secret>[MNO][A-Za-z0-9_\-]{23,27}\.[A-Za-z0-9_\-]{6}\.[A-Za-z0-9_\-]{27,})"), SecretHeuristics.IsRealToken),
 		Provider("notion-token", null, @"(?:secret_|ntn_)[A-Za-z0-9]{40,}"),
 		Provider("linear-token", "lin_api_", @"lin_api_[A-Za-z0-9]{32,}"),
 		Provider("plane-token", "plane_api_", @"plane_api_[A-Za-z0-9]{24,}"),
@@ -472,9 +479,10 @@ internal static class RedactionRules
 		Provider("render-key", "rnd_", @"rnd_[A-Za-z0-9]{24,}"),
 		Provider("netlify-token", "nfp_", @"nfp_[A-Za-z0-9]{32,}"),
 		Provider("planetscale-token", "pscale_tkn_", @"pscale_tkn_[A-Za-z0-9_\-]{32,}"),
-		Provider("doppler-token", "dp.st.", @"dp\.st\.[A-Za-z0-9_.\-]{32,}"),
+		Provider("doppler-token", "dp.", @"dp\.(?:st|pt|ct|sa|scim|audit)\.[A-Za-z0-9_.\-]{32,}"),
 		Provider("alibaba-key", "LTAI", @"LTAI[A-Za-z0-9]{12,20}", fixedLength: true),
-		Provider("square-token", "sq0atp-", @"sq0atp-[A-Za-z0-9_\-]{22,}"),
+		Provider("square-token", "sq0", @"sq0(?:atp|csp)-[A-Za-z0-9_\-]{22,}"),
+		Provider("square-production-token", "EAAA", @"EAAA[A-Za-z0-9_\-]{60}", fixedLength: true),
 		Provider("hubspot-token", "pat-", @"pat-(?:na|eu|ap)[0-9]-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"),
 		Provider("atlassian-cookie-token", "ATCTT3", @"ATCTT3[A-Za-z0-9_=\-]{32,}"),
 		Provider("supabase-secret", "sb_secret_", @"sb_secret_[A-Za-z0-9_\-]{20,}"),
@@ -483,11 +491,32 @@ internal static class RedactionRules
 		Provider("gitlab-feature-flag-token", "glffct-", @"glffct-[A-Za-z0-9_\-]{20,}"),
 	];
 
+	/// <summary>A 32-digit hex value on a line that names Twilio, however it is written. Alone it is only a hash, so the name is what makes it a credential.</summary>
+	public static readonly RedactionRule TwilioAuthToken = new(
+		"twilio-auth-token",
+		Pattern(@"(?i:twilio)[^\r\n]{0,60}?[^A-Za-z0-9](?<secret>[0-9a-fA-F]{32})(?:$|[^A-Za-z0-9])"),
+		c => !ValueShapes.IsPlaceholder(c.Value));
+
+	/// <summary>Percent-encoded text whose decoded form holds a credential, such as a token with <c>%5F</c> for its underscore. See <see cref="EncodedTokens"/>.</summary>
+	public static readonly RedactionRule PercentEncodedToken = new(
+		"percent-encoded-token",
+		Pattern(@"(?:[A-Za-z0-9._~+\-]|%[0-9A-Fa-f]{2})*%[0-9A-Fa-f]{2}(?:[A-Za-z0-9._~+\-]|%[0-9A-Fa-f]{2})*"),
+		EncodedTokens.IsPercentEncodedCredential,
+		literal: "%",
+		skipRejected: true);
+
+	/// <summary>Base64 whose decoded form holds a credential. A run of base64 alone says nothing, so only what it decodes to counts. See <see cref="EncodedTokens"/>.</summary>
+	public static readonly RedactionRule Base64EncodedToken = new(
+		"base64-token",
+		Pattern(@"[A-Za-z0-9+/_\-]{24,}={0,2}"),
+		EncodedTokens.IsBase64EncodedCredential,
+		skipRejected: true);
+
 	/// <summary>A Discord webhook path, which authorizes posting with no other credential. The host and channel id stay readable.</summary>
 	public static readonly RedactionRule DiscordWebhook = new(
 		"discord-webhook",
 		Pattern(@"discord(?:app)?\.com" + Slash + @"api" + Slash + @"webhooks" + Slash + @"[0-9]+" + Slash + @"(?<secret>[A-Za-z0-9_\-]{30,})"),
-		SecretHeuristics.IsRealToken,
+		SecretHeuristics.IsPrefixedToken,
 		literal: "discord");
 
 	/// <summary>The rules, in execution order.</summary>
@@ -500,6 +529,7 @@ internal static class RedactionRules
 		PuttyPrivateKey,
 		Base64PrivateKey,
 		AwsSecretKey,
+		AwsSecretNearId,
 		AnthropicKey,
 		OpenAiKey,
 		GitHubToken,
@@ -518,6 +548,7 @@ internal static class RedactionRules
 		GitLabToken,
 		MemoriaApiKey,
 		.. ProviderTokens,
+		TwilioAuthToken,
 		DiscordWebhook,
 		TeamsWebhook,
 		MemoriaSharedSecret,
@@ -542,12 +573,35 @@ internal static class RedactionRules
 		SqlPassword,
 		SecretFlag,
 		SecretAssignment,
+		PercentEncodedToken,
+		Base64EncodedToken,
+	];
+
+	/// <summary>Rules that know a credential by its own format, so they can look inside decoded text, where what surrounded it means nothing. They include the encoded ones, for encoding inside encoding.</summary>
+	public static readonly IReadOnlyList<RedactionRule> SelfEvident =
+	[
+		AnthropicKey,
+		OpenAiKey,
+		GitHubToken,
+		AwsAccessKey,
+		Jwt,
+		SlackToken,
+		GoogleApiKey,
+		GoogleOAuthToken,
+		StripeKey,
+		NpmToken,
+		HuggingFaceToken,
+		GitLabToken,
+		MemoriaApiKey,
+		.. ProviderTokens,
+		PercentEncodedToken,
+		Base64EncodedToken,
 	];
 
 	private static RedactionRule Provider(string name, string? literal, string pattern, bool fixedLength = false, bool strictLeft = false)
 	{
 		string regex = (strictLeft ? StrictLeft : Left) + "(?<secret>" + pattern + ")" + (fixedLength ? Right : "");
-		return new RedactionRule(name, Pattern(regex), SecretHeuristics.IsRealToken, literal: literal);
+		return new RedactionRule(name, Pattern(regex), SecretHeuristics.IsPrefixedToken, literal: literal);
 	}
 
 	private static Regex Pattern(string pattern)
