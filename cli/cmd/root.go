@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"regexp"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -216,13 +217,25 @@ func classifyCobraError(err error) error {
 	return err
 }
 
+// lockedWriter keeps diagnostics whole when several workers write at once.
+type lockedWriter struct {
+	mu sync.Mutex
+	to io.Writer
+}
+
+func (l *lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.to.Write(p)
+}
+
 func newApp(stdin io.Reader, stdout, stderr io.Writer) *app {
 	r := redact.New()
 	return &app{
 		stdin:           stdin,
 		stdout:          r.Writer(stdout),
 		rawStdout:       stdout,
-		stderr:          r.DiagnosticWriter(stderr),
+		stderr:          &lockedWriter{to: r.DiagnosticWriter(stderr)},
 		redactor:        r,
 		getenv:          os.Getenv,
 		stdinIsTerminal: func() bool { return term.IsTerminal(int(os.Stdin.Fd())) },

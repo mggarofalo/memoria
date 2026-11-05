@@ -234,12 +234,12 @@ func MigratePushTable(w io.Writer, result *migrate.PushResult) error {
 			}
 			continue
 		}
-		rows = append(rows, row(s.Name, s.Target, s.Selected, s.Sent, s.AlreadySent, s.RefusedTotal(), s.OverCap, s.Unreadable, s.FoldersSkipped, s.NotReached, sum(s.Frontmatter)))
+		rows = append(rows, row(s.Name, s.Target, s.Selected, s.Sent, s.AlreadySent, s.TakenOver, s.RefusedTotal(), s.OverCap, s.Unreadable, s.FoldersSkipped, s.NotReached, sum(s.Frontmatter)))
 		for _, line := range pushDetails(s) {
 			b.WriteString(row(line) + "\n")
 		}
 	}
-	header := "COLLECTION\tTARGET\tSELECTED\tSENT\tALREADY SENT\tREFUSED\tOVER CAP\tUNREADABLE\tFOLDERS SKIPPED\tNOT REACHED\tFRONTMATTER ISSUES"
+	header := "COLLECTION\tTARGET\tSELECTED\tSENT\tALREADY SENT\tTAKEN OVER\tREFUSED\tOVER CAP\tUNREADABLE\tFOLDERS SKIPPED\tNOT REACHED\tFRONTMATTER ISSUES"
 	if result.DryRun {
 		header = "COLLECTION\tTARGET\tWOULD SEND\tBYTES\tOVER 2 MIB\tCANNOT BE STORED\tFOLDERS SKIPPED"
 	}
@@ -257,8 +257,8 @@ func MigratePushMarkdown(w io.Writer, result *migrate.PushResult) error {
 	var b strings.Builder
 	for i := range result.Collections {
 		s := &result.Collections[i]
-		fmt.Fprintf(&b, "- **%s** to %s: %d selected, %d sent, %d already sent, %d refused, %d over cap, %d unreadable, %d folders skipped, %d not reached, %d frontmatter issues\n",
-			inlineText(s.Name), inlineText(s.Target), s.Selected, s.Sent, s.AlreadySent, s.RefusedTotal(), s.OverCap, s.Unreadable, s.FoldersSkipped, s.NotReached, sum(s.Frontmatter))
+		fmt.Fprintf(&b, "- **%s** to %s: %d selected, %d sent, %d already sent, %d taken over, %d refused, %d over cap, %d unreadable, %d folders skipped, %d not reached, %d frontmatter issues\n",
+			inlineText(s.Name), inlineText(s.Target), s.Selected, s.Sent, s.AlreadySent, s.TakenOver, s.RefusedTotal(), s.OverCap, s.Unreadable, s.FoldersSkipped, s.NotReached, sum(s.Frontmatter))
 		for _, line := range pushDetails(s) {
 			b.WriteString("  - " + inlineText(line) + "\n")
 		}

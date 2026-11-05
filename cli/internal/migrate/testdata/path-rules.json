@@ -29,6 +29,7 @@
   { "path": "nothing", "reason": "not_ending_in_md" },
   { "path": "Vendor/a.md", "reason": "folder_qmd_excludes" },
   { "path": "sub/BUILD/a.md", "reason": "folder_qmd_excludes" },
+  { "path": "back\\slash.md", "reason": "backslash" },
   { "path": "trailing./a.md", "reason": "ends_in_a_dot" },
   { "path": " leading/a.md", "reason": "space_at_the_edge" },
   { "path": "trailing /a.md", "reason": "space_at_the_edge" },

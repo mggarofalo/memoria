@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -83,6 +84,7 @@ type harness struct {
 	checkLists    *[][]string
 	checkArgs     []string
 	checkDuring   func()
+	sleptMu       sync.Mutex
 }
 
 func newHarness(t *testing.T) *harness {
@@ -119,6 +121,8 @@ func (h *harness) app() *app {
 	a.selfUpdate.executable = func() (string, error) { return "memoria-test-exe", nil }
 	a.redactionCheck = h.fakeRedactionCheck
 	a.sleep = func(_ context.Context, wait time.Duration) error {
+		h.sleptMu.Lock()
+		defer h.sleptMu.Unlock()
 		h.slept = append(h.slept, wait)
 		return h.sleepErr
 	}

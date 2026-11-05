@@ -29,10 +29,12 @@ const (
 	pushSaveEvery = 25
 	pushSaveAfter = 5 * time.Second
 
-	waitAttempts   = 20
 	pauseAttempts  = 60
 	resendAttempts = 8
 	reportAttempts = 3
+
+	// A write that was cut off holds its path for the server's 5-minute lease, so a later run must outlast that.
+	inProgressBudget = 6 * time.Minute
 
 	minServerWait = time.Second
 	pauseDefault  = 2 * time.Second
@@ -79,6 +81,9 @@ Mac can hold, goes in composed form, the same every time, as the server refuses 
 
 It always sends the newest copy of a file, and sends again until the server answers. A copy
 older than the one it already sent is not sent, as it would replace the newer one.
+
+A document its session has since taken over is counted as migrated, not failed, once the
+server confirms that state for its path.
 
 A document whose frontmatter the server could not read is stored and searchable, but
 matches no date, project or tag filter. Those are counted and named in the report.`,
@@ -401,6 +406,8 @@ type pushed struct {
 	size    int64
 	// unreadable is a file gone or denied since it was selected.
 	unreadable bool
+	// takenOver is a refusal the server confirmed means its session now owns this path.
+	takenOver bool
 }
 
 func (r *pushRun) document(c *pushCollection, name string) {
@@ -453,6 +460,8 @@ func (r *pushRun) settle(c *pushCollection, name string, outcome pushed) {
 		case outcome.unreadable:
 			c.summary.Unreadable++
 			c.addProblem(name, migrate.ProblemUnreadable, "")
+		case outcome.takenOver:
+			c.summary.TakenOver++
 		case outcome.action == migrate.ActionStored:
 			c.stored(name, outcome.updated, outcome.size, outcome.result)
 		case outcome.action == migrate.ActionOverCap:
@@ -489,6 +498,7 @@ func (c *pushCollection) saveIfDue() error {
 
 // deliver sends until the document has an end. The boolean is false when the run stopped first, and it is left for a later run.
 func (r *pushRun) deliver(c *pushCollection, name string) (pushed, bool) {
+	var waited time.Duration
 	for attempt := 0; ; attempt++ {
 		if err := r.waitForPause(); err != nil {
 			return pushed{}, false
@@ -501,22 +511,50 @@ func (r *pushRun) deliver(c *pushCollection, name string) (pushed, bool) {
 		if c.olderThanSent(name, updated) {
 			return pushed{action: migrate.ActionReport, reason: migrate.ReasonOlderThanSent}, true
 		}
-		answer, err := r.post(c, name, updated, size)
-		if errors.Is(err, errFileUnreadable) {
-			return pushed{unreadable: true}, true
-		}
-		if err != nil {
-			if !r.retryAfterLoss(err, attempt) {
-				return pushed{}, false
-			}
-			continue
-		}
-		outcome, again := r.judge(c, answer, attempt)
-		outcome.updated, outcome.size = updated, size
-		if !again {
-			return outcome, outcome.action != migrate.ActionStop
+		outcome, step := r.sendOnce(c, name, updated, size, attempt, &waited)
+		if step != stepAgain {
+			return outcome, step == stepFinished
 		}
 	}
+}
+
+// What one send leaves a document's delivery to do next.
+type pushStep int
+
+const (
+	stepAgain pushStep = iota
+	stepFinished
+	stepAbandoned
+)
+
+func (r *pushRun) sendOnce(c *pushCollection, name string, updated time.Time, size int64, attempt int, waited *time.Duration) (pushed, pushStep) {
+	answer, err := r.post(c, name, updated, size)
+	if errors.Is(err, errFileUnreadable) {
+		return pushed{unreadable: true}, stepFinished
+	}
+	if err != nil {
+		if r.retryAfterLoss(err, attempt) {
+			return pushed{}, stepAgain
+		}
+		return pushed{}, stepAbandoned
+	}
+	if wait := inProgressWait(answer); wait > 0 && *waited < inProgressBudget {
+		*waited += wait
+		if !r.sleep(wait) {
+			r.stopForInterrupt()
+			return pushed{}, stepAbandoned
+		}
+		return pushed{}, stepAgain
+	}
+	outcome, again := r.judge(c, name, answer, attempt)
+	outcome.updated, outcome.size = updated, size
+	switch {
+	case again:
+		return outcome, stepAgain
+	case outcome.action == migrate.ActionStop:
+		return outcome, stepAbandoned
+	}
+	return outcome, stepFinished
 }
 
 // olderThanSent is a copy older than one the server holds. Sent again it could replace the newer one, so it stays here.
@@ -567,7 +605,17 @@ func (r *pushRun) sleep(wait time.Duration) bool {
 }
 
 // judge reads one answer. The boolean says to send it again, after any wait.
-func (r *pushRun) judge(c *pushCollection, answer *api.IngestRenderedResponse, attempt int) (pushed, bool) {
+// inProgressWait is how long to give a write of this path that is still running, or 0 if this answer is not that.
+func inProgressWait(answer *api.IngestRenderedResponse) time.Duration {
+	refused := apperr.FromResponse(answer.StatusCode(), answer.HTTPResponse.Header, answer.Body)
+	if migrate.Classify(answer.StatusCode(), refused.Code) != migrate.ActionWait {
+		return 0
+	}
+	named := apperr.ParseRetryAfter(answer.HTTPResponse.Header.Get("Retry-After"), time.Now())
+	return min(max(named, minServerWait), maxRetryWait)
+}
+
+func (r *pushRun) judge(c *pushCollection, name string, answer *api.IngestRenderedResponse, attempt int) (pushed, bool) {
 	status := answer.StatusCode()
 	refused := apperr.FromResponse(status, answer.HTTPResponse.Header, answer.Body)
 	action := migrate.Classify(status, refused.Code)
@@ -579,9 +627,17 @@ func (r *pushRun) judge(c *pushCollection, answer *api.IngestRenderedResponse, a
 		r.stop(stopFor(c.job.target, refused))
 		return pushed{action: migrate.ActionStop}, false
 	case migrate.ActionReport, migrate.ActionOverCap:
+		outcome.takenOver = migrate.MayBeTakenOver(refused.Code) && r.isTakenOver(c, name)
 		return outcome, false
 	}
 	return r.retryAnswer(outcome, answer.HTTPResponse, attempt)
+}
+
+// isTakenOver asks the server what a refused path is. Anything short of a clear yes leaves it a reported problem.
+func (r *pushRun) isTakenOver(c *pushCollection, name string) bool {
+	sent := migrate.ServerPath(name)
+	answer, err := r.session.client.GetRenderedIngestStatusWithResponse(r.ctx, &api.GetRenderedIngestStatusParams{Collection: &c.job.target, Path: &sent})
+	return err == nil && answer.JSON200 != nil && answer.JSON200.State == migrate.StateTakenOver
 }
 
 // acceptAnswer takes a 202 only if it is about this document's collection. Saying otherwise would record it as stored.
@@ -604,7 +660,7 @@ func stopFor(target string, refused *apperr.Error) error {
 func (r *pushRun) retryAnswer(outcome pushed, resp *http.Response, attempt int) (pushed, bool) {
 	named := apperr.ParseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
 	wait, limit := retryPlan(outcome.action, named, attempt)
-	if attempt+1 < limit && wait <= maxRetryWait {
+	if outcome.action != migrate.ActionWait && attempt+1 < limit && wait <= maxRetryWait {
 		if outcome.action == migrate.ActionPause {
 			r.pauseFor(wait)
 		} else if !r.sleep(wait) {
@@ -613,6 +669,7 @@ func (r *pushRun) retryAnswer(outcome pushed, resp *http.Response, attempt int) 
 		}
 		return outcome, true
 	}
+	// deliver has already waited out its budget for a write in progress.
 	if outcome.action == migrate.ActionWait || outcome.action == migrate.ActionResendThenReport {
 		outcome.action = migrate.ActionReport
 		return outcome, false
@@ -628,8 +685,6 @@ func (r *pushRun) stopForInterrupt() {
 // retryPlan is how long to wait, and how many tries to allow. A server's named time is honoured, with a floor so a zero does not spin.
 func retryPlan(action migrate.Action, named time.Duration, attempt int) (time.Duration, int) {
 	switch action {
-	case migrate.ActionWait:
-		return max(named, minServerWait), waitAttempts
 	case migrate.ActionPause:
 		if named > 0 {
 			return max(named, minServerWait), pauseAttempts

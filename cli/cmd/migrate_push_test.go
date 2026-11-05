@@ -38,6 +38,7 @@ type pushAnswer struct {
 
 type pushServer struct {
 	*httptest.Server
+	state   atomic.Value
 	t       *testing.T
 	mu      sync.Mutex
 	calls   []pushCall
@@ -76,6 +77,10 @@ func (s *pushServer) begin(r *http.Request) (pushCall, pushAnswer) {
 }
 
 func (s *pushServer) serve(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		s.serveStatus(w, r)
+		return
+	}
 	call, answer := s.begin(r)
 	time.Sleep(2 * time.Millisecond)
 	s.mu.Lock()
@@ -94,6 +99,16 @@ func (s *pushServer) serve(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeStored(w, call, answer)
 	}
+}
+
+func (s *pushServer) serveStatus(w http.ResponseWriter, r *http.Request) {
+	state, known := s.state.Load().(string)
+	if !known {
+		writeProblem(w, pushAnswer{status: http.StatusServiceUnavailable})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = fmt.Fprintf(w, `{"collection":"notes","path":%q,"state":%q,"updated":null}`, r.URL.Query().Get("path"), state)
 }
 
 func writeProblem(w http.ResponseWriter, answer pushAnswer) {
@@ -591,12 +606,13 @@ func TestADocumentThatStaysInProgressIsReported(t *testing.T) {
 	f := newPushFixture(t)
 	server := newPushServer(t, func(call pushCall, _ int) pushAnswer {
 		if call.path == "a.md" {
-			return pushAnswer{status: http.StatusConflict, code: "ingest_in_progress", retryAfter: "1"}
+			return pushAnswer{status: http.StatusConflict, code: "ingest_in_progress", retryAfter: "60"}
 		}
 		return pushAnswer{}
 	})
 	summary, code, _ := f.result(t, server)
-	if code != apperr.ExitGeneric || summary.Refused["ingest_in_progress"] != 1 || summary.Sent != 2 || server.callsFor("a.md") != waitAttempts {
+	// 6 minutes of 60-second waits outlasts the server's 5-minute lease.
+	if code != apperr.ExitGeneric || summary.Refused["ingest_in_progress"] != 1 || summary.Sent != 2 || server.callsFor("a.md") != 7 {
 		t.Fatalf("code = %d, summary = %+v", code, summary)
 	}
 }
@@ -739,6 +755,9 @@ func TestPushRunsFewWorkersWithNoFlag(t *testing.T) {
 	server := newPushServer(t, nil)
 	if code := f.push(server); code != 0 {
 		t.Fatalf("code = %d", code)
+	}
+	if got := newMigratePushCmd(f.h.app()).Flags().Lookup("workers").DefValue; got != "4" {
+		t.Fatalf("the default is %s workers", got)
 	}
 	if server.most > defaultPushWorkers || server.most < 2 {
 		t.Fatalf("at most %d at once", server.most)
@@ -888,5 +907,73 @@ func TestReportFailsOnANameThatLooksLikeACredential(t *testing.T) {
 	f.fakeCheck("["+named+","+cleanCheck+"]", nil)
 	if code := f.report(); code != apperr.ExitGeneric || !strings.Contains(f.h.stderr.String(), "looks like a credential") {
 		t.Fatalf("code = %d, stderr = %q", code, f.h.stderr.String())
+	}
+}
+
+func TestATakenOverPathCountsAsMigratedOnlyWhenTheServerSaysSo(t *testing.T) {
+	for _, reason := range []string{"path_owned", "stale_version"} {
+		t.Run(reason, func(t *testing.T) { checkTakeover(t, reason) })
+	}
+}
+
+func checkTakeover(t *testing.T, reason string) {
+	t.Helper()
+	f := newPushFixture(t)
+	server := newPushServer(t, func(call pushCall, _ int) pushAnswer {
+		if call.path == "a.md" {
+			return pushAnswer{status: http.StatusConflict, code: reason}
+		}
+		return pushAnswer{}
+	})
+	server.state.Store(migrate.StateTakenOver)
+	summary, code, report := f.result(t, server)
+	checkPush(t, summary, code, 0, 2, 0)
+	if summary.TakenOver != 1 || summary.RefusedTotal() != 0 {
+		t.Fatalf("summary = %+v", summary)
+	}
+	if problems := readProblems(t, report); len(problems) != 0 {
+		t.Fatalf("problems = %+v", problems)
+	}
+	if code := f.push(server); code != 0 || !strings.Contains(f.h.stdout.String(), "Every selected document is stored") {
+		t.Fatalf("code = %d, stdout = %q", code, f.h.stdout.String())
+	}
+}
+
+func TestAnOwnedPathThatWasNotTakenOverStaysAProblem(t *testing.T) {
+	for name, state := range map[string]any{"complete": "complete", "none": "none", "no answer": nil} {
+		t.Run(name, func(t *testing.T) {
+			f := newPushFixture(t)
+			server := newPushServer(t, func(call pushCall, _ int) pushAnswer {
+				if call.path == "a.md" {
+					return pushAnswer{status: http.StatusConflict, code: "path_owned"}
+				}
+				return pushAnswer{}
+			})
+			if state != nil {
+				server.state.Store(state)
+			}
+			summary, code, report := f.result(t, server)
+			checkPush(t, summary, code, apperr.ExitGeneric, 2, 0)
+			checkOneProblem(t, report, "a.md", migrate.ProblemRefused, "path_owned")
+			if summary.TakenOver != 0 {
+				t.Fatalf("summary = %+v", summary)
+			}
+		})
+	}
+}
+
+func TestOtherRefusalsDoNotAskWhetherAPathWasTakenOver(t *testing.T) {
+	f := newPushFixture(t)
+	server := newPushServer(t, func(call pushCall, _ int) pushAnswer {
+		if call.path == "a.md" {
+			return pushAnswer{status: http.StatusConflict, code: "case_conflict"}
+		}
+		return pushAnswer{}
+	})
+	server.state.Store(migrate.StateTakenOver)
+	summary, code, _ := f.result(t, server)
+	checkPush(t, summary, code, apperr.ExitGeneric, 2, 0)
+	if summary.TakenOver != 0 {
+		t.Fatalf("summary = %+v", summary)
 	}
 }

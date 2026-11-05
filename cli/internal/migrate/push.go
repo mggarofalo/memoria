@@ -83,6 +83,14 @@ func classifyConflict(code string) Action {
 
 var safeCode = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 
+// StateTakenOver is the state a path's ledger entry has once its session owns it.
+const StateTakenOver = "taken_over"
+
+// MayBeTakenOver is whether a refusal is what a re-push of a taken-over path gets. Only the path's own state can say that it was.
+func MayBeTakenOver(code string) bool {
+	return code == "path_owned" || code == "stale_version"
+}
+
 // ReasonOlderThanSent is a local copy older than one already stored, which this does not send.
 const ReasonOlderThanSent = "older_than_sent"
 
@@ -199,13 +207,15 @@ const (
 
 // PushSummary is one collection's run. It holds counts, and reasons a server gave as codes, and names no file.
 type PushSummary struct {
-	Name             string         `json:"name"`
-	Target           string         `json:"target"`
-	Selected         int            `json:"selected"`
-	Bytes            int64          `json:"bytes"`
-	OverDefaultLimit int            `json:"overDefaultLimit"`
-	Sent             int            `json:"sent"`
-	AlreadySent      int            `json:"alreadySent"`
+	Name             string `json:"name"`
+	Target           string `json:"target"`
+	Selected         int    `json:"selected"`
+	Bytes            int64  `json:"bytes"`
+	OverDefaultLimit int    `json:"overDefaultLimit"`
+	Sent             int    `json:"sent"`
+	AlreadySent      int    `json:"alreadySent"`
+	// TakenOver is documents whose session has since replaced them, which the server confirmed. They are migrated, not failed.
+	TakenOver        int            `json:"takenOver"`
 	Refused          map[string]int `json:"refused"`
 	OverCap          int            `json:"overCap"`
 	Unreadable       int            `json:"unreadable"`
@@ -235,7 +245,7 @@ func (s *PushSummary) NotStored() int {
 
 // Accounted reports whether every selected document is in exactly one count, which is what makes the summary worth trusting.
 func (s *PushSummary) Accounted() bool {
-	return s.Sent+s.AlreadySent+s.NotStored()+s.OverCap == s.Selected
+	return s.Sent+s.AlreadySent+s.TakenOver+s.NotStored()+s.OverCap == s.Selected
 }
 
 // PushResult is what a run says on stdout.

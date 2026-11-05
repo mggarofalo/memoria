@@ -10,18 +10,20 @@ import path from "node:path";
 import { issueKey } from "./auth-helpers.ts";
 import { pause, redactionCheckDll, repo, type CliResult, type Harness } from "./harness.ts";
 import { forceIndex } from "./ingest.ts";
+import { line } from "./ingest-races.ts";
 
 const TARGET = "migrated";
 const SECOND_TARGET = "migrated-resume";
 const REFUSING_TARGET = "migrated-refusing";
 const KILLED_TARGET = "migrated-killed";
 const RULES_TARGET = "migrated-rules";
+const TAKEOVER_TARGET = "migrated-takeover";
 const DECOMPOSED_TARGET = "migrated-decomposed";
 const CREDENTIAL_TARGET = "migrated-credential";
 const OLDER_TARGET = "migrated-older";
 const CLOSED = "closed";
 const FILLED = "filled";
-const FILE_TIME = new Date("2025-06-01T12:00:00.123Z");
+const FILE_TIME = new Date("2025-06-01T12:00:00Z");
 const MAX_DOCUMENT_BYTES = 2 * 1024 * 1024;
 const ROUTE = "/v1/ingest/rendered";
 
@@ -76,6 +78,8 @@ function forward(api: URL, incoming: IncomingMessage, outgoing: ServerResponse, 
     answer.pipe(outgoing);
   });
   upstream.once("error", () => incoming.socket.destroy());
+  // A client that dies takes its upload with it, as with no proxy here.
+  incoming.socket.once("close", () => upstream.destroy());
   incoming.pipe(upstream);
 }
 
@@ -281,6 +285,30 @@ function olderCopy(h: Harness, key: string): void {
   h.check("push: an older copy is not sent, is reported, and the newer one stays", first.code === 0 && second.code === 1 && rowOf(second).refused?.["older_than_sent"] === 1 && stored.includes("newercopy"), second.out + stored.slice(0, 80));
 }
 
+/** A session takes over a migrated document, and then a re-push of that document is already done. A path it merely owns is not. */
+async function takenOver(h: Harness, key: string): Promise<void> {
+  const id = "dededede-1111-2222-3333-444444444444";
+  const text = `---\nsession_id: "${id}"\nmessage_end: 0\n---\n\n## User\n\nold\n`;
+  const s = setup(h, key, "takeover", TAKEOVER_TARGET, { "2026-01-15_dededede.md": text });
+  const first = push(s, h.apiUrl, "--apply", "--format", "json");
+  const session = async (sessionId: string, ...words: string[]): Promise<number> => {
+    const query = new URLSearchParams({ collection: TAKEOVER_TARGET, format: "claude", sessionId, updated: new Date(Date.now() + 60_000).toISOString() });
+    const answer = await fetch(`${h.apiUrl}/v1/ingest/session?${query}`, { method: "POST", headers: { authorization: `Bearer ${key}`, "content-type": "application/x-ndjson" }, body: words.map((word, index) => line(index % 2 === 0 ? "user" : "assistant", word)).join("") });
+    await answer.arrayBuffer();
+    return answer.status;
+  };
+  const took = await session(id, "one", "two");
+  const repush = push(s, h.apiUrl, "--apply", "--ignore-state", "--format", "json");
+  h.check("push: a path its session took over counts as migrated, not as a failure", first.code === 0 && took === 202 && repush.code === 0 && (rowOf(repush) as unknown as { takenOver: number }).takenOver === 1 && rowOf(repush).sent === 0, { first: first.code, took, out: repush.out, err: repush.err });
+
+  const before = new Set(storedFiles(h, TAKEOVER_TARGET));
+  const owned = await session("efefefef-1111-2222-3333-444444444444", "mine");
+  const name = storedFiles(h, TAKEOVER_TARGET).find((file) => !before.has(file)) ?? "";
+  const other = setup(h, key, "takeover-owned", TAKEOVER_TARGET, { [name]: "---\ndate: \"2024-03-01\"\n---\n\nanother\n" });
+  const refused = push(other, h.apiUrl, "--apply", "--format", "json");
+  h.check("push: a path a session owns, with no takeover, stays a reported problem", owned === 202 && name !== "" && refused.code === 1 && rowOf(refused).refused?.["path_owned"] === 1, { owned, name, out: refused.out, err: refused.err });
+}
+
 /** The moves that lose an answer, and the ones a server says itself, on real writes. */
 async function lostAnswers(h: Harness, key: string): Promise<void> {
   const files = many(12, "lost");
@@ -356,7 +384,7 @@ function stops(h: Harness, key: string, narrow: string): void {
 
 /** Runs against a server started with INGEST_SERVER, where these targets are opened and empty. */
 export async function migratePush(h: Harness, admin: string): Promise<void> {
-  const collections = [TARGET, SECOND_TARGET, REFUSING_TARGET, KILLED_TARGET, RULES_TARGET, DECOMPOSED_TARGET, CREDENTIAL_TARGET, OLDER_TARGET, FILLED, CLOSED];
+  const collections = [TARGET, SECOND_TARGET, REFUSING_TARGET, KILLED_TARGET, RULES_TARGET, TAKEOVER_TARGET, DECOMPOSED_TARGET, CREDENTIAL_TARGET, OLDER_TARGET, FILLED, CLOSED];
   // A key has a budget of requests a minute, and this should not spend its time waiting out a window. A real push does, and goes at that rate.
   const fresh = async (label: string): Promise<string> => (await issueKey(h, admin, { label, scopes: ["ingest", "read"], collections })).token;
   await dryRunAndSend(h, await fresh("push"));
@@ -366,6 +394,7 @@ export async function migratePush(h: Harness, admin: string): Promise<void> {
   decomposed(h, other);
   credentialNames(h, other);
   olderCopy(h, other);
+  await takenOver(h, await fresh("push-takeover"));
   await lostAnswers(h, await fresh("push-lost"));
   await killed(h, await fresh("push-killed"));
   refusals(h, await fresh("push-refusals"));
