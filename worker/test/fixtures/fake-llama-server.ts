@@ -58,7 +58,16 @@ const routes = new Map<string, (body: Body) => Reply>([
   ["/v1/embeddings", (body) => [200, { data: (body.input as number[][]).map((tokens, index) => ({ index, embedding: vectorFor(detokenize(tokens)) })) }]],
   ["/completion", completion],
   ["/v1/chat/completions", chat],
-  ["/debug/env", () => [200, { keys: Object.keys(process.env).filter((k) => k.startsWith("MEMORIA_")), args }]],
+  ["/props", () => (loading() ? [503, { error: { message: "Loading model" } }] : [200, { model_alias: process.env.LLAMA_ARG_ALIAS ?? "" }])],
+  ["/debug/env", () => [200, { keys: Object.keys(process.env).filter((k) => k.toUpperCase().startsWith("MEMORIA_")), args, api: Boolean(process.env.LLAMA_API_KEY) }]],
+  [
+    "/debug/say",
+    (body) => {
+      process.stderr.write(`srv prompt: ${String(body.text)}\n`);
+      setTimeout(() => process.exit(3), 10);
+      return [200, {}];
+    },
+  ],
   [
     "/debug/crash",
     () => {
@@ -80,11 +89,16 @@ const server = createServer((request, response) => {
   const chunks: Buffer[] = [];
   request.on("data", (c: Buffer) => chunks.push(c));
   request.on("end", () => {
+    const finish = ([status, reply]: Reply): void => {
+      response.writeHead(status, { "content-type": "application/json" });
+      response.end(JSON.stringify(reply));
+    };
+    // As the real server: /health is open, and everything else needs the key when one is set.
+    const key = process.env.LLAMA_API_KEY;
+    if (key && request.url !== "/health" && !request.url?.startsWith("/debug/") && request.headers.authorization !== `Bearer ${key}`) return finish([401, { error: { message: "Invalid API Key" } }]);
     const body = chunks.length > 0 ? (JSON.parse(Buffer.concat(chunks).toString("utf8")) as Body) : {};
     const route = routes.get(request.url ?? "");
-    const [status, reply] = typeof route === "function" ? route(body) : ([404, { error: { message: "no such route" } }] as Reply);
-    response.writeHead(status, { "content-type": "application/json" });
-    response.end(JSON.stringify(reply));
+    return finish(typeof route === "function" ? route(body) : [404, { error: { message: "no such route" } }]);
   });
 });
 server.listen(port, "127.0.0.1");

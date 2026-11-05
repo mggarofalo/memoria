@@ -96,10 +96,10 @@ test("a worker list names each token's environment variable and holds no secrets
 });
 
 test("a pool token can come from a file, like every other secret", async () => {
-  const { mkdtemp, writeFile, chmod } = await import("node:fs/promises");
-  const { tmpdir } = await import("node:os");
+  const { writeFile, chmod } = await import("node:fs/promises");
+  const { tempDir } = await import("./helpers.ts");
   const { join } = await import("node:path");
-  const file = join(await mkdtemp(join(tmpdir(), "memoria-config-")), "token");
+  const file = join(await tempDir("memoria-config-"), "token");
   await writeFile(file, "Xk29vQmB7fLp3ZtRw\n");
   await chmod(file, 0o600);
   const workers = JSON.stringify([{ name: "a", url: "http://192.168.1.20:1", tokenEnv: "A_TOKEN" }]);

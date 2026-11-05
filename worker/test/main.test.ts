@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -28,7 +28,10 @@ test("the entry point starts, warms up, serves every endpoint, keeps the token o
     MEMORIA_WORKER_TOKEN: TOKEN,
     MEMORIA_WORKER_MODEL_DIR: "/no/models/needed/for/external/servers",
   };
-  for (const r of roles) env[`MEMORIA_WORKER_${r.role.toUpperCase()}_URL`] = `http://127.0.0.1:${r.port}`;
+  for (const r of roles) {
+    env[`MEMORIA_WORKER_${r.role.toUpperCase()}_URL`] = `http://127.0.0.1:${r.port}`;
+    env[`MEMORIA_WORKER_${r.role.toUpperCase()}_API_KEY`] = upstream.apiKeyFor(r.role);
+  }
   const child = spawn(process.execPath, [main], { env, stdio: ["ignore", "pipe", "pipe"] });
   let output = "";
   child.stdout.on("data", (c: Buffer) => (output += c.toString()));
@@ -62,8 +65,9 @@ test("bad configuration exits non-zero, names the setting, and does not repeat a
   assert.ok(!short.stderr.includes("short-secret"));
 });
 
-test("the entry point reads its token from a file, and a bad file stops it without repeating the content", async () => {
+test("the entry point reads its token from a file, and a bad file stops it without repeating the content", async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), "memoria-worker-token-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
   const run = (over: NodeJS.ProcessEnv) => spawnSync(process.execPath, [main], { env: { ...process.env, MEMORIA_WORKER_TOKEN: "", MEMORIA_WORKER_MODEL_DIR: "/definitely/not/here", ...over }, encoding: "utf8", timeout: 20_000 });
 
   const missing = run({ MEMORIA_WORKER_TOKEN_FILE: path.join(dir, "absent") });

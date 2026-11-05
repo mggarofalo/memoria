@@ -327,6 +327,67 @@ test("expansion output that is not text falls back to the plain query", async ()
   }
 });
 
+test("primed tokens answer without a call, and are forgotten when told", async () => {
+  const h = await harness();
+  try {
+    await h.llm.primeTokens(["one", "two", "one"]);
+    assert.equal(h.worker.count("/v1/tokenize-batch"), 1);
+    assert.deepEqual(await h.llm.tokenize("two"), Array.from("two", (c) => c.codePointAt(0)));
+    assert.equal(h.worker.count("/v1/tokenize"), 0);
+    await h.llm.tokenize("three");
+    assert.equal(h.worker.count("/v1/tokenize"), 1, "anything not primed is asked for singly");
+    h.llm.forgetPrimedTokens();
+    await h.llm.tokenize("two");
+    assert.equal(h.worker.count("/v1/tokenize"), 2);
+  } finally {
+    await h.done();
+  }
+});
+
+test("priming splits a large set into batches a worker accepts", async () => {
+  const h = await harness();
+  try {
+    await h.llm.primeTokens(Array.from({ length: 300 }, (_, i) => `text ${i}`));
+    assert.equal(h.worker.count("/v1/tokenize-batch"), 2);
+    await h.llm.primeTokens(["x".repeat(5 * 1024 * 1024), "y".repeat(5 * 1024 * 1024)]);
+    assert.equal(h.worker.count("/v1/tokenize-batch"), 4);
+  } finally {
+    await h.done();
+  }
+});
+
+test("a failed priming costs nothing but the time it would have saved", async () => {
+  const bad: Array<[string, () => { status?: number; body: unknown }]> = [
+    ["wrong count", () => ({ body: { tokens: [[1]] } })],
+    ["not numbers", () => ({ body: { tokens: [["x"], ["y"]] } })],
+    ["server error", () => ({ status: 500, body: { error: "x" } })],
+  ];
+  for (const [label, reply] of bad) {
+    const h = await harness();
+    try {
+      h.worker.on("POST /v1/tokenize-batch", reply);
+      await h.llm.primeTokens(["a", "b"]);
+      assert.deepEqual(await h.llm.tokenize("a"), ["a".codePointAt(0)], label);
+      assert.equal(h.worker.count("/v1/tokenize"), 1, label);
+    } finally {
+      await h.done();
+    }
+  }
+});
+
+test("a worker without the batch route is asked once", async () => {
+  const h = await harness();
+  try {
+    h.worker.on("POST /v1/tokenize-batch", () => ({ status: 404, body: { error: "no_route" } }));
+    await h.llm.primeTokens(["a"]);
+    await h.llm.primeTokens(["b"]);
+    await h.llm.primeTokens(["c"]);
+    assert.equal(h.worker.count("/v1/tokenize-batch"), 1);
+  } finally {
+    await h.done();
+  }
+});
+
 test("bad tokens and bad detokenized text are rejected", async () => {
   for (const tokens of [["1"], [-1], [1.5], "abc", new Array(100).fill(1)]) {
     const h = await harness();

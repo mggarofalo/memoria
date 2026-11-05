@@ -34,6 +34,8 @@ export interface SdkHandles {
   migrateVectors(model: string): void;
   fingerprint(model: string): string;
   chunk(body: string, path: string, signal: AbortSignal): Promise<Array<{ text: string; pos: number }>>;
+  /** The texts `chunk` will ask to tokenize first, before any re-splitting. */
+  firstPassTexts(body: string, path: string): Promise<string[]>;
   format(text: string, title: string, model: string): string;
   title(body: string, path: string): string;
   clearVectors(): void;
@@ -230,7 +232,14 @@ function farmDeps(handles: SdkHandles, llm: RemoteLlm, model: string, fingerprin
     capacity: () => llm.pool.backgroundCapacity("embed"),
     pendingDocs: pending,
     readBody: (hash) => (db.prepare("SELECT doc FROM content WHERE hash = ?").get(hash) as { doc?: string } | undefined)?.doc ?? "",
-    chunk: handles.chunk,
+    chunk: async (body, path, signal) => {
+      await llm.primeTokens(await handles.firstPassTexts(body, path));
+      try {
+        return await handles.chunk(body, path, signal);
+      } finally {
+        llm.forgetPrimedTokens();
+      }
+    },
     format: (text, body, path) => handles.format(text, handles.title(body, path), model),
     vectorDimensions: () => indexDimensions(db),
     resetVectors: () => politeWrite(db, handles.clearVectors),

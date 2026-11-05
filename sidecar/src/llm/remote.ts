@@ -19,7 +19,7 @@ import type {
   RerankResult,
   WorkerOptions,
 } from "./types.ts";
-import { checkedScore, parseEmbedResponse, parseRerankResults, parseText, parseTokens, ResponseViolation } from "./validate.ts";
+import { checkedScore, parseEmbedResponse, parseRerankResults, parseText, parseTokenLists, parseTokens, ResponseViolation } from "./validate.ts";
 
 /** Longer than any honest expansion: QMD asks for 600 tokens at most. */
 const MAX_EXPANSION_CHARS = 16 * 1024;
@@ -107,6 +107,28 @@ function definedOnly<T extends object>(value: T): { [K in keyof T]?: Exclude<T[K
   return Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined)) as { [K in keyof T]?: Exclude<T[K], undefined> };
 }
 
+/** Sizes a worker accepts, kept well under its body limit. */
+const TOKEN_BATCH_TEXTS = 256;
+const TOKEN_BATCH_BYTES = 8 * 1024 * 1024;
+
+function tokenBatches(texts: readonly string[]): string[][] {
+  const batches: string[][] = [];
+  let current: string[] = [];
+  let bytes = 0;
+  for (const text of texts) {
+    const size = Buffer.byteLength(text, "utf8");
+    if (current.length > 0 && (current.length >= TOKEN_BATCH_TEXTS || bytes + size > TOKEN_BATCH_BYTES)) {
+      batches.push(current);
+      current = [];
+      bytes = 0;
+    }
+    current.push(text);
+    bytes += size;
+  }
+  if (current.length > 0) batches.push(current);
+  return batches;
+}
+
 function workersFrom(options: RemoteLlmOptions): PoolWorkerConfig[] {
   if (options.workers) return options.workers;
   if (!options.worker) throw new Error("RemoteLlm needs `worker` or `workers`");
@@ -136,6 +158,8 @@ export class RemoteLlm implements LlmSurface {
   readonly #now: () => number;
   readonly #searchDeadlineMs: number;
   readonly #search = new AsyncLocalStorage<SearchContext>();
+  readonly #primed = new Map<string, readonly number[]>();
+  #noTokenBatches = false;
   #dimensions: number;
 
   constructor(options: RemoteLlmOptions) {
@@ -374,8 +398,37 @@ export class RemoteLlm implements LlmSurface {
 
   // --- tokens ----------------------------------------------------------------
 
+  /**
+   * The SDK's chunker asks for tokens one text at a time, and on a real corpus those
+   * round trips took most of the time a re-embed was not embedding. It asks about
+   * known texts first, so these are fetched together and its calls answered from
+   * here. This only saves time: any failure leaves the texts to be asked for singly.
+   */
+  async primeTokens(texts: readonly string[]): Promise<void> {
+    if (this.#noTokenBatches) return;
+    for (const batch of tokenBatches([...new Set(texts)])) {
+      try {
+        await this.pool.dispatch("embed", "background", "tokenize", async ({ client }) => {
+          const raw = await client.post("tokenize", "tokenize", "/v1/tokenize-batch", { texts: batch }, batch.length);
+          const lists = this.#validated(client.name, "tokenize", () => parseTokenLists(raw, batch));
+          batch.forEach((text, i) => this.#primed.set(text, lists[i]!));
+        });
+      } catch (err) {
+        // A worker from before this route: asked once, so its circuit is not at risk.
+        if (err instanceof WorkerError && err.status === 404) this.#noTokenBatches = true;
+        return;
+      }
+    }
+  }
+
+  forgetPrimedTokens(): void {
+    this.#primed.clear();
+  }
+
   /** Tokens are the embedding model's, so these route like embedding, including the model check. */
   async tokenize(text: string): Promise<readonly number[]> {
+    const primed = this.#primed.get(text);
+    if (primed) return primed;
     try {
       return await this.pool.dispatch("embed", "background", "tokenize", async ({ client }) => {
         const raw = await client.post("tokenize", "tokenize", "/v1/tokenize", { text }, 1);

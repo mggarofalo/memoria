@@ -233,6 +233,10 @@ interface SdkLlmModule {
 
 /** `dist/store.js` exports likewise. Pinned by test/llm-surface.test.ts. */
 interface SdkStoreModule {
+  CHUNK_SIZE_TOKENS: number;
+  CHUNK_OVERLAP_TOKENS: number;
+  CHUNK_WINDOW_TOKENS: number;
+  chunkDocumentAsync(content: string, maxChars: number, overlapChars: number, windowChars: number, filepath: string, strategy: string): Promise<Array<{ text: string; pos: number }>>;
   getEmbeddingFingerprint(model: string): string;
   chunkDocumentByTokens(content: string, maxTokens: undefined, overlap: undefined, window: undefined, filepath: string, strategy: undefined, signal: AbortSignal): Promise<Array<{ text: string; pos: number }>>;
   extractTitle(content: string, filename: string): string;
@@ -262,6 +266,9 @@ async function sdkHandles(storeInternal: unknown, local: LlmSurface): Promise<Sd
     migrateVectors: (model) => void internal.getHashesNeedingEmbedding(model),
     fingerprint: (model) => sdkStore.getEmbeddingFingerprint(model),
     chunk: (body, path, signal) => sdkStore.chunkDocumentByTokens(body, undefined, undefined, undefined, path, undefined, signal),
+    // The same first pass as chunkDocumentByTokens, which estimates three characters a token.
+    firstPassTexts: async (body, path) =>
+      (await sdkStore.chunkDocumentAsync(body, sdkStore.CHUNK_SIZE_TOKENS * 3, sdkStore.CHUNK_OVERLAP_TOKENS * 3, sdkStore.CHUNK_WINDOW_TOKENS * 3, path, "regex")).map((c) => c.text),
     format: (text, title, model) => sdkLlm.formatDocForEmbedding(text, title, model),
     title: (body, path) => sdkStore.extractTitle(body, path),
     clearVectors: () => sdkStore.clearAllEmbeddings(internal.db),

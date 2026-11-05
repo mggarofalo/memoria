@@ -71,6 +71,8 @@ export interface ParityOptions {
   expansionRuns: number;
   now?: () => number;
   onProgress?: (done: number, total: number, id: string) => void;
+  /** After each query, with every report so far, so a crash does not lose the run. */
+  onQuery?: (reports: readonly QueryReport[]) => void;
 }
 
 /** QMD prefixes the intent to the rerank query; the direct comparison has to as well. */
@@ -203,6 +205,7 @@ export async function runParity(queries: readonly BenchQuery[], local: ParitySid
   for (const [position, query] of queries.entries()) {
     reports.push(await reportQuery(query, local, remote, options, timed));
     options.onProgress?.(position + 1, queries.length, query.id);
+    options.onQuery?.(reports);
   }
 
   return {

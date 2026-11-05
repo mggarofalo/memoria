@@ -1,3 +1,4 @@
+import { readBounded, ResponseTooLarge } from "./bounded-read.ts";
 import { CONTEXT_SIZE, type Role } from "./config.ts";
 
 /**
@@ -56,6 +57,8 @@ export interface RerankBackend {
 
 export interface LlamaRoutes {
   baseUrlFor(role: Role): string | undefined;
+  /** Sent as a bearer token on every call. */
+  apiKeyFor?(role: Role): string | undefined;
 }
 
 export class LlamaServers {
@@ -72,18 +75,23 @@ export class LlamaServers {
   async post(role: Role, path: string, body: unknown): Promise<unknown> {
     const base = this.#routes.baseUrlFor(role);
     if (base === undefined) throw new UpstreamError("not_served", `This worker does not serve ${role}`);
+    const apiKey = this.#routes.apiKeyFor?.(role);
     let response: Response;
+    let text: string;
     try {
       response = await this.#fetch(new URL(path, base), {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", ...(apiKey !== undefined ? { authorization: `Bearer ${apiKey}` } : {}) },
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(this.#timeoutMs),
+        // A redirect would carry transcript text to wherever it points.
+        redirect: "error",
       });
-    } catch {
+      text = await readBounded(response);
+    } catch (err) {
+      if (err instanceof ResponseTooLarge) throw new UpstreamError("upstream_too_large", `llama-server for ${role} returned too much`);
       throw new UpstreamError("upstream_unavailable", `llama-server for ${role} did not answer`);
     }
-    const text = await response.text();
     // llama-server saying the input is bad is a refusal of this text, not a broken server.
     if (REJECTED_INPUT.has(response.status)) throw new InvalidRequest("upstream_rejected", `llama-server for ${role} rejected the input with HTTP ${response.status}`);
     if (!response.ok) throw new UpstreamError("upstream_error", `llama-server for ${role} returned HTTP ${response.status}`);
@@ -326,6 +334,11 @@ export class Inference {
   /** The tokenizer that matters for chunking is the embedding model's, as in QMD. */
   tokenize(text: string): Promise<number[]> {
     return this.#servers.tokenize("embed", text);
+  }
+
+  /** llama-server tokenizes one text per call, so these run side by side. */
+  tokenizeMany(texts: string[]): Promise<number[][]> {
+    return mapLimited(texts, TOKENIZE_CONCURRENCY, (text) => this.#servers.tokenize("embed", text));
   }
 
   detokenize(tokens: number[]): Promise<string> {

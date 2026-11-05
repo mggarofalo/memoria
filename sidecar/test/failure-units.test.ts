@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { test } from "node:test";
@@ -17,7 +16,7 @@ import { parseEmbeddings, ResponseViolation } from "../src/llm/validate.ts";
 import { guardedFallback, sdkCacheFileName, type SdkDb } from "../src/llm/wire.ts";
 import { openJobStore, retryJobStore, SqliteJobStore } from "../src/queue-store.ts";
 import { loadConfig } from "../src/config.ts";
-import { ManualScheduler } from "./helpers.ts";
+import { ManualScheduler, tempDir } from "./helpers.ts";
 import { EMBED_FILE, MockWorker, vectorFor } from "./mock-worker.ts";
 
 /** Each test here reproduces a failure that once left the system looking healthy. */
@@ -28,7 +27,7 @@ const result: JobResult = { update: { collections: 1, indexed: 0, updated: 0, un
 const req = (over: Partial<ReindexRequest> = {}): ReindexRequest => ({ collections: ["c"], embed: true, force: false, reason: "test", ...over });
 const never = new Promise<JobResult>(() => {});
 const workerConfig = (name: string, url: string, extra: Partial<PoolWorkerConfig> = {}): PoolWorkerConfig => ({ name, url, token: undefined, capabilities: ["embed", "rerank", "generate"], priority: 1, maxConcurrent: 4, ...extra });
-const tempFile = async (name: string) => path.join(await mkdtemp(path.join(tmpdir(), "memoria-failure-")), name);
+const tempFile = async (name: string) => path.join(await tempDir("memoria-failure-"), name);
 
 interface Pair {
   a: MockWorker;

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
+import { createServer } from "node:http";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -328,6 +329,97 @@ test("a missing llama-server binary backs off rather than crashing the worker", 
   assert.equal(spawnFails.ready("embed"), false);
   await spawnFails.stop();
   await supervisor.stop();
+});
+
+test("something else on the port is never marked ready or sent text", async () => {
+  const roles = await roleConfigs(["embed"]);
+  const seen: string[] = [];
+  const impostor = createServer((request, response) => {
+    seen.push(`${request.method} ${request.url} ${request.headers.authorization ? "keyed" : "open"}`);
+    request.resume();
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ status: "ok", model_alias: "guess", tokens: [1] }));
+  });
+  await new Promise<void>((resolve) => impostor.listen(roles[0]!.port, "127.0.0.1", resolve));
+  const supervisor = fakeSupervisor(roles);
+  supervisor.start();
+  try {
+    assert.equal(await supervisor.waitReady(1_500), false);
+    assert.equal(supervisor.ready("embed"), false);
+    assert.ok(seen.length > 0, "the check did reach it");
+    assert.ok(seen.every((line) => line.startsWith("GET /props")), "no call but the identity check");
+  } finally {
+    await supervisor.stop();
+    await new Promise((resolve) => impostor.close(resolve));
+  }
+});
+
+test("a launched server takes calls only with this start's key, which is not on its command line", async () => {
+  await withWorker(async (w) => {
+    const child = `http://127.0.0.1:${w.roles[0]!.port}`;
+    assert.equal((await fetch(`${child}/tokenize`, { method: "POST", body: "{}" })).status, 401);
+    const debug = await json(fetch(`${child}/debug/env`));
+    assert.equal(debug.api, true);
+    const key = w.supervisor.apiKeyFor(w.roles[0]!.role)!;
+    assert.ok(key.length > 20);
+    assert.ok(!debug.args.join(" ").includes(key));
+    assert.equal((await post(w, "/v1/embed", { texts: ["hello"] })).status, 200);
+  });
+});
+
+test("llama-server's output stays out of the logs", async () => {
+  await withWorker(async (w) => {
+    const child = `http://127.0.0.1:${w.roles[0]!.port}`;
+    await fetch(`${child}/debug/say`, { method: "POST", headers: { authorization: `Bearer ${w.supervisor.apiKeyFor(w.roles[0]!.role)!}` }, body: JSON.stringify({ text: "PRIVATE-TRANSCRIPT" }) });
+    await waitUntil(() => w.logs.some((l) => l.includes("llama-server exited")), "the exit to be logged");
+    assert.ok(!w.logs.join("\n").includes("PRIVATE-TRANSCRIPT"));
+  });
+});
+
+test("a full queue refuses before reading the body", async () => {
+  await withWorker(
+    async (w) => {
+      const gate = w.gates.get("embed")!;
+      let release = () => {};
+      const held = new Promise<void>((resolve) => (release = resolve));
+      const busy = [gate.run(() => held), gate.run(() => held)];
+      const response = await fetch(`${w.url}/v1/embed`, { method: "POST", headers: auth, body: JSON.stringify({ texts: ["x".repeat(500_000)] }) });
+      assert.equal(response.status, 503);
+      assert.equal((await response.json() as { error: string }).error, "overloaded");
+      release();
+      await Promise.all(busy);
+    },
+    { maxQueue: 0 },
+  );
+});
+
+test("request bodies held in memory are capped, and released with the answer", async () => {
+  await withWorker(
+    async (w) => {
+      const over = await fetch(`${w.url}/v1/embed`, { method: "POST", headers: auth, body: JSON.stringify({ texts: ["x".repeat(3000)] }) });
+      assert.equal(over.status, 503);
+      assert.equal((await over.json() as { error: string }).error, "overloaded");
+      for (let i = 0; i < 5; i++) assert.equal((await post(w, "/v1/embed", { texts: ["x".repeat(1200)] })).status, 200);
+    },
+    { maxBufferedBytes: 2048 },
+  );
+});
+
+test("an oversized grammar is refused before it reaches llama-server", async () => {
+  await withWorker(async (w) => {
+    const r = await post(w, "/v1/complete", { prompt: "p", grammar: `root ::= "${"a".repeat(17 * 1024)}"` });
+    assert.equal(r.status, 400);
+    assert.equal((await r.json() as { error: string }).error, "grammar_too_large");
+  });
+});
+
+test("a batch of texts is tokenized in order, and its size is limited", async () => {
+  await withWorker(async (w) => {
+    const ok = await json(post(w, "/v1/tokenize-batch", { texts: ["ab", "c", ""] }));
+    assert.deepEqual(ok.tokens, [Array.from("ab", (c) => c.codePointAt(0)! + 1), ["c".codePointAt(0)! + 1], []]);
+    assert.equal((await post(w, "/v1/tokenize-batch", { texts: Array.from({ length: 257 }, () => "x") })).status, 400);
+    assert.equal((await post(w, "/v1/tokenize-batch", { texts: [] })).status, 400);
+  });
 });
 
 test("stopping the worker stops its children", async () => {

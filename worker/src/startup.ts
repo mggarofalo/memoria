@@ -71,6 +71,7 @@ export async function startWorker(config: WorkerConfig, log: Logger, options: { 
     token: config.token,
     allowedHosts: config.allowedHosts,
     bodyLimitBytes: config.bodyLimitBytes,
+    maxBufferedBytes: config.maxBufferedBytes,
     maxQueue: config.maxQueue,
     concurrency,
     inference,

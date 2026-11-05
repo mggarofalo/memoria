@@ -167,7 +167,7 @@ test("parity holds on awkward documents: no heading, unicode, frontmatter, dupli
     },
   };
   const build = async () => {
-    const root = await tempDir("memoria-parity-");
+    const root = await tempDir("memoria-farm-parity-");
     const collections: Record<string, { path: string; pattern: string }> = {};
     for (const [name, docs] of Object.entries(awkward)) {
       const dir = path.join(root, name);
@@ -187,9 +187,10 @@ test("parity holds on awkward documents: no heading, unicode, frontmatter, dupli
   const mock = await new MockWorker(8).start();
   const farm = await openBackend({ dbPath: farmDb, keepWarm: false, llm: remoteOptions([worker("w", mock)]) });
   const out = await farm.embed({ force: false });
-  assert.equal(out.errors, 0);
   await farm.close();
   await mock.stop();
+  assert.equal(out.errors, 0);
+  assert.ok(mock.count("/v1/tokenize-batch") > 0, "chunks are tokenized in batches");
 
   const qmd = await import("@tobilu/qmd");
   const store = await qmd.createStore({ dbPath: sdkDb });

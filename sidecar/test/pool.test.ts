@@ -142,6 +142,21 @@ test("priority breaks ties between equally loaded workers", async () => {
   }
 });
 
+test("background work asks a down worker again rather than call a missed heartbeat an outage", async () => {
+  const f = await fleet();
+  const healthy = { body: { status: "ok", queueDepth: 0, models: { embed: { loaded: true }, rerank: { loaded: true }, generate: { loaded: true } } } };
+  try {
+    for (const mock of [f.a, f.b]) mock.on("GET /health", () => ({ status: 500, body: { error: "stalled" } }));
+    await f.pool.refresh();
+    assert.equal(f.pool.canServe("embed", "background"), false);
+    for (const mock of [f.a, f.b]) mock.on("GET /health", () => healthy);
+    await assert.rejects(f.pool.dispatch("rerank", "interactive", "rerank", async () => "x"), /no worker/, "an interactive caller does not wait on it");
+    assert.equal(await f.pool.dispatch("embed", "background", "embed", async () => "served"), "served");
+  } finally {
+    await f.done();
+  }
+});
+
 test("the lowest queue depth wins over priority", async () => {
   const f = await fleet();
   try {

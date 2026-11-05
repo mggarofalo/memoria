@@ -6,7 +6,8 @@ import { createLogger } from "../src/log.ts";
 import { findModel } from "../src/models.ts";
 import { busyReasons, CachedMachine, parseNvidiaSmi, parsePmsetThermal, readMachine, type ProbeSource } from "../src/probes.ts";
 import { Gate } from "../src/server.ts";
-import { childEnvironment, llamaServerArgs } from "../src/supervisor.ts";
+import { childEnvironment, llamaServerArgs, stderrCode } from "../src/supervisor.ts";
+import { MAX_UPSTREAM_BYTES, readBounded, ResponseTooLarge } from "../src/bounded-read.ts";
 
 const GOOD_TOKEN = "Xk29vQmB7fLp3ZtRw";
 
@@ -24,13 +25,23 @@ test("defaults bind loopback and serve all three roles", () => {
 });
 
 test("the bind address must be loopback or a private LAN address", () => {
-  for (const host of ["0.0.0.0", "::", "8.8.8.8", "172.32.0.1", "example.com", "192.169.0.1", "2001:db8::1"]) {
+  for (const host of ["0.0.0.0", "::", "8.8.8.8", "172.32.0.1", "example.com", "192.169.0.1", "2001:db8::1", "fc00:evil.example.com", "10.0.0.256", "fc00::1/0", "10.1", "127.0.0.1.example.com", "fe80:evil", "172.16.0.1/8", "010.0.0.1"]) {
     assert.throws(() => loadConfig({ MEMORIA_WORKER_HOST: host, MEMORIA_WORKER_TOKEN: GOOD_TOKEN }), /MEMORIA_WORKER_HOST/, host);
     assert.equal(isLanAddress(host), false, host);
   }
   for (const host of ["127.0.0.1", "::1", "localhost", "10.0.0.5", "172.16.0.1", "172.31.255.1", "192.168.1.20", "169.254.1.1", "fd00::1", "fe80::1"]) {
     assert.equal(isLanAddress(host), true, host);
   }
+});
+
+test("an external llama-server must be a plain loopback or private URL", () => {
+  for (const url of ["http://example.com:8000", "http://8.8.8.8", "http://user:pw@127.0.0.1:9000", "ftp://127.0.0.1", "not a url", "http://10.0.0.256", "http://[2001:db8::1]:80"]) {
+    assert.throws(() => loadConfig({ MEMORIA_WORKER_EMBED_URL: url }), /MEMORIA_WORKER_EMBED_URL/, url);
+  }
+  for (const url of ["http://127.0.0.1:9000", "http://[::1]:9000", "https://192.168.1.20:9000", "http://[fd00::1]:9000"]) {
+    assert.equal(loadConfig({ MEMORIA_WORKER_EMBED_URL: url }).roles[0]!.externalUrl, url);
+  }
+  assert.equal(loadConfig({ MEMORIA_WORKER_EMBED_URL: "http://127.0.0.1:9000", MEMORIA_WORKER_EMBED_API_KEY: "k" }).roles[0]!.externalApiKey, "k");
 });
 
 test("a LAN bind needs a token of real length", () => {
@@ -79,6 +90,22 @@ test("llama-server flags bind loopback and size contexts like QMD", () => {
 test("the child environment never holds the worker's settings", () => {
   const env = childEnvironment({ PATH: "/bin", CUDA_VISIBLE_DEVICES: "0", MEMORIA_WORKER_TOKEN: GOOD_TOKEN, MEMORIA_WORKER_HOST: "x" });
   assert.deepEqual(env, { PATH: "/bin", CUDA_VISIBLE_DEVICES: "0" });
+  assert.deepEqual(childEnvironment({ Path: "x", memoria_worker_token: GOOD_TOKEN, Memoria_Worker_Token: GOOD_TOKEN }), { Path: "x" }, "Windows keeps a variable's case");
+  assert.deepEqual(childEnvironment({ LLAMA_ARG_HOST: "0.0.0.0", llama_api_key: "x" }), {}, "inherited settings must not undo the flags");
+});
+
+test("llama-server's output reduces to a fixed code", () => {
+  assert.equal(stderrCode("start: couldn't bind HTTP server socket, hostname: 127.0.0.1, port: 8384"), "port_in_use");
+  assert.equal(stderrCode("srv load_model: failed to load model, 'x'"), "model_load_failed");
+  assert.equal(stderrCode("ggml_gallocr: failed to allocate buffer"), "out_of_memory");
+  assert.equal(stderrCode("error: invalid argument: --nope"), "bad_arguments");
+  assert.equal(stderrCode("slot launch: PRIVATE TEXT"), null);
+});
+
+test("responses are read only up to a limit", async () => {
+  assert.equal(await readBounded(new Response("héllo")), "héllo");
+  await assert.rejects(readBounded(new Response("x".repeat(100)), 10), ResponseTooLarge);
+  assert.ok(MAX_UPSTREAM_BYTES >= 32 * 1024 * 1024);
 });
 
 // --- machine probes -------------------------------------------------------------
@@ -240,6 +267,18 @@ test("a failed template fetch is retried on the next call", async () => {
   await assert.rejects(inference.rerank("q", ["d"]));
   fail = false;
   assert.deepEqual(await inference.rerank("q", ["d"]), [0.5]);
+});
+
+test("calls refuse redirects and carry the key", async () => {
+  const seen: RequestInit[] = [];
+  const fetchFn = (async (_url: unknown, init: RequestInit) => {
+    seen.push(init);
+    return new Response(JSON.stringify({ tokens: [1] }), { status: 200 });
+  }) as unknown as typeof globalThis.fetch;
+  const routes = { baseUrlFor: () => "http://127.0.0.1:1/", apiKeyFor: () => "the-key" };
+  await new LlamaServers(routes, { fetch: fetchFn, timeoutMs: 1000 }).tokenize("embed", "x");
+  assert.equal(seen[0]!.redirect, "error");
+  assert.equal((seen[0]!.headers as Record<string, string>).authorization, "Bearer the-key");
 });
 
 test("rerank refuses a query that leaves no room", async () => {

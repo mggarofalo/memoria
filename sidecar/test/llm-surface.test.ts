@@ -61,6 +61,10 @@ test("the seams remote mode replaces are where it expects them", async () => {
   // The chunker ignores store.llm, which is why the singleton must be replaced too.
   assert.match(store, /export async function chunkDocumentByTokens\([^)]*\) \{\s*const llm = getDefaultLlamaCpp\(\);/);
   assert.match(llm, /export function setDefaultLlamaCpp\(llm\)/);
+  // Token priming repeats the chunker's first pass; if this drifts, it silently stops saving time.
+  assert.match(store, /const avgCharsPerToken = 3;\s+const maxChars = maxTokens \* avgCharsPerToken;\s+const overlapChars = overlapTokens \* avgCharsPerToken;\s+const windowChars = windowTokens \* avgCharsPerToken;/);
+  assert.match(store, /await chunkDocumentAsync\(content, maxChars, overlapChars, windowChars, filepath, chunkStrategy\)/);
+  assert.match(store, /windowTokens = CHUNK_WINDOW_TOKENS, filepath, chunkStrategy = "regex", signal\)/);
   // The setter is reachable only by file URL, because of this exports map.
   const pkg = JSON.parse(await readFile(new URL("../package.json", dist), "utf8"));
   assert.deepEqual(Object.keys(pkg.exports), ["."]);
