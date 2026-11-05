@@ -63,7 +63,8 @@ internal sealed class ClaudeTranscript(SessionSource source, SessionRenderOption
 			Report,
 			CountsByRule,
 			Refusals,
-			path => SessionPaths.IsClaudeFamily(path, shortId));
+			path => SessionPaths.IsClaudeFamily(path, shortId),
+			SessionPaths.ClaudeGlob(shortId));
 	}
 
 	/// <summary>Keeps the raw first cwd too, only to compare with the project folder. It is never written out.</summary>
@@ -142,6 +143,14 @@ internal sealed class ClaudeTranscript(SessionSource source, SessionRenderOption
 		if (text.Length > 0 && text != InterruptedMarker)
 		{
 			AddMessage(role, text, time);
+		}
+	}
+
+	protected override void MessagesRenumbered(int[] firstPiece)
+	{
+		foreach (string path in _files.Keys.ToArray())
+		{
+			_files[path] = firstPiece[_files[path]];
 		}
 	}
 

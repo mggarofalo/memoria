@@ -147,7 +147,7 @@ public sealed class MemoriaQmdClientTests
 	[Fact]
 	public async Task BoundedReadStream_PassesThrough_AndCountsEveryReadPath()
 	{
-		using BoundedReadStream stream = new(new MemoryStream(new byte[10]), 4);
+		using BoundedReadStream stream = new(new MemoryStream(new byte[10]), 4, () => new SidecarException(SidecarException.ResponseTooLarge, "too much", System.Net.HttpStatusCode.OK));
 		byte[] buffer = new byte[2];
 
 		Assert.True(stream.CanRead);

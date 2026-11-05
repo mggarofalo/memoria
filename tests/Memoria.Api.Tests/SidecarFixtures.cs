@@ -128,6 +128,7 @@ public static class SidecarFixtures
 			  "models": { "embed": "embed.gguf", "rerank": "rerank.gguf", "generate": "gen.gguf", "loaded": { "embed": {{flag}}, "rerank": {{flag}}, "generate": {{flag}} }, "resident": {{flag}} },
 			  "warmup": { "requested": true, "done": {{flag}}, "error": {{error}}, "durationMs": null },
 			  "metadata": { "documents": 1501, "refreshedAt": null },
+			  "sdk": { "patched": true },
 			  "jobs": { "pending": 0 }
 			}
 			""";

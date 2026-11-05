@@ -211,6 +211,31 @@ reverse proxy. The `RemoteIp` in the log line and the failed-authentication limi
 use the client address: the socket peer, or the forwarded client when the peer is a
 configured `TrustedProxies` entry.
 
+## `Memoria:Ingest` — writing to the corpus
+
+| Key | Default | Purpose |
+|---|---|---|
+| `MaxDocumentBytes` | `2097152` | The largest stored document, in UTF-8 bytes, at least 64 KiB. Set it to the sidecar's `MEMORIA_QMD_MAX_DOCUMENT_BYTES`. Over it, `POST /v1/documents` answers 413 and a session part fails on its own. The renderer splits a long message to fit. |
+| `MaxSessionBytes` | `268435456` | The largest raw transcript one request may send. It is read as a stream, and past this the request gets 413 or, if the upload has no declared length and the client is still sending, a closed connection. A transcript under this limit whose text passes the renderer's 32 million character budget is stored as far as the budget goes and answered with 207: it stays `partial`, and `read.messagesOverLimit` says how much was left out. |
+| `MaxConcurrentSessions` | `2` | Transcripts rendered at once. One render can hold about 100 MB, so this bounds memory. Past it a caller gets 503 with `Retry-After`. |
+| `Collections:<name>:Redaction` | not set | Exactly `Disabled` turns redaction off for that collection. See below. |
+
+Writing needs the `ingest` scope and the target collection in the key's allowlist, and is not available when `Memoria:Auth:Mode` is `Disabled`.
+
+### Turning redaction off for a collection
+
+Every collection is redacted unless an operator names it here:
+
+```jsonc
+{ "Memoria": { "Ingest": { "Collections": { "family-notes": { "Redaction": "Disabled" } } } } }
+```
+
+- **Only this setting can do it.** No request parameter, key attribute, header or envelope field has any effect, so a caller cannot turn redaction off.
+- **The value and the name are exact.** `disabled`, `off`, `false` and ` Disabled ` all leave redaction on, and the server warns at startup about a value it did not recognize. A differently cased collection name is a different collection, and is redacted.
+- **Search results from an unredacted collection can reach cloud models.** They go wherever the caller sends them, along with any credential the text holds. Treat every credential ingested into the collection as exposed to those models.
+- **A switch changes future ingest only.** Turning redaction back on does not clean what is already stored. Older documents stay as they were written until they are ingested again or deleted, so re-ingest or delete them, and rotate any credential they held. Turning redaction off does not change older documents either.
+- **It is visible.** Startup logs a warning naming each unredacted collection. The ingest response and the audit record say `redaction: "disabled"`, and `GET /v1/status` lists `unredactedCollections` for a key that has `admin` as well as `read`. The per-rule counts, refusals and the check on finished parts do not apply to such a collection, so they are empty.
+
 ## Host settings outside `Memoria`
 
 | Key | Default | Purpose |

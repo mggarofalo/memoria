@@ -40,7 +40,7 @@ See [AGENTS.md](AGENTS.md) for full development guidance.
 
 ## Security
 
-Memoria indexes agent transcripts, which routinely contain pasted credentials, `.env` contents, and tokens captured in tool output. Redaction runs at ingest, before anything is indexed. Do not deploy an instance without it, and scope API keys to collections rather than issuing a single all-access key.
+Memoria indexes agent transcripts, which routinely contain pasted credentials, `.env` contents, and tokens captured in tool output. Redaction runs at ingest, before anything is indexed, and it is on by default. An operator can turn it off for a named collection in configuration, and no caller can; do that only for a collection you are sure holds no credentials, because its search results can reach cloud models (see [configuration](docs/configuration.md#memoriaingest--writing-to-the-corpus)). Do not deploy an instance that indexes transcripts without it, and scope API keys to collections rather than issuing a single all-access key.
 
 ## License
 

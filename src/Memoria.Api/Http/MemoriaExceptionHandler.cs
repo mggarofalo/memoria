@@ -1,4 +1,6 @@
 using System.Net;
+using Memoria.Api.Ingest;
+using Memoria.Core.Redaction;
 using Memoria.Core.Sidecar;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
@@ -15,6 +17,8 @@ namespace Memoria.Api.Http;
 /// </summary>
 public sealed partial class MemoriaExceptionHandler(IProblemDetailsService problemDetails, ILogger<MemoriaExceptionHandler> logger) : IExceptionHandler
 {
+	private const int DefaultRetryAfterSeconds = 5;
+
 	public async ValueTask<bool> TryHandleAsync(HttpContext httpContext, Exception exception, CancellationToken cancellationToken)
 	{
 		ProblemDetails? problem = exception switch
@@ -27,12 +31,20 @@ public sealed partial class MemoriaExceptionHandler(IProblemDetailsService probl
 				Detail = forbidden.Message,
 				Extensions = { ["code"] = "collection_forbidden", ["collection"] = forbidden.Collection },
 			},
+			IngestRefusedException refused => FromRefusal(refused),
+			RedactionException redaction => FromRedaction(redaction),
+			BadHttpRequestException { StatusCode: StatusCodes.Status413PayloadTooLarge } => FromRefusal(new IngestRefusedException(StatusCodes.Status413PayloadTooLarge, "payload_too_large", "The request body is too large.")),
 			_ => null,
 		};
 
 		if (problem is null)
 		{
 			return false;
+		}
+
+		if (RetryAfterSeconds(exception) is int retryAfter)
+		{
+			httpContext.Response.Headers.RetryAfter = retryAfter.ToString(System.Globalization.CultureInfo.InvariantCulture);
 		}
 
 		httpContext.Response.StatusCode = problem.Status ?? StatusCodes.Status500InternalServerError;
@@ -42,6 +54,47 @@ public sealed partial class MemoriaExceptionHandler(IProblemDetailsService probl
 			Exception = exception,
 			ProblemDetails = problem,
 		});
+	}
+
+	/// <summary>What a busy backend or a busy ingest asks of the caller. The sidecar's own value wins, and a 503 without one gets a short default.</summary>
+	internal static int? RetryAfterSeconds(Exception exception)
+	{
+		return exception switch
+		{
+			IngestRefusedException refused => refused.RetryAfterSeconds,
+			SidecarException { RetryAfter: { } after } => Math.Max(1, (int)Math.Ceiling(after.TotalSeconds)),
+			SidecarException sidecar when Map(sidecar).Status == StatusCodes.Status503ServiceUnavailable => DefaultRetryAfterSeconds,
+			_ => null,
+		};
+	}
+
+	private static ProblemDetails FromRefusal(IngestRefusedException refused)
+	{
+		return new ProblemDetails
+		{
+			Status = refused.Status,
+			Title = "Ingest refused",
+			Detail = refused.Message,
+			Extensions = { ["code"] = refused.Code },
+		};
+	}
+
+	/// <summary>Names the rule and the part and nothing from the text: <see cref="RedactionException"/> carries no more than that.</summary>
+	private static ProblemDetails FromRedaction(RedactionException redaction)
+	{
+		return new ProblemDetails
+		{
+			Status = StatusCodes.Status422UnprocessableEntity,
+			Title = "Redaction could not finish",
+			Detail = "The document was not stored, because it could not be confirmed free of credentials.",
+			Extensions =
+			{
+				["code"] = "redaction_failed",
+				["rule"] = redaction.RuleName,
+				["failure"] = redaction.Failure.ToString(),
+				["part"] = redaction.Part,
+			},
+		};
 	}
 
 	private ProblemDetails FromSidecar(SidecarException exception, ICallerScope scope)
@@ -97,6 +150,7 @@ public sealed partial class MemoriaExceptionHandler(IProblemDetailsService probl
 			HttpStatusCode.Conflict => (StatusCodes.Status409Conflict, "Conflict"),
 			HttpStatusCode.RequestEntityTooLarge => (StatusCodes.Status413PayloadTooLarge, "Payload too large"),
 			HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden => (StatusCodes.Status502BadGateway, "Search backend rejected Memoria's credentials"),
+			HttpStatusCode.ServiceUnavailable when exception.RetryAfter is not null => (StatusCodes.Status503ServiceUnavailable, "Search backend busy"),
 			HttpStatusCode.ServiceUnavailable => (StatusCodes.Status503ServiceUnavailable, "Search backend not ready"),
 			_ => (StatusCodes.Status502BadGateway, "Search backend error"),
 		};

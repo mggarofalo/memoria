@@ -14,6 +14,7 @@ public sealed class MemoriaOptionsValidator : IValidateOptions<MemoriaOptions>
 		ValidateSidecar(options.Sidecar, failures);
 		ValidateSearch(options.Search, failures);
 		ValidateMcp(options.Mcp, failures);
+		ValidateIngest(options.Ingest, failures);
 		ValidateAuthMode(options.Auth, failures);
 		ValidateTrustedProxies(options.Auth.TrustedProxies, failures);
 		ValidateFailedAuth(options.Auth.FailedAuth, failures);
@@ -48,6 +49,15 @@ public sealed class MemoriaOptionsValidator : IValidateOptions<MemoriaOptions>
 	{
 		bool valid = !string.IsNullOrWhiteSpace(mcp.Path) && mcp.Path.StartsWith('/') && !mcp.Path.StartsWith("/v1", StringComparison.OrdinalIgnoreCase);
 		Require(!mcp.Enabled || valid, "Memoria:Mcp:Path must start with '/' and must not sit under /v1.", failures);
+	}
+
+	private const int MinDocumentBytes = 64 * 1024;
+
+	private static void ValidateIngest(IngestOptions ingest, List<string> failures)
+	{
+		Require(ingest.MaxDocumentBytes >= MinDocumentBytes, $"Memoria:Ingest:MaxDocumentBytes must be at least {MinDocumentBytes}, as frontmatter alone can take 8 KiB.", failures);
+		Require(ingest.MaxSessionBytes >= 1024, "Memoria:Ingest:MaxSessionBytes must be at least 1024.", failures);
+		Require(ingest.MaxConcurrentSessions >= 1, "Memoria:Ingest:MaxConcurrentSessions must be at least 1.", failures);
 	}
 
 	private static void ValidateAuthMode(AuthOptions auth, List<string> failures)

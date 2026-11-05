@@ -3,6 +3,7 @@ using Memoria.Api.Configuration;
 using Memoria.Api.Endpoints;
 using Memoria.Api.Hosting;
 using Memoria.Api.Http;
+using Memoria.Api.Ingest;
 using Memoria.Api.Mcp;
 using Memoria.Api.OpenApi;
 using Memoria.Api.Search;
@@ -52,6 +53,7 @@ builder.Services.AddMemoriaQmdClient();
 IConfigurationSection memoriaSection = builder.Configuration.GetSection(MemoriaOptions.SectionName);
 builder.Services.AddMemoriaAuth(memoriaSection.GetSection(nameof(MemoriaOptions.Auth)).Get<AuthOptions>() ?? new AuthOptions());
 builder.Services.AddScoped<ScopedCorpus>();
+builder.Services.AddMemoriaIngest();
 
 builder.Services.AddProblemDetails(options =>
 	options.CustomizeProblemDetails = context =>
@@ -79,6 +81,7 @@ builder.Services.AddOpenApi("v1", options =>
 WebApplication app = builder.Build();
 
 await app.InitializeMemoriaAuthAsync();
+app.WarnAboutRedactionSettings();
 
 // First, so logs and the failed-authentication limit see the real client.
 app.UseMemoriaForwardedHeaders(app.Services.GetRequiredService<IOptions<MemoriaOptions>>().Value.Auth.TrustedProxies);
@@ -94,6 +97,7 @@ app.MapOpenApi().AllowAnonymous();
 app.MapHealth();
 app.MapV1();
 app.MapAdminKeys();
+app.MapIngest();
 if (mcpOptions.Enabled)
 {
 	app.MapMemoriaMcp(mcpOptions);

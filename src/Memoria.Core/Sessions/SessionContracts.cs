@@ -50,6 +50,12 @@ public sealed record SessionRenderOptions
 	/// later message and file is dropped and counted, so the result is a prefix of the transcript.
 	/// </summary>
 	public long MaxRetainedChars { get; init; } = 32 * 1024 * 1024;
+
+	/// <summary>
+	/// A message longer than this, in UTF-8 bytes, is split so its pieces land in separate parts. It is the sidecar's 2 MiB
+	/// document cap less room for the frontmatter (<see cref="SessionFrontmatter.MaxBytes"/>), the title and the headings.
+	/// </summary>
+	public int MaxMessageBytes { get; init; } = (2 * 1024 * 1024) - (16 * 1024);
 }
 
 /// <summary>
@@ -145,8 +151,10 @@ public sealed class RedactedSession
 		SessionReadReport report,
 		IReadOnlyDictionary<string, int> countsByRule,
 		IReadOnlyList<SessionFieldRefusal> refusals,
-		Func<string, bool> isInSessionFamily)
+		Func<string, bool> isInSessionFamily,
+		string existingPathsGlob)
 	{
+		ExistingPathsGlob = existingPathsGlob;
 		Format = format;
 		SessionId = sessionId;
 		Documents = documents;
@@ -157,6 +165,9 @@ public sealed class RedactedSession
 	}
 
 	public SessionFormat Format { get; }
+
+	/// <summary>A glob matching at least every path of this session, for listing what exists. Filter what it finds with <see cref="IsSupersededPath"/>.</summary>
+	public string ExistingPathsGlob { get; }
 
 	public string SessionId { get; }
 

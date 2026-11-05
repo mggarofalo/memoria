@@ -82,7 +82,7 @@ public sealed class MemoriaQmdClient(HttpClient http) : IMemoriaQmdClient
 
 		// The body is deserialized as it arrives, so a sidecar that ignores the budget
 		// is cut off while reading instead of being buffered whole.
-		await using Stream body = new BoundedReadStream(await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false), MaxMultiGetWireBytes(request));
+		await using Stream body = BoundedSidecarBody(await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false), MaxMultiGetWireBytes(request));
 		try
 		{
 			return await JsonSerializer.DeserializeAsync(body, SidecarJsonContext.Default.SidecarMultiGetResponse, cancellationToken).ConfigureAwait(false)
@@ -92,6 +92,11 @@ public sealed class MemoriaQmdClient(HttpClient http) : IMemoriaQmdClient
 		{
 			throw new SidecarException(SidecarException.Malformed, $"The sidecar returned a body that is not valid JSON: {ex.Message}", response.StatusCode, innerException: ex);
 		}
+	}
+
+	private static BoundedReadStream BoundedSidecarBody(Stream body, long limit)
+	{
+		return new BoundedReadStream(body, limit, () => new SidecarException(SidecarException.ResponseTooLarge, $"The sidecar's response passed the {limit}-byte limit.", HttpStatusCode.OK));
 	}
 
 	/// <summary>The budget at JSON's worst escaping (six bytes per character), plus room for metadata.</summary>
@@ -108,7 +113,21 @@ public sealed class MemoriaQmdClient(HttpClient http) : IMemoriaQmdClient
 	public Task<SidecarIngestResponse> IngestAsync(SidecarIngestRequest request, CancellationToken cancellationToken = default)
 	{
 		ArgumentNullException.ThrowIfNull(request);
+		if (request.Content.PassThroughCollection is { } allowed && !string.Equals(allowed, request.Collection, StringComparison.Ordinal))
+		{
+			throw new InvalidOperationException("Text that skipped redaction for one collection cannot be stored in another.");
+		}
+
 		return PostAsync("documents", request, SidecarJsonContext.Default.SidecarIngestRequest, SidecarJsonContext.Default.SidecarIngestResponse, cancellationToken);
+	}
+
+	public async Task<SidecarDeleteResponse> DeleteDocumentAsync(string collection, string path, CancellationToken cancellationToken = default)
+	{
+		ArgumentException.ThrowIfNullOrWhiteSpace(collection);
+		ArgumentException.ThrowIfNullOrWhiteSpace(path);
+		string url = $"documents?collection={Uri.EscapeDataString(collection)}&path={Uri.EscapeDataString(path)}";
+		using HttpResponseMessage response = await SendAsync(new HttpRequestMessage(HttpMethod.Delete, url), cancellationToken).ConfigureAwait(false);
+		return await ReadSuccessAsync(response, SidecarJsonContext.Default.SidecarDeleteResponse, cancellationToken).ConfigureAwait(false);
 	}
 
 	public async Task<SidecarJob> ReindexAsync(SidecarReindexRequest request, CancellationToken cancellationToken = default)
@@ -237,7 +256,7 @@ public sealed class MemoriaQmdClient(HttpClient http) : IMemoriaQmdClient
 				SidecarError? error = await response.Content.ReadFromJsonAsync(SidecarJsonContext.Default.SidecarError, cancellationToken).ConfigureAwait(false);
 				if (error is { Error.Length: > 0 })
 				{
-					return new SidecarException(error.Error, error.Message, response.StatusCode, error.Details);
+					return new SidecarException(error.Error, error.Message, response.StatusCode, error.Details) { RetryAfter = response.Headers.RetryAfter?.Delta };
 				}
 			}
 			catch (JsonException)

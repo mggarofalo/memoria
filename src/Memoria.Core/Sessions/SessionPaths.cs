@@ -67,6 +67,16 @@ public static partial class SessionPaths
 		return $"{date}_codex_{safeId}_chunk-{part:D5}.md";
 	}
 
+	internal static string ClaudeGlob(string shortId)
+	{
+		return $"????-??-??_{shortId}*.md";
+	}
+
+	internal static string CodexGlob(string safeId)
+	{
+		return $"????-??-??_codex_{safeId}_chunk-*.md";
+	}
+
 	internal static bool IsClaudeFamily(string path, string shortId)
 	{
 		return IsFamily(path, shortId, ClaudeSuffix());

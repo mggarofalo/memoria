@@ -27,7 +27,8 @@ public sealed record IndexStatus(
 	int? NeedsEmbedding,
 	bool HasVectorIndex,
 	IReadOnlyList<IndexCollectionStatus> Collections,
-	int? DocumentsSetAside);
+	int? DocumentsSetAside,
+	IReadOnlyList<string>? UnredactedCollections = null);
 
 public sealed record IndexCollectionStatus(
 	string Name,

@@ -21,6 +21,9 @@ public sealed class SidecarException(
 	/// <summary>HTTP status from the sidecar, or null when the request never completed.</summary>
 	public HttpStatusCode? StatusCode { get; } = statusCode;
 
+	/// <summary>How long the sidecar asked callers to wait, when it said.</summary>
+	public TimeSpan? RetryAfter { get; init; }
+
 	/// <summary>Code-specific extra data from the sidecar's envelope.</summary>
 	public JsonElement? Details { get; } = details;
 

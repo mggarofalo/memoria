@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text;
 using System.Text.Json;
 using Memoria.Core.Redaction;
 
@@ -28,14 +29,40 @@ public static class SessionRenderer
 	{
 		ArgumentNullException.ThrowIfNull(payload);
 		ArgumentNullException.ThrowIfNull(source);
-		options ??= SessionRenderOptions.Default;
+		return await RenderCoreAsync(payload, source, options ?? SessionRenderOptions.Default, null, cancellationToken);
+	}
+
+	/// <summary>
+	/// The same rendering with redaction and the part gate left out, for the one collection <paramref name="disabled"/> names.
+	/// Every other caller uses <see cref="RenderAsync"/>. Paths match what <see cref="RenderAsync"/> gives, so turning the switch does not move files.
+	/// </summary>
+	public static async Task<RedactedSession> RenderWithoutRedactionForDisabledCollectionAsync(
+		Stream payload,
+		SessionSource source,
+		RedactionDisabledCollection disabled,
+		SessionRenderOptions? options = null,
+		CancellationToken cancellationToken = default)
+	{
+		ArgumentNullException.ThrowIfNull(payload);
+		ArgumentNullException.ThrowIfNull(source);
+		ArgumentNullException.ThrowIfNull(disabled);
+		return await RenderCoreAsync(payload, source, options ?? SessionRenderOptions.Default, disabled, cancellationToken);
+	}
+
+	private static async Task<RedactedSession> RenderCoreAsync(
+		Stream payload,
+		SessionSource source,
+		SessionRenderOptions options,
+		RedactionDisabledCollection? disabled,
+		CancellationToken cancellationToken)
+	{
 		Validate(source, options);
 
 		SessionReadReport report = new();
 		SessionTranscript transcript = source.Format switch
 		{
-			SessionFormat.ClaudeCode => new ClaudeTranscript(source, options, report),
-			SessionFormat.Codex => new CodexTranscript(source, options, report),
+			SessionFormat.ClaudeCode => new ClaudeTranscript(source, options, report) { RedactionDisabled = disabled },
+			SessionFormat.Codex => new CodexTranscript(source, options, report) { RedactionDisabled = disabled },
 			_ => throw new ArgumentException("Unknown session format.", nameof(source)),
 		};
 		try
@@ -55,7 +82,7 @@ public static class SessionRenderer
 		{
 			throw new ArgumentException("A session id is required.", nameof(source));
 		}
-		if (options.MaxPartChars < 1 || options.MaxLineBytes < 1 || options.MaxRetainedChars < 1)
+		if (options.MaxPartChars < 1 || options.MaxLineBytes < 1 || options.MaxRetainedChars < 1 || options.MaxMessageBytes < 4)
 		{
 			throw new ArgumentException("Render limits must be positive.", nameof(options));
 		}
@@ -75,6 +102,9 @@ internal abstract class SessionTranscript(SessionSource source, SessionRenderOpt
 	private readonly Dictionary<int, string> _refusedMessages = [];
 	private long _retained;
 	private bool _overBudget;
+
+	/// <summary>Set only through <see cref="SessionRenderer.RenderWithoutRedactionForDisabledCollectionAsync"/>. Null, the normal case, means every value is redacted.</summary>
+	public RedactionDisabledCollection? RedactionDisabled { get; init; }
 
 	protected SessionSource Source { get; } = source;
 
@@ -150,6 +180,11 @@ internal abstract class SessionTranscript(SessionSource source, SessionRenderOpt
 	/// <summary>Redacts one metadata string. The same few values repeat on every record, so each is judged once.</summary>
 	protected string RedactMetadata(string value)
 	{
+		if (RedactionDisabled is not null)
+		{
+			return value;
+		}
+
 		if (_redactedMetadata.TryGetValue(value, out string? known))
 		{
 			return known;
@@ -187,6 +222,11 @@ internal abstract class SessionTranscript(SessionSource source, SessionRenderOpt
 	/// </summary>
 	protected void RedactMessages()
 	{
+		if (RedactionDisabled is not null)
+		{
+			return;
+		}
+
 		string[] texts = [.. Messages.Select(RepairBoundary)];
 		Stopwatch clock = Stopwatch.StartNew();
 		for (int round = 0; round < MaxMessageRounds; round++)
@@ -320,7 +360,25 @@ internal abstract class SessionTranscript(SessionSource source, SessionRenderOpt
 	/// <summary>The id a path is built from. When redaction changed the id, a digest of the raw id keeps two such sessions apart. A digest reveals nothing.</summary>
 	protected string PathId(string rawId)
 	{
-		return RedactMetadata(rawId) == rawId ? rawId : SessionPaths.Digest(rawId);
+		return WouldRedactionChange(rawId) ? SessionPaths.Digest(rawId) : rawId;
+	}
+
+	/// <summary>Asked even with redaction off: a file name is not content, and turning the switch must not move a session's files.</summary>
+	private bool WouldRedactionChange(string value)
+	{
+		if (RedactionDisabled is null)
+		{
+			return RedactMetadata(value) != value;
+		}
+
+		try
+		{
+			return Redactor.Shared.RedactFragment(value).Text != value;
+		}
+		catch (RedactionException)
+		{
+			return true;
+		}
 	}
 
 	private string RepairBoundary(SessionMessage message)
@@ -344,6 +402,7 @@ internal abstract class SessionTranscript(SessionSource source, SessionRenderOpt
 	/// <summary>Greedy and prefix-stable: appending to a session only changes its last part.</summary>
 	protected List<ArraySegment<SessionMessage>> SplitIntoParts()
 	{
+		SplitGiantMessages();
 		SessionMessage[] all = [.. Messages];
 		List<ArraySegment<SessionMessage>> parts = [];
 		int start = 0;
@@ -366,6 +425,50 @@ internal abstract class SessionTranscript(SessionSource source, SessionRenderOpt
 		return parts;
 	}
 
+	/// <summary>
+	/// Parts split only between messages, so a giant message would be a giant part, over the sidecar's document cap.
+	/// This runs after redaction, so a cut cannot hide a secret from it, and every piece still passes the check on
+	/// finished parts. Where a message is cut depends only on its own text, so appending to a session leaves earlier parts alone.
+	/// </summary>
+	private void SplitGiantMessages()
+	{
+		if (!Messages.Exists(message => Encoding.UTF8.GetByteCount(message.Text) > Options.MaxMessageBytes))
+		{
+			return;
+		}
+
+		List<SessionMessage> pieces = new(Messages.Count);
+		int[] firstPiece = new int[Messages.Count];
+		for (int i = 0; i < Messages.Count; i++)
+		{
+			firstPiece[i] = pieces.Count;
+			pieces.AddRange(MessageSplitter.Split(Messages[i], Options.MaxMessageBytes));
+		}
+
+		Dictionary<int, string> refused = _refusedMessages.ToDictionary(entry => firstPiece[entry.Key], entry => entry.Value);
+		_refusedMessages.Clear();
+		foreach ((int index, string rule) in refused)
+		{
+			_refusedMessages[index] = rule;
+		}
+
+		Messages.Clear();
+		Messages.AddRange(pieces);
+		MessagesRenumbered(firstPiece);
+	}
+
+	private RedactedMarkdown FinishPart(string document, SessionPart part)
+	{
+		return RedactionDisabled is { } disabled
+			? RedactedMarkdown.PassThroughForDisabledCollection(new UnredactedMarkdown(document), disabled)
+			: PartGate.Clean(document, part, Refusals);
+	}
+
+	/// <summary>Called when message indexes changed: entry i is where message i now starts. For anything that remembers an index.</summary>
+	protected virtual void MessagesRenumbered(int[] firstPiece)
+	{
+	}
+
 	protected List<RedactedSessionDocument> BuildDocuments(
 		List<ArraySegment<SessionMessage>> segments,
 		Func<SessionPart, string> render,
@@ -383,7 +486,7 @@ internal abstract class SessionTranscript(SessionSource source, SessionRenderOpt
 				part.Number,
 				messageStart,
 				segments[i].Count,
-				PartGate.Clean(render(part), part, Refusals)));
+				FinishPart(render(part), part)));
 			messageStart += segments[i].Count;
 		}
 		return documents;

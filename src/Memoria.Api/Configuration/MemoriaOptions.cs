@@ -19,6 +19,35 @@ public sealed class MemoriaOptions
 	public McpOptions Mcp { get; set; } = new();
 
 	public AuthOptions Auth { get; set; } = new();
+
+	public IngestOptions Ingest { get; set; } = new();
+}
+
+/// <summary>Limits on writing into the corpus.</summary>
+public sealed class IngestOptions
+{
+	/// <summary>The largest stored document, in UTF-8 bytes. Matches the sidecar's <c>MEMORIA_QMD_MAX_DOCUMENT_BYTES</c>.</summary>
+	public int MaxDocumentBytes { get; set; } = 2 * 1024 * 1024;
+
+	/// <summary>The largest raw transcript one request may send. It is read as a stream, so this limits work, not memory.</summary>
+	public long MaxSessionBytes { get; set; } = 256L * 1024 * 1024;
+
+	/// <summary>Transcripts rendered at once. A render can hold about 100 MB, so this is what bounds memory. Past it, callers get 503 and <c>Retry-After</c>.</summary>
+	public int MaxConcurrentSessions { get; set; } = 2;
+
+	/// <summary>Per-collection settings, by exact collection name. A collection not listed here is redacted.</summary>
+	public Dictionary<string, IngestCollectionOptions> Collections { get; set; } = new(StringComparer.Ordinal);
+}
+
+/// <summary>One collection's ingest settings.</summary>
+public sealed class IngestCollectionOptions
+{
+	/// <summary>
+	/// Exactly <c>Disabled</c> stores this collection's text unredacted. Anything else, including <c>disabled</c>, <c>off</c>
+	/// and a stray space, leaves redaction on, and the server warns at startup about a value it did not recognize.
+	/// A string for the same reason as <see cref="AuthOptions.Mode"/>: an enum would accept values nobody meant as this.
+	/// </summary>
+	public string? Redaction { get; set; }
 }
 
 /// <summary>How callers authenticate.</summary>

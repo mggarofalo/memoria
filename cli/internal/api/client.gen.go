@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/oapi-codegen/runtime"
+	openapi_types "github.com/oapi-codegen/runtime/types"
 )
 
 // ApiKeyInfo defines model for ApiKeyInfo.
@@ -74,6 +75,40 @@ type Document struct {
 	Title      string            `json:"title"`
 }
 
+// DocumentDeleteResult defines model for DocumentDeleteResult.
+type DocumentDeleteResult struct {
+	Collection   string  `json:"collection"`
+	Deleted      bool    `json:"deleted"`
+	Path         string  `json:"path"`
+	ReindexJobId *string `json:"reindexJobId"`
+}
+
+// DocumentIngestRequest defines model for DocumentIngestRequest.
+type DocumentIngestRequest struct {
+	Body       *string    `json:"body"`
+	Collection *string    `json:"collection"`
+	Project    *string    `json:"project,omitempty"`
+	Source     *string    `json:"source"`
+	SourceId   *string    `json:"sourceId"`
+	Tags       *[]string  `json:"tags,omitempty"`
+	Title      *string    `json:"title,omitempty"`
+	Updated    *time.Time `json:"updated"`
+	Url        *string    `json:"url,omitempty"`
+}
+
+// DocumentIngestResult defines model for DocumentIngestResult.
+type DocumentIngestResult struct {
+	Bytes      int64            `json:"bytes"`
+	Collection string           `json:"collection"`
+	Created    bool             `json:"created"`
+	File       string           `json:"file"`
+	JobId      string           `json:"jobId"`
+	Path       string           `json:"path"`
+	Redaction  string           `json:"redaction"`
+	Redactions map[string]int32 `json:"redactions"`
+	Refusals   []IngestRefusal  `json:"refusals"`
+}
+
 // DocumentMetadata defines model for DocumentMetadata.
 type DocumentMetadata struct {
 	Branch    *string  `json:"branch"`
@@ -111,11 +146,19 @@ type IndexCollectionStatus struct {
 
 // IndexStatus defines model for IndexStatus.
 type IndexStatus struct {
-	Collections       []IndexCollectionStatus `json:"collections"`
-	DocumentsSetAside *int32                  `json:"documentsSetAside"`
-	HasVectorIndex    bool                    `json:"hasVectorIndex"`
-	NeedsEmbedding    *int32                  `json:"needsEmbedding"`
-	TotalDocuments    int32                   `json:"totalDocuments"`
+	Collections           []IndexCollectionStatus `json:"collections"`
+	DocumentsSetAside     *int32                  `json:"documentsSetAside"`
+	HasVectorIndex        bool                    `json:"hasVectorIndex"`
+	NeedsEmbedding        *int32                  `json:"needsEmbedding"`
+	TotalDocuments        int32                   `json:"totalDocuments"`
+	UnredactedCollections *[]string               `json:"unredactedCollections,omitempty"`
+}
+
+// IngestRefusal defines model for IngestRefusal.
+type IngestRefusal struct {
+	Field string `json:"field"`
+	Part  int32  `json:"part"`
+	Rule  string `json:"rule"`
 }
 
 // IssuedApiKey defines model for IssuedApiKey.
@@ -192,6 +235,63 @@ type SearchResult struct {
 	Total           int32           `json:"total"`
 }
 
+// SessionIngestResult defines model for SessionIngestResult.
+type SessionIngestResult struct {
+	Collection   string                  `json:"collection"`
+	Complete     bool                    `json:"complete"`
+	Format       string                  `json:"format"`
+	JobId        *string                 `json:"jobId"`
+	Parts        []SessionPartResult     `json:"parts"`
+	Read         SessionReadSummary      `json:"read"`
+	Redaction    string                  `json:"redaction"`
+	Redactions   map[string]int32        `json:"redactions"`
+	RefusalCount int32                   `json:"refusalCount"`
+	Refusals     []IngestRefusal         `json:"refusals"`
+	ReindexJobId *string                 `json:"reindexJobId"`
+	Retryable    bool                    `json:"retryable"`
+	SessionId    string                  `json:"sessionId"`
+	Superseded   SessionSupersededResult `json:"superseded"`
+}
+
+// SessionIngestStatus defines model for SessionIngestStatus.
+type SessionIngestStatus struct {
+	Collection string     `json:"collection"`
+	Paths      []string   `json:"paths"`
+	SessionId  string     `json:"sessionId"`
+	State      string     `json:"state"`
+	Updated    *time.Time `json:"updated"`
+}
+
+// SessionPartResult defines model for SessionPartResult.
+type SessionPartResult struct {
+	Code              *string `json:"code,omitempty"`
+	Message           *string `json:"message,omitempty"`
+	Part              int32   `json:"part"`
+	Path              string  `json:"path"`
+	RetryAfterSeconds *int32  `json:"retryAfterSeconds,omitempty"`
+	Retryable         *bool   `json:"retryable,omitempty"`
+	State             string  `json:"state"`
+}
+
+// SessionReadSummary defines model for SessionReadSummary.
+type SessionReadSummary struct {
+	BytesRead         int64 `json:"bytesRead"`
+	Lines             int64 `json:"lines"`
+	MalformedLines    int64 `json:"malformedLines"`
+	Messages          int64 `json:"messages"`
+	MessagesOverLimit int64 `json:"messagesOverLimit"`
+	OversizedLines    int64 `json:"oversizedLines"`
+	SkippedContent    bool  `json:"skippedContent"`
+	UnterminatedLines int64 `json:"unterminatedLines"`
+}
+
+// SessionSupersededResult defines model for SessionSupersededResult.
+type SessionSupersededResult struct {
+	Deleted []string `json:"deleted"`
+	Failed  []string `json:"failed"`
+	Kept    []string `json:"kept"`
+}
+
 // SidecarIndexInfo defines model for SidecarIndexInfo.
 type SidecarIndexInfo struct {
 	DbPath         string `json:"dbPath"`
@@ -247,10 +347,16 @@ type SidecarReadiness struct {
 	Llm           *SidecarLlmInfo          `json:"llm,omitempty"`
 	Metadata      SidecarMetadataIndexInfo `json:"metadata"`
 	Models        SidecarModelsInfo        `json:"models"`
+	Sdk           *SidecarSdkInfo          `json:"sdk,omitempty"`
 	Status        string                   `json:"status"`
 	UptimeSeconds int32                    `json:"uptimeSeconds"`
 	Version       string                   `json:"version"`
 	Warmup        SidecarWarmupInfo        `json:"warmup"`
+}
+
+// SidecarSdkInfo defines model for SidecarSdkInfo.
+type SidecarSdkInfo struct {
+	Patched bool `json:"patched"`
 }
 
 // SidecarStuckJob defines model for SidecarStuckJob.
@@ -273,6 +379,9 @@ type SkippedDocument struct {
 	Reason string `json:"reason"`
 }
 
+// Stream defines model for Stream.
+type Stream = openapi_types.File
+
 // ReadyParams defines parameters for Ready.
 type ReadyParams struct {
 	// Strict Answer 503 unless the sidecar is fully ready, with no degradation.
@@ -292,6 +401,54 @@ type GetDocumentParams struct {
 
 	// Body false returns metadata only.
 	Body *bool `form:"body,omitempty" json:"body,omitempty"`
+}
+
+// DeleteDocumentParams defines parameters for DeleteDocument.
+type DeleteDocumentParams struct {
+	// Collection The collection the document is in.
+	Collection *string `form:"collection,omitempty" json:"collection,omitempty"`
+
+	// Source The source it was stored under. Use with `sourceId`.
+	Source *string `form:"source,omitempty" json:"source,omitempty"`
+
+	// SourceId Its identity within that source.
+	SourceId *string `form:"sourceId,omitempty" json:"sourceId,omitempty"`
+
+	// Path Its path within the collection, instead of `source` and `sourceId`.
+	Path *string `form:"path,omitempty" json:"path,omitempty"`
+}
+
+// GetSessionIngestStatusParams defines parameters for GetSessionIngestStatus.
+type GetSessionIngestStatusParams struct {
+	// Collection The collection to write to.
+	Collection *string `form:"collection,omitempty" json:"collection,omitempty"`
+
+	// Format `claude` or `codex`.
+	Format *string `form:"format,omitempty" json:"format,omitempty"`
+
+	// SessionId The session's id, normally the transcript's file name without its extension.
+	SessionId *string `form:"sessionId,omitempty" json:"sessionId,omitempty"`
+
+	// ProjectDirectory The Claude Code project folder the transcript was in. Tells apart two copies of one session.
+	ProjectDirectory *string `form:"projectDirectory,omitempty" json:"projectDirectory,omitempty"`
+}
+
+// IngestSessionParams defines parameters for IngestSession.
+type IngestSessionParams struct {
+	// Collection The collection to write to.
+	Collection *string `form:"collection,omitempty" json:"collection,omitempty"`
+
+	// Format `claude` or `codex`.
+	Format *string `form:"format,omitempty" json:"format,omitempty"`
+
+	// SessionId The session's id, normally the transcript's file name without its extension.
+	SessionId *string `form:"sessionId,omitempty" json:"sessionId,omitempty"`
+
+	// ProjectDirectory The Claude Code project folder the transcript was in. Tells apart two copies of one session.
+	ProjectDirectory *string `form:"projectDirectory,omitempty" json:"projectDirectory,omitempty"`
+
+	// Updated When this copy of the transcript last changed, as an ISO timestamp. Orders uploads, so an older one is refused.
+	Updated *time.Time `form:"updated,omitempty" json:"updated,omitempty"`
 }
 
 // SearchParams defines parameters for Search.
@@ -338,6 +495,9 @@ type CreateApiKeyJSONRequestBody = CreateApiKeyRequest
 
 // GetDocumentsJSONRequestBody defines body for GetDocuments for application/json ContentType.
 type GetDocumentsJSONRequestBody = MultiGetRequest
+
+// IngestDocumentJSONRequestBody defines body for IngestDocument for application/json ContentType.
+type IngestDocumentJSONRequestBody = DocumentIngestRequest
 
 // RequestEditorFn is the function signature for the RequestEditor callback function
 type RequestEditorFn func(ctx context.Context, req *http.Request) error
@@ -498,6 +658,47 @@ type ClientInterface interface {
 	// Corresponds with POST /v1/docs:multiGet (the `GetDocuments` operationId).
 	GetDocuments(ctx context.Context, body GetDocumentsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// DeleteDocument Delete a document
+	//
+	// Names a document by `source` and `sourceId`, or by `path` within the collection, and removes it. The index update starts at once, because a deleted document stays searchable until the index changes. It also stops an older version being stored again. Safe to repeat: a missing document answers `deleted: false`. When `reindexJobId` is null the update could not be queued, so repeat the request. Requires the `ingest` scope.
+	//
+	// Corresponds with DELETE /v1/documents (the `DeleteDocument` operationId).
+	DeleteDocument(ctx context.Context, params *DeleteDocumentParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// IngestDocumentWithBody Store a document
+	//
+	// Renders the envelope to frontmatter, redacts the whole document, and stores it. Redaction cannot be turned off, and a document it cannot finish is refused with 422. `source` and `sourceId` are its identity: sending them again overwrites, and `updated` orders versions, so an older version gets 409. The response counts what was replaced, by rule, with no values. The document becomes searchable when the job finishes. Requires the `ingest` scope.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with POST /v1/documents (the `IngestDocument` operationId).
+	IngestDocumentWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// IngestDocument Store a document
+	//
+	// Renders the envelope to frontmatter, redacts the whole document, and stores it. Redaction cannot be turned off, and a document it cannot finish is refused with 422. `source` and `sourceId` are its identity: sending them again overwrites, and `updated` orders versions, so an older version gets 409. The response counts what was replaced, by rule, with no values. The document becomes searchable when the job finishes. Requires the `ingest` scope.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with POST /v1/documents (the `IngestDocument` operationId).
+	IngestDocument(ctx context.Context, body IngestDocumentJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetSessionIngestStatus How a session's upload ended
+	//
+	// Only `complete` means all of it arrived. `partial` means some parts may be searchable, and the upload should be sent again. Requires the `ingest` scope.
+	//
+	// Corresponds with GET /v1/ingest/session (the `GetSessionIngestStatus` operationId).
+	GetSessionIngestStatus(ctx context.Context, params *GetSessionIngestStatusParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// IngestSessionWithBody Store a raw session transcript
+	//
+	// The body is the raw JSONL of a Claude Code or Codex session, read as a stream. It is rendered and redacted here into one or more parts. 202 means every part arrived. 207 means some did not: `parts` says which, the session stays `partial`, and when `retryable` is true sending the same upload again finishes it. An older version than the one stored gets 409, as does a second upload of the session while one is running. Parts a shrunken session no longer has are deleted last. Requires the `ingest` scope.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with POST /v1/ingest/session (the `IngestSession` operationId).
+	IngestSessionWithBody(ctx context.Context, params *IngestSessionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// Search Search the corpus
 	//
 	// Hybrid search over the indexed documents: BM25 and vector retrieval fused by reciprocal rank, then reranked by a cross-encoder unless `rerank=false`. Reranked queries take a few seconds; `rerank=false` returns fused results in well under a second. Frontmatter filters (`project`, `branch`, `since`, `until`, `tag`) are applied after retrieval, so a filtered result set can be shorter than `limit` even when more matches exist. `degraded` means the search ran without something a full search uses, such as the reranker: results are valid but may rank worse, and `degradedReasons` says what. Requires the `read` scope.
@@ -507,7 +708,7 @@ type ClientInterface interface {
 
 	// GetStatus Index status
 	//
-	// Totals for the collections the caller may read, whether a vector index exists, and per-collection counts. `needsEmbedding` is the backlog for the whole index, so it is null for a collection-scoped key. Requires the `read` scope.
+	// Totals for the collections the caller may read, whether a vector index exists, and per-collection counts. `needsEmbedding` is the backlog for the whole index, so it is null for a collection-scoped key. `unredactedCollections` lists what an operator stored unredacted. Only a key with the `admin` scope as well sees it; it is null for anyone else. Requires the `read` scope.
 	//
 	// Corresponds with GET /v1/status (the `GetStatus` operationId).
 	GetStatus(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -708,6 +909,97 @@ func (c *Client) GetDocuments(ctx context.Context, body GetDocumentsJSONRequestB
 	return c.Client.Do(req)
 }
 
+// DeleteDocument Delete a document
+//
+// Names a document by `source` and `sourceId`, or by `path` within the collection, and removes it. The index update starts at once, because a deleted document stays searchable until the index changes. It also stops an older version being stored again. Safe to repeat: a missing document answers `deleted: false`. When `reindexJobId` is null the update could not be queued, so repeat the request. Requires the `ingest` scope.
+//
+// Corresponds with DELETE /v1/documents (the `DeleteDocument` operationId).
+func (c *Client) DeleteDocument(ctx context.Context, params *DeleteDocumentParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteDocumentRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// IngestDocumentWithBody Store a document
+//
+// Renders the envelope to frontmatter, redacts the whole document, and stores it. Redaction cannot be turned off, and a document it cannot finish is refused with 422. `source` and `sourceId` are its identity: sending them again overwrites, and `updated` orders versions, so an older version gets 409. The response counts what was replaced, by rule, with no values. The document becomes searchable when the job finishes. Requires the `ingest` scope.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with POST /v1/documents (the `IngestDocument` operationId).
+func (c *Client) IngestDocumentWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewIngestDocumentRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// IngestDocument Store a document
+//
+// Renders the envelope to frontmatter, redacts the whole document, and stores it. Redaction cannot be turned off, and a document it cannot finish is refused with 422. `source` and `sourceId` are its identity: sending them again overwrites, and `updated` orders versions, so an older version gets 409. The response counts what was replaced, by rule, with no values. The document becomes searchable when the job finishes. Requires the `ingest` scope.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with POST /v1/documents (the `IngestDocument` operationId).
+func (c *Client) IngestDocument(ctx context.Context, body IngestDocumentJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewIngestDocumentRequest(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// GetSessionIngestStatus How a session's upload ended
+//
+// Only `complete` means all of it arrived. `partial` means some parts may be searchable, and the upload should be sent again. Requires the `ingest` scope.
+//
+// Corresponds with GET /v1/ingest/session (the `GetSessionIngestStatus` operationId).
+func (c *Client) GetSessionIngestStatus(ctx context.Context, params *GetSessionIngestStatusParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetSessionIngestStatusRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// IngestSessionWithBody Store a raw session transcript
+//
+// The body is the raw JSONL of a Claude Code or Codex session, read as a stream. It is rendered and redacted here into one or more parts. 202 means every part arrived. 207 means some did not: `parts` says which, the session stays `partial`, and when `retryable` is true sending the same upload again finishes it. An older version than the one stored gets 409, as does a second upload of the session while one is running. Parts a shrunken session no longer has are deleted last. Requires the `ingest` scope.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with POST /v1/ingest/session (the `IngestSession` operationId).
+func (c *Client) IngestSessionWithBody(ctx context.Context, params *IngestSessionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewIngestSessionRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 // Search Search the corpus
 //
 // Hybrid search over the indexed documents: BM25 and vector retrieval fused by reciprocal rank, then reranked by a cross-encoder unless `rerank=false`. Reranked queries take a few seconds; `rerank=false` returns fused results in well under a second. Frontmatter filters (`project`, `branch`, `since`, `until`, `tag`) are applied after retrieval, so a filtered result set can be shorter than `limit` even when more matches exist. `degraded` means the search ran without something a full search uses, such as the reranker: results are valid but may rank worse, and `degradedReasons` says what. Requires the `read` scope.
@@ -727,7 +1019,7 @@ func (c *Client) Search(ctx context.Context, params *SearchParams, reqEditors ..
 
 // GetStatus Index status
 //
-// Totals for the collections the caller may read, whether a vector index exists, and per-collection counts. `needsEmbedding` is the backlog for the whole index, so it is null for a collection-scoped key. Requires the `read` scope.
+// Totals for the collections the caller may read, whether a vector index exists, and per-collection counts. `needsEmbedding` is the backlog for the whole index, so it is null for a collection-scoped key. `unredactedCollections` lists what an operator stored unredacted. Only a key with the `admin` scope as well sees it; it is null for anyone else. Requires the `read` scope.
 //
 // Corresponds with GET /v1/status (the `GetStatus` operationId).
 func (c *Client) GetStatus(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
@@ -1122,6 +1414,330 @@ func NewGetDocumentsRequestWithBody(server string, contentType string, body io.R
 	return req, nil
 }
 
+// NewDeleteDocumentRequest constructs an http.Request for the DeleteDocument method
+func NewDeleteDocumentRequest(server string, params *DeleteDocumentParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v1/documents")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		// queryValues collects non-styled parameters (passthrough, JSON)
+		// that are safe to round-trip through url.Values.Encode().
+		queryValues := queryURL.Query()
+		// rawQueryFragments collects pre-encoded query fragments from
+		// styled parameters, preserving literal commas as delimiters
+		// per the OpenAPI spec (e.g. "color=blue,black,brown").
+		var rawQueryFragments []string
+
+		if params.Collection != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "collection", *params.Collection, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.Source != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "source", *params.Source, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.SourceId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "sourceId", *params.SourceId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.Path != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "path", *params.Path, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if encoded := queryValues.Encode(); encoded != "" {
+			rawQueryFragments = append(rawQueryFragments, encoded)
+		}
+		queryURL.RawQuery = strings.Join(rawQueryFragments, "&")
+	}
+
+	req, err := http.NewRequest(http.MethodDelete, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewIngestDocumentRequest calls the generic IngestDocument builder with application/json body
+func NewIngestDocumentRequest(server string, body IngestDocumentJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewIngestDocumentRequestWithBody(server, "application/json", bodyReader)
+}
+
+// NewIngestDocumentRequestWithBody constructs an http.Request for the IngestDocument method, with any body, and a specified content type
+func NewIngestDocumentRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v1/documents")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewGetSessionIngestStatusRequest constructs an http.Request for the GetSessionIngestStatus method
+func NewGetSessionIngestStatusRequest(server string, params *GetSessionIngestStatusParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v1/ingest/session")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		// queryValues collects non-styled parameters (passthrough, JSON)
+		// that are safe to round-trip through url.Values.Encode().
+		queryValues := queryURL.Query()
+		// rawQueryFragments collects pre-encoded query fragments from
+		// styled parameters, preserving literal commas as delimiters
+		// per the OpenAPI spec (e.g. "color=blue,black,brown").
+		var rawQueryFragments []string
+
+		if params.Collection != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "collection", *params.Collection, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.Format != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "format", *params.Format, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.SessionId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "sessionId", *params.SessionId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.ProjectDirectory != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "projectDirectory", *params.ProjectDirectory, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if encoded := queryValues.Encode(); encoded != "" {
+			rawQueryFragments = append(rawQueryFragments, encoded)
+		}
+		queryURL.RawQuery = strings.Join(rawQueryFragments, "&")
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewIngestSessionRequestWithBody constructs an http.Request for the IngestSession method, with any body, and a specified content type
+func NewIngestSessionRequestWithBody(server string, params *IngestSessionParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v1/ingest/session")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		// queryValues collects non-styled parameters (passthrough, JSON)
+		// that are safe to round-trip through url.Values.Encode().
+		queryValues := queryURL.Query()
+		// rawQueryFragments collects pre-encoded query fragments from
+		// styled parameters, preserving literal commas as delimiters
+		// per the OpenAPI spec (e.g. "color=blue,black,brown").
+		var rawQueryFragments []string
+
+		if params.Collection != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "collection", *params.Collection, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.Format != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "format", *params.Format, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.SessionId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "sessionId", *params.SessionId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.ProjectDirectory != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "projectDirectory", *params.ProjectDirectory, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.Updated != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "updated", *params.Updated, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: "date-time"}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if encoded := queryValues.Encode(); encoded != "" {
+			rawQueryFragments = append(rawQueryFragments, encoded)
+		}
+		queryURL.RawQuery = strings.Join(rawQueryFragments, "&")
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewSearchRequest constructs an http.Request for the Search method
 func NewSearchRequest(server string, params *SearchParams) (*http.Request, error) {
 	var err error
@@ -1478,6 +2094,51 @@ type ClientWithResponsesInterface interface {
 	// Corresponds with POST /v1/docs:multiGet (the `GetDocuments` operationId).
 	GetDocumentsWithResponse(ctx context.Context, body GetDocumentsJSONRequestBody, reqEditors ...RequestEditorFn) (*GetDocumentsResponse, error)
 
+	// DeleteDocumentWithResponse Delete a document
+	//
+	// Names a document by `source` and `sourceId`, or by `path` within the collection, and removes it. The index update starts at once, because a deleted document stays searchable until the index changes. It also stops an older version being stored again. Safe to repeat: a missing document answers `deleted: false`. When `reindexJobId` is null the update could not be queued, so repeat the request. Requires the `ingest` scope.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with DELETE /v1/documents (the `DeleteDocument` operationId).
+	DeleteDocumentWithResponse(ctx context.Context, params *DeleteDocumentParams, reqEditors ...RequestEditorFn) (*DeleteDocumentResponse, error)
+
+	// IngestDocumentWithBodyWithResponse Store a document
+	//
+	// Renders the envelope to frontmatter, redacts the whole document, and stores it. Redaction cannot be turned off, and a document it cannot finish is refused with 422. `source` and `sourceId` are its identity: sending them again overwrites, and `updated` orders versions, so an older version gets 409. The response counts what was replaced, by rule, with no values. The document becomes searchable when the job finishes. Requires the `ingest` scope.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /v1/documents (the `IngestDocument` operationId).
+	IngestDocumentWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*IngestDocumentResponse, error)
+
+	// IngestDocumentWithResponse Store a document
+	//
+	// Renders the envelope to frontmatter, redacts the whole document, and stores it. Redaction cannot be turned off, and a document it cannot finish is refused with 422. `source` and `sourceId` are its identity: sending them again overwrites, and `updated` orders versions, so an older version gets 409. The response counts what was replaced, by rule, with no values. The document becomes searchable when the job finishes. Requires the `ingest` scope.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /v1/documents (the `IngestDocument` operationId).
+	IngestDocumentWithResponse(ctx context.Context, body IngestDocumentJSONRequestBody, reqEditors ...RequestEditorFn) (*IngestDocumentResponse, error)
+
+	// GetSessionIngestStatusWithResponse How a session's upload ended
+	//
+	// Only `complete` means all of it arrived. `partial` means some parts may be searchable, and the upload should be sent again. Requires the `ingest` scope.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /v1/ingest/session (the `GetSessionIngestStatus` operationId).
+	GetSessionIngestStatusWithResponse(ctx context.Context, params *GetSessionIngestStatusParams, reqEditors ...RequestEditorFn) (*GetSessionIngestStatusResponse, error)
+
+	// IngestSessionWithBodyWithResponse Store a raw session transcript
+	//
+	// The body is the raw JSONL of a Claude Code or Codex session, read as a stream. It is rendered and redacted here into one or more parts. 202 means every part arrived. 207 means some did not: `parts` says which, the session stays `partial`, and when `retryable` is true sending the same upload again finishes it. An older version than the one stored gets 409, as does a second upload of the session while one is running. Parts a shrunken session no longer has are deleted last. Requires the `ingest` scope.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /v1/ingest/session (the `IngestSession` operationId).
+	IngestSessionWithBodyWithResponse(ctx context.Context, params *IngestSessionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*IngestSessionResponse, error)
+
 	// SearchWithResponse Search the corpus
 	//
 	// Hybrid search over the indexed documents: BM25 and vector retrieval fused by reciprocal rank, then reranked by a cross-encoder unless `rerank=false`. Reranked queries take a few seconds; `rerank=false` returns fused results in well under a second. Frontmatter filters (`project`, `branch`, `since`, `until`, `tag`) are applied after retrieval, so a filtered result set can be shorter than `limit` even when more matches exist. `degraded` means the search ran without something a full search uses, such as the reranker: results are valid but may rank worse, and `degradedReasons` says what. Requires the `read` scope.
@@ -1489,7 +2150,7 @@ type ClientWithResponsesInterface interface {
 
 	// GetStatusWithResponse Index status
 	//
-	// Totals for the collections the caller may read, whether a vector index exists, and per-collection counts. `needsEmbedding` is the backlog for the whole index, so it is null for a collection-scoped key. Requires the `read` scope.
+	// Totals for the collections the caller may read, whether a vector index exists, and per-collection counts. `needsEmbedding` is the backlog for the whole index, so it is null for a collection-scoped key. `unredactedCollections` lists what an operator stored unredacted. Only a key with the `admin` scope as well sees it; it is null for anyone else. Requires the `read` scope.
 	//
 	// Returns a wrapper object for the known response body format(s).
 	//
@@ -2118,6 +2779,422 @@ func (r GetDocumentsResponse) ContentType() string {
 	return ""
 }
 
+type DeleteDocumentResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON202 the response for an HTTP 202 `application/json` response
+	JSON202 *DocumentDeleteResult
+	// ApplicationproblemJSON400 the response for an HTTP 400 `application/problem+json` response
+	ApplicationproblemJSON400 *HttpValidationProblemDetails
+	// ApplicationproblemJSON401 the response for an HTTP 401 `application/problem+json` response
+	ApplicationproblemJSON401 *ProblemDetails
+	// ApplicationproblemJSON403 the response for an HTTP 403 `application/problem+json` response
+	ApplicationproblemJSON403 *ProblemDetails
+	// ApplicationproblemJSON409 the response for an HTTP 409 `application/problem+json` response
+	ApplicationproblemJSON409 *ProblemDetails
+	// ApplicationproblemJSON429 the response for an HTTP 429 `application/problem+json` response
+	ApplicationproblemJSON429 *ProblemDetails
+	// ApplicationproblemJSON502 the response for an HTTP 502 `application/problem+json` response
+	ApplicationproblemJSON502 *ProblemDetails
+	// ApplicationproblemJSON503 the response for an HTTP 503 `application/problem+json` response
+	ApplicationproblemJSON503 *ProblemDetails
+	// ApplicationproblemJSON504 the response for an HTTP 504 `application/problem+json` response
+	ApplicationproblemJSON504 *ProblemDetails
+}
+
+// GetJSON202 returns the response for an HTTP 202 `application/json` response
+func (r DeleteDocumentResponse) GetJSON202() *DocumentDeleteResult {
+	return r.JSON202
+}
+
+// GetApplicationproblemJSON400 returns the response for an HTTP 400 `application/problem+json` response
+func (r DeleteDocumentResponse) GetApplicationproblemJSON400() *HttpValidationProblemDetails {
+	return r.ApplicationproblemJSON400
+}
+
+// GetApplicationproblemJSON401 returns the response for an HTTP 401 `application/problem+json` response
+func (r DeleteDocumentResponse) GetApplicationproblemJSON401() *ProblemDetails {
+	return r.ApplicationproblemJSON401
+}
+
+// GetApplicationproblemJSON403 returns the response for an HTTP 403 `application/problem+json` response
+func (r DeleteDocumentResponse) GetApplicationproblemJSON403() *ProblemDetails {
+	return r.ApplicationproblemJSON403
+}
+
+// GetApplicationproblemJSON409 returns the response for an HTTP 409 `application/problem+json` response
+func (r DeleteDocumentResponse) GetApplicationproblemJSON409() *ProblemDetails {
+	return r.ApplicationproblemJSON409
+}
+
+// GetApplicationproblemJSON429 returns the response for an HTTP 429 `application/problem+json` response
+func (r DeleteDocumentResponse) GetApplicationproblemJSON429() *ProblemDetails {
+	return r.ApplicationproblemJSON429
+}
+
+// GetApplicationproblemJSON502 returns the response for an HTTP 502 `application/problem+json` response
+func (r DeleteDocumentResponse) GetApplicationproblemJSON502() *ProblemDetails {
+	return r.ApplicationproblemJSON502
+}
+
+// GetApplicationproblemJSON503 returns the response for an HTTP 503 `application/problem+json` response
+func (r DeleteDocumentResponse) GetApplicationproblemJSON503() *ProblemDetails {
+	return r.ApplicationproblemJSON503
+}
+
+// GetApplicationproblemJSON504 returns the response for an HTTP 504 `application/problem+json` response
+func (r DeleteDocumentResponse) GetApplicationproblemJSON504() *ProblemDetails {
+	return r.ApplicationproblemJSON504
+}
+
+// GetBody returns the raw response body bytes
+func (r DeleteDocumentResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r DeleteDocumentResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DeleteDocumentResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r DeleteDocumentResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type IngestDocumentResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON202 the response for an HTTP 202 `application/json` response
+	JSON202 *DocumentIngestResult
+	// ApplicationproblemJSON400 the response for an HTTP 400 `application/problem+json` response
+	ApplicationproblemJSON400 *HttpValidationProblemDetails
+	// ApplicationproblemJSON401 the response for an HTTP 401 `application/problem+json` response
+	ApplicationproblemJSON401 *ProblemDetails
+	// ApplicationproblemJSON403 the response for an HTTP 403 `application/problem+json` response
+	ApplicationproblemJSON403 *ProblemDetails
+	// ApplicationproblemJSON409 the response for an HTTP 409 `application/problem+json` response
+	ApplicationproblemJSON409 *ProblemDetails
+	// ApplicationproblemJSON413 the response for an HTTP 413 `application/problem+json` response
+	ApplicationproblemJSON413 *ProblemDetails
+	// ApplicationproblemJSON422 the response for an HTTP 422 `application/problem+json` response
+	ApplicationproblemJSON422 *ProblemDetails
+	// ApplicationproblemJSON429 the response for an HTTP 429 `application/problem+json` response
+	ApplicationproblemJSON429 *ProblemDetails
+	// ApplicationproblemJSON502 the response for an HTTP 502 `application/problem+json` response
+	ApplicationproblemJSON502 *ProblemDetails
+	// ApplicationproblemJSON503 the response for an HTTP 503 `application/problem+json` response
+	ApplicationproblemJSON503 *ProblemDetails
+	// ApplicationproblemJSON504 the response for an HTTP 504 `application/problem+json` response
+	ApplicationproblemJSON504 *ProblemDetails
+}
+
+// GetJSON202 returns the response for an HTTP 202 `application/json` response
+func (r IngestDocumentResponse) GetJSON202() *DocumentIngestResult {
+	return r.JSON202
+}
+
+// GetApplicationproblemJSON400 returns the response for an HTTP 400 `application/problem+json` response
+func (r IngestDocumentResponse) GetApplicationproblemJSON400() *HttpValidationProblemDetails {
+	return r.ApplicationproblemJSON400
+}
+
+// GetApplicationproblemJSON401 returns the response for an HTTP 401 `application/problem+json` response
+func (r IngestDocumentResponse) GetApplicationproblemJSON401() *ProblemDetails {
+	return r.ApplicationproblemJSON401
+}
+
+// GetApplicationproblemJSON403 returns the response for an HTTP 403 `application/problem+json` response
+func (r IngestDocumentResponse) GetApplicationproblemJSON403() *ProblemDetails {
+	return r.ApplicationproblemJSON403
+}
+
+// GetApplicationproblemJSON409 returns the response for an HTTP 409 `application/problem+json` response
+func (r IngestDocumentResponse) GetApplicationproblemJSON409() *ProblemDetails {
+	return r.ApplicationproblemJSON409
+}
+
+// GetApplicationproblemJSON413 returns the response for an HTTP 413 `application/problem+json` response
+func (r IngestDocumentResponse) GetApplicationproblemJSON413() *ProblemDetails {
+	return r.ApplicationproblemJSON413
+}
+
+// GetApplicationproblemJSON422 returns the response for an HTTP 422 `application/problem+json` response
+func (r IngestDocumentResponse) GetApplicationproblemJSON422() *ProblemDetails {
+	return r.ApplicationproblemJSON422
+}
+
+// GetApplicationproblemJSON429 returns the response for an HTTP 429 `application/problem+json` response
+func (r IngestDocumentResponse) GetApplicationproblemJSON429() *ProblemDetails {
+	return r.ApplicationproblemJSON429
+}
+
+// GetApplicationproblemJSON502 returns the response for an HTTP 502 `application/problem+json` response
+func (r IngestDocumentResponse) GetApplicationproblemJSON502() *ProblemDetails {
+	return r.ApplicationproblemJSON502
+}
+
+// GetApplicationproblemJSON503 returns the response for an HTTP 503 `application/problem+json` response
+func (r IngestDocumentResponse) GetApplicationproblemJSON503() *ProblemDetails {
+	return r.ApplicationproblemJSON503
+}
+
+// GetApplicationproblemJSON504 returns the response for an HTTP 504 `application/problem+json` response
+func (r IngestDocumentResponse) GetApplicationproblemJSON504() *ProblemDetails {
+	return r.ApplicationproblemJSON504
+}
+
+// GetBody returns the raw response body bytes
+func (r IngestDocumentResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r IngestDocumentResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r IngestDocumentResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r IngestDocumentResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type GetSessionIngestStatusResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *SessionIngestStatus
+	// ApplicationproblemJSON400 the response for an HTTP 400 `application/problem+json` response
+	ApplicationproblemJSON400 *HttpValidationProblemDetails
+	// ApplicationproblemJSON401 the response for an HTTP 401 `application/problem+json` response
+	ApplicationproblemJSON401 *ProblemDetails
+	// ApplicationproblemJSON403 the response for an HTTP 403 `application/problem+json` response
+	ApplicationproblemJSON403 *ProblemDetails
+	// ApplicationproblemJSON429 the response for an HTTP 429 `application/problem+json` response
+	ApplicationproblemJSON429 *ProblemDetails
+	// ApplicationproblemJSON502 the response for an HTTP 502 `application/problem+json` response
+	ApplicationproblemJSON502 *ProblemDetails
+	// ApplicationproblemJSON503 the response for an HTTP 503 `application/problem+json` response
+	ApplicationproblemJSON503 *ProblemDetails
+	// ApplicationproblemJSON504 the response for an HTTP 504 `application/problem+json` response
+	ApplicationproblemJSON504 *ProblemDetails
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r GetSessionIngestStatusResponse) GetJSON200() *SessionIngestStatus {
+	return r.JSON200
+}
+
+// GetApplicationproblemJSON400 returns the response for an HTTP 400 `application/problem+json` response
+func (r GetSessionIngestStatusResponse) GetApplicationproblemJSON400() *HttpValidationProblemDetails {
+	return r.ApplicationproblemJSON400
+}
+
+// GetApplicationproblemJSON401 returns the response for an HTTP 401 `application/problem+json` response
+func (r GetSessionIngestStatusResponse) GetApplicationproblemJSON401() *ProblemDetails {
+	return r.ApplicationproblemJSON401
+}
+
+// GetApplicationproblemJSON403 returns the response for an HTTP 403 `application/problem+json` response
+func (r GetSessionIngestStatusResponse) GetApplicationproblemJSON403() *ProblemDetails {
+	return r.ApplicationproblemJSON403
+}
+
+// GetApplicationproblemJSON429 returns the response for an HTTP 429 `application/problem+json` response
+func (r GetSessionIngestStatusResponse) GetApplicationproblemJSON429() *ProblemDetails {
+	return r.ApplicationproblemJSON429
+}
+
+// GetApplicationproblemJSON502 returns the response for an HTTP 502 `application/problem+json` response
+func (r GetSessionIngestStatusResponse) GetApplicationproblemJSON502() *ProblemDetails {
+	return r.ApplicationproblemJSON502
+}
+
+// GetApplicationproblemJSON503 returns the response for an HTTP 503 `application/problem+json` response
+func (r GetSessionIngestStatusResponse) GetApplicationproblemJSON503() *ProblemDetails {
+	return r.ApplicationproblemJSON503
+}
+
+// GetApplicationproblemJSON504 returns the response for an HTTP 504 `application/problem+json` response
+func (r GetSessionIngestStatusResponse) GetApplicationproblemJSON504() *ProblemDetails {
+	return r.ApplicationproblemJSON504
+}
+
+// GetBody returns the raw response body bytes
+func (r GetSessionIngestStatusResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r GetSessionIngestStatusResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetSessionIngestStatusResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r GetSessionIngestStatusResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type IngestSessionResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON202 the response for an HTTP 202 `application/json` response
+	JSON202 *SessionIngestResult
+	// JSON207 the response for an HTTP 207 `application/json` response
+	JSON207 *SessionIngestResult
+	// ApplicationproblemJSON400 the response for an HTTP 400 `application/problem+json` response
+	ApplicationproblemJSON400 *HttpValidationProblemDetails
+	// ApplicationproblemJSON401 the response for an HTTP 401 `application/problem+json` response
+	ApplicationproblemJSON401 *ProblemDetails
+	// ApplicationproblemJSON403 the response for an HTTP 403 `application/problem+json` response
+	ApplicationproblemJSON403 *ProblemDetails
+	// ApplicationproblemJSON409 the response for an HTTP 409 `application/problem+json` response
+	ApplicationproblemJSON409 *ProblemDetails
+	// ApplicationproblemJSON413 the response for an HTTP 413 `application/problem+json` response
+	ApplicationproblemJSON413 *ProblemDetails
+	// ApplicationproblemJSON422 the response for an HTTP 422 `application/problem+json` response
+	ApplicationproblemJSON422 *ProblemDetails
+	// ApplicationproblemJSON429 the response for an HTTP 429 `application/problem+json` response
+	ApplicationproblemJSON429 *ProblemDetails
+	// ApplicationproblemJSON502 the response for an HTTP 502 `application/problem+json` response
+	ApplicationproblemJSON502 *ProblemDetails
+	// ApplicationproblemJSON503 the response for an HTTP 503 `application/problem+json` response
+	ApplicationproblemJSON503 *ProblemDetails
+	// ApplicationproblemJSON504 the response for an HTTP 504 `application/problem+json` response
+	ApplicationproblemJSON504 *ProblemDetails
+}
+
+// GetJSON202 returns the response for an HTTP 202 `application/json` response
+func (r IngestSessionResponse) GetJSON202() *SessionIngestResult {
+	return r.JSON202
+}
+
+// GetJSON207 returns the response for an HTTP 207 `application/json` response
+func (r IngestSessionResponse) GetJSON207() *SessionIngestResult {
+	return r.JSON207
+}
+
+// GetApplicationproblemJSON400 returns the response for an HTTP 400 `application/problem+json` response
+func (r IngestSessionResponse) GetApplicationproblemJSON400() *HttpValidationProblemDetails {
+	return r.ApplicationproblemJSON400
+}
+
+// GetApplicationproblemJSON401 returns the response for an HTTP 401 `application/problem+json` response
+func (r IngestSessionResponse) GetApplicationproblemJSON401() *ProblemDetails {
+	return r.ApplicationproblemJSON401
+}
+
+// GetApplicationproblemJSON403 returns the response for an HTTP 403 `application/problem+json` response
+func (r IngestSessionResponse) GetApplicationproblemJSON403() *ProblemDetails {
+	return r.ApplicationproblemJSON403
+}
+
+// GetApplicationproblemJSON409 returns the response for an HTTP 409 `application/problem+json` response
+func (r IngestSessionResponse) GetApplicationproblemJSON409() *ProblemDetails {
+	return r.ApplicationproblemJSON409
+}
+
+// GetApplicationproblemJSON413 returns the response for an HTTP 413 `application/problem+json` response
+func (r IngestSessionResponse) GetApplicationproblemJSON413() *ProblemDetails {
+	return r.ApplicationproblemJSON413
+}
+
+// GetApplicationproblemJSON422 returns the response for an HTTP 422 `application/problem+json` response
+func (r IngestSessionResponse) GetApplicationproblemJSON422() *ProblemDetails {
+	return r.ApplicationproblemJSON422
+}
+
+// GetApplicationproblemJSON429 returns the response for an HTTP 429 `application/problem+json` response
+func (r IngestSessionResponse) GetApplicationproblemJSON429() *ProblemDetails {
+	return r.ApplicationproblemJSON429
+}
+
+// GetApplicationproblemJSON502 returns the response for an HTTP 502 `application/problem+json` response
+func (r IngestSessionResponse) GetApplicationproblemJSON502() *ProblemDetails {
+	return r.ApplicationproblemJSON502
+}
+
+// GetApplicationproblemJSON503 returns the response for an HTTP 503 `application/problem+json` response
+func (r IngestSessionResponse) GetApplicationproblemJSON503() *ProblemDetails {
+	return r.ApplicationproblemJSON503
+}
+
+// GetApplicationproblemJSON504 returns the response for an HTTP 504 `application/problem+json` response
+func (r IngestSessionResponse) GetApplicationproblemJSON504() *ProblemDetails {
+	return r.ApplicationproblemJSON504
+}
+
+// GetBody returns the raw response body bytes
+func (r IngestSessionResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r IngestSessionResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r IngestSessionResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r IngestSessionResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 type SearchResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -2456,6 +3533,81 @@ func (c *ClientWithResponses) GetDocumentsWithResponse(ctx context.Context, body
 	return ParseGetDocumentsResponse(rsp)
 }
 
+// DeleteDocumentWithResponse Delete a document
+//
+// Names a document by `source` and `sourceId`, or by `path` within the collection, and removes it. The index update starts at once, because a deleted document stays searchable until the index changes. It also stops an older version being stored again. Safe to repeat: a missing document answers `deleted: false`. When `reindexJobId` is null the update could not be queued, so repeat the request. Requires the `ingest` scope.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with DELETE /v1/documents (the `DeleteDocument` operationId).
+func (c *ClientWithResponses) DeleteDocumentWithResponse(ctx context.Context, params *DeleteDocumentParams, reqEditors ...RequestEditorFn) (*DeleteDocumentResponse, error) {
+	rsp, err := c.DeleteDocument(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDeleteDocumentResponse(rsp)
+}
+
+// IngestDocumentWithBodyWithResponse Store a document
+//
+// Renders the envelope to frontmatter, redacts the whole document, and stores it. Redaction cannot be turned off, and a document it cannot finish is refused with 422. `source` and `sourceId` are its identity: sending them again overwrites, and `updated` orders versions, so an older version gets 409. The response counts what was replaced, by rule, with no values. The document becomes searchable when the job finishes. Requires the `ingest` scope.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /v1/documents (the `IngestDocument` operationId).
+func (c *ClientWithResponses) IngestDocumentWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*IngestDocumentResponse, error) {
+	rsp, err := c.IngestDocumentWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseIngestDocumentResponse(rsp)
+}
+
+// IngestDocumentWithResponse Store a document
+//
+// Renders the envelope to frontmatter, redacts the whole document, and stores it. Redaction cannot be turned off, and a document it cannot finish is refused with 422. `source` and `sourceId` are its identity: sending them again overwrites, and `updated` orders versions, so an older version gets 409. The response counts what was replaced, by rule, with no values. The document becomes searchable when the job finishes. Requires the `ingest` scope.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /v1/documents (the `IngestDocument` operationId).
+func (c *ClientWithResponses) IngestDocumentWithResponse(ctx context.Context, body IngestDocumentJSONRequestBody, reqEditors ...RequestEditorFn) (*IngestDocumentResponse, error) {
+	rsp, err := c.IngestDocument(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseIngestDocumentResponse(rsp)
+}
+
+// GetSessionIngestStatusWithResponse How a session's upload ended
+//
+// Only `complete` means all of it arrived. `partial` means some parts may be searchable, and the upload should be sent again. Requires the `ingest` scope.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /v1/ingest/session (the `GetSessionIngestStatus` operationId).
+func (c *ClientWithResponses) GetSessionIngestStatusWithResponse(ctx context.Context, params *GetSessionIngestStatusParams, reqEditors ...RequestEditorFn) (*GetSessionIngestStatusResponse, error) {
+	rsp, err := c.GetSessionIngestStatus(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetSessionIngestStatusResponse(rsp)
+}
+
+// IngestSessionWithBodyWithResponse Store a raw session transcript
+//
+// The body is the raw JSONL of a Claude Code or Codex session, read as a stream. It is rendered and redacted here into one or more parts. 202 means every part arrived. 207 means some did not: `parts` says which, the session stays `partial`, and when `retryable` is true sending the same upload again finishes it. An older version than the one stored gets 409, as does a second upload of the session while one is running. Parts a shrunken session no longer has are deleted last. Requires the `ingest` scope.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /v1/ingest/session (the `IngestSession` operationId).
+func (c *ClientWithResponses) IngestSessionWithBodyWithResponse(ctx context.Context, params *IngestSessionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*IngestSessionResponse, error) {
+	rsp, err := c.IngestSessionWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseIngestSessionResponse(rsp)
+}
+
 // SearchWithResponse Search the corpus
 //
 // Hybrid search over the indexed documents: BM25 and vector retrieval fused by reciprocal rank, then reranked by a cross-encoder unless `rerank=false`. Reranked queries take a few seconds; `rerank=false` returns fused results in well under a second. Frontmatter filters (`project`, `branch`, `since`, `until`, `tag`) are applied after retrieval, so a filtered result set can be shorter than `limit` even when more matches exist. `degraded` means the search ran without something a full search uses, such as the reranker: results are valid but may rank worse, and `degradedReasons` says what. Requires the `read` scope.
@@ -2473,7 +3625,7 @@ func (c *ClientWithResponses) SearchWithResponse(ctx context.Context, params *Se
 
 // GetStatusWithResponse Index status
 //
-// Totals for the collections the caller may read, whether a vector index exists, and per-collection counts. `needsEmbedding` is the backlog for the whole index, so it is null for a collection-scoped key. Requires the `read` scope.
+// Totals for the collections the caller may read, whether a vector index exists, and per-collection counts. `needsEmbedding` is the backlog for the whole index, so it is null for a collection-scoped key. `unredactedCollections` lists what an operator stored unredacted. Only a key with the `admin` scope as well sees it; it is null for anyone else. Requires the `read` scope.
 //
 // Returns a wrapper object for the known response body format(s).
 //
@@ -2941,6 +4093,362 @@ func ParseGetDocumentsResponse(rsp *http.Response) (*GetDocumentsResponse, error
 			return nil, err
 		}
 		response.ApplicationproblemJSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 429:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON429 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 502:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON502 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 504:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON504 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseDeleteDocumentResponse parses an HTTP response from a DeleteDocumentWithResponse call
+func ParseDeleteDocumentResponse(rsp *http.Response) (*DeleteDocumentResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DeleteDocumentResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest DocumentDeleteResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest HttpValidationProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON400 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 429:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON429 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 502:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON502 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 504:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON504 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseIngestDocumentResponse parses an HTTP response from a IngestDocumentWithResponse call
+func ParseIngestDocumentResponse(rsp *http.Response) (*IngestDocumentResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &IngestDocumentResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest DocumentIngestResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest HttpValidationProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON400 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 413:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON413 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 429:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON429 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 502:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON502 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 504:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON504 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetSessionIngestStatusResponse parses an HTTP response from a GetSessionIngestStatusWithResponse call
+func ParseGetSessionIngestStatusResponse(rsp *http.Response) (*GetSessionIngestStatusResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetSessionIngestStatusResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest SessionIngestStatus
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest HttpValidationProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON400 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 429:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON429 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 502:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON502 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 504:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON504 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseIngestSessionResponse parses an HTTP response from a IngestSessionWithResponse call
+func ParseIngestSessionResponse(rsp *http.Response) (*IngestSessionResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &IngestSessionResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest SessionIngestResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 207:
+		var dest SessionIngestResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON207 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest HttpValidationProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON400 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 413:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON413 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 429:
 		var dest ProblemDetails

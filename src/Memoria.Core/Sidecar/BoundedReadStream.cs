@@ -1,7 +1,10 @@
 namespace Memoria.Core.Sidecar;
 
-/// <summary>Reads through to another stream and fails once more than <paramref name="limit"/> bytes have come through.</summary>
-internal sealed class BoundedReadStream(Stream inner, long limit) : Stream
+/// <summary>
+/// Reads through to another stream and fails once more than <paramref name="limit"/> bytes have come through,
+/// so a large body is refused as it arrives instead of being buffered first.
+/// </summary>
+public sealed class BoundedReadStream(Stream inner, long limit, Func<Exception> overLimit) : Stream
 {
 	private long _read;
 
@@ -68,7 +71,7 @@ internal sealed class BoundedReadStream(Stream inner, long limit) : Stream
 		_read += bytes;
 		if (_read > limit)
 		{
-			throw new SidecarException(SidecarException.ResponseTooLarge, $"The sidecar's response passed the {limit}-byte limit.", System.Net.HttpStatusCode.OK);
+			throw overLimit();
 		}
 
 		return bytes;

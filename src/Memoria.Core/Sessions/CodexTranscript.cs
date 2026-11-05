@@ -66,7 +66,8 @@ internal sealed partial class CodexTranscript : SessionTranscript
 			Report,
 			CountsByRule,
 			Refusals,
-			path => SessionPaths.IsCodexFamily(path, safeId));
+			path => SessionPaths.IsCodexFamily(path, safeId),
+			SessionPaths.CodexGlob(safeId));
 	}
 
 	private void Apply(string type, JsonElement payload, SessionTimestamp? time)
