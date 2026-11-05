@@ -20,13 +20,13 @@ internal static class MessageSplitter
 			yield break;
 		}
 
-		int start = 0;
-		while (start < message.Text.Length)
+		// Always moving forward means the loop ends after at most one piece per character, however a cut is worked out.
+		int end;
+		for (int start = 0; start < message.Text.Length; start = end)
 		{
-			int end = NextCut(message.Text, start, maxBytes);
+			end = Math.Max(NextCut(message.Text, start, maxBytes), start + 1);
 			string piece = message.Text[start..end];
 			yield return message with { Text = piece, CodePoints = PythonText.CodePointLength(piece) };
-			start = end;
 		}
 	}
 
