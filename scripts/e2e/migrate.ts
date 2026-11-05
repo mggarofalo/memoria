@@ -112,6 +112,11 @@ function crash(h: Harness, tool: string): void {
   h.check("redaction check: when it cannot finish it exits 3, with no stack and no file name", run.status === 3 && all.includes("could not finish") && !all.includes("secretfilename") && !all.includes("   at "), all.slice(0, 400));
 }
 
+/** What is in a temp folder, apart from the sockets and locks the .NET runtime keeps there on Linux. */
+function written(temp: string): number {
+  return readdirSync(temp).filter((name) => !/^(clr-debug-pipe|dotnet-diagnostic|\.dotnet)/.test(name)).length;
+}
+
 /** Watches its temp folder the whole time, and then kills it: there must be nothing to find, whether it finishes or not. */
 async function leavesNothing(h: Harness, tool: string, secret: string): Promise<void> {
   const folder = h.privatePath("migrate-many");
@@ -126,12 +131,12 @@ async function leavesNothing(h: Harness, tool: string, secret: string): Promise<
   let seen = 0;
   const started = Date.now();
   while (!exited && Date.now() - started < 2000) {
-    seen += readdirSync(temp).length;
+    seen += written(temp);
     await pause(5);
   }
   child.kill("SIGKILL");
   await pause(100);
-  seen += readdirSync(temp).length;
+  seen += written(temp);
   h.check("redaction check: killed partway, it leaves no copy, and wrote none while running", seen === 0, seen);
 }
 

@@ -14,11 +14,11 @@ using System.Text.Json;
 using Memoria.Core.Redaction;
 using Memoria.Core.Sessions;
 
-return RedactionReport.Main(args);
+return RedactionReport.Guarded(args);
 
 internal static class RedactionReport
 {
-	public static int Main(string[] args)
+	public static int Guarded(string[] args)
 	{
 		// An unhandled exception would print its message, which can name a file, and put it in the Windows event log.
 		try
