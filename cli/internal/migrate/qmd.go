@@ -55,6 +55,9 @@ func LoadCollections(path string) ([]Collection, error) {
 		// The parser's message can quote the file, which may hold an update command's secrets.
 		return nil, errors.New("the QMD config is not valid YAML")
 	}
+	if len(parsed.Collections) == 0 {
+		return nil, errors.New("the QMD config names no collections; check the spelling of its 'collections' key")
+	}
 	collections := make([]Collection, 0, len(parsed.Collections))
 	for name, entry := range parsed.Collections {
 		collections = append(collections, Collection{Name: name, Path: expandHome(entry.Path), Pattern: patternOr(entry.Pattern), Ignore: entry.Ignore})

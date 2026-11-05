@@ -65,18 +65,64 @@ func TestIgnoreRulesAreReadAsQMDReadsThem(t *testing.T) {
 	}
 }
 
+// A rule ending in a wildcard reaches files only, and scripts/e2e checks these same forms against a real QMD index.
+func TestAWildcardIgnoreCoversOnlyWhatItMatches(t *testing.T) {
+	tree := []string{"a.md", "ab.md", "sub/d.md", "sub/ax.md", "sub/deep/f.md", "deep/g.md"}
+	for rule, want := range map[string]int{
+		"s*": 6, "?ub": 6, "sub/d*": 5, "sub/*": 4, "*/*": 3, "*": 4, "sub/deep/*": 5, "**/deep/*": 4,
+		"sub": 3, "sub/**": 3, "**/deep": 4, "sub/deep": 5, "{sub,deep}": 2, "sub/{deep,x}": 5, "{s*,deep}": 5,
+	} {
+		s := selection(t, "**/*.md", rule)
+		got := 0
+		for _, name := range tree {
+			if s.Takes(name) {
+				got++
+			}
+		}
+		if got != want {
+			t.Errorf("ignoring %q takes %d of the files, want %d", rule, got, want)
+		}
+	}
+}
+
+func TestFolderNamesWithSymbolsAreRead(t *testing.T) {
+	for _, c := range []struct{ pattern, name string }{
+		{"C++/*.md", "C++/a.md"}, {"docs@v2/**", "docs@v2/x/a.md"}, {"a&b/*.md", "a&b/a.md"}, {"#x/*.md", "#x/a.md"}, {"$y/*.md", "$y/a.md"}, {"~z/*.md", "~z/a.md"},
+	} {
+		if !selection(t, c.pattern).Takes(c.name) {
+			t.Errorf("%q did not take %q", c.pattern, c.name)
+		}
+	}
+	if selection(t, "**/*.md", "C++").Takes("C++/a.md") {
+		t.Error("an ignored folder with symbols was taken")
+	}
+	for _, pattern := range []string{"C++(x)/*.md", "docs@(v2)/*.md", "C++/"} {
+		if _, err := NewSelection(pattern, nil); err == nil {
+			t.Errorf("%q was accepted", pattern)
+		}
+	}
+}
+
+func TestAnEmptyChoiceInAnIgnoreRuleIsRefused(t *testing.T) {
+	for _, rule := range []string{"{a,}", "{,a}", "{a,,b}"} {
+		if _, err := NewSelection("**/*.md", []string{rule}); err == nil {
+			t.Errorf("%q was accepted", rule)
+		}
+	}
+}
+
 // Each of these is silently read differently by the other matcher, so each is refused rather than guessed at.
 func TestWhatCannotBeReadFaithfullyIsRefused(t *testing.T) {
 	for _, pattern := range []string{
 		"**/*.@(md|txt)", "**/!(a).md", "**/+(a|b).md", "**/?(a).md", "**/*(a).md", "!**/*.md",
-		"[ab].md", "**/*.{1..3}", "**/{a}.md", "a**b/*.md", "../x/*.md", "/abs/*.md", "a//b.md", `a\b.md`, "sub/",
+		"[ab].md", "**/*.{1..3}", "**/{a}.md", "a**b/*.md", "../x/*.md", "/abs/*.md", "a//b.md", `a\b.md`, "sub/", "*/**", "s*/**",
 	} {
 		_, err := NewSelection(pattern, nil)
 		if err == nil || !strings.Contains(err.Error(), "refused") || !strings.Contains(err.Error(), pattern) {
 			t.Errorf("pattern %q: err = %v", pattern, err)
 		}
 	}
-	for _, rule := range []string{"**/*.@(md)", ",!sub/**", "!sub/**", "sub/", " sub", "", "a,b"} {
+	for _, rule := range []string{"**/*.@(md)", ",!sub/**", "!sub/**", "sub/", " sub", "", "a,b", "*/**", "s*/**", "sub/*/**"} {
 		if _, err := NewSelection("**/*.md", []string{rule}); err == nil {
 			t.Errorf("ignore rule %q was accepted", rule)
 		}

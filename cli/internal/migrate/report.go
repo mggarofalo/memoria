@@ -9,10 +9,12 @@ import (
 // CheckResult is one list of files from the redaction check. It holds counts and rule names
 // and never a value, a path or a line.
 type CheckResult struct {
-	Files           int            `json:"files"`
-	Changed         int            `json:"changed"`
-	Refused         int            `json:"refused"`
-	Skipped         int            `json:"skipped"`
+	Files   int `json:"files"`
+	Changed int `json:"changed"`
+	Refused int `json:"refused"`
+	Skipped int `json:"skipped"`
+	// Unscanned is the documents gitleaks was meant to read and did not, as it stopped or gave nothing usable.
+	Unscanned       int            `json:"gitleaksUnscanned"`
 	Replacements    map[string]int `json:"replacements"`
 	FilesByRule     map[string]int `json:"filesByRule"`
 	GitleaksRan     bool           `json:"gitleaksRan"`
@@ -26,9 +28,10 @@ type Report struct {
 	CheckResult
 }
 
-// Clean reports whether nothing was refused and gitleaks, if it ran, found nothing.
+// Clean reports whether nothing was refused and gitleaks, if it ran, read everything and found nothing. Even so,
+// gitleaks is best effort: it can miss a token at a chunk boundary, so this is no proof that nothing is left.
 func (r CheckResult) Clean() bool {
-	return r.Refused == 0 && len(r.GitleaksResults) == 0
+	return r.Refused == 0 && r.Unscanned == 0 && len(r.GitleaksResults) == 0
 }
 
 // ParseCheck reads the tool's output: one JSON line, the last on stdout, with one result for

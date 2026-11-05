@@ -9,12 +9,14 @@ import (
 	"github.com/bmatcuk/doublestar/v4"
 )
 
-// A pattern may hold only what is matched here the same way QMD's matcher does: names, '*', '?', a whole-segment
-// '**', and {a,b}. Extglobs, negation, brackets, escapes and ranges are refused rather than guessed at, because a
+// A pattern may hold only what is matched here the same way QMD's matcher does: names, which may hold + & @ # $ ~,
+// '*', '?', a whole-segment '**', and {a,b}. Extglobs, negation, brackets, escapes and ranges are refused rather than guessed at, because a
 // wrong guess is silent: a count of 0, or a file sent that the owner excluded.
 var (
-	supportedGlob = regexp.MustCompile(`^[\p{L}\p{N} _./*?{},-]+$`)
+	supportedGlob = regexp.MustCompile(`^[\p{L}\p{N} _./*?{},+&@#$~-]+$`)
 	braceList     = regexp.MustCompile(`\{[^{}]*,[^{}]*\}`)
+	// An empty choice in an ignore rule would expand to a rule with an empty end.
+	emptyAlternative = regexp.MustCompile(`\{,|,\}|,,`)
 )
 
 // Selection decides which files in a collection QMD would index. The push must use this too, so that what is
@@ -22,6 +24,8 @@ var (
 type Selection struct {
 	patterns []string
 	ignore   []string
+	// pruning is the ignore rules that also stop QMD walking into a folder they match. See prunesFolders.
+	pruning []string
 }
 
 // NewSelection reads a collection's pattern and ignore rules as QMD does, or refuses them.
@@ -42,14 +46,19 @@ func NewSelection(pattern string, ignore []string) (*Selection, error) {
 		if err != nil {
 			return nil, err
 		}
-		selection.ignore = append(selection.ignore, normal)
+		for _, each := range expandBraces(normal) {
+			selection.ignore = append(selection.ignore, each)
+			if prunesFolders(each) {
+				selection.pruning = append(selection.pruning, each)
+			}
+		}
 	}
 	return selection, nil
 }
 
 func normalizeIgnore(rule string) (string, error) {
 	// QMD does not split an ignore rule on commas. An entry holding one outside braces means something else, and isSupported refuses it.
-	if strings.TrimSpace(rule) != rule || strings.HasSuffix(rule, "/") {
+	if strings.TrimSpace(rule) != rule || strings.HasSuffix(rule, "/") || emptyAlternative.MatchString(rule) {
 		return "", refused(rule)
 	}
 	return normalize(rule)
@@ -67,12 +76,20 @@ func isSupported(glob string) bool {
 	if !supportedGlob.MatchString(glob) || strings.HasPrefix(glob, "/") || strings.Contains(glob, "..") || !doublestar.ValidatePattern(glob) {
 		return false
 	}
+	return segmentsAreSupported(glob) && !hasBareBraceOrComma(glob)
+}
+
+func segmentsAreSupported(glob string) bool {
+	// "s*/**" takes a file called sx.md here, but not in QMD's matcher, though "?x.md/**" does in both.
+	if strings.HasSuffix(glob, "*/**") && !strings.HasSuffix(glob, "**/**") {
+		return false
+	}
 	for _, segment := range strings.Split(glob, "/") {
 		if segment == "" || (strings.Contains(segment, "**") && segment != "**") {
 			return false
 		}
 	}
-	return !hasBareBraceOrComma(glob)
+	return true
 }
 
 // hasBareBraceOrComma finds {x}, which the two matchers read differently, and a comma outside a list.
@@ -93,14 +110,32 @@ func quoteRule(glob string) string {
 	return "\"" + strings.Join(strings.Fields(glob), " ") + "\""
 }
 
-// Takes reports whether QMD would index this slash-separated relative path. An ignore rule matching a folder
-// also covers what is inside it, as QMD's matcher stops walking there.
+// prunesFolders is fast-glob's rule: QMD's matcher stops walking into a matching folder only for a rule ending in
+// /** or in a literal name. Any other rule is tested against files alone, so "s*" leaves everything inside sub.
+func prunesFolders(rule string) bool {
+	return strings.HasSuffix(rule, "/**") || !strings.ContainsAny(path.Base(rule), "*?")
+}
+
+// expandBraces gives one rule for each choice, as QMD's matcher does before it looks at how a rule ends.
+func expandBraces(glob string) []string {
+	found := braceList.FindStringIndex(glob)
+	if found == nil {
+		return []string{glob}
+	}
+	var rules []string
+	for _, choice := range strings.Split(glob[found[0]+1:found[1]-1], ",") {
+		rules = append(rules, expandBraces(glob[:found[0]]+choice+glob[found[1]:])...)
+	}
+	return rules
+}
+
+// Takes reports whether QMD would index this slash-separated relative path.
 func (s *Selection) Takes(name string) bool {
-	if !matchesAny(s.patterns, name) {
+	if !matchesAny(s.patterns, name) || matchesAny(s.ignore, name) {
 		return false
 	}
-	for current := name; current != "."; current = path.Dir(current) {
-		if matchesAny(s.ignore, current) {
+	for folder := path.Dir(name); folder != "."; folder = path.Dir(folder) {
+		if matchesAny(s.pruning, folder) {
 			return false
 		}
 	}

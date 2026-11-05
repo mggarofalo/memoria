@@ -172,7 +172,23 @@ func (a *app) migratePlan(ctx context.Context, o migratePlanOptions) error {
 	}); err != nil {
 		return err
 	}
+	a.warnOfEmptyPlans(result.Collections)
 	return planOutcome(result, o.acceptSkips)
+}
+
+func (a *app) warnOfEmptyPlans(plans []migrate.Plan) {
+	for i := range plans {
+		if plans[i].Problem == "" {
+			a.warnIfNoFiles(plans[i].Name, plans[i].Files, plans[i].Unreadable)
+		}
+	}
+}
+
+// warnIfNoFiles keeps a folder with nothing to take from passing for one that was read and found clean.
+func (a *app) warnIfNoFiles(name string, files, unread int) {
+	if files == 0 && unread == 0 {
+		a.warn("collection " + name + ": no file in its folder matches its pattern")
+	}
 }
 
 // planOutcome makes a plan that could not see everything fail, as its counts would read as the whole of it.
@@ -223,12 +239,15 @@ checkout of the repository, which needs the .NET runtime:
   dotnet build tools/RedactionCheck -c Release
 
 Gitleaks then looks over the redacted text for anything left, so it must be on PATH.
+It is best effort: it can miss a token at a chunk boundary, so 0 findings is not proof
+that nothing is left. A document gitleaks could not read is counted as unscanned.
 --no-gitleaks goes without that second look, which makes this a weaker check: it only
 says what the rules replaced, and nothing about what they missed. The text goes to
 gitleaks on its standard input, so no copy is written to disk.
 
-This exits 1 if a document was refused, gitleaks found something, or anything could not
-be read. Those last are counted, never named, and --accept-skips lets the exit be 0.`,
+This exits 1 if a document was refused, gitleaks found something or could not read a
+document, or anything could not be read. Those last are counted, never named, and
+--accept-skips lets the exit be 0 for them alone.`,
 		Example: `  memoria migrate report --qmd-config ~/.config/qmd/index.yml --tool tools/RedactionCheck/bin/Release/net10.0/RedactionCheck.dll`,
 		Args:    noArgs,
 		RunE:    func(cmd *cobra.Command, _ []string) error { return a.migrateReport(cmd.Context(), o) },
@@ -252,6 +271,9 @@ func (a *app) migrateReport(ctx context.Context, o migrateReportOptions) error {
 	if o.noGitleaks {
 		a.warn("--no-gitleaks makes this a weaker check: it says what the rules replaced, and nothing about what they missed")
 	}
+	if !o.noGitleaks {
+		a.warn("gitleaks is best effort: it can miss a token at a chunk boundary, so 0 findings is not proof that nothing is left")
+	}
 	reports, err := a.runRedactionCheck(ctx, o, collections)
 	if err != nil {
 		return err
@@ -266,6 +288,9 @@ func (a *app) migrateReport(ctx context.Context, o migrateReportOptions) error {
 	}); err != nil {
 		return err
 	}
+	for i := range reports {
+		a.warnIfNoFiles(reports[i].Name, reports[i].Files, reports[i].Skipped)
+	}
 	return uncleanError(reports, o.acceptSkips)
 }
 
@@ -273,7 +298,7 @@ func uncleanError(reports []migrate.Report, acceptSkips bool) error {
 	skipped := 0
 	for i := range reports {
 		if !reports[i].Clean() {
-			return apperr.New(apperr.KindGeneric, "a document was refused, or gitleaks found something in the redacted text; see the counts above")
+			return apperr.New(apperr.KindGeneric, "a document was refused, or gitleaks found something in the redacted text or could not read it; see the counts above")
 		}
 		skipped += reports[i].Skipped
 	}

@@ -9,9 +9,12 @@
 // input, so a list of names is never on disk. With --json it prints one line, an array with one result per
 // list, in the order given.
 //
-// Exits 0 when clean, 1 when something was refused, found or skipped, 2 on bad usage, 3 when it could not finish.
+// Gitleaks is best effort: it can miss a token at a chunk boundary, so 0 findings is not proof that nothing is left.
+//
+// Exits 0 when clean, 1 when something was refused, found, skipped or not scanned, 2 on bad usage, 3 when it could not finish.
 using System.Diagnostics;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Memoria.Core.Redaction;
 using Memoria.Core.Sessions;
 
@@ -44,7 +47,7 @@ internal static class RedactionReport
 
 		List<Result> results = [.. options.Lists.Select(list => Check(list, options.Gitleaks))];
 		Report(results, options.Json);
-		return results.All(static result => result.GitleaksFindings.Count == 0 && result.Refused == 0 && result.Skipped == 0) ? 0 : 1;
+		return results.All(static result => result.IsClean) ? 0 : 1;
 	}
 
 	private static Result Check(FileList list, bool gitleaks)
@@ -52,7 +55,7 @@ internal static class RedactionReport
 		using Gitleaks? scan = gitleaks ? Gitleaks.Start() : null;
 		Summary summary = Redact(list.Files(), scan);
 		Dictionary<string, int> findings = scan?.Finish() ?? [];
-		return new Result(summary.Files, summary.Changed, summary.Refused, summary.Skipped, summary.Counts, summary.FilesByRule, gitleaks, findings);
+		return new Result(summary.Files, summary.Changed, summary.Refused, summary.Skipped, scan?.Unscanned ?? 0, summary.Counts, summary.FilesByRule, gitleaks, findings);
 	}
 
 	private static Summary Redact(IEnumerable<string> files, Gitleaks? scan)
@@ -129,7 +132,8 @@ internal static class RedactionReport
 			return;
 		}
 
-		Console.WriteLine($"gitleaks findings in redacted output: {result.GitleaksFindings.Values.Sum()}");
+		Console.WriteLine($"gitleaks findings in redacted output: {result.GitleaksFindings.Values.Sum()}. Best effort: it can miss a token at a chunk boundary, so 0 is not proof that nothing is left.");
+		Console.WriteLine($"documents gitleaks could not read: {result.GitleaksUnscanned}");
 		foreach ((string rule, int count) in result.GitleaksFindings.OrderByDescending(static pair => pair.Value))
 		{
 			Console.WriteLine($"  {rule}: {count}");
@@ -143,13 +147,25 @@ internal sealed class Gitleaks : IDisposable
 	private readonly Process _process;
 	private readonly Task<string> _report;
 	private readonly Task _errors;
+	private int _documents;
+	private bool _failed;
 
 	private Gitleaks(Process process)
 	{
 		_process = process;
 		_report = process.StandardOutput.ReadToEndAsync();
 		_errors = process.StandardError.ReadToEndAsync();
+		Send(new string(' ', SniffedBytes) + "\n");
 	}
+
+	/// <summary>
+	/// Gitleaks looks at the start of its input to decide if it is binary or an archive, and if so reads no further and reports nothing
+	/// while exiting 0. A Markdown file can start with %PDF or MZ, so the input starts with blanks instead, longer than what it looks at.
+	/// </summary>
+	private const int SniffedBytes = 512;
+
+	/// <summary>The documents it did not read, which is all of them once it stops or gives nothing usable.</summary>
+	public int Unscanned => _failed ? _documents : 0;
 
 	public static Gitleaks Start()
 	{
@@ -158,7 +174,7 @@ internal sealed class Gitleaks : IDisposable
 			ArgumentList =
 			{
 				"stdin", "--config", Path.Combine(AppContext.BaseDirectory, "gitleaks-redacted.toml"),
-				"--redact=100", "--no-banner", "--log-level", "error", "--exit-code", "0", "--report-format", "json", "--report-path", "-",
+				"--ignore-gitleaks-allow", "--redact=100", "--no-banner", "--log-level", "error", "--exit-code", "0", "--report-format", "json", "--report-path", "-",
 			},
 			RedirectStandardInput = true,
 			RedirectStandardOutput = true,
@@ -170,30 +186,70 @@ internal sealed class Gitleaks : IDisposable
 
 	public void Write(string text)
 	{
-		_process.StandardInput.Write(text);
-		_process.StandardInput.Write('\n');
+		_documents++;
+		Send(text + "\n");
+	}
+
+	/// <summary>Gitleaks may stop reading at any time, and that must be counted rather than end the whole report.</summary>
+	private void Send(string text)
+	{
+		if (_failed)
+		{
+			return;
+		}
+
+		try
+		{
+			_process.StandardInput.Write(text);
+		}
+		catch (IOException)
+		{
+			_failed = true;
+		}
 	}
 
 	public Dictionary<string, int> Finish()
 	{
-		_process.StandardInput.Close();
+		CloseInput();
 		string report = _report.GetAwaiter().GetResult();
 		_errors.GetAwaiter().GetResult();
 		_process.WaitForExit();
-		if (_process.ExitCode != 0)
-		{
-			throw new InvalidOperationException($"gitleaks exited with {_process.ExitCode}.");
-		}
+		Dictionary<string, int>? findings = _process.ExitCode == 0 && !_failed ? Parse(report) : null;
+		_failed = findings is null;
+		return findings ?? [];
+	}
 
-		Dictionary<string, int> findings = [];
-		using JsonDocument document = JsonDocument.Parse(report);
-		foreach (JsonElement finding in document.RootElement.EnumerateArray())
+	private void CloseInput()
+	{
+		try
 		{
-			string rule = finding.GetProperty("RuleID").GetString() ?? "unknown";
-			findings[rule] = findings.GetValueOrDefault(rule) + 1;
+			_process.StandardInput.Close();
 		}
+		catch (IOException)
+		{
+			_failed = true;
+		}
+	}
 
-		return findings;
+	/// <summary>Null when gitleaks gave something other than its report.</summary>
+	private static Dictionary<string, int>? Parse(string report)
+	{
+		try
+		{
+			Dictionary<string, int> findings = [];
+			using JsonDocument document = JsonDocument.Parse(report);
+			foreach (JsonElement finding in document.RootElement.EnumerateArray())
+			{
+				string rule = finding.GetProperty("RuleID").GetString() ?? "unknown";
+				findings[rule] = findings.GetValueOrDefault(rule) + 1;
+			}
+
+			return findings;
+		}
+		catch (Exception ex) when (ex is JsonException or InvalidOperationException or KeyNotFoundException)
+		{
+			return null;
+		}
 	}
 
 	public void Dispose()
@@ -257,10 +313,15 @@ internal sealed record Result(
 	int Changed,
 	int Refused,
 	int Skipped,
+	int GitleaksUnscanned,
 	Dictionary<string, int> Replacements,
 	Dictionary<string, int> FilesByRule,
 	bool GitleaksRan,
-	Dictionary<string, int> GitleaksFindings);
+	Dictionary<string, int> GitleaksFindings)
+{
+	[JsonIgnore]
+	public bool IsClean => GitleaksFindings.Count == 0 && GitleaksUnscanned == 0 && Refused == 0 && Skipped == 0;
+}
 
 internal sealed class Summary
 {

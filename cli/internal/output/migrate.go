@@ -58,6 +58,18 @@ func MigratePlanMarkdown(w io.Writer, plans []migrate.Plan, raw *migrate.RawSess
 	return writeText(w, &b)
 }
 
+// gitleaksCaveat keeps a count of 0 from reading as proof.
+const gitleaksCaveat = "Gitleaks is best effort: it can miss a token at a chunk boundary, so 0 findings is not proof that nothing is left."
+
+func anyGitleaks(reports []migrate.Report) bool {
+	for i := range reports {
+		if reports[i].GitleaksRan {
+			return true
+		}
+	}
+	return false
+}
+
 func gitleaksSummary(report *migrate.Report) string {
 	if !report.GitleaksRan {
 		return "NOT RUN"
@@ -83,9 +95,9 @@ func MigrateReportTable(w io.Writer, reports []migrate.Report) error {
 	rows := make([]string, 0, len(reports))
 	for i := range reports {
 		r := &reports[i]
-		rows = append(rows, row(r.Name, r.Files, r.Changed, r.Refused, r.Skipped, gitleaksSummary(r)))
+		rows = append(rows, row(r.Name, r.Files, r.Changed, r.Refused, r.Skipped, r.Unscanned, gitleaksSummary(r)))
 	}
-	if err := table(w, "COLLECTION\tFILES\tCHANGED\tREFUSED\tSKIPPED\tGITLEAKS FINDINGS", rows); err != nil {
+	if err := table(w, "COLLECTION\tFILES\tCHANGED\tREFUSED\tSKIPPED\tUNSCANNED\tGITLEAKS FINDINGS", rows); err != nil {
 		return err
 	}
 	var b strings.Builder
@@ -98,6 +110,9 @@ func MigrateReportTable(w io.Writer, reports []migrate.Report) error {
 			b.WriteString(row(fmt.Sprintf("%s: gitleaks %s: %d left after redaction", r.Name, rule, r.GitleaksResults[rule])) + "\n")
 		}
 	}
+	if anyGitleaks(reports) {
+		b.WriteString(gitleaksCaveat + "\n")
+	}
 	return writeText(w, &b)
 }
 
@@ -106,13 +121,16 @@ func MigrateReportMarkdown(w io.Writer, reports []migrate.Report) error {
 	var b strings.Builder
 	for i := range reports {
 		r := &reports[i]
-		fmt.Fprintf(&b, "- **%s**: %d files, %d changed, %d refused, %d skipped, gitleaks findings: %s\n", inlineText(r.Name), r.Files, r.Changed, r.Refused, r.Skipped, gitleaksSummary(r))
+		fmt.Fprintf(&b, "- **%s**: %d files, %d changed, %d refused, %d skipped, %d not scanned by gitleaks, gitleaks findings: %s\n", inlineText(r.Name), r.Files, r.Changed, r.Refused, r.Skipped, r.Unscanned, gitleaksSummary(r))
 		for _, rule := range ruleNames(r.Replacements) {
 			fmt.Fprintf(&b, "  - %s: %d replacements in %d files\n", inlineText(rule), r.Replacements[rule], r.FilesByRule[rule])
 		}
 		for _, rule := range ruleNames(r.GitleaksResults) {
 			fmt.Fprintf(&b, "  - gitleaks %s: %d left after redaction\n", inlineText(rule), r.GitleaksResults[rule])
 		}
+	}
+	if anyGitleaks(reports) {
+		b.WriteString("\n" + gitleaksCaveat + "\n")
 	}
 	return writeText(w, &b)
 }

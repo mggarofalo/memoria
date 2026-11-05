@@ -1,9 +1,10 @@
 /**
  * `memoria migrate plan` and `report`, on a QMD config and collections this file makes in the
  * driver's private directory. Nothing here points at a real setup. The redaction check is the
- * real tool, run with no gitleaks, as it is not in CI.
+ * real tool, with gitleaks where it is installed.
  */
 import { spawn, spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { pause, redactionCheckDll, repo, type Harness } from "./harness.ts";
@@ -105,11 +106,79 @@ function missingFile(h: Harness, tool: string, notes: string): void {
 /** A name outside ASCII reaches the tool whole, whatever the console's code page. */
 function wideName(h: Harness, tool: string, secret: string): void {
   const folder = h.privatePath("migrate-wide");
-  write(folder, "caf\u00e9-\u6587.md", `# Doc\n\nthe key is ${secret} here\n`);
-  const input = JSON.stringify([[path.join(folder, "caf\u00e9-\u6587.md")]]);
-  const run = spawnSync("dotnet", [tool, "--json", "--no-gitleaks", "--lists-on-stdin"], { input, encoding: "utf8", timeout: 120_000 });
-  const row = (JSON.parse(run.stdout || "[{}]") as Array<{ changed?: number; skipped?: number }>)[0];
-  h.check("redaction check: a file name outside ASCII is read, not skipped", row?.changed === 1 && row.skipped === 0, run.stdout + run.stderr);
+  const names = ["caf\u00e9", "na\u00efve", "\u00fcber", "ma\u00f1ana", "stra\u00dfe", "\u6587\u4ef6", "\u65e5\u672c\u8a9e", "\u041f\u0440\u0438\u0432\u0435\u0442", "\ud55c\uae00", "\u4e2d\u6587"];
+  for (const name of names) write(folder, `${name}.md`, `# Doc\n\nthe key is ${secret} here\n`);
+  const input = JSON.stringify([names.map((name) => path.join(folder, `${name}.md`))]);
+  const read = (label: string, run: { stdout: string; stderr: string }): void => {
+    const row = (JSON.parse(run.stdout || "[{}]") as Array<{ changed?: number; skipped?: number }>)[0];
+    h.check(`redaction check: file names outside ASCII are read, not skipped, ${label}`, row?.changed === names.length && row.skipped === 0, run.stdout + run.stderr);
+  };
+  read("as UTF-8", spawnSync("dotnet", [tool, "--json", "--no-gitleaks", "--lists-on-stdin"], { input, encoding: "utf8", timeout: 120_000 }));
+  if (process.platform !== "win32") return;
+  const line = `/c chcp 437 >nul && dotnet "${tool}" --json --no-gitleaks --lists-on-stdin`;
+  read("under code page 437", spawnSync("cmd", [line], { input, encoding: "utf8", timeout: 120_000, windowsVerbatimArguments: true }));
+}
+
+/** Gitleaks that goes wrong in each way it can. None may end the report, or pass for one that read everything. */
+function gitleaksThatFails(h: Harness, tool: string, notes: string): void {
+  const folder = h.privatePath("migrate-fake-gitleaks");
+  mkdirSync(folder);
+  const source = path.join(folder, "fake.go");
+  writeFileSync(source, `package main
+
+import (
+\t"fmt"
+\t"io"
+\t"os"
+)
+
+func main() {
+\tmode := os.Getenv("FAKE_GITLEAKS")
+\tif mode == "stops" {
+\t\tos.Exit(7)
+\t}
+\t_, _ = io.Copy(io.Discard, os.Stdin)
+\tif mode == "exits" {
+\t\tos.Exit(7)
+\t}
+\tfmt.Print("this is not a report")
+}
+`);
+  const built = spawnSync("go", ["build", "-o", path.join(folder, process.platform === "win32" ? "gitleaks.exe" : "gitleaks"), source], { encoding: "utf8", timeout: 120_000 });
+  h.check("redaction check: a fake gitleaks was built", built.status === 0, built.stderr);
+  const name = Object.keys(process.env).find((key) => key.toUpperCase() === "PATH") ?? "PATH";
+  const input = JSON.stringify([[path.join(notes, "plain.md")]]);
+  for (const mode of ["stops", "exits", "garbage"]) {
+    const env = { ...process.env, FAKE_GITLEAKS: mode, [name]: folder + path.delimiter + (process.env[name] ?? "") };
+    const run = spawnSync("dotnet", [tool, "--json", "--lists-on-stdin"], { input, env, encoding: "utf8", timeout: 120_000 });
+    const row = (JSON.parse(run.stdout || "[{}]") as Array<{ gitleaksUnscanned?: number }>)[0];
+    h.check(`redaction check: gitleaks that ${mode}: counted as unscanned, and exits 1`, run.status === 1 && row?.gitleaksUnscanned === 1, run.stdout + run.stderr);
+  }
+}
+
+/** Each of these once gave gitleaks nothing to read, while the report said 0 and exited 0, or ended with "did not finish". */
+function gitleaksReads(h: Harness, tool: string): void {
+  const token = h.remember("ruby" + "gems_" + randomBytes(24).toString("hex"));
+  const body = `\nthe value is ${token} here\n`;
+  const filler = "plain words\n".repeat(20_000);
+  const cases: Array<{ label: string; files: string[] }> = [
+    { label: "a Markdown file", files: [`# Doc${body}`] },
+    { label: "a file starting %PDF", files: [`%PDF-1.7${body}`] },
+    { label: "a file starting MZ", files: [`MZ ${body}`] },
+    { label: "a file starting PK", files: [`PK\x03\x04${body}`] },
+    { label: "a sentence naming the allow marker", files: [`# Doc\n\ngit${"leaks:allow"} is named here ${token}\n`] },
+    { label: "several files that start like binaries", files: [`%PDF-1.7${body}${filler}`, `MZ ${body}${filler}`, `PK\x03\x04${body}${filler}`] },
+    { label: "a 200 KB file starting MZ", files: [`MZ ${body}${filler}`] },
+  ];
+  cases.forEach((item, index) => {
+    const folder = h.privatePath(`migrate-reads-${index}`);
+    item.files.forEach((text, file) => write(folder, `doc-${file}.md`, text));
+    const config = planConfig(h, folder, { pattern: "**/*.md" }, 200 + index);
+    const run = h.memoria(["migrate", "report", "--qmd-config", config, "--tool", tool, "--format", "json"]);
+    const row = (JSON.parse(run.out || "[{}]") as Array<{ gitleaksFindings?: Record<string, number>; gitleaksUnscanned?: number }>)[0];
+    const found = Object.values(row?.gitleaksFindings ?? {}).reduce((sum, count) => sum + count, 0);
+    h.check(`migrate report: real gitleaks finds a token in ${item.label}, and exits 1`, run.code === 1 && found >= 1 && row?.gitleaksUnscanned === 0 && !run.out.includes(token), { code: run.code, found, err: run.err.slice(0, 200) });
+  });
 }
 
 /** Forces the unexpected: a NUL in a path. The Windows event log gets what an unhandled exception says. */
@@ -170,6 +239,7 @@ function realGitleaks(h: Harness, config: string, tool: string): void {
     console.log("NOT RUN migrate report: with real gitleaks (it is not on this machine)");
     return;
   }
+  gitleaksReads(h, tool);
   const run = h.memoria(["migrate", "report", "--qmd-config", config, "--tool", redactionCheckDll(), "--format", "json"]);
   const { notes } = rowsOf(run.out);
   h.check("migrate report: with real gitleaks, it reads the redacted text on stdin and finds nothing left", run.code === 0 && notes?.gitleaksRan === true && notes.files === 2, run.out + run.err);
@@ -196,12 +266,18 @@ function report(h: Harness, config: string, notes: string, secret: string): void
 
 /** A tree where each form below would make a difference. */
 function conformanceTree(root: string): void {
-  for (const name of ["a.md", "b.txt", "c.org", "ab.md", "sub/d.md", "sub/e.txt", "sub/ax.md", "sub/deep/f.md", "deep/g.md", "my dir/h.md", ".hidden/i.md", "node_modules/j.md", "sub/build/k.md"]) {
+  for (const name of ["a.md", "b.txt", "c.org", "ab.md", "sub/d.md", "sub/e.txt", "sub/ax.md", "sub/deep/f.md", "deep/g.md", "my dir/h.md", ".hidden/i.md", "node_modules/j.md", "sub/build/k.md", "C++/l.md", "docs@v2/x/m.md", "a&b/n.md", "#x/o.md", "$y/p.md", "~z/q.md", "solo", "sx.md", "e/f/deep"]) {
     write(root, name, `# ${name}\n\nsome text so it is indexed\n`);
   }
 }
 
-const SUPPORTED: Array<{ pattern: string; ignore?: string[] }> = [
+type Form = { pattern: string; ignore?: string[] };
+
+/** A review's tree, on which rules ending in a wildcard once dropped files that QMD keeps. */
+const WILDCARD_TREE = ["a.md", "sub/x.md", "sub/deep/f.md", "sub/deep/more/h.md", "deep/g.md", "other/a/b.md"];
+const WILDCARD_RULES: Form[] = ["s*", "?ub", "sub/d*", "sub/*", "*/*", "*", "sub/deep/*", "**/deep/*"].map((rule) => ({ pattern: "**/*.md", ignore: [rule] }));
+
+const SUPPORTED: Form[] = [
   { pattern: "**/*.md" },
   { pattern: "*.md" },
   { pattern: "./**/*.md" },
@@ -223,9 +299,12 @@ const SUPPORTED: Array<{ pattern: string; ignore?: string[] }> = [
   { pattern: "**/*.md", ignore: ["*.md"] },
   { pattern: "**/*.md", ignore: ["sub/*.md"] },
   { pattern: "**/*", ignore: ["**/*.txt", "deep"] },
+  ...["s*", "?ub", "sub/d*", "sub/*", "*/*", "*", "sub/deep/*", "**/deep/*", "*/deep", "sub/deep", "**/sub/deep", "{sub,deep}", "**/{deep,x}", "sub/{deep,x}", "{s*,deep}", "C++", "docs@v2/**", "**/x", "#x", "$y", "~z", "a&b"].map((rule) => ({ pattern: "**/*.md", ignore: [rule] })),
+  ...["solo/**", "?x.md/**", "*.md/**", "**/deep/**", "**/deep/*", "**/solo/**", "sub/**/*", "solo/**/*", "sub/**/deep", "*/deep/**", "e/*/deep/**", "**/**", "**"].map((rule) => ({ pattern: "**/*", ignore: [rule] })),
+  ...["C++/*.md", "docs@v2/**", "a&b/*.md", "#x/*.md", "$y/*.md", "~z/*.md", "**/C++/*.md"].map((pattern) => ({ pattern })),
 ];
 
-const REFUSED: Array<{ pattern: string; ignore?: string[] }> = [
+const REFUSED: Form[] = [
   { pattern: "**/*.@(md|txt)" },
   { pattern: "**/!(a).md" },
   { pattern: "**/+(a|b).md" },
@@ -235,19 +314,24 @@ const REFUSED: Array<{ pattern: string; ignore?: string[] }> = [
   { pattern: "**/*.md", ignore: ["**/*.@(md)"] },
   { pattern: "**/*.md", ignore: [",!sub/**"] },
   { pattern: "**/*.md", ignore: ["!sub/**"] },
+  { pattern: "**/*.md", ignore: ["*/**"] },
+  { pattern: "**/*.md", ignore: ["s*/**"] },
+  { pattern: "**/*.md", ignore: ["sub/*/**"] },
+  { pattern: "s*/**" },
+  { pattern: "C++(x)/*.md" },
 ];
 
 /** What the real QMD indexes for each form, one store each. */
-function qmdCounts(h: Harness, root: string): number[] {
-  const list = h.privatePath("migrate-conformance.json");
-  writeFileSync(list, JSON.stringify(SUPPORTED));
+function qmdCounts(h: Harness, root: string, forms: Form[], tag: string): number[] {
+  const list = h.privatePath(`migrate-conformance${tag}.json`);
+  writeFileSync(list, JSON.stringify(forms));
   const code = `const qmd = await import("@tobilu/qmd");
 const fs = await import("node:fs");
 const cases = JSON.parse(fs.readFileSync(${JSON.stringify(list)}, "utf8"));
 const counts = [];
 let i = 0;
 for (const { pattern, ignore } of cases) {
-  const store = await qmd.createStore({ dbPath: ${JSON.stringify(h.privatePath("migrate-conformance"))} + (i++) + ".sqlite", config: { collections: { c: { path: ${JSON.stringify(root)}, pattern, ...(ignore ? { ignore } : {}) } } } });
+  const store = await qmd.createStore({ dbPath: ${JSON.stringify(h.privatePath(`migrate-conformance${tag}-db`))} + (i++) + ".sqlite", config: { collections: { c: { path: ${JSON.stringify(root)}, pattern, ...(ignore ? { ignore } : {}) } } } });
   await store.update();
   counts.push(store.internal.db.prepare("SELECT count(*) AS n FROM documents WHERE active = 1").get().n);
   await store.close();
@@ -258,21 +342,28 @@ console.log(JSON.stringify(counts));`;
   return JSON.parse(run.stdout.trim().split("\n").at(-1) ?? "[]") as number[];
 }
 
-function planConfig(h: Harness, root: string, form: { pattern: string; ignore?: string[] }, index: number): string {
+function planConfig(h: Harness, root: string, form: Form, index: number): string {
   const config = h.privatePath(`migrate-conformance-${index}.yml`);
   writeFileSync(config, `collections:\n  c:\n    path: ${JSON.stringify(root)}\n    pattern: ${JSON.stringify(form.pattern)}\n${form.ignore ? `    ignore: ${JSON.stringify(form.ignore)}\n` : ""}`);
   return config;
 }
 
+function agree(h: Harness, root: string, forms: Form[], tag: string, offset: number): void {
+  const counts = qmdCounts(h, root, forms, tag);
+  forms.forEach((form, index) => {
+    const run = h.memoria(["migrate", "plan", "--qmd-config", planConfig(h, root, form, offset + index), "--format", "json"]);
+    const planned = (JSON.parse(run.out || "{}") as PlanResult).collections?.[0]?.files;
+    h.check(`selection: plan and the real QMD agree on ${JSON.stringify(form)}: QMD ${counts[index]}, plan ${planned}`, run.code === 0 && counts[index] !== undefined && planned === counts[index], { qmd: counts[index], plan: planned, err: run.err });
+  });
+}
+
 function conformance(h: Harness): void {
   const root = h.privatePath("migrate-conformance-tree");
   conformanceTree(root);
-  const counts = qmdCounts(h, root);
-  SUPPORTED.forEach((form, index) => {
-    const run = h.memoria(["migrate", "plan", "--qmd-config", planConfig(h, root, form, index), "--format", "json"]);
-    const planned = (JSON.parse(run.out || "{}") as PlanResult).collections?.[0]?.files;
-    h.check(`selection: plan and the real QMD agree on ${JSON.stringify(form)}`, run.code === 0 && counts[index] !== undefined && planned === counts[index], { qmd: counts[index], plan: planned, err: run.err });
-  });
+  agree(h, root, SUPPORTED, "", 0);
+  const wildcards = h.privatePath("migrate-wildcard-tree");
+  for (const name of WILDCARD_TREE) write(wildcards, name, `# ${name}\n\nsome text so it is indexed\n`);
+  agree(h, wildcards, WILDCARD_RULES, "-wildcard", 300);
   REFUSED.forEach((form, index) => {
     const run = h.memoria(["migrate", "plan", "--qmd-config", planConfig(h, root, form, 100 + index), "--format", "json"]);
     h.check(`selection: refuses ${JSON.stringify(form)}, rather than a silent count`, run.code === 1 && run.err.includes("refused"), run.out + run.err);
@@ -287,6 +378,7 @@ export async function migrate(h: Harness): Promise<void> {
   report(h, config, notes, secret);
   await leavesNothing(h, redactionCheckDll(), secret);
   await writesNoList(h, config, redactionCheckDll());
+  gitleaksThatFails(h, redactionCheckDll(), notes);
   wideName(h, redactionCheckDll(), secret);
   realGitleaks(h, config, redactionCheckDll());
   conformance(h);

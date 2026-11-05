@@ -489,3 +489,64 @@ func exitOneState(t *testing.T) *os.ProcessState {
 	}
 	return exit.ProcessState
 }
+
+func TestAConfigWithNoCollectionsIsAClearError(t *testing.T) {
+	f := newMigrateFixture(t)
+	config := filepath.Join(t.TempDir(), "index.yml")
+	writeFile(t, config, "colections:\n  notes:\n    path: /tmp\n")
+	for _, args := range [][]string{{"migrate", "plan", "--qmd-config", config}, {"migrate", "report", "--qmd-config", config, "--tool", f.tool, "--no-gitleaks"}} {
+		if code := f.h.run(args...); code == 0 || !strings.Contains(f.h.stderr.String(), "no collections") {
+			t.Errorf("%v: code = %d, stderr = %q", args, code, f.h.stderr.String())
+		}
+	}
+	if len(f.h.checkArgs) != 0 {
+		t.Fatalf("the tool ran: %v", f.h.checkArgs)
+	}
+}
+
+func TestAFolderWithNoMatchingFilesWarnsAndExitsZero(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "notes", "a.txt"), "not markdown")
+	config := filepath.Join(dir, "index.yml")
+	writeFile(t, config, fmt.Sprintf("collections:\n  notes:\n    path: %q\n", filepath.Join(dir, "notes")))
+	h := newHarness(t)
+	if code := h.run("migrate", "plan", "--qmd-config", config); code != 0 || !strings.Contains(h.stderr.String(), "no file in its folder") {
+		t.Fatalf("plan: code = %d, stderr = %q", code, h.stderr.String())
+	}
+	tool := filepath.Join(dir, "tool.dll")
+	writeFile(t, tool, "")
+	h.checkOutput = `[{"files":0,"changed":0,"refused":0,"skipped":0,"replacements":{},"filesByRule":{},"gitleaksRan":false,"gitleaksFindings":{}}]`
+	if code := h.run("migrate", "report", "--qmd-config", config, "--tool", tool, "--no-gitleaks"); code != 0 || !strings.Contains(h.stderr.String(), "no file in its folder") {
+		t.Fatalf("report: code = %d, stderr = %q", code, h.stderr.String())
+	}
+}
+
+func TestADocumentGitleaksCouldNotReadFailsAndCounts(t *testing.T) {
+	f := newMigrateFixture(t)
+	unscanned := `{"files":1,"changed":0,"refused":0,"skipped":0,"gitleaksUnscanned":1,"replacements":{},"filesByRule":{},"gitleaksRan":true,"gitleaksFindings":{}}`
+	f.fakeCheck("["+unscanned+","+cleanCheck+"]", nil)
+	if code := f.report(); code != apperr.ExitGeneric || !strings.Contains(f.h.stdout.String(), "UNSCANNED") {
+		t.Fatalf("code = %d, stdout = %q", code, f.h.stdout.String())
+	}
+	if code := f.report("--format", "markdown"); code != apperr.ExitGeneric || !strings.Contains(f.h.stdout.String(), "1 not scanned") {
+		t.Fatalf("code = %d, stdout = %q", code, f.h.stdout.String())
+	}
+	if code := f.report("--accept-skips"); code != apperr.ExitGeneric {
+		t.Fatalf("--accept-skips let it through: code = %d", code)
+	}
+}
+
+func TestZeroFindingsIsNotReportedAsProof(t *testing.T) {
+	f := newMigrateFixture(t)
+	ran := `{"files":1,"changed":0,"refused":0,"skipped":0,"replacements":{},"filesByRule":{},"gitleaksRan":true,"gitleaksFindings":{}}`
+	f.fakeCheck("["+ran+","+ran+"]", nil)
+	for _, format := range []string{"table", "markdown"} {
+		if code := f.report("--format", format); code != 0 || !strings.Contains(f.h.stdout.String(), "best effort") {
+			t.Errorf("%s: code = %d, stdout = %q", format, code, f.h.stdout.String())
+		}
+	}
+	f.fakeCheck("["+cleanCheck+","+cleanCheck+"]", nil)
+	if code := f.report(); code != 0 || strings.Contains(f.h.stdout.String(), "best effort") {
+		t.Errorf("without gitleaks: code = %d, stdout = %q", code, f.h.stdout.String())
+	}
+}
