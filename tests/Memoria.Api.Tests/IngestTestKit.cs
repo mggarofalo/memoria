@@ -20,9 +20,9 @@ internal sealed class FakeCorpus
 		sidecar.Requests.Clear();
 		sidecar.On("POST", "/documents", Write);
 		sidecar.On("DELETE", "/documents", Delete);
+		sidecar.OnPrefix("GET", "/collections/", (_, _) => FakeSidecar.Json(HttpStatusCode.OK, $$"""{"collection":"c","empty":{{(HoldsForeignFiles ? "false" : "true")}}}"""));
 		sidecar.On("POST", "/reindex", (_, _) => FakeSidecar.Json(HttpStatusCode.Accepted, $$"""{"job":{{Job()}}}"""));
-		sidecar.On("POST", "/docs:multiGet", List);
-		sidecar.OnPrefix("GET", "/docs/", Head);
+
 	}
 
 	/// <summary>Collection-relative path to stored content.</summary>
@@ -31,13 +31,14 @@ internal sealed class FakeCorpus
 	/// <summary>Every call in order: <c>write path</c>, <c>delete path</c>, <c>list</c>.</summary>
 	public ConcurrentQueue<string> Calls { get; } = new();
 
+	/// <summary>Says the directory has files in it, as it would for a collection someone else filled.</summary>
+	public bool HoldsForeignFiles { get; set; }
+
 	/// <summary>Answers a write with something else: return null to let it through.</summary>
 	public Func<string, HttpResponseMessage?> OnWrite { get; set; } = static _ => null;
 
 	public Func<string, HttpResponseMessage?> OnDelete { get; set; } = static _ => null;
 
-	/// <summary>What the index lists. By default, what is stored.</summary>
-	public Func<HttpResponseMessage?> OnList { get; set; } = static () => null;
 
 	private HttpResponseMessage Write(HttpRequestMessage request, string? body)
 	{
@@ -72,42 +73,6 @@ internal sealed class FakeCorpus
 		bool deleted = Files.TryRemove(path, out _);
 		return FakeSidecar.Json(HttpStatusCode.Accepted, $$"""
 			{"collection":"{{collection}}","path":{{JsonSerializer.Serialize(path)}},"file":{{JsonSerializer.Serialize(collection + "/" + path)}},"deleted":{{(deleted ? "true" : "false")}},"job":{{Job()}}}
-			""");
-	}
-
-	private HttpResponseMessage List(HttpRequestMessage request, string? body)
-	{
-		Calls.Enqueue("list");
-		if (OnList() is { } scripted)
-		{
-			return scripted;
-		}
-
-		// As the real route does: a document over maxBytes is listed under skipped, even when no body was asked for.
-		using JsonDocument parsed = JsonDocument.Parse(body!);
-		string collection = parsed.RootElement.GetProperty("collections")[0].GetString()!;
-		int maxBytes = parsed.RootElement.TryGetProperty("maxBytes", out JsonElement max) ? max.GetInt32() : 65536;
-		ILookup<bool, KeyValuePair<string, string>> byFit = Files.ToLookup(file => Encoding.UTF8.GetByteCount(file.Value) <= maxBytes);
-		IEnumerable<string> docs = byFit[true].Select(file => $$"""
-			{"docid":{{JsonSerializer.Serialize(file.Key)}},"file":{{JsonSerializer.Serialize(collection + "/" + file.Key)}},"collection":{{JsonSerializer.Serialize(collection)}},"path":{{JsonSerializer.Serialize(file.Key)}},"title":"t","context":null,"modifiedAt":"2026-01-01T00:00:00.000Z","bodyLength":0,"body":null,"metadata":null}
-			""");
-		IEnumerable<string> skipped = byFit[false].Select(file => $$"""{"file":{{JsonSerializer.Serialize(collection + "/" + file.Key)}},"reason":"too large"}""");
-		return FakeSidecar.Json(HttpStatusCode.OK, $$"""{"docs":[{{string.Join(',', docs)}}],"skipped":[{{string.Join(',', skipped)}}],"errors":[]}""");
-	}
-
-	private HttpResponseMessage Head(HttpRequestMessage request, string? body)
-	{
-		Calls.Enqueue("head");
-		string reference = Uri.UnescapeDataString(request.RequestUri!.AbsolutePath["/docs/".Length..]);
-		string path = reference[(reference.IndexOf('/', StringComparison.Ordinal) + 1)..];
-		if (!Files.TryGetValue(path, out string? content))
-		{
-			return FakeSidecar.Json(HttpStatusCode.NotFound, """{"error":"not_found","message":"gone"}""");
-		}
-
-		string head = string.Join('\n', content.Split('\n').Take(64));
-		return FakeSidecar.Json(HttpStatusCode.OK, $$"""
-			{"docid":"d","file":"c/p","collection":"c","path":"p","title":"t","context":null,"modifiedAt":"2026-01-01T00:00:00.000Z","bodyLength":0,"body":{{JsonSerializer.Serialize(head)}},"metadata":null}
 			""");
 	}
 
@@ -157,9 +122,10 @@ internal static class IngestKit
 		string sessionId = "11111111-2222-3333-4444-555555555555",
 		DateTimeOffset? updated = null,
 		bool allowShrink = false,
-		string? projectDirectory = null)
+		string? projectDirectory = null,
+		bool restoreDeleted = false)
 	{
-		string query = $"/v1/ingest/session?collection={Uri.EscapeDataString(collection)}&format={format}&sessionId={Uri.EscapeDataString(sessionId)}&updated={Uri.EscapeDataString((updated ?? Stamp).ToString("O"))}{(allowShrink ? "&allowShrink=true" : "")}{(projectDirectory is null ? "" : "&projectDirectory=" + Uri.EscapeDataString(projectDirectory))}";
+		string query = $"/v1/ingest/session?collection={Uri.EscapeDataString(collection)}&format={format}&sessionId={Uri.EscapeDataString(sessionId)}&updated={Uri.EscapeDataString((updated ?? Stamp).ToString("O"))}{(allowShrink ? "&allowShrink=true" : "")}{(projectDirectory is null ? "" : "&projectDirectory=" + Uri.EscapeDataString(projectDirectory))}{(restoreDeleted ? "&restoreDeleted=true" : "")}";
 		return client.PostAsync(query, new StringContent(jsonl, Encoding.UTF8, "application/x-ndjson"));
 	}
 
@@ -180,12 +146,6 @@ internal static class IngestKit
 	{
 		string message = JsonSerializer.Serialize(new { role, content = text });
 		return $$"""{"type":"{{role}}","timestamp":"{{day}}T10:{{minute % 60:D2}}:00.000Z","cwd":"{{cwd}}","message":{{message}}}""" + "\n";
-	}
-
-	/// <summary>A part as an earlier exporter wrote it: frontmatter naming its session, and no ledger entry.</summary>
-	public static string ExporterPart(string sessionId, int bytes = 100)
-	{
-		return $"---\nsession_id: \"{sessionId}\"\nproject: \"demo\"\n---\n\n## User\n\n" + new string('w', bytes) + "\n";
 	}
 
 	public static async Task<JsonElement> ReadAsync(HttpResponseMessage response)

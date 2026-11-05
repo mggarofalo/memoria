@@ -421,6 +421,12 @@ type DeleteDocumentParams struct {
 	Path *string `form:"path,omitempty" json:"path,omitempty"`
 }
 
+// IngestDocumentParams defines parameters for IngestDocument.
+type IngestDocumentParams struct {
+	// RestoreDeleted Stores this even though it was deleted, including the same content. Needs a key with the `admin` scope as well.
+	RestoreDeleted *bool `form:"restoreDeleted,omitempty" json:"restoreDeleted,omitempty"`
+}
+
 // GetSessionIngestStatusParams defines parameters for GetSessionIngestStatus.
 type GetSessionIngestStatusParams struct {
 	// Collection The collection to write to.
@@ -435,8 +441,11 @@ type GetSessionIngestStatusParams struct {
 	// ProjectDirectory The Claude Code project folder the transcript was in. Tells apart two copies of one session.
 	ProjectDirectory *string `form:"projectDirectory,omitempty" json:"projectDirectory,omitempty"`
 
-	// AllowShrink Set when the session really did lose messages. Without it, an upload with fewer messages than the stored one is refused, as it looks just like a cut copy.
+	// AllowShrink Set when the session's history really did change. Without it, an upload whose messages do not start with the stored ones is refused, as it looks just like a cut or damaged copy.
 	AllowShrink *bool `form:"allowShrink,omitempty" json:"allowShrink,omitempty"`
+
+	// RestoreDeleted Writes parts of this session that were deleted, which otherwise stay deleted. Needs a key with the `admin` scope as well.
+	RestoreDeleted *bool `form:"restoreDeleted,omitempty" json:"restoreDeleted,omitempty"`
 }
 
 // IngestSessionParams defines parameters for IngestSession.
@@ -453,8 +462,11 @@ type IngestSessionParams struct {
 	// ProjectDirectory The Claude Code project folder the transcript was in. Tells apart two copies of one session.
 	ProjectDirectory *string `form:"projectDirectory,omitempty" json:"projectDirectory,omitempty"`
 
-	// AllowShrink Set when the session really did lose messages. Without it, an upload with fewer messages than the stored one is refused, as it looks just like a cut copy.
+	// AllowShrink Set when the session's history really did change. Without it, an upload whose messages do not start with the stored ones is refused, as it looks just like a cut or damaged copy.
 	AllowShrink *bool `form:"allowShrink,omitempty" json:"allowShrink,omitempty"`
+
+	// RestoreDeleted Writes parts of this session that were deleted, which otherwise stay deleted. Needs a key with the `admin` scope as well.
+	RestoreDeleted *bool `form:"restoreDeleted,omitempty" json:"restoreDeleted,omitempty"`
 
 	// Updated When this copy of the transcript last changed, as an ISO timestamp. Orders uploads, so an older one is refused.
 	Updated *time.Time `form:"updated,omitempty" json:"updated,omitempty"`
@@ -669,7 +681,7 @@ type ClientInterface interface {
 
 	// DeleteDocument Delete a document
 	//
-	// Names a document by `source` and `sourceId`, or by `path` within the collection, and removes it. A deleted document stays searchable until the index changes, so an update starts at once, or within `reindexInSeconds` when one just ran in this collection: `reindexState` says which. It also stops an older copy being stored again. Safe to repeat: a missing document answers `deleted: false` and costs no update. When `reindexState` is `failed`, repeat the request. Requires the `ingest` scope.
+	// Names a document by `source` and `sourceId`, or by `path` within the collection, and removes it, waiting for any write of it in progress to finish first. 503 `delete_unconfirmed` means it could not be confirmed done, and repeating it is safe. A deleted document stays searchable until the index changes, so an update starts at once, or within `reindexInSeconds` when one just ran in this collection: `reindexState` says which. It also stops an older copy, or the same content under a later date, being stored again. Safe to repeat: a missing document answers `deleted: false` and costs no update. When `reindexState` is `failed`, repeat the request. Requires the `ingest` scope.
 	//
 	// Corresponds with DELETE /v1/documents (the `DeleteDocument` operationId).
 	DeleteDocument(ctx context.Context, params *DeleteDocumentParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -681,7 +693,7 @@ type ClientInterface interface {
 	// Takes any type of body and a specified content type.
 	//
 	// Corresponds with POST /v1/documents (the `IngestDocument` operationId).
-	IngestDocumentWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	IngestDocumentWithBody(ctx context.Context, params *IngestDocumentParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// IngestDocument Store a document
 	//
@@ -690,7 +702,7 @@ type ClientInterface interface {
 	// Takes a body of the `application/json` content type.
 	//
 	// Corresponds with POST /v1/documents (the `IngestDocument` operationId).
-	IngestDocument(ctx context.Context, body IngestDocumentJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	IngestDocument(ctx context.Context, params *IngestDocumentParams, body IngestDocumentJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetSessionIngestStatus How a session's upload ended
 	//
@@ -701,7 +713,7 @@ type ClientInterface interface {
 
 	// IngestSessionWithBody Store a raw session transcript
 	//
-	// The body is the raw JSONL of a Claude Code or Codex session, read as a stream. It is rendered and redacted here into one or more parts. 202 means every part arrived. 207 means not all of it is stored: `parts` and `read` say why, the session stays `partial`, and when `retryable` is true sending the same upload again finishes it. A transcript with no messages, or that lost any, is never 202. An older version than the one stored gets 409, as does a second upload of the session while one is running, a file belonging to another session, and fewer messages than the one stored unless `allowShrink` is set. Parts a shrunken session no longer has are deleted last, and only when they are provably this session's. Requires the `ingest` scope.
+	// The body is the raw JSONL of a Claude Code or Codex session, read as a stream. It is rendered and redacted here into one or more parts. 202 means every part arrived. 207 means not all of it is stored: `parts` and `read` say why, the session stays `partial`, and when `retryable` is true sending the same upload again finishes it. A transcript with no messages, or that lost any, is never 202. An older version than the one stored gets 409, as does a second upload of the session while one is running, a file the ledger does not say is this session's, and messages that do not start with the stored ones, unless `allowShrink` is set. Parts it no longer has are deleted last, and a part someone deleted stays deleted. Requires the `ingest` scope.
 	//
 	// Takes any type of body and a specified content type.
 	//
@@ -920,7 +932,7 @@ func (c *Client) GetDocuments(ctx context.Context, body GetDocumentsJSONRequestB
 
 // DeleteDocument Delete a document
 //
-// Names a document by `source` and `sourceId`, or by `path` within the collection, and removes it. A deleted document stays searchable until the index changes, so an update starts at once, or within `reindexInSeconds` when one just ran in this collection: `reindexState` says which. It also stops an older copy being stored again. Safe to repeat: a missing document answers `deleted: false` and costs no update. When `reindexState` is `failed`, repeat the request. Requires the `ingest` scope.
+// Names a document by `source` and `sourceId`, or by `path` within the collection, and removes it, waiting for any write of it in progress to finish first. 503 `delete_unconfirmed` means it could not be confirmed done, and repeating it is safe. A deleted document stays searchable until the index changes, so an update starts at once, or within `reindexInSeconds` when one just ran in this collection: `reindexState` says which. It also stops an older copy, or the same content under a later date, being stored again. Safe to repeat: a missing document answers `deleted: false` and costs no update. When `reindexState` is `failed`, repeat the request. Requires the `ingest` scope.
 //
 // Corresponds with DELETE /v1/documents (the `DeleteDocument` operationId).
 func (c *Client) DeleteDocument(ctx context.Context, params *DeleteDocumentParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
@@ -942,8 +954,8 @@ func (c *Client) DeleteDocument(ctx context.Context, params *DeleteDocumentParam
 // Takes any type of body and a specified content type.
 //
 // Corresponds with POST /v1/documents (the `IngestDocument` operationId).
-func (c *Client) IngestDocumentWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewIngestDocumentRequestWithBody(c.Server, contentType, body)
+func (c *Client) IngestDocumentWithBody(ctx context.Context, params *IngestDocumentParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewIngestDocumentRequestWithBody(c.Server, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -961,8 +973,8 @@ func (c *Client) IngestDocumentWithBody(ctx context.Context, contentType string,
 // Takes a body of the `application/json` content type.
 //
 // Corresponds with POST /v1/documents (the `IngestDocument` operationId).
-func (c *Client) IngestDocument(ctx context.Context, body IngestDocumentJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewIngestDocumentRequest(c.Server, body)
+func (c *Client) IngestDocument(ctx context.Context, params *IngestDocumentParams, body IngestDocumentJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewIngestDocumentRequest(c.Server, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -992,7 +1004,7 @@ func (c *Client) GetSessionIngestStatus(ctx context.Context, params *GetSessionI
 
 // IngestSessionWithBody Store a raw session transcript
 //
-// The body is the raw JSONL of a Claude Code or Codex session, read as a stream. It is rendered and redacted here into one or more parts. 202 means every part arrived. 207 means not all of it is stored: `parts` and `read` say why, the session stays `partial`, and when `retryable` is true sending the same upload again finishes it. A transcript with no messages, or that lost any, is never 202. An older version than the one stored gets 409, as does a second upload of the session while one is running, a file belonging to another session, and fewer messages than the one stored unless `allowShrink` is set. Parts a shrunken session no longer has are deleted last, and only when they are provably this session's. Requires the `ingest` scope.
+// The body is the raw JSONL of a Claude Code or Codex session, read as a stream. It is rendered and redacted here into one or more parts. 202 means every part arrived. 207 means not all of it is stored: `parts` and `read` say why, the session stays `partial`, and when `retryable` is true sending the same upload again finishes it. A transcript with no messages, or that lost any, is never 202. An older version than the one stored gets 409, as does a second upload of the session while one is running, a file the ledger does not say is this session's, and messages that do not start with the stored ones, unless `allowShrink` is set. Parts it no longer has are deleted last, and a part someone deleted stays deleted. Requires the `ingest` scope.
 //
 // Takes any type of body and a specified content type.
 //
@@ -1514,18 +1526,18 @@ func NewDeleteDocumentRequest(server string, params *DeleteDocumentParams) (*htt
 }
 
 // NewIngestDocumentRequest calls the generic IngestDocument builder with application/json body
-func NewIngestDocumentRequest(server string, body IngestDocumentJSONRequestBody) (*http.Request, error) {
+func NewIngestDocumentRequest(server string, params *IngestDocumentParams, body IngestDocumentJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewIngestDocumentRequestWithBody(server, "application/json", bodyReader)
+	return NewIngestDocumentRequestWithBody(server, params, "application/json", bodyReader)
 }
 
 // NewIngestDocumentRequestWithBody constructs an http.Request for the IngestDocument method, with any body, and a specified content type
-func NewIngestDocumentRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+func NewIngestDocumentRequestWithBody(server string, params *IngestDocumentParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	serverURL, err := url.Parse(server)
@@ -1541,6 +1553,33 @@ func NewIngestDocumentRequestWithBody(server string, contentType string, body io
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+		// queryValues collects non-styled parameters (passthrough, JSON)
+		// that are safe to round-trip through url.Values.Encode().
+		queryValues := queryURL.Query()
+		// rawQueryFragments collects pre-encoded query fragments from
+		// styled parameters, preserving literal commas as delimiters
+		// per the OpenAPI spec (e.g. "color=blue,black,brown").
+		var rawQueryFragments []string
+
+		if params.RestoreDeleted != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "restoreDeleted", *params.RestoreDeleted, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if encoded := queryValues.Encode(); encoded != "" {
+			rawQueryFragments = append(rawQueryFragments, encoded)
+		}
+		queryURL.RawQuery = strings.Join(rawQueryFragments, "&")
 	}
 
 	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
@@ -1632,6 +1671,18 @@ func NewGetSessionIngestStatusRequest(server string, params *GetSessionIngestSta
 		if params.AllowShrink != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "allowShrink", *params.AllowShrink, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.RestoreDeleted != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "restoreDeleted", *params.RestoreDeleted, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
 				return nil, err
 			} else {
 				for _, qp := range strings.Split(queryFrag, "&") {
@@ -1734,6 +1785,18 @@ func NewIngestSessionRequestWithBody(server string, params *IngestSessionParams,
 		if params.AllowShrink != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "allowShrink", *params.AllowShrink, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.RestoreDeleted != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "restoreDeleted", *params.RestoreDeleted, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
 				return nil, err
 			} else {
 				for _, qp := range strings.Split(queryFrag, "&") {
@@ -2129,7 +2192,7 @@ type ClientWithResponsesInterface interface {
 
 	// DeleteDocumentWithResponse Delete a document
 	//
-	// Names a document by `source` and `sourceId`, or by `path` within the collection, and removes it. A deleted document stays searchable until the index changes, so an update starts at once, or within `reindexInSeconds` when one just ran in this collection: `reindexState` says which. It also stops an older copy being stored again. Safe to repeat: a missing document answers `deleted: false` and costs no update. When `reindexState` is `failed`, repeat the request. Requires the `ingest` scope.
+	// Names a document by `source` and `sourceId`, or by `path` within the collection, and removes it, waiting for any write of it in progress to finish first. 503 `delete_unconfirmed` means it could not be confirmed done, and repeating it is safe. A deleted document stays searchable until the index changes, so an update starts at once, or within `reindexInSeconds` when one just ran in this collection: `reindexState` says which. It also stops an older copy, or the same content under a later date, being stored again. Safe to repeat: a missing document answers `deleted: false` and costs no update. When `reindexState` is `failed`, repeat the request. Requires the `ingest` scope.
 	//
 	// Returns a wrapper object for the known response body format(s).
 	//
@@ -2143,7 +2206,7 @@ type ClientWithResponsesInterface interface {
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 	//
 	// Corresponds with POST /v1/documents (the `IngestDocument` operationId).
-	IngestDocumentWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*IngestDocumentResponse, error)
+	IngestDocumentWithBodyWithResponse(ctx context.Context, params *IngestDocumentParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*IngestDocumentResponse, error)
 
 	// IngestDocumentWithResponse Store a document
 	//
@@ -2152,7 +2215,7 @@ type ClientWithResponsesInterface interface {
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 	//
 	// Corresponds with POST /v1/documents (the `IngestDocument` operationId).
-	IngestDocumentWithResponse(ctx context.Context, body IngestDocumentJSONRequestBody, reqEditors ...RequestEditorFn) (*IngestDocumentResponse, error)
+	IngestDocumentWithResponse(ctx context.Context, params *IngestDocumentParams, body IngestDocumentJSONRequestBody, reqEditors ...RequestEditorFn) (*IngestDocumentResponse, error)
 
 	// GetSessionIngestStatusWithResponse How a session's upload ended
 	//
@@ -2165,7 +2228,7 @@ type ClientWithResponsesInterface interface {
 
 	// IngestSessionWithBodyWithResponse Store a raw session transcript
 	//
-	// The body is the raw JSONL of a Claude Code or Codex session, read as a stream. It is rendered and redacted here into one or more parts. 202 means every part arrived. 207 means not all of it is stored: `parts` and `read` say why, the session stays `partial`, and when `retryable` is true sending the same upload again finishes it. A transcript with no messages, or that lost any, is never 202. An older version than the one stored gets 409, as does a second upload of the session while one is running, a file belonging to another session, and fewer messages than the one stored unless `allowShrink` is set. Parts a shrunken session no longer has are deleted last, and only when they are provably this session's. Requires the `ingest` scope.
+	// The body is the raw JSONL of a Claude Code or Codex session, read as a stream. It is rendered and redacted here into one or more parts. 202 means every part arrived. 207 means not all of it is stored: `parts` and `read` say why, the session stays `partial`, and when `retryable` is true sending the same upload again finishes it. A transcript with no messages, or that lost any, is never 202. An older version than the one stored gets 409, as does a second upload of the session while one is running, a file the ledger does not say is this session's, and messages that do not start with the stored ones, unless `allowShrink` is set. Parts it no longer has are deleted last, and a part someone deleted stays deleted. Requires the `ingest` scope.
 	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -3568,7 +3631,7 @@ func (c *ClientWithResponses) GetDocumentsWithResponse(ctx context.Context, body
 
 // DeleteDocumentWithResponse Delete a document
 //
-// Names a document by `source` and `sourceId`, or by `path` within the collection, and removes it. A deleted document stays searchable until the index changes, so an update starts at once, or within `reindexInSeconds` when one just ran in this collection: `reindexState` says which. It also stops an older copy being stored again. Safe to repeat: a missing document answers `deleted: false` and costs no update. When `reindexState` is `failed`, repeat the request. Requires the `ingest` scope.
+// Names a document by `source` and `sourceId`, or by `path` within the collection, and removes it, waiting for any write of it in progress to finish first. 503 `delete_unconfirmed` means it could not be confirmed done, and repeating it is safe. A deleted document stays searchable until the index changes, so an update starts at once, or within `reindexInSeconds` when one just ran in this collection: `reindexState` says which. It also stops an older copy, or the same content under a later date, being stored again. Safe to repeat: a missing document answers `deleted: false` and costs no update. When `reindexState` is `failed`, repeat the request. Requires the `ingest` scope.
 //
 // Returns a wrapper object for the known response body format(s).
 //
@@ -3588,8 +3651,8 @@ func (c *ClientWithResponses) DeleteDocumentWithResponse(ctx context.Context, pa
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 //
 // Corresponds with POST /v1/documents (the `IngestDocument` operationId).
-func (c *ClientWithResponses) IngestDocumentWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*IngestDocumentResponse, error) {
-	rsp, err := c.IngestDocumentWithBody(ctx, contentType, body, reqEditors...)
+func (c *ClientWithResponses) IngestDocumentWithBodyWithResponse(ctx context.Context, params *IngestDocumentParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*IngestDocumentResponse, error) {
+	rsp, err := c.IngestDocumentWithBody(ctx, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -3603,8 +3666,8 @@ func (c *ClientWithResponses) IngestDocumentWithBodyWithResponse(ctx context.Con
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 //
 // Corresponds with POST /v1/documents (the `IngestDocument` operationId).
-func (c *ClientWithResponses) IngestDocumentWithResponse(ctx context.Context, body IngestDocumentJSONRequestBody, reqEditors ...RequestEditorFn) (*IngestDocumentResponse, error) {
-	rsp, err := c.IngestDocument(ctx, body, reqEditors...)
+func (c *ClientWithResponses) IngestDocumentWithResponse(ctx context.Context, params *IngestDocumentParams, body IngestDocumentJSONRequestBody, reqEditors ...RequestEditorFn) (*IngestDocumentResponse, error) {
+	rsp, err := c.IngestDocument(ctx, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -3628,7 +3691,7 @@ func (c *ClientWithResponses) GetSessionIngestStatusWithResponse(ctx context.Con
 
 // IngestSessionWithBodyWithResponse Store a raw session transcript
 //
-// The body is the raw JSONL of a Claude Code or Codex session, read as a stream. It is rendered and redacted here into one or more parts. 202 means every part arrived. 207 means not all of it is stored: `parts` and `read` say why, the session stays `partial`, and when `retryable` is true sending the same upload again finishes it. A transcript with no messages, or that lost any, is never 202. An older version than the one stored gets 409, as does a second upload of the session while one is running, a file belonging to another session, and fewer messages than the one stored unless `allowShrink` is set. Parts a shrunken session no longer has are deleted last, and only when they are provably this session's. Requires the `ingest` scope.
+// The body is the raw JSONL of a Claude Code or Codex session, read as a stream. It is rendered and redacted here into one or more parts. 202 means every part arrived. 207 means not all of it is stored: `parts` and `read` say why, the session stays `partial`, and when `retryable` is true sending the same upload again finishes it. A transcript with no messages, or that lost any, is never 202. An older version than the one stored gets 409, as does a second upload of the session while one is running, a file the ledger does not say is this session's, and messages that do not start with the stored ones, unless `allowShrink` is set. Parts it no longer has are deleted last, and a part someone deleted stays deleted. Requires the `ingest` scope.
 //
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 //

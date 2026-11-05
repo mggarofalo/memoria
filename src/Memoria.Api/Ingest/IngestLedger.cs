@@ -25,17 +25,23 @@ public enum IngestClaimOutcome
 
 	/// <summary>This upload has fewer messages than the recorded one, and the caller did not say that is intended.</summary>
 	Shrunk,
+
+	/// <summary>This upload's messages do not start with the ones recorded. Overwriting would replace text it does not have.</summary>
+	LostContent,
+
 }
 
-/// <summary>What is recorded about one document or session.</summary>
+/// <summary>What is recorded about one document or session: what its last write that landed stored. A lease says one is running now.</summary>
 public sealed record IngestRecord(
 	DateTimeOffset Version,
 	string State,
 	DateTimeOffset LeaseUntil,
 	IReadOnlyList<string> Paths,
 	string? LeaseOwner = null,
-	DateTimeOffset? DeletedVersion = null,
-	long? MessageCount = null);
+	long? MessageCount = null,
+	string? ContentHash = null,
+	string? MessagesDigest = null,
+	IReadOnlyList<string>? DeletedPaths = null);
 
 /// <summary>What an upload wants to take. <see cref="Identity"/> must be made from the same inputs as <see cref="Paths"/>, or ordering and ownership stop meaning anything.</summary>
 public sealed record IngestClaimRequest(
@@ -47,66 +53,68 @@ public sealed record IngestClaimRequest(
 	string? Lookup = null,
 	string? Stem = null,
 	long? MessageCount = null,
-	bool AllowShrink = false);
+	bool AllowShrink = false,
+	string? ContentHash = null,
+	bool Restore = false,
+	string? MessagesDigest = null,
+	Func<long, string, bool>? StartsWithStored = null,
+	Func<string, bool>? IsSameContent = null);
 
 /// <summary>The answer to a claim. <see cref="PreviousPaths"/> is what earlier uploads wrote, which the index may not have seen yet.</summary>
-public sealed record IngestClaim(IngestClaimOutcome Outcome, IReadOnlyList<string> PreviousPaths, string? LeaseToken = null, int? RetryAfterSeconds = null);
-
-public enum IngestDeleteOutcome
+public sealed record IngestClaim(IngestClaimOutcome Outcome, IReadOnlyList<string> PreviousPaths, string? LeaseToken = null, int? RetryAfterSeconds = null)
 {
-	/// <summary>The ledger knew the path, and now records it gone.</summary>
-	Recorded,
-
-	/// <summary>The ledger has never heard of the path. Nothing was written, so a delete of nothing leaves nothing behind.</summary>
-	NoRecord,
-
-	/// <summary>An upload holds the path right now.</summary>
-	Busy,
+	/// <summary>Parts deleted from this session, which stay deleted.</summary>
+	public IReadOnlyList<string> DeletedPaths { get; init; } = [];
 }
 
-public sealed record IngestDeleteGate(IngestDeleteOutcome Outcome, int? RetryAfterSeconds = null);
-
 /// <summary>
-/// The durable record of what was ingested. It makes writes ordered and exclusive: a claim is one transaction
-/// that compares versions, takes a lease and takes ownership of paths, so an old replay is refused, two uploads of one
-/// session cannot interleave, and no upload can write a file that belongs to another. It also tells a finished session
-/// from one that stopped halfway. The files are written one at a time, so nothing about them can say that.
+/// The durable record of what was ingested. It keeps uploads ordered: a claim is one transaction that compares versions and takes a lease, so an old replay is
+/// refused and two uploads of one session cannot interleave. It also remembers which session each path belongs to, and what was deleted. Everything in an
+/// ingest collection is Memoria's, so nothing here decides whether a file may be overwritten.
 /// </summary>
 public interface IIngestLedger
 {
-	/// <summary>Takes the lease and the paths, or says why not. An equal version is a retry, and allowed.</summary>
+	/// <summary>Takes the lease, or says why not. An equal version is a retry, and allowed. Records nothing about what is stored until a write lands.</summary>
 	Task<IngestClaim> ClaimAsync(IngestClaimRequest request, CancellationToken cancellationToken);
 
-	/// <summary>Keeps the lease through a long upload. False when it was lost, and the upload must stop writing.</summary>
-	Task<bool> RenewAsync(string identity, string leaseToken, DateTimeOffset now, CancellationToken cancellationToken);
-
-	/// <summary>Records how the upload ended and releases the lease. Does nothing when the lease has passed to someone else, which is what false means.</summary>
-	Task<bool> FinishAsync(string identity, string leaseToken, string collection, string state, IReadOnlyList<string> paths);
+	/// <summary>
+	/// Keeps the lease and notes this path as the upload's, before the write goes out, so a delete can find its session even if the answer never comes back.
+	/// Call it holding the path's lock. False when the lease was lost to a delete, and the upload must stop writing.
+	/// </summary>
+	Task<bool> BeginWriteAsync(string identity, string leaseToken, string collection, string path, DateTimeOffset now, CancellationToken cancellationToken);
 
 	/// <summary>
-	/// Records that a path is being deleted, before the file goes. A document becomes a tombstone, so an older copy cannot bring it back.
-	/// A session's part leaves the session partial, as the session no longer has all of itself.
+	/// Records how the upload ended and releases the lease. <paramref name="landed"/> is what to record about it when any of its writes landed; when none did,
+	/// what was stored is unchanged, so nothing about it changes either. Does nothing when the lease has passed on, which is what false means.
 	/// </summary>
-	Task<IngestDeleteGate> PrepareDeleteAsync(string collection, string path, string documentIdentity, DateTimeOffset now, CancellationToken cancellationToken);
+	Task<bool> FinishAsync(string identity, string leaseToken, string collection, string state, IReadOnlyList<string> paths, IngestClaimRequest? landed);
 
-	/// <summary>Tombstones a document the ledger did not know but a delete did remove, such as one from before there was a ledger.</summary>
-	Task RecordDeletedAsync(string documentIdentity, DateTimeOffset now, CancellationToken cancellationToken);
+	/// <summary>
+	/// Leaves the tombstone, before the file goes, and takes the lease from any upload holding it. A document stays deleted against an older copy; a session's part leaves the
+	/// session partial, and stays deleted. Written first so a crash leaves a file a repeated delete can remove, not a removed file an old copy can bring back. Call it holding the path's lock.
+	/// </summary>
+	Task MarkDeletedAsync(string collection, string path, string documentIdentity, DateTimeOffset now);
 
-	/// <summary>Who owns each of these paths. A path nobody has claimed is absent.</summary>
-	Task<IReadOnlyDictionary<string, string>> OwnersAsync(string collection, IReadOnlyList<string> paths, CancellationToken cancellationToken);
+	/// <summary>The file is confirmed gone, so the path is no one's.</summary>
+	Task ForgetPathAsync(string collection, string path);
+
+	/// <summary>Whether this collection has been checked empty and opened to ingest.</summary>
+	Task<bool> IsCollectionOpenAsync(string collection, CancellationToken cancellationToken);
+
+	Task OpenCollectionAsync(string collection, DateTimeOffset now, CancellationToken cancellationToken);
 
 	Task<IngestRecord?> FindAsync(string identity, CancellationToken cancellationToken);
 
 	/// <summary>Every copy recorded under one session name. Copies relocated to another project folder are separate sessions that share it.</summary>
 	Task<IReadOnlyList<IngestRecord>> FindByLookupAsync(string lookup, CancellationToken cancellationToken);
 
-	/// <summary>The state to report: an upload whose lease has lapsed or whose process has died is not still running.</summary>
+	/// <summary>The state to report: an upload holding a live lease is writing, and one whose lease has lapsed or whose process has died is not.</summary>
 	string EffectiveState(IngestRecord record, DateTimeOffset now);
 }
 
 public static class IngestIdentity
 {
-	/// <summary>A digest, because session ids and source ids are caller text and may hold a credential that belongs nowhere in a table.</summary>
+	/// <summary>A digest, because session ids and source ids are caller text and may hold a credential that belongs nowhere in a table. Unkeyed on purpose: these must stay the same for good, and cover identifiers, not content.</summary>
 	public static string For(params string?[] parts)
 	{
 		return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join('\0', parts))));
@@ -118,6 +126,8 @@ public sealed class SqliteIngestLedger(ControlDatabase database) : IIngestLedger
 {
 	/// <summary>Long enough to outlast one part's sidecar call.</summary>
 	public static readonly TimeSpan Lease = TimeSpan.FromMinutes(5);
+
+	private const string Columns = "version_ticks, state, lease_until_ticks, paths, lease_owner, message_count, content_hash, messages_digest, deleted_paths";
 
 	private readonly string _instance = Guid.NewGuid().ToString("N");
 
@@ -134,97 +144,96 @@ public sealed class SqliteIngestLedger(ControlDatabase database) : IIngestLedger
 			return new IngestClaim(outcome, previous, null, outcome == IngestClaimOutcome.Busy ? SecondsLeft(row!, request.Now) : null);
 		}
 
-		outcome = await CheckOwnershipAsync(connection, transaction, request, cancellationToken);
+		outcome = await CheckPathsAsync(connection, transaction, request, cancellationToken);
 		if (outcome != IngestClaimOutcome.Acquired)
 		{
 			return new IngestClaim(outcome, previous);
 		}
 
 		string token = $"{_instance}:{Guid.NewGuid():N}";
-		IngestRecord claimed = new(request.Version, IngestStateName.Writing, request.Now + Lease, previous, token, row?.DeletedVersion, request.MessageCount ?? row?.MessageCount);
-		await UpsertAsync(connection, transaction, request.Identity, request.Lookup, claimed, cancellationToken);
-		await TakeOwnershipAsync(connection, transaction, request, cancellationToken);
+		await UpsertAsync(connection, transaction, request.Identity, request.Lookup, Claimed(request, row, token), cancellationToken);
+		await TakeStemAsync(connection, transaction, request, cancellationToken);
 		await transaction.CommitAsync(cancellationToken);
-		return new IngestClaim(IngestClaimOutcome.Acquired, previous, token);
+		return new IngestClaim(IngestClaimOutcome.Acquired, previous, token) { DeletedPaths = request.Restore ? [] : row?.DeletedPaths ?? [] };
 	}
 
-	public async Task<bool> RenewAsync(string identity, string leaseToken, DateTimeOffset now, CancellationToken cancellationToken)
+	public async Task<bool> BeginWriteAsync(string identity, string leaseToken, string collection, string path, DateTimeOffset now, CancellationToken cancellationToken)
 	{
 		await using SqliteConnection connection = await database.OpenAsync(cancellationToken);
-		await using SqliteCommand command = connection.CreateCommand();
-		command.CommandText = "UPDATE ingest_state SET lease_until_ticks = $lease WHERE identity = $identity AND lease_owner = $owner AND state = $writing;";
-		command.Parameters.AddWithValue("$identity", identity);
-		command.Parameters.AddWithValue("$owner", leaseToken);
-		command.Parameters.AddWithValue("$writing", IngestStateName.Writing);
-		command.Parameters.AddWithValue("$lease", (now + Lease).UtcTicks);
-		return await command.ExecuteNonQueryAsync(cancellationToken) > 0;
-	}
-
-	public async Task<bool> FinishAsync(string identity, string leaseToken, string collection, string state, IReadOnlyList<string> paths)
-	{
-		await using SqliteConnection connection = await database.OpenAsync();
 		await using SqliteTransaction transaction = connection.BeginTransaction(deferred: false);
-		await using SqliteCommand command = connection.CreateCommand();
-		command.Transaction = transaction;
-		command.CommandText = "UPDATE ingest_state SET state = $state, lease_until_ticks = 0, lease_owner = NULL, paths = $paths WHERE identity = $identity AND lease_owner = $owner;";
-		command.Parameters.AddWithValue("$identity", identity);
-		command.Parameters.AddWithValue("$owner", leaseToken);
-		command.Parameters.AddWithValue("$state", state);
-		command.Parameters.AddWithValue("$paths", JsonSerializer.Serialize(paths));
-		if (await command.ExecuteNonQueryAsync() == 0)
+		IngestRecord? row = await ReadAsync(connection, transaction, identity, cancellationToken);
+		if (row is null || row.LeaseOwner != leaseToken)
 		{
 			return false;
 		}
 
+		await InsertOwnedAsync(connection, transaction, identity, collection, path, cancellationToken);
+		IReadOnlyList<string> paths = row.Paths.Contains(path, StringComparer.Ordinal) ? row.Paths : [.. row.Paths, path];
+		await UpsertAsync(connection, transaction, identity, null, row with { LeaseUntil = now + Lease, Paths = paths }, cancellationToken);
+		await transaction.CommitAsync(cancellationToken);
+		return true;
+	}
+
+	public async Task<bool> FinishAsync(string identity, string leaseToken, string collection, string state, IReadOnlyList<string> paths, IngestClaimRequest? landed)
+	{
+		ArgumentNullException.ThrowIfNull(paths);
+		await using SqliteConnection connection = await database.OpenAsync();
+		await using SqliteTransaction transaction = connection.BeginTransaction(deferred: false);
+		IngestRecord? row = await ReadAsync(connection, transaction, identity, CancellationToken.None);
+		if (row is null || row.LeaseOwner != leaseToken)
+		{
+			return false;
+		}
+
+		await UpsertAsync(connection, transaction, identity, null, Finished(row, landed, state, paths), CancellationToken.None);
 		await ReplaceOwnedPathsAsync(connection, transaction, identity, collection, paths);
 		await transaction.CommitAsync();
 		return true;
 	}
 
-	public async Task<IngestDeleteGate> PrepareDeleteAsync(string collection, string path, string documentIdentity, DateTimeOffset now, CancellationToken cancellationToken)
+	public async Task MarkDeletedAsync(string collection, string path, string documentIdentity, DateTimeOffset now)
 	{
-		await using SqliteConnection connection = await database.OpenAsync(cancellationToken);
+		await using SqliteConnection connection = await database.OpenAsync();
 		await using SqliteTransaction transaction = connection.BeginTransaction(deferred: false);
-		string identity = await OwnerAsync(connection, transaction, collection, path, cancellationToken) ?? documentIdentity;
-		IngestRecord? row = await ReadAsync(connection, transaction, identity, cancellationToken);
-		if (row is null)
+		string identity = await OwnerAsync(connection, transaction, collection, path, CancellationToken.None) ?? documentIdentity;
+		IngestRecord? row = await ReadAsync(connection, transaction, identity, CancellationToken.None);
+		// Deleting what is already deleted changes nothing, so a repeat cannot move a tombstone past what has been stored since.
+		if (row is null || row is { State: IngestStateName.Deleted, LeaseOwner: null })
 		{
-			return new IngestDeleteGate(IngestDeleteOutcome.NoRecord);
+			return;
 		}
 
-		if (IsLeased(row, now))
-		{
-			return new IngestDeleteGate(IngestDeleteOutcome.Busy, SecondsLeft(row, now));
-		}
-
-		await UpsertAsync(connection, transaction, identity, null, AfterDelete(row, identity == documentIdentity, path, now), cancellationToken);
-		await ReleasePathAsync(connection, transaction, collection, path, cancellationToken);
-		await transaction.CommitAsync(cancellationToken);
-		return new IngestDeleteGate(IngestDeleteOutcome.Recorded);
+		await UpsertAsync(connection, transaction, identity, null, AfterDelete(row, identity == documentIdentity, path, now), CancellationToken.None);
+		await transaction.CommitAsync();
 	}
 
-	public async Task RecordDeletedAsync(string documentIdentity, DateTimeOffset now, CancellationToken cancellationToken)
+	public async Task ForgetPathAsync(string collection, string path)
 	{
-		await using SqliteConnection connection = await database.OpenAsync(cancellationToken);
-		await using SqliteTransaction transaction = connection.BeginTransaction(deferred: false);
-		await UpsertAsync(connection, transaction, documentIdentity, null, new IngestRecord(now, IngestStateName.Deleted, DateTimeOffset.MinValue, []), cancellationToken);
-		await transaction.CommitAsync(cancellationToken);
+		await using SqliteConnection connection = await database.OpenAsync();
+		await using SqliteCommand command = connection.CreateCommand();
+		command.CommandText = "DELETE FROM ingest_paths WHERE collection = $collection AND path = $path;";
+		command.Parameters.AddWithValue("$collection", collection);
+		command.Parameters.AddWithValue("$path", path);
+		await command.ExecuteNonQueryAsync();
 	}
 
-	public async Task<IReadOnlyDictionary<string, string>> OwnersAsync(string collection, IReadOnlyList<string> paths, CancellationToken cancellationToken)
+	public async Task<bool> IsCollectionOpenAsync(string collection, CancellationToken cancellationToken)
 	{
-		ArgumentNullException.ThrowIfNull(paths);
-		Dictionary<string, string> owners = new(StringComparer.Ordinal);
 		await using SqliteConnection connection = await database.OpenAsync(cancellationToken);
-		foreach (string path in paths)
-		{
-			if (await OwnerAsync(connection, null, collection, path, cancellationToken) is { } owner)
-			{
-				owners[path] = owner;
-			}
-		}
+		await using SqliteCommand command = connection.CreateCommand();
+		command.CommandText = "SELECT EXISTS (SELECT 1 FROM ingest_collections WHERE collection = $collection);";
+		command.Parameters.AddWithValue("$collection", collection);
+		return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken), System.Globalization.CultureInfo.InvariantCulture) != 0;
+	}
 
-		return owners;
+	public async Task OpenCollectionAsync(string collection, DateTimeOffset now, CancellationToken cancellationToken)
+	{
+		await using SqliteConnection connection = await database.OpenAsync(cancellationToken);
+		await using SqliteCommand command = connection.CreateCommand();
+		command.CommandText = "INSERT OR IGNORE INTO ingest_collections (collection, opened_ticks) VALUES ($collection, $opened);";
+		command.Parameters.AddWithValue("$collection", collection);
+		command.Parameters.AddWithValue("$opened", now.UtcTicks);
+		await command.ExecuteNonQueryAsync(cancellationToken);
 	}
 
 	public async Task<IngestRecord?> FindAsync(string identity, CancellationToken cancellationToken)
@@ -252,10 +261,34 @@ public sealed class SqliteIngestLedger(ControlDatabase database) : IIngestLedger
 	public string EffectiveState(IngestRecord record, DateTimeOffset now)
 	{
 		ArgumentNullException.ThrowIfNull(record);
-		return record.State == IngestStateName.Writing && !IsLeased(record, now) ? IngestStateName.Partial : record.State;
+		return IsLeased(record, now) ? IngestStateName.Writing : record.State;
 	}
 
-	private const string Columns = "version_ticks, state, lease_until_ticks, paths, lease_owner, deleted_version_ticks, message_count";
+	/// <summary>A new row starts with no version and nothing stored, so an upload whose writes all fail leaves no mark on what later uploads are compared with.</summary>
+	private static IngestRecord Claimed(IngestClaimRequest request, IngestRecord? row, string token)
+	{
+		IngestRecord before = row ?? new IngestRecord(new DateTimeOffset(0, TimeSpan.Zero), IngestStateName.Partial, request.Now, []);
+		return before with { LeaseUntil = request.Now + Lease, LeaseOwner = token, DeletedPaths = request.Restore ? [] : before.DeletedPaths };
+	}
+
+	/// <summary>A version is recorded as at most the clock, so a date ahead of it cannot hold honest updates back until that date passes.</summary>
+	private static IngestRecord Finished(IngestRecord row, IngestClaimRequest? landed, string state, IReadOnlyList<string> paths)
+	{
+		IngestRecord released = row with { LeaseUntil = new DateTimeOffset(0, TimeSpan.Zero), LeaseOwner = null, Paths = paths };
+		if (landed is null)
+		{
+			return released;
+		}
+
+		return released with
+		{
+			Version = landed.Version < landed.Now ? landed.Version : landed.Now,
+			State = state,
+			MessageCount = landed.MessageCount ?? row.MessageCount,
+			MessagesDigest = landed.MessageCount is null ? row.MessagesDigest : landed.MessagesDigest,
+			ContentHash = landed.ContentHash ?? row.ContentHash,
+		};
+	}
 
 	/// <summary>The lease comes first, so a replay during an upload is told to wait, and then told it is stale.</summary>
 	private IngestClaimOutcome Decide(IngestRecord? row, IngestClaimRequest request)
@@ -270,33 +303,54 @@ public sealed class SqliteIngestLedger(ControlDatabase database) : IIngestLedger
 			return IngestClaimOutcome.Busy;
 		}
 
-		if (IsStale(row, request.Version))
-		{
-			return IngestClaimOutcome.Stale;
-		}
-
-		return !request.AllowShrink && request.MessageCount < row.MessageCount ? IngestClaimOutcome.Shrunk : IngestClaimOutcome.Acquired;
+		return IsStale(row, request) ? IngestClaimOutcome.Stale : WouldLoseStoredText(row, request);
 	}
 
-	/// <summary>After a delete only something newer than the delete can return, and never the very copy that was deleted, whatever date it claims.</summary>
-	private static bool IsStale(IngestRecord row, DateTimeOffset version)
+	private static IngestClaimOutcome WouldLoseStoredText(IngestRecord row, IngestClaimRequest request)
 	{
-		return row.State == IngestStateName.Deleted
-			? version <= row.Version || version == row.DeletedVersion
-			: version < row.Version;
+		if (request.AllowShrink)
+		{
+			return IngestClaimOutcome.Acquired;
+		}
+
+		if (request.MessageCount < row.MessageCount)
+		{
+			return IngestClaimOutcome.Shrunk;
+		}
+
+		bool sameStart = row.MessagesDigest is not { } stored || row.MessageCount is not { } count || request.StartsWithStored?.Invoke(count, stored) != false;
+		return sameStart ? IngestClaimOutcome.Acquired : IngestClaimOutcome.LostContent;
+	}
+
+	/// <summary>After a delete only something newer than the delete can return, and never the same content, whatever date it now claims. An operator's restore overrides that.</summary>
+	private static bool IsStale(IngestRecord row, IngestClaimRequest request)
+	{
+		if (row.State != IngestStateName.Deleted)
+		{
+			return request.Version < row.Version;
+		}
+
+		bool sameContent = row.ContentHash is { } stored && request.IsSameContent?.Invoke(stored) == true;
+		return !request.Restore && (request.Version <= row.Version || sameContent);
 	}
 
 	private static IngestRecord AfterDelete(IngestRecord row, bool isDocument, string path, DateTimeOffset now)
 	{
+		IngestRecord released = row with { LeaseUntil = new DateTimeOffset(0, TimeSpan.Zero), LeaseOwner = null };
 		return isDocument
-			? new IngestRecord(now, IngestStateName.Deleted, DateTimeOffset.MinValue, [], null, row.State == IngestStateName.Deleted ? row.DeletedVersion : row.Version)
-			: row with { State = IngestStateName.Partial, LeaseUntil = DateTimeOffset.MinValue, LeaseOwner = null, Paths = [.. row.Paths.Where(known => known != path)] };
+			? released with { Version = now, State = IngestStateName.Deleted, Paths = [], MessageCount = null }
+			: released with
+			{
+				State = IngestStateName.Partial,
+				Paths = [.. row.Paths.Where(known => known != path)],
+				DeletedPaths = [.. row.DeletedPaths ?? [], path],
+			};
 	}
 
 	/// <summary>A lease is live only while it has time left and the process that took it is this one. Anything else died with its process.</summary>
 	private bool IsLeased(IngestRecord row, DateTimeOffset now)
 	{
-		return row.State == IngestStateName.Writing && row.LeaseUntil > now && row.LeaseOwner?.StartsWith(_instance, StringComparison.Ordinal) == true;
+		return row.LeaseUntil > now && row.LeaseOwner?.StartsWith(_instance, StringComparison.Ordinal) == true;
 	}
 
 	private static int SecondsLeft(IngestRecord row, DateTimeOffset now)
@@ -304,9 +358,9 @@ public sealed class SqliteIngestLedger(ControlDatabase database) : IIngestLedger
 		return Math.Max(1, (int)Math.Ceiling((row.LeaseUntil - now).TotalSeconds));
 	}
 
-	private static async Task<IngestClaimOutcome> CheckOwnershipAsync(SqliteConnection connection, SqliteTransaction transaction, IngestClaimRequest request, CancellationToken cancellationToken)
+	private static async Task<IngestClaimOutcome> CheckPathsAsync(SqliteConnection connection, SqliteTransaction transaction, IngestClaimRequest request, CancellationToken cancellationToken)
 	{
-		if (request.Stem is { } stem && await StemOwnerAsync(connection, transaction, request.Collection, stem, cancellationToken) is { } stemOwner && stemOwner != request.Identity)
+		if (request.Stem is { } stem && await StemHeldByAnotherAsync(connection, transaction, request, stem, cancellationToken))
 		{
 			return IngestClaimOutcome.StemClash;
 		}
@@ -322,23 +376,36 @@ public sealed class SqliteIngestLedger(ControlDatabase database) : IIngestLedger
 		return IngestClaimOutcome.Acquired;
 	}
 
-	private static async Task TakeOwnershipAsync(SqliteConnection connection, SqliteTransaction transaction, IngestClaimRequest request, CancellationToken cancellationToken)
+	/// <summary>A stem is only held while its owner still has files. Otherwise deleting a squatter's files would not be enough to free it.</summary>
+	private static async Task<bool> StemHeldByAnotherAsync(SqliteConnection connection, SqliteTransaction transaction, IngestClaimRequest request, string stem, CancellationToken cancellationToken)
 	{
-		foreach (string path in request.Paths)
+		string? owner = await StemOwnerAsync(connection, transaction, request.Collection, stem, cancellationToken);
+		if (owner is null || owner == request.Identity)
 		{
-			await InsertOwnedAsync(connection, transaction, request.Identity, request.Collection, path, cancellationToken);
+			return false;
 		}
 
-		if (request.Stem is { } stem)
+		await using SqliteCommand command = connection.CreateCommand();
+		command.Transaction = transaction;
+		command.CommandText = "SELECT EXISTS (SELECT 1 FROM ingest_paths WHERE owner = $owner);";
+		command.Parameters.AddWithValue("$owner", owner);
+		return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken), System.Globalization.CultureInfo.InvariantCulture) != 0;
+	}
+
+	private static async Task TakeStemAsync(SqliteConnection connection, SqliteTransaction transaction, IngestClaimRequest request, CancellationToken cancellationToken)
+	{
+		if (request.Stem is not { } stem)
 		{
-			await using SqliteCommand command = connection.CreateCommand();
-			command.Transaction = transaction;
-			command.CommandText = "INSERT OR IGNORE INTO ingest_stems (collection, stem, owner) VALUES ($collection, $stem, $owner);";
-			command.Parameters.AddWithValue("$collection", request.Collection);
-			command.Parameters.AddWithValue("$stem", stem);
-			command.Parameters.AddWithValue("$owner", request.Identity);
-			await command.ExecuteNonQueryAsync(cancellationToken);
+			return;
 		}
+
+		await using SqliteCommand command = connection.CreateCommand();
+		command.Transaction = transaction;
+		command.CommandText = "INSERT OR REPLACE INTO ingest_stems (collection, stem, owner) VALUES ($collection, $stem, $owner);";
+		command.Parameters.AddWithValue("$collection", request.Collection);
+		command.Parameters.AddWithValue("$stem", stem);
+		command.Parameters.AddWithValue("$owner", request.Identity);
+		await command.ExecuteNonQueryAsync(cancellationToken);
 	}
 
 	private static async Task ReplaceOwnedPathsAsync(SqliteConnection connection, SqliteTransaction transaction, string identity, string collection, IReadOnlyList<string> paths)
@@ -365,16 +432,6 @@ public sealed class SqliteIngestLedger(ControlDatabase database) : IIngestLedger
 		command.Parameters.AddWithValue("$collection", collection);
 		command.Parameters.AddWithValue("$path", path);
 		command.Parameters.AddWithValue("$owner", identity);
-		await command.ExecuteNonQueryAsync(cancellationToken);
-	}
-
-	private static async Task ReleasePathAsync(SqliteConnection connection, SqliteTransaction transaction, string collection, string path, CancellationToken cancellationToken)
-	{
-		await using SqliteCommand command = connection.CreateCommand();
-		command.Transaction = transaction;
-		command.CommandText = "DELETE FROM ingest_paths WHERE collection = $collection AND path = $path;";
-		command.Parameters.AddWithValue("$collection", collection);
-		command.Parameters.AddWithValue("$path", path);
 		await command.ExecuteNonQueryAsync(cancellationToken);
 	}
 
@@ -416,8 +473,10 @@ public sealed class SqliteIngestLedger(ControlDatabase database) : IIngestLedger
 			new DateTimeOffset(reader.GetInt64(2), TimeSpan.Zero),
 			JsonSerializer.Deserialize<string[]>(reader.GetString(3)) ?? [],
 			reader.IsDBNull(4) ? null : reader.GetString(4),
-			reader.IsDBNull(5) ? null : new DateTimeOffset(reader.GetInt64(5), TimeSpan.Zero),
-			reader.IsDBNull(6) ? null : reader.GetInt64(6));
+			reader.IsDBNull(5) ? null : reader.GetInt64(5),
+			reader.IsDBNull(6) ? null : reader.GetString(6),
+			reader.IsDBNull(7) ? null : reader.GetString(7),
+			JsonSerializer.Deserialize<string[]>(reader.GetString(8)) ?? []);
 	}
 
 	private static async Task UpsertAsync(SqliteConnection connection, SqliteTransaction transaction, string identity, string? lookup, IngestRecord record, CancellationToken cancellationToken)
@@ -425,11 +484,11 @@ public sealed class SqliteIngestLedger(ControlDatabase database) : IIngestLedger
 		await using SqliteCommand command = connection.CreateCommand();
 		command.Transaction = transaction;
 		command.CommandText = """
-			INSERT INTO ingest_state (identity, lookup, version_ticks, state, lease_until_ticks, lease_owner, deleted_version_ticks, message_count, paths)
-			VALUES ($identity, $lookup, $version, $state, $lease, $owner, $deleted, $messages, $paths)
+			INSERT INTO ingest_state (identity, lookup, version_ticks, state, lease_until_ticks, lease_owner, content_hash, message_count, paths, messages_digest, deleted_paths)
+			VALUES ($identity, $lookup, $version, $state, $lease, $owner, $hash, $messages, $paths, $digest, $deletedPaths)
 			ON CONFLICT(identity) DO UPDATE SET
 				lookup = COALESCE($lookup, lookup), version_ticks = $version, state = $state, lease_until_ticks = $lease, lease_owner = $owner,
-				deleted_version_ticks = $deleted, message_count = $messages, paths = $paths;
+				content_hash = $hash, message_count = $messages, paths = $paths, messages_digest = $digest, deleted_paths = $deletedPaths;
 			""";
 		command.Parameters.AddWithValue("$identity", identity);
 		command.Parameters.AddWithValue("$lookup", (object?)lookup ?? DBNull.Value);
@@ -437,9 +496,11 @@ public sealed class SqliteIngestLedger(ControlDatabase database) : IIngestLedger
 		command.Parameters.AddWithValue("$state", record.State);
 		command.Parameters.AddWithValue("$lease", record.LeaseUntil.UtcTicks);
 		command.Parameters.AddWithValue("$owner", (object?)record.LeaseOwner ?? DBNull.Value);
-		command.Parameters.AddWithValue("$deleted", (object?)record.DeletedVersion?.UtcTicks ?? DBNull.Value);
+		command.Parameters.AddWithValue("$hash", (object?)record.ContentHash ?? DBNull.Value);
 		command.Parameters.AddWithValue("$messages", (object?)record.MessageCount ?? DBNull.Value);
 		command.Parameters.AddWithValue("$paths", JsonSerializer.Serialize(record.Paths));
+		command.Parameters.AddWithValue("$digest", (object?)record.MessagesDigest ?? DBNull.Value);
+		command.Parameters.AddWithValue("$deletedPaths", JsonSerializer.Serialize(record.DeletedPaths ?? []));
 		await command.ExecuteNonQueryAsync(cancellationToken);
 	}
 }

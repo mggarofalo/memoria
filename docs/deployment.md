@@ -174,6 +174,7 @@ docker build -t memoria-api:local .
 docker run --rm -p 8080:8080 \
   -e Memoria__Sidecar__BaseUrl=http://host.docker.internal:8282 \
   -e Memoria__Sidecar__Secret="$MEMORIA_QMD_SECRET" \
+  -e Memoria__Ingest__DigestKey="$MEMORIA_INGEST_DIGEST_KEY" \
   -v memoria-data:/data \
   memoria-api:local
 ```
@@ -189,6 +190,7 @@ The image sets `Memoria__Auth__DatabasePath=/data/control.db`. Without a volume 
 MEMORIA_VERSION=0.1.0 \
 MEMORIA_SIDECAR_URL=http://192.168.1.20:8282 \
 MEMORIA_SIDECAR_SECRET=... \
+MEMORIA_INGEST_DIGEST_KEY=... \
 docker compose -f deploy/compose.yaml up -d
 ```
 
@@ -238,9 +240,28 @@ own scoped keys with it; see [configuration.md](configuration.md#memoriaauth--ap
 | `Memoria__Sidecar__BaseUrl` | Where the sidecar listens, e.g. `http://192.168.1.20:8282`. |
 | `Memoria__Sidecar__Secret` | The sidecar's `MEMORIA_QMD_SECRET`. The API refuses to start without it when the sidecar is not on loopback. |
 | `Memoria__Auth__DatabasePath` | Where the control database lives. The image sets it to `/data/control.db`. The API refuses to start without it unless `Memoria__Auth__Mode` is explicitly `Disabled`. |
+| `Memoria__Ingest__DigestKey` | At least 32 random characters, kept outside the database. Compose reads it from `MEMORIA_INGEST_DIGEST_KEY`. The API refuses to start without it unless `Memoria__Auth__Mode` is explicitly `Disabled`. See [configuration](configuration.md#digests-in-the-ledger) for how to change it. |
 
 Everything else has a default. Pass secrets through the environment or a
 Docker secret; never bake them into the image or commit them.
+
+## Nothing may sit between the API and the sidecar
+
+Ingest runs with the API and the sidecar on one Linux host, as two compose services on one bridge network, with the API calling the sidecar by service name and **no published sidecar port**. Run one API instance.
+
+The rule: **nothing may sit between the API and the sidecar.** No reverse proxy, no TLS terminator, no load balancer, no `docker-proxy` from a published port, and no gateway that buffers a request or answers for the sidecar. The reason is that a write is tied to its connection. If the API dies or gives up on a write, its connection closes, and the sidecar drops the write just before it would land. Anything holding its own connection to the sidecar keeps that write alive after the API has gone, and anything that answers 502 and forwards anyway makes the API take a write that may land for one that did not. Then a write can land after a delete has been answered, and only repeating the delete clears it.
+
+Two API instances have the same effect, as the locks that order writes and deletes are in the API's memory.
+
+Reaching the sidecar across a network, as the tunnel below does, still serves search. It weakens ingest: a lost tunnel or a host crash closes nothing until a TCP timeout, so the sidecar cannot tell its caller has gone. On Linux a connection cut off that way still looked open after 75 s.
+
+## Limits accepted for this deployment
+
+- **Run the API with at least a 1 GiB heap** (`DOTNET_GCHeapHardLimit`). Under less, large uploads are refused more often, and running out of memory can kill the process.
+- **A write already past its connection check can land after a delete.** The rename follows the check in about 0.1 ms, and at most 69 ms when measured. Repeating the delete clears it.
+- **A mount that disappears after a collection opened is not noticed.** A missing directory will not open, but an empty directory that is really an unmounted volume cannot be told from a new one. If that empty directory opens the collection, or an empty remount follows opening, search stops returning the documents, documents written then stay in the other mount, and ingest overwrites or deletes whatever is there once the real volume returns. Mount the volume before first use.
+- **Restoring the control database forgets deletes made since the backup.** Deleted content can be sent again and stored. A delete of a newer file still works.
+- **A sidecar crash can leave `.memoria-*.tmp` files holding text,** until a later write in that folder removes them after an hour. They are not indexed, but they may hold secret text, so a credential cleanup should check for them.
 
 ## Traffic between hosts: WireGuard
 
@@ -285,7 +306,7 @@ New-NetFirewallRule -DisplayName "memoria-qmd" -Direction Inbound -Protocol TCP 
 
 **Upgrading a LAN install:** it stops starting until the setting is added. Move it onto the tunnel first, because the setting does not encrypt anything.
 
-TLS is not the chosen setup. A TLS reverse proxy would also work, with the sidecar on loopback behind it, and clients pointed at `https://`.
+TLS is not the chosen setup.
 
 **Host names.** A request must arrive under an IP address, `localhost`, or a name in `MEMORIA_QMD_ALLOWED_HOSTS`, and any request carrying an `Origin` is refused. That stops a web page reaching the service through DNS rebinding. Tunnel addresses need no listing. A deployment calling by name, such as `host.docker.internal`, must list it or gets a 421 that says so. The worker has the same rule, with `MEMORIA_WORKER_ALLOWED_HOSTS`.
 

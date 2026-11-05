@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { constants, type Stats } from "node:fs";
-import { link, lstat, mkdir, open, readdir, realpath, rename, unlink } from "node:fs/promises";
+import { lstat, mkdir, open, readdir, realpath, rename, unlink } from "node:fs/promises";
 import path from "node:path";
 import picomatch from "picomatch";
 import { HttpError } from "./errors.ts";
@@ -283,9 +283,12 @@ function pathChanged(): HttpError {
 export type IngestStep = "ready" | "opened" | "written" | "checked" | "renamed" | "moved";
 
 export interface IngestHooks {
+  /**
+   * Whether whoever asked for this write is still connected. Checked at the last moment before the rename, so a write the API has died or given up on does not land.
+   * No state is involved: the connection is the record.
+   */
+  stillConnected?: () => boolean;
   onStep?: (step: IngestStep) => Promise<void>;
-  /** Stands in for `fs.link`, so tests can act as a filesystem with no hard links. */
-  link?: (existing: string, created: string) => Promise<void>;
 }
 
 export interface WriteResult {
@@ -294,12 +297,11 @@ export interface WriteResult {
 }
 
 /** What is at the target now, and whether it may be replaced. Returns undefined when nothing is there. */
-async function inspectExisting(target: ResolvedTarget, overwrite: boolean): Promise<Stats | undefined> {
+async function inspectExisting(target: ResolvedTarget): Promise<Stats | undefined> {
   const stats = await lstatIfPresent(target.absolute);
   if (stats === undefined) return undefined;
   if (stats.isDirectory()) throw new HttpError(409, "is_directory", "path refers to a directory");
   if (!stats.isFile()) throw invalidPath("path refers to a symbolic link or special file");
-  if (!overwrite) throw new HttpError(409, "exists", "document already exists and overwrite is false");
   // The rename would be safe, but it would silently split a file that something else also uses.
   if (stats.nlink > 1) throw new HttpError(409, "hard_link", "path refers to a file with more than one hard link");
   return stats;
@@ -324,46 +326,30 @@ async function ensureParents(target: ResolvedTarget): Promise<void> {
 const CREATE_FLAGS = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0);
 
 /**
- * Put the finished temp file at the target. A rename replaces whatever is there,
- * so `overwrite: false` links instead, which fails if the name is taken. That is
- * atomic on NTFS and POSIX filesystems. There is no fallback where hard links are
- * unavailable: quietly replacing a document is what the caller asked not to happen.
+ * The asker has gone, so nothing may land for them. The turn comes first because a close already on the socket is only seen once the event loop has run; a check in the same
+ * turn says connected every time. `socket.destroyed` is the signal: `request.destroyed` turns true as soon as the body has been read, with the client still there.
+ * What this does not close: the moment between this check and the rename, under a millisecond when measured, and a close the kernel has not yet delivered.
  */
-async function publish(target: ResolvedTarget, scratch: string, overwrite: boolean, hooks: IngestHooks): Promise<void> {
-  if (overwrite) {
+async function assertStillConnected(hooks: IngestHooks): Promise<void> {
+  if (hooks.stillConnected === undefined) return;
+  await new Promise((resolve) => setImmediate(resolve));
+  if (!hooks.stillConnected()) throw new HttpError(499, "client_gone", "the caller went away before the write could land; nothing was committed");
+}
+
+async function commit(target: ResolvedTarget, scratch: string, hooks: IngestHooks): Promise<void> {
+  await retryTransient(async () => {
+    await assertSafePath(target);
+    await assertScratchInRoot(target, scratch);
+    await hooks.onStep?.("checked");
+    await assertStillConnected(hooks);
     await rename(scratch, target.absolute);
-    return;
-  }
-  await (hooks.link ?? link)(scratch, target.absolute);
-  // The document is in place. A leftover temp name is harmless and the sweep removes it.
-  await unlink(scratch).catch(() => undefined);
-}
-
-function exclusiveCreateFailure(err: unknown): unknown {
-  if (err instanceof HttpError || isMissing(err)) return err;
-  if (codeOf(err) === "EEXIST") return new HttpError(409, "exists", "document already exists and overwrite is false");
-  return new HttpError(500, "exclusive_create_failed", `overwrite=false needs a hard link in the collection directory, and creating one failed (${codeOf(err) ?? "unknown error"}). This filesystem may not support them; retry with overwrite=true if replacing an existing document is acceptable`);
-}
-
-async function commit(target: ResolvedTarget, scratch: string, overwrite: boolean, hooks: IngestHooks): Promise<void> {
-  try {
-    await retryTransient(async () => {
-      await assertSafePath(target);
-      await assertScratchInRoot(target, scratch);
-      await hooks.onStep?.("checked");
-      await publish(target, scratch, overwrite, hooks);
-    });
-  } catch (err) {
-    throw overwrite ? err : exclusiveCreateFailure(err);
-  }
+  });
 }
 
 /**
  * Remove temp files a crash left in the target's directory. QMD never sees them,
- * since their names are hidden, so this is only tidiness, except that a crash
- * between link and unlink leaves a document looking hard-linked, which would
- * block overwriting it. The age limit keeps it off another request's live temp
- * file. Best effort: a failure here must not fail the write.
+ * since their names are hidden, so this is only tidiness. The age limit keeps it off another
+ * request's live temp file. Best effort: a failure here must not fail the write.
  */
 async function sweepStaleScratch(target: ResolvedTarget): Promise<void> {
   const dir = path.dirname(target.absolute);
@@ -381,7 +367,7 @@ async function removeIfStale(target: ResolvedTarget, file: string): Promise<void
   await unlink(file);
 }
 
-async function writeAndCommit(target: ResolvedTarget, scratch: string, content: string, mode: number, overwrite: boolean, hooks: IngestHooks): Promise<void> {
+async function writeAndCommit(target: ResolvedTarget, scratch: string, content: string, mode: number, hooks: IngestHooks): Promise<void> {
   await hooks.onStep?.("ready");
   // The file stays empty until it is known to be inside the root, so a swapped directory receives no content.
   const handle = await open(scratch, CREATE_FLAGS, mode);
@@ -395,30 +381,36 @@ async function writeAndCommit(target: ResolvedTarget, scratch: string, content: 
     await handle.close();
   }
   await hooks.onStep?.("written");
-  await commit(target, scratch, overwrite, hooks);
+  await commit(target, scratch, hooks);
   await hooks.onStep?.("renamed");
   // Too late to undo, but a caller must not be told a swapped write went where it asked.
   await assertContained(target);
 }
 
-export async function writeDocument(target: ResolvedTarget, content: string, overwrite: boolean, hooks: IngestHooks = {}): Promise<WriteResult> {
+export async function writeDocument(target: ResolvedTarget, content: string, hooks: IngestHooks = {}): Promise<WriteResult> {
   // QMD skips a blank file without touching its row, so the old text would stay searchable.
   if (content.trim() === "") throw new HttpError(400, "empty_content", "content must not be blank; QMD does not index blank documents");
   await assertSafePath(target);
   await sweepStaleScratch(target);
-  const existing = await inspectExisting(target, overwrite);
+  const existing = await inspectExisting(target);
   await ensureParents(target);
   await assertContained(target);
   const scratch = scratchPath(target);
   // An overwrite keeps the old permission bits, so it cannot widen access to the document.
   const mode = existing ? existing.mode & 0o777 : 0o666;
   try {
-    await writeAndCommit(target, scratch, content, mode, overwrite, hooks);
+    await writeAndCommit(target, scratch, content, mode, hooks);
   } catch (err) {
     await unlink(scratch).catch(() => undefined);
     throw isMissing(err) ? pathChanged() : err;
   }
   return { bytes: Buffer.byteLength(content, "utf8"), created: existing === undefined };
+}
+
+/** Whether a collection's directory exists and holds nothing but our own leftover temp files. A missing one is not empty: it may be a volume not mounted yet, with real files to come. */
+export async function isRootEmpty(root: string): Promise<boolean> {
+  const names = await namesIn(root);
+  return names !== undefined && names.every((name) => SCRATCH_NAME.test(name));
 }
 
 /**

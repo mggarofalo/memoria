@@ -127,7 +127,7 @@ test("the real SDK skips temp files and ignored paths, and the sidecar agrees wi
       assert.equal(refused.statusCode, 400, p);
       assert.equal(refused.json().error, "ignored_path");
     }
-    const accepted = await app.inject({ method: "POST", url: "/documents", headers: authHeaders, payload: { collection: "loose", path: "fresh.md", content: "# Fresh\n\nfreshmarker\n", embed: false, overwrite: false } });
+    const accepted = await app.inject({ method: "POST", url: "/documents", headers: authHeaders, payload: { collection: "loose", path: "fresh.md", content: "# Fresh\n\nfreshmarker\n", embed: false } });
     assert.equal(accepted.statusCode, 202, accepted.body);
     await app.ctx.jobs.idle();
     assert.equal((await search("freshmarker")).json().total, 1);

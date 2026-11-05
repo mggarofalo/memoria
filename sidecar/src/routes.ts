@@ -4,7 +4,7 @@ import type { FastifyInstance } from "fastify";
 import type { AppContext } from "./app.ts";
 import { SIDECAR_VERSION } from "./app.ts";
 import { HttpError } from "./errors.ts";
-import { removeDocument, resolveDeleteTarget, resolveTarget, writeDocument } from "./ingest.ts";
+import { isRootEmpty, removeDocument, resolveDeleteTarget, resolveTarget, writeDocument } from "./ingest.ts";
 import { parseLineRange } from "./line-range.ts";
 import { hasFilters, matchesFilters, parseBound, type DocumentMetadata, type SearchFilters } from "./metadata.ts";
 import { DEFAULT_MAX_TOTAL_BYTES, MAX_BYTES_CEILING, MAX_REFERENCE_LENGTH, MAX_TOTAL_BYTES_CEILING, resolveLookup, resolveMultiGet } from "./multi-get.ts";
@@ -214,7 +214,6 @@ interface IngestBody {
   path: string;
   content: string;
   embed: boolean;
-  overwrite: boolean;
 }
 
 interface DeleteQuery {
@@ -697,7 +696,9 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
           "collection. The file on disk is the durable artifact; the index is rebuilt from it. Returns 202 with the " +
           "job that will make the document searchable. The job is debounced: a burst of documents for one collection " +
           "shares a single job, which stays `queued` until writes go quiet. Redaction is the caller's responsibility " +
-          "and must happen before this call.",
+          "and must happen before this call. A path that exists is replaced. If the caller has disconnected by the moment before the file would " +
+          "land, the write is dropped, so a caller that died or gave up leaves nothing behind. That only works with nothing buffering between " +
+          "the caller and this service.",
         body: {
           type: "object",
           required: ["collection", "path", "content"],
@@ -707,7 +708,6 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
             path: { type: "string", minLength: 1, maxLength: 1024, description: "Relative to the collection root; must match the collection's glob." },
             content: { type: "string", description: "Full markdown, frontmatter included." },
             embed: { type: "boolean", default: true, description: "Generate embeddings after indexing." },
-            overwrite: { type: "boolean", default: true, description: "false returns 409 when the path already exists." },
           },
         },
         response: {
@@ -729,17 +729,20 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       },
     },
     async (request, reply) => {
-      const { collection, path, content, embed, overwrite } = request.body;
+      const { collection, path, content, embed } = request.body;
       const row = (await backend.listCollections()).find((c) => c.name === collection);
       if (!row) throw new HttpError(404, "unknown_collection", `Unknown collection: ${collection}`);
       const target = resolveTarget(row.pwd, row.glob_pattern, path, backend.ignorePatterns(collection));
       if (Buffer.byteLength(content, "utf8") > ctx.config.maxDocumentBytes) throw new HttpError(413, "document_too_large", `A document can be at most ${ctx.config.maxDocumentBytes} bytes. Split it into parts.`);
       const parsed = ctx.metadata.parse(content);
-      const written = await writeDocument(target, content, overwrite);
+      const written = await writeDocument(target, content, { stillConnected: () => !request.raw.socket.destroyed }).catch((err: unknown) => {
+        if (err instanceof HttpError && err.code === "client_gone") request.log.info({ collection }, "write dropped: the caller disconnected");
+        throw err;
+      });
       const file = `${collection}/${target.relative}`;
       const metadata = ctx.metadata.store(file, parsed) ?? null;
       const job = ctx.jobs.enqueue({ collections: [collection], embed, force: false, reason: `POST /documents ${file}` }, { debounce: true });
-      request.log.info({ file, bytes: written.bytes, created: written.created, jobId: job.id }, "document ingested");
+      request.log.info({ collection, bytes: written.bytes, created: written.created, jobId: job.id }, "document ingested");
       return reply.code(202).send({ collection, path: target.relative, file, bytes: written.bytes, created: written.created, metadata, job });
     },
   );
@@ -791,12 +794,38 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       const file = `${collection}/${target.relative}`;
       ctx.metadata.delete(file);
       const job = ctx.jobs.enqueue({ collections: [collection], embed: false, force: false, reason: `DELETE /documents ${file}` }, { debounce: true });
-      request.log.info({ file, deleted, jobId: job.id }, "document deleted");
+      request.log.info({ collection, deleted, jobId: job.id }, "document deleted");
       return reply.code(202).send({ collection, path: target.relative, file, deleted, job });
     },
   );
 
   // ---- collections -----------------------------------------------------------
+
+  app.get<{ Params: { name: string } }>(
+    "/collections/:name/empty",
+    {
+      schema: {
+        tags: ["collections"],
+        summary: "Whether a collection's directory is empty",
+        description: "Reads the directory and keeps no record. The API asks this once, before opening a collection to ingest. A directory that does not exist is not empty.",
+        params: { type: "object", required: ["name"], properties: { name: { type: "string", minLength: 1 } } },
+        response: {
+          200: {
+            type: "object",
+            required: ["collection", "empty"],
+            properties: { collection: { type: "string" }, empty: { type: "boolean" } },
+          },
+          ...errorResponses,
+        },
+      },
+    },
+    async (request) => {
+      const { name } = request.params;
+      const row = (await backend.listCollections()).find((c) => c.name === name);
+      if (!row) throw new HttpError(404, "unknown_collection", `Unknown collection: ${name}`);
+      return { collection: name, empty: await isRootEmpty(row.pwd) };
+    },
+  );
 
   app.get(
     "/collections",

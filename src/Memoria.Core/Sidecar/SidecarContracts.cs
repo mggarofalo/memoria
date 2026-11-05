@@ -205,8 +205,7 @@ public sealed record SidecarIngestRequest(
 	string Collection,
 	string Path,
 	Memoria.Core.Redaction.RedactedMarkdown Content,
-	bool? Embed = null,
-	bool? Overwrite = null);
+	bool? Embed = null);
 
 public sealed record SidecarIngestResponse(
 	string Collection,
@@ -224,6 +223,9 @@ public sealed record SidecarDeleteResponse(
 	string File,
 	bool Deleted,
 	SidecarJob Job);
+
+/// <summary>Result of <c>GET /collections/{name}/empty</c>, which ingest asks once before opening a collection.</summary>
+public sealed record SidecarCollectionEmptyResponse(string Collection, bool Empty);
 
 /// <summary>Body of <c>POST /reindex</c>.</summary>
 public sealed record SidecarReindexRequest(
@@ -282,6 +284,7 @@ public sealed record SidecarMetadataSummary(int Documents, int WithMetadata);
 [JsonSerializable(typeof(SidecarIngestRequest))]
 [JsonSerializable(typeof(SidecarIngestResponse))]
 [JsonSerializable(typeof(SidecarDeleteResponse))]
+[JsonSerializable(typeof(SidecarCollectionEmptyResponse))]
 [JsonSerializable(typeof(SidecarReindexRequest))]
 [JsonSerializable(typeof(SidecarJobResponse))]
 [JsonSerializable(typeof(SidecarJobsResponse))]

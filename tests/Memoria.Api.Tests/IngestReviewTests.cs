@@ -148,7 +148,10 @@ public sealed class IngestOwnershipTests(AuthApiFactory factory) : IClassFixture
 		string id = NewSession();
 		string path = $"2026-01-15_{id[..8]}.md";
 		IIngestLedger ledger = factory.Services.GetRequiredService<IIngestLedger>();
-		await ledger.ClaimAsync(new IngestClaimRequest("someone-else", "c", Stamp, DateTimeOffset.UtcNow.AddHours(-1), [path]), default);
+		string someoneElse = "someone-else-" + id;
+		DateTimeOffset earlier = DateTimeOffset.UtcNow.AddHours(-1);
+		IngestClaim theirs = await ledger.ClaimAsync(new IngestClaimRequest(someoneElse, "c", Stamp, earlier, [path]), default);
+		await ledger.BeginWriteAsync(someoneElse, theirs.LeaseToken!, "c", path, earlier, default);
 
 		HttpResponseMessage response = await PostSessionAsync(client, ClaudeLine("user", "hello"), sessionId: id);
 
@@ -158,35 +161,17 @@ public sealed class IngestOwnershipTests(AuthApiFactory factory) : IClassFixture
 	}
 
 	[Fact]
-	public async Task A_file_from_before_the_ledger_naming_another_session_is_neither_overwritten_nor_deleted()
+	public async Task A_retry_after_a_partial_upload_overwrites_only_its_own_files()
 	{
 		FakeCorpus corpus = new(factory.Sidecar);
+		HttpClient client = await WriterAsync();
 		string id = NewSession();
-		string sameDate = $"2026-01-15_{id[..8]}.md";
-		string otherPart = $"2026-01-15_{id[..8]}_part-002.md";
-		string other = ExporterPart($"{id[..8]}-ffff-ffff-ffff-ffffffffffff");
-		corpus.Files[sameDate] = other;
-		corpus.Files[otherPart] = other;
+		corpus.OnWrite = static path => path.Contains("_part-002", StringComparison.Ordinal) ? Busy() : null;
+		await PostSessionAsync(client, Transcript(3), sessionId: id);
+		corpus.OnWrite = static _ => null;
 
-		HttpResponseMessage response = await PostSessionAsync(await WriterAsync(), ClaudeLine("user", "mine"), sessionId: id);
-
-		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
-		Assert.Equal(other, corpus.Files[sameDate]);
-		Assert.Equal(other, corpus.Files[otherPart]);
+		Assert.Equal(HttpStatusCode.Accepted, (await PostSessionAsync(client, Transcript(3), sessionId: id)).StatusCode);
 		Assert.Equal(3, corpus.Files.Count);
-	}
-
-	[Fact]
-	public async Task A_body_cannot_claim_a_session_id_for_its_file()
-	{
-		FakeCorpus corpus = new(factory.Sidecar);
-		string id = NewSession();
-		string path = $"2026-01-15_{id[..8]}_part-002.md";
-		corpus.Files[path] = $"# no frontmatter\n\nsession_id: \"{id}\"\n";
-
-		await PostSessionAsync(await WriterAsync(), ClaudeLine("user", "mine"), sessionId: id);
-
-		Assert.True(corpus.Files.ContainsKey(path));
 	}
 
 	// --- H2 ------------------------------------------------------------------------
@@ -296,53 +281,6 @@ public sealed class IngestOwnershipTests(AuthApiFactory factory) : IClassFixture
 		Assert.Equal(HttpStatusCode.Conflict, (await PostSessionAsync(client, Transcript(2), sessionId: id)).StatusCode);
 	}
 
-	// --- M1 ------------------------------------------------------------------------
-
-	[Fact]
-	public async Task Old_parts_over_the_listing_size_limit_are_still_found_and_removed()
-	{
-		FakeCorpus corpus = new(factory.Sidecar);
-		string id = NewSession();
-		foreach (int part in new[] { 2, 3, 4 })
-		{
-			corpus.Files[$"2026-01-15_{id[..8]}_part-{part:D3}.md"] = ExporterPart(id, 100_000);
-		}
-
-		HttpResponseMessage response = await PostSessionAsync(await WriterAsync(), ClaudeLine("user", "one part"), sessionId: id);
-
-		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
-		Assert.Equal(3, (await ReadAsync(response)).GetProperty("superseded").GetProperty("deleted").GetArrayLength());
-		Assert.Single(corpus.Files);
-	}
-
-	[Fact]
-	public async Task A_large_old_part_of_another_session_is_left_alone()
-	{
-		FakeCorpus corpus = new(factory.Sidecar);
-		string id = NewSession();
-		string path = $"2026-01-15_{id[..8]}_part-002.md";
-		corpus.Files[path] = ExporterPart($"{id[..8]}-ffff-ffff-ffff-ffffffffffff", 100_000);
-
-		await PostSessionAsync(await WriterAsync(), ClaudeLine("user", "one part"), sessionId: id);
-
-		Assert.True(corpus.Files.ContainsKey(path));
-	}
-
-	[Fact]
-	public async Task A_part_that_cannot_be_read_to_judge_it_stays_and_the_session_is_not_complete()
-	{
-		FakeCorpus corpus = new(factory.Sidecar);
-		string id = NewSession();
-		string path = $"2026-01-15_{id[..8]}_part-002.md";
-		corpus.Files[path] = ExporterPart(id);
-		factory.Sidecar.OnPrefix("GET", "/docs/", (_, _) => Busy());
-
-		HttpResponseMessage response = await PostSessionAsync(await WriterAsync(), ClaudeLine("user", "one part"), sessionId: id);
-
-		Assert.Equal(HttpStatusCode.MultiStatus, response.StatusCode);
-		Assert.True(corpus.Files.ContainsKey(path));
-	}
-
 	// --- M6 ------------------------------------------------------------------------
 
 	[Fact]
@@ -360,7 +298,7 @@ public sealed class IngestOwnershipTests(AuthApiFactory factory) : IClassFixture
 
 		// A second delete must not lose what the first remembered about the copy.
 		await client.DeleteAsync($"/v1/documents?collection=c&source=notes&sourceId={id}");
-		Assert.Equal(HttpStatusCode.Conflict, (await PostDocumentAsync(client, sourceId: id, updated: ahead)).StatusCode);
+		Assert.Equal(HttpStatusCode.Conflict, (await PostDocumentAsync(client, sourceId: id, body: "dated ahead", updated: ahead)).StatusCode);
 
 		await Task.Delay(5);
 		Assert.Equal(HttpStatusCode.Accepted, (await PostDocumentAsync(client, sourceId: id, body: "honest", updated: DateTimeOffset.UtcNow)).StatusCode);
@@ -385,24 +323,24 @@ public sealed class IngestOwnershipTests(AuthApiFactory factory) : IClassFixture
 		string identity = DocumentIngestor.IdentityOf("c", path);
 		DateTimeOffset now = DateTimeOffset.UtcNow;
 		IngestClaim lapsed = await ledger.ClaimAsync(new IngestClaimRequest(identity, "c", Stamp, now, [path]), default);
+		await ledger.BeginWriteAsync(identity, lapsed.LeaseToken!, "c", path, now, default);
 
-		IngestDeleteGate gate = await ledger.PrepareDeleteAsync("c", path, identity, now.AddMinutes(6), default);
+		await ledger.MarkDeletedAsync("c", path, identity, now.AddMinutes(6));
 
-		Assert.Equal(IngestDeleteOutcome.Recorded, gate.Outcome);
-		Assert.False(await ledger.FinishAsync(identity, lapsed.LeaseToken!, "c", IngestStateName.Complete, [path]));
-		Assert.False(await ledger.RenewAsync(identity, lapsed.LeaseToken!, now.AddMinutes(6), default));
+		Assert.False(await ledger.FinishAsync(identity, lapsed.LeaseToken!, "c", IngestStateName.Complete, [path], null));
+		Assert.False(await ledger.BeginWriteAsync(identity, lapsed.LeaseToken!, "c", path, now.AddMinutes(6), default));
 		Assert.Equal(IngestStateName.Deleted, (await ledger.FindAsync(identity, default))!.State);
 
 		string other = Guid.NewGuid().ToString("N");
 		IngestClaim oldLease = await ledger.ClaimAsync(new IngestClaimRequest(other, "c", Stamp, now, []), default);
 		IngestClaim newLease = await ledger.ClaimAsync(new IngestClaimRequest(other, "c", Stamp, now.AddMinutes(6), []), default);
-		Assert.False(await ledger.FinishAsync(other, oldLease.LeaseToken!, "c", IngestStateName.Complete, []));
+		Assert.False(await ledger.FinishAsync(other, oldLease.LeaseToken!, "c", IngestStateName.Complete, [], null));
 		Assert.Equal(IngestClaimOutcome.Busy, (await ledger.ClaimAsync(new IngestClaimRequest(other, "c", Stamp, now.AddMinutes(7), []), default)).Outcome);
-		Assert.True(await ledger.FinishAsync(other, newLease.LeaseToken!, "c", IngestStateName.Complete, []));
+		Assert.True(await ledger.FinishAsync(other, newLease.LeaseToken!, "c", IngestStateName.Complete, [], null));
 	}
 
 	[Fact]
-	public async Task A_lease_left_by_a_dead_process_yields_to_a_delete_and_a_retry_at_once()
+	public async Task A_lease_left_by_a_dead_process_yields_to_a_retry_at_once()
 	{
 		Memoria.Api.Auth.ControlDatabase database = factory.Services.GetRequiredService<Memoria.Api.Auth.ControlDatabase>();
 		SqliteIngestLedger before = new(database);
@@ -412,14 +350,8 @@ public sealed class IngestOwnershipTests(AuthApiFactory factory) : IClassFixture
 		DateTimeOffset now = DateTimeOffset.UtcNow;
 		await before.ClaimAsync(new IngestClaimRequest(identity, "c", Stamp, now, [path]), default);
 
-		Assert.Equal(IngestDeleteOutcome.Busy, (await before.PrepareDeleteAsync("c", path, identity, now, default)).Outcome);
 		Assert.Equal(IngestStateName.Partial, after.EffectiveState((await after.FindAsync(identity, default))!, now));
 		Assert.Equal(IngestClaimOutcome.Acquired, (await after.ClaimAsync(new IngestClaimRequest(identity, "c", Stamp, now, [path]), default)).Outcome);
-
-		string second = Guid.NewGuid().ToString("N") + ".md";
-		string secondIdentity = DocumentIngestor.IdentityOf("c", second);
-		await before.ClaimAsync(new IngestClaimRequest(secondIdentity, "c", Stamp, now, [second]), default);
-		Assert.Equal(IngestDeleteOutcome.Recorded, (await after.PrepareDeleteAsync("c", second, secondIdentity, now, default)).Outcome);
 	}
 
 	[Fact]
@@ -431,10 +363,8 @@ public sealed class IngestOwnershipTests(AuthApiFactory factory) : IClassFixture
 		DateTimeOffset now = DateTimeOffset.UtcNow;
 		await ledger.ClaimAsync(new IngestClaimRequest(identity, "c", Stamp, now, [path]), default);
 
-		IngestDeleteGate gate = await ledger.PrepareDeleteAsync("c", path, identity, now.AddMinutes(4), default);
 		IngestClaim claim = await ledger.ClaimAsync(new IngestClaimRequest(identity, "c", Stamp, now.AddMinutes(1), [path]), default);
 
-		Assert.Equal(60, gate.RetryAfterSeconds);
 		Assert.Equal(240, claim.RetryAfterSeconds);
 	}
 
@@ -560,20 +490,7 @@ public sealed class IngestOwnershipTests(AuthApiFactory factory) : IClassFixture
 	}
 
 	[Fact]
-	public async Task A_file_from_before_the_ledger_is_tombstoned_when_it_is_really_deleted()
-	{
-		FakeCorpus corpus = new(factory.Sidecar);
-		HttpClient client = await WriterAsync();
-		string id = Guid.NewGuid().ToString("N");
-		corpus.Files[new DocumentEnvelope("notes", id).StoragePath()] = "old";
-
-		await client.DeleteAsync($"/v1/documents?collection=c&source=notes&sourceId={id}");
-
-		Assert.Equal(HttpStatusCode.Conflict, (await PostDocumentAsync(client, sourceId: id)).StatusCode);
-	}
-
-	[Fact]
-	public async Task Deleting_one_part_by_path_leaves_the_session_partial_and_a_resend_restores_it()
+	public async Task Deleting_one_part_stays_deleted_until_an_operator_restores_it()
 	{
 		FakeCorpus corpus = new(factory.Sidecar);
 		HttpClient client = await WriterAsync();
@@ -589,8 +506,17 @@ public sealed class IngestOwnershipTests(AuthApiFactory factory) : IClassFixture
 		Assert.DoesNotContain(status.GetProperty("paths").EnumerateArray(), element => element.GetString() == part);
 		Assert.False(corpus.Files.ContainsKey(part));
 
-		Assert.Equal(HttpStatusCode.Accepted, (await PostSessionAsync(client, jsonl, sessionId: id)).StatusCode);
-		Assert.Equal(3, corpus.Files.Count);
+		HttpResponseMessage resent = await PostSessionAsync(client, jsonl, sessionId: id);
+		Assert.Equal(HttpStatusCode.MultiStatus, resent.StatusCode);
+		JsonElement result = await ReadAsync(resent);
+		Assert.Equal([SessionPartState.Written, SessionPartState.Deleted, SessionPartState.Written], States(result));
+		Assert.False(result.GetProperty("retryable").GetBoolean());
+		Assert.False(corpus.Files.ContainsKey(part));
+
+		Assert.Equal(HttpStatusCode.Forbidden, (await PostSessionAsync(client, jsonl, sessionId: id, restoreDeleted: true)).StatusCode);
+		HttpClient operatorKey = await factory.ClientWithScopesAsync([MemoriaScopes.Ingest, MemoriaScopes.Admin], ["c"]);
+		Assert.Equal(HttpStatusCode.Accepted, (await PostSessionAsync(operatorKey, jsonl, sessionId: id, restoreDeleted: true)).StatusCode);
+		Assert.True(corpus.Files.ContainsKey(part));
 		Assert.Equal(IngestStateName.Complete, await StateAsync(client, id));
 	}
 
@@ -663,6 +589,30 @@ public sealed class IngestLeaseRenewalTests(AuthApiFactory factory) : IClassFixt
 	}
 }
 
+/// <summary>Records what a route set the server's minimum rate to, as only Kestrel has one.</summary>
+internal sealed class RateProbe : IStartupFilter
+{
+	public RateFeature Feature { get; } = new();
+
+	public Action<IApplicationBuilder> Configure(Action<IApplicationBuilder> next)
+	{
+		return app =>
+		{
+			app.Use(async (context, inner) =>
+			{
+				context.Features.Set<Microsoft.AspNetCore.Server.Kestrel.Core.Features.IHttpMinRequestBodyDataRateFeature>(Feature);
+				await inner();
+			});
+			next(app);
+		};
+	}
+
+	public sealed class RateFeature : Microsoft.AspNetCore.Server.Kestrel.Core.Features.IHttpMinRequestBodyDataRateFeature
+	{
+		public Microsoft.AspNetCore.Server.Kestrel.Core.MinDataRate? MinDataRate { get; set; }
+	}
+}
+
 /// <summary>Records what a route set the server's body limit to, as the test server has no such limit of its own.</summary>
 internal sealed class BodyLimitProbe : IStartupFilter
 {
@@ -715,6 +665,26 @@ public sealed class IngestBodyLimitTests(AuthApiFactory factory) : IClassFixture
 		await AuthApiFactory.Authorized(app.CreateClient(), key).PostAsync("/v1/documents", new StringContent("not json", Encoding.UTF8, "application/json"));
 
 		Assert.Equal((2L * 2097152) + 65536, probe.Feature.MaxRequestBodySize);
+	}
+
+	[Fact]
+	public async Task A_minimum_rate_is_set_before_any_refusal_on_both_routes()
+	{
+		RateProbe probe = new();
+		await using WebApplicationFactory<Program> app = factory.WithWebHostBuilder(builder =>
+		{
+			builder.UseSetting("Memoria:Ingest:MinUploadBytesPerSecond", "12345");
+			builder.ConfigureTestServices(services => services.AddSingleton<IStartupFilter>(probe));
+		});
+		(_, string key) = await factory.IssueAsync([MemoriaScopes.Ingest], ["c"]);
+		HttpClient client = AuthApiFactory.Authorized(app.CreateClient(), key);
+
+		await client.PostAsync("/v1/ingest/session?collection=c&format=word&sessionId=x&updated=2026-01-01T00:00:00Z", new StringContent("", Encoding.UTF8, "application/x-ndjson"));
+		Assert.Equal(12345, probe.Feature.MinDataRate?.BytesPerSecond);
+
+		probe.Feature.MinDataRate = null;
+		await client.PostAsync("/v1/documents", new StringContent("not json", Encoding.UTF8, "application/json"));
+		Assert.Equal(12345, probe.Feature.MinDataRate?.BytesPerSecond);
 	}
 }
 
@@ -815,29 +785,11 @@ public sealed class IngestLoadTests(AuthApiFactory factory) : IClassFixture<Auth
 	}
 
 	[Fact]
-	public void The_gate_counts_per_key_and_overall_and_gives_back_what_it_took()
-	{
-		IngestGate gate = new(3, 2, "busy");
-
-		using IngestGate.Slot a1 = gate.Enter("a");
-		IngestGate.Slot a2 = gate.Enter("a");
-		Assert.Equal(503, Assert.Throws<IngestRefusedException>(() => gate.Enter("a")).Status);
-		using IngestGate.Slot b1 = gate.Enter("b");
-		Assert.Throws<IngestRefusedException>(() => gate.Enter("c"));
-
-		a2.Dispose();
-		using IngestGate.Slot c1 = gate.Enter("c");
-		Assert.Throws<IngestRefusedException>(() => gate.Enter("a"));
-	}
-
-	[Fact]
 	public async Task One_keys_slow_uploads_leave_room_for_another_key_and_hold_no_render_slot()
 	{
 		SlowBodies slow = new();
 		await using WebApplicationFactory<Program> app = factory.WithWebHostBuilder(builder =>
 		{
-			builder.UseSetting("Memoria:Ingest:MaxConcurrentSessions", "3");
-			builder.UseSetting("Memoria:Ingest:MaxConcurrentSessionsPerKey", "2");
 			builder.UseSetting("Memoria:Ingest:MaxConcurrentRenders", "1");
 			builder.ConfigureTestServices(services => services.AddSingleton<IStartupFilter>(slow));
 		});
@@ -852,12 +804,10 @@ public sealed class IngestLoadTests(AuthApiFactory factory) : IClassFixture<Auth
 		}
 
 		Assert.Equal(2, slow.Entered);
-		HttpResponseMessage third = await PostSessionAsync(slowKey, ClaudeLine("user", "third"), sessionId: Guid.NewGuid().ToString());
 		HttpResponseMessage other = await PostSessionAsync(otherKey, ClaudeLine("user", "hello"), sessionId: Guid.NewGuid().ToString());
 		slow.Finish.SetResult();
 		await Task.WhenAll(one, two);
 
-		Assert.Equal(HttpStatusCode.ServiceUnavailable, third.StatusCode);
 		Assert.Equal(HttpStatusCode.Accepted, other.StatusCode);
 	}
 
@@ -904,32 +854,6 @@ public sealed class IngestLoadTests(AuthApiFactory factory) : IClassFixture<Auth
 	}
 
 	[Fact]
-	public async Task Past_the_document_limit_a_caller_is_told_to_come_back()
-	{
-		await using WebApplicationFactory<Program> app = factory.WithWebHostBuilder(static builder => builder.UseSetting("Memoria:Ingest:MaxConcurrentDocuments", "1"));
-		FakeCorpus corpus = new(factory.Sidecar);
-		HttpClient first = await ClientAsync(app);
-		HttpClient second = await ClientAsync(app);
-		using ManualResetEventSlim entered = new();
-		using ManualResetEventSlim release = new();
-		corpus.OnWrite = _ =>
-		{
-			entered.Set();
-			release.Wait(TimeSpan.FromSeconds(30));
-			return null;
-		};
-
-		Task<HttpResponseMessage> running = PostDocumentAsync(first, sourceId: Guid.NewGuid().ToString("N"));
-		Assert.True(entered.Wait(TimeSpan.FromSeconds(30)));
-		HttpResponseMessage refused = await PostDocumentAsync(second, sourceId: Guid.NewGuid().ToString("N"));
-		release.Set();
-		await running;
-
-		Assert.Equal(HttpStatusCode.ServiceUnavailable, refused.StatusCode);
-		Assert.True(refused.Headers.Contains("Retry-After"));
-	}
-
-	[Fact]
 	public async Task An_oversized_body_is_refused_before_redaction_runs()
 	{
 		CountingRedactor redactor = new();
@@ -950,7 +874,7 @@ public sealed class IngestLoadTests(AuthApiFactory factory) : IClassFixture<Auth
 		IngestGates gates = app.Services.GetRequiredService<IngestGates>();
 		using ManualResetEventSlim release = new();
 		TaskCompletionSource started = new(TaskCreationOptions.RunContinuationsAsynchronously);
-		Task<int> holding = Task.Run(() => gates.WorkAsync(() =>
+		Task<int> holding = Task.Run(() => gates.WorkAsync(2 * 1024 * 1024, () =>
 		{
 			started.SetResult();
 			release.Wait(TimeSpan.FromSeconds(30));
@@ -958,7 +882,7 @@ public sealed class IngestLoadTests(AuthApiFactory factory) : IClassFixture<Auth
 		}, default));
 		await started.Task;
 
-		Task<int> waiting = gates.WorkAsync(static () => 2, default);
+		Task<int> waiting = gates.WorkAsync(2 * 1024 * 1024, static () => 2, default);
 		await Task.Delay(50);
 		Assert.False(waiting.IsCompleted);
 
@@ -970,9 +894,13 @@ public sealed class IngestLoadTests(AuthApiFactory factory) : IClassFixture<Auth
 	[Fact]
 	public async Task A_burst_of_deletes_shares_one_more_update_and_a_delete_of_nothing_costs_none()
 	{
-		await using WebApplicationFactory<Program> app = factory.WithWebHostBuilder(static builder => builder.UseSetting("Memoria:Ingest:MinReindexInterval", "00:00:00.5"));
-		FakeCorpus corpus = new(factory.Sidecar);
 		string collection = "burst-" + Guid.NewGuid().ToString("N");
+		await using WebApplicationFactory<Program> app = factory.WithWebHostBuilder(builder =>
+		{
+			builder.UseSetting("Memoria:Ingest:MinReindexInterval", "00:00:00.5");
+			builder.UseSetting($"Memoria:Ingest:Collections:{collection}:Enabled", "true");
+		});
+		FakeCorpus corpus = new(factory.Sidecar);
 		(_, string key) = await factory.IssueAsync([MemoriaScopes.Ingest], [collection]);
 		HttpClient client = AuthApiFactory.Authorized(app.CreateClient(), key);
 		foreach (int i in Enumerable.Range(0, 3))
@@ -1023,7 +951,7 @@ public sealed class RedactionSwitchLayerTests(AuthApiFactory factory) : IClassFi
 	{
 		await using WebApplicationFactory<Program> app = factory.WithWebHostBuilder(static builder => builder.ConfigureAppConfiguration(static (_, config) =>
 		{
-			config.AddInMemoryCollection(new Dictionary<string, string?> { ["Memoria:Ingest:Collections:Notes:Redaction"] = "Disabled" });
+			config.AddInMemoryCollection(new Dictionary<string, string?> { ["Memoria:Ingest:Collections:Notes:Redaction"] = "Disabled", ["Memoria:Ingest:Collections:Notes:Enabled"] = "true" });
 			config.AddInMemoryCollection(new Dictionary<string, string?> { ["Memoria:Ingest:Collections:notes:Other"] = "x" });
 		}));
 		FakeCorpus corpus = new(factory.Sidecar);
@@ -1034,8 +962,10 @@ public sealed class RedactionSwitchLayerTests(AuthApiFactory factory) : IClassFi
 		JsonElement upper = await ReadAsync(await PostDocumentAsync(client, collection: "Notes", sourceId: Guid.NewGuid().ToString("N"), body: token));
 		JsonElement lower = await ReadAsync(await PostDocumentAsync(client, collection: "notes", sourceId: Guid.NewGuid().ToString("N"), body: token));
 
-		Assert.Equal(IngestRedaction.Enabled, upper.GetProperty("redaction").GetString());
-		Assert.Equal(IngestRedaction.Enabled, lower.GetProperty("redaction").GetString());
+		// Which spelling the setting landed on is an accident, so one of them is open to ingest. Whichever it is stays redacted.
+		JsonElement[] stored = [.. new[] { upper, lower }.Where(static answer => answer.TryGetProperty("redaction", out _))];
+		Assert.NotEmpty(stored);
+		Assert.All(stored, static answer => Assert.Equal(IngestRedaction.Enabled, answer.GetProperty("redaction").GetString()));
 		Assert.DoesNotContain(corpus.Files.Values, content => content.Contains(token, StringComparison.Ordinal));
 		Assert.Contains(factory.Logs, static log => log.EventId.Id == 3302);
 	}

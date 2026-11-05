@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -150,11 +151,11 @@ function reportedVersion(tools: Tools): string | undefined {
   return undefined;
 }
 
-/** Run this exact image reference and compare what it reports. The Sidecar URL only satisfies startup validation. */
+/** Run this exact image reference and compare what it reports. The Sidecar URL and the throwaway digest key only satisfy startup validation. */
 function verifyImageCommand(tools: Tools, image: string | undefined, version: string | undefined): void {
   if (image === undefined || version === undefined) fail("verify-image needs an image and a version");
   const name = "memoria-verify";
-  tools.docker(["run", "-d", "--name", name, "-p", `127.0.0.1:${VERIFY_PORT}:8080`, "-e", "Memoria__Sidecar__BaseUrl=http://127.0.0.1:8282", image]);
+  tools.docker(["run", "-d", "--name", name, "-p", `127.0.0.1:${VERIFY_PORT}:8080`, "-e", "Memoria__Sidecar__BaseUrl=http://127.0.0.1:8282", "-e", `Memoria__Ingest__DigestKey=${randomBytes(32).toString("base64url")}`, image]);
   try {
     const reported = reportedVersion(tools);
     if (reported !== version) fail(`${image} reports version ${reported ?? "(no answer)"}, expected ${version}`);

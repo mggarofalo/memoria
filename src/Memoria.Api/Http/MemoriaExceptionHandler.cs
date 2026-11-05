@@ -48,6 +48,12 @@ public sealed partial class MemoriaExceptionHandler(IProblemDetailsService probl
 			httpContext.Response.Headers.RetryAfter = retryAfter.ToString(System.Globalization.CultureInfo.InvariantCulture);
 		}
 
+		// A refusal under load leaves a body unread. Draining it costs memory for each one, and that is what runs a burst of retries out of memory.
+		if (exception is IngestRefusedException { Code: "ingest_busy" })
+		{
+			httpContext.Response.Headers.Connection = "close";
+		}
+
 		httpContext.Response.StatusCode = problem.Status ?? StatusCodes.Status500InternalServerError;
 		return await problemDetails.TryWriteAsync(new ProblemDetailsContext
 		{
@@ -108,7 +114,7 @@ public sealed partial class MemoriaExceptionHandler(IProblemDetailsService probl
 		}
 		else
 		{
-			LogSidecarRejection(logger, exception.Code, (int)exception.StatusCode!.Value, exception.Message);
+			LogSidecarRejection(logger, exception.Code, (int)exception.StatusCode!.Value);
 		}
 
 		SidecarFailureView view = SidecarDisclosure.For(exception, scope);
@@ -160,6 +166,7 @@ public sealed partial class MemoriaExceptionHandler(IProblemDetailsService probl
 	[LoggerMessage(EventId = 2000, Level = LogLevel.Error, Message = "Sidecar call failed with {Code} (upstream status {UpstreamStatus})")]
 	private static partial void LogSidecarFailure(ILogger logger, Exception exception, string code, int? upstreamStatus);
 
-	[LoggerMessage(EventId = 2001, Level = LogLevel.Information, Message = "Sidecar rejected request with {Code} ({UpstreamStatus}): {Message}")]
-	private static partial void LogSidecarRejection(ILogger logger, string code, int upstreamStatus, string message);
+	/// <remarks>Not the sidecar's message, which can quote a document reference.</remarks>
+	[LoggerMessage(EventId = 2001, Level = LogLevel.Information, Message = "Sidecar rejected request with {Code} ({UpstreamStatus})")]
+	private static partial void LogSidecarRejection(ILogger logger, string code, int upstreamStatus);
 }

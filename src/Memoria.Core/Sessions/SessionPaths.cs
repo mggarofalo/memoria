@@ -74,16 +74,6 @@ public static partial class SessionPaths
 		return string.Concat(path.AsSpan(0, at), replacement, path.AsSpan(at + stem.Length));
 	}
 
-	internal static string ClaudeGlob(string shortId)
-	{
-		return $"????-??-??_{shortId}*.md";
-	}
-
-	internal static string CodexGlob(string safeId)
-	{
-		return $"????-??-??_codex_{safeId}_chunk-*.md";
-	}
-
 	internal static bool IsClaudeFamily(string path, string shortId)
 	{
 		return IsFamily(path, shortId, ClaudeSuffix());
@@ -107,6 +97,15 @@ public static partial class SessionPaths
 			&& SafeOnly().IsMatch(value)
 			&& value[0] != '.'
 			&& value[^1] != '.';
+	}
+
+	/// <summary>
+	/// A digest only ever used to make one session's file names distinct. It has its own namespace, so no other input that
+	/// reaches a file name, such as a project folder, can be chosen to produce it.
+	/// </summary>
+	internal static string DistinctDigest(string value, int chars)
+	{
+		return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes("distinct-path\0" + value)))[..chars];
 	}
 
 	internal static string Digest(string value)

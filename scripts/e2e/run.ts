@@ -8,8 +8,10 @@ import { issueScopeKeys, mcpScope, multiGetLimits, scopeMatrix, secretsAbsent, s
 import { bootstrap, keyManagement, login, mcp, noModels, rateLimits, scopedReads, scopeErrors, traversal, type Keys } from "./checks.ts";
 import { Harness } from "./harness.ts";
 import { skillMatchesTheServer } from "./skill.ts";
-import { ingest, INGEST_SERVER } from "./ingest.ts";
+import { ingest, INGEST_SERVER, keyMaker } from "./ingest.ts";
 import { migrate } from "./migrate.ts";
+import { ingestConnection } from "./ingest-connection.ts";
+import { ingestRaces } from "./ingest-races.ts";
 import { sourcesSync } from "./sources.ts";
 
 async function runAll(h: Harness): Promise<void> {
@@ -59,6 +61,8 @@ async function runIngest(h: Harness): Promise<void> {
   const admin = bootstrap(h);
   await h.startApi();
   await ingest(h, admin);
+  await ingestRaces(h, keyMaker(h, admin));
+  await ingestConnection(h, keyMaker(h, admin));
   await sourcesSync(h, admin);
   await migrate(h);
   noModels(h);

@@ -1,8 +1,14 @@
+using System.Collections.Concurrent;
+using System.Runtime;
+using System.Security.Cryptography;
+using System.Text;
 using Memoria.Api.Configuration;
 using Memoria.Api.Http;
 using Memoria.Core.Redaction;
 using Memoria.Core.Sidecar;
 using Microsoft.AspNetCore.Http.Features;
+using Microsoft.AspNetCore.Server.Kestrel.Core;
+using Microsoft.AspNetCore.Server.Kestrel.Core.Features;
 using Microsoft.Extensions.Options;
 
 namespace Memoria.Api.Ingest;
@@ -30,97 +36,279 @@ public sealed record AuditIngest(
 	int Deleted,
 	int Redactions,
 	int Refusals,
-	IReadOnlyList<string> Paths);
+	IReadOnlyList<string> Paths,
+	bool Restored = false);
 
 /// <summary>
-/// Bounds how many requests of one kind run at once, overall and per key, so one key's slow uploads leave room for everyone else's.
-/// A caller past either bound is told to come back rather than queued.
+/// Which document a read found, for an operator working out what happened. Only in the table, never the log. Caller text is kept only once it has resolved to a real
+/// document: nothing can tell a credential by its look, so a reference that found nothing is recorded as a placeholder.
 /// </summary>
-public sealed class IngestGate(int capacity, int perKey, string busyMessage)
+public sealed record AuditRead(string Reference, bool Found);
+
+/// <summary>
+/// Keeps the API alive under its memory limit with plain counts: past a size, a request holds a place until it ends, and past the limit it gets an honest 503, as a
+/// runtime out of memory can kill the process outright. Transcripts and documents count separately, and small ones never get this far, so neither turns them away.
+/// </summary>
+public sealed class LargeUploads(IOptions<MemoriaOptions> options)
 {
-	private const int RetryAfterSeconds = 5;
+	public const long LargeBytes = 8L * 1024 * 1024;
 
-	private readonly Lock _lock = new();
-	private readonly Dictionary<string, int> _byKey = new(StringComparer.Ordinal);
-	private int _running;
+	private const int RetryAfterSeconds = 30;
 
-	public Slot Enter(string keyId)
+	public const long LargeDocumentBytes = 256L * 1024;
+
+	private readonly SemaphoreSlim _transcripts = new(options.Value.Ingest.MaxConcurrentLargeUploads, options.Value.Ingest.MaxConcurrentLargeUploads);
+	private readonly SemaphoreSlim _documents = new(options.Value.Ingest.MaxConcurrentLargeDocuments, options.Value.Ingest.MaxConcurrentLargeDocuments);
+
+	/// <summary>A transcript's body: a declared length over the line takes the place before anything is read, and otherwise the byte that crosses it does.</summary>
+	public Stream Watch(Stream body, long? declaredLength)
 	{
-		lock (_lock)
-		{
-			int mine = _byKey.GetValueOrDefault(keyId);
-			if (_running >= capacity || mine >= perKey)
-			{
-				throw new IngestRefusedException(StatusCodes.Status503ServiceUnavailable, "ingest_busy", busyMessage, RetryAfterSeconds);
-			}
-
-			_running++;
-			_byKey[keyId] = mine + 1;
-		}
-
-		return new Slot(this, keyId);
+		return Watched(body, declaredLength, _transcripts, LargeBytes);
 	}
 
-	private void Leave(string keyId)
+	/// <summary>The same for a document. Hold it until the request ends, as a document's text stays in memory while it waits to be redacted and written.</summary>
+	public Stream WatchDocument(Stream body, long? declaredLength)
 	{
-		lock (_lock)
-		{
-			_running--;
-			int left = _byKey[keyId] - 1;
-			if (left == 0)
-			{
-				_byKey.Remove(keyId);
-			}
-			else
-			{
-				_byKey[keyId] = left;
-			}
-		}
+		return Watched(body, declaredLength, _documents, LargeDocumentBytes);
 	}
 
-	public sealed class Slot(IngestGate gate, string keyId) : IDisposable
+	private static WatchedBody Watched(Stream body, long? declaredLength, SemaphoreSlim places, long line)
 	{
-		public void Dispose()
+		WatchedBody watched = new(body, places, line);
+		watched.Note(declaredLength ?? 0);
+		return watched;
+	}
+
+	private sealed class WatchedBody(Stream inner, SemaphoreSlim places, long line) : Stream
+	{
+		private long _seen;
+		private bool _holding;
+
+		public void Note(long total)
 		{
-			gate.Leave(keyId);
+			_seen = Math.Max(_seen, total);
+			if (_seen > line && !_holding)
+			{
+				_holding = places.Wait(0) ? true : throw new IngestRefusedException(StatusCodes.Status503ServiceUnavailable, "ingest_busy", "Too many large uploads are running. Try again shortly.", RetryAfterSeconds);
+			}
+		}
+
+		public override bool CanRead => true;
+
+		public override bool CanSeek => false;
+
+		public override bool CanWrite => false;
+
+		public override long Length => throw new NotSupportedException();
+
+		public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+
+		public override int Read(byte[] buffer, int offset, int count)
+		{
+			int read = inner.Read(buffer, offset, count);
+			Note(_seen + read);
+			return read;
+		}
+
+		public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+		{
+			int read = await inner.ReadAsync(buffer, cancellationToken);
+			Note(_seen + read);
+			return read;
+		}
+
+		public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+		{
+			return ReadAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
+		}
+
+		public override void Flush()
+		{
+		}
+
+		public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
+		public override void SetLength(long value) => throw new NotSupportedException();
+
+		public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+		protected override void Dispose(bool disposing)
+		{
+			if (disposing && _holding)
+			{
+				_holding = false;
+				places.Release();
+			}
+
+			base.Dispose(disposing);
 		}
 	}
 }
 
-/// <summary>The gates ingest passes through. Reading a request and doing the expensive work have separate bounds, so a slow client never holds up the work.</summary>
+/// <summary>
+/// One lock per path, for the single API instance this design assumes. A write holds it until the sidecar answers. A delete waits for it, so it cannot miss a write in
+/// flight, and an API crash releases it along with the connections its writes were on, which makes those writes drop themselves in the sidecar.
+/// </summary>
+public sealed class IngestPathLocks
+{
+	private readonly Dictionary<string, Entry> _entries = new(StringComparer.Ordinal);
+
+	/// <summary>Null when the lock did not come free in time.</summary>
+	public async Task<IDisposable?> TryHoldAsync(string collection, string path, TimeSpan wait, CancellationToken cancellationToken)
+	{
+		string key = collection + "\0" + path;
+		Entry entry;
+		lock (_entries)
+		{
+			entry = _entries.TryGetValue(key, out Entry? known) ? known : _entries[key] = new Entry();
+			entry.Users++;
+		}
+
+		bool taken = false;
+		try
+		{
+			taken = await entry.Gate.WaitAsync(wait, cancellationToken);
+			return taken ? new Held(this, key, entry) : null;
+		}
+		finally
+		{
+			if (!taken)
+			{
+				Leave(key, entry);
+			}
+		}
+	}
+
+	private void Leave(string key, Entry entry)
+	{
+		lock (_entries)
+		{
+			if (--entry.Users == 0)
+			{
+				_entries.Remove(key);
+			}
+		}
+	}
+
+	private sealed class Entry
+	{
+		public SemaphoreSlim Gate { get; } = new(1, 1);
+
+		public int Users { get; set; }
+	}
+
+	private sealed class Held(IngestPathLocks locks, string key, Entry entry) : IDisposable
+	{
+		public void Dispose()
+		{
+			entry.Gate.Release();
+			locks.Leave(key, entry);
+		}
+	}
+}
+
+/// <summary>
+/// Which collections ingest may touch. An operator names one in configuration, and it opens only if its root is empty the first time ingest uses it. From then on everything
+/// inside is Memoria's, which is why nothing else in ingest asks who a file belongs to. The record is in the control database: the sidecar keeps none.
+/// </summary>
+public sealed class IngestCollections(IIngestLedger ledger, IOptions<MemoriaOptions> options, TimeProvider timeProvider)
+{
+	private readonly SemaphoreSlim _opening = new(1, 1);
+
+	public async Task RequireOpenAsync(string collection, IMemoriaQmdClient sidecar, CancellationToken cancellationToken)
+	{
+		if (!options.Value.Ingest.Collections.TryGetValue(collection, out IngestCollectionOptions? settings) || !settings.Enabled)
+		{
+			throw new IngestRefusedException(StatusCodes.Status409Conflict, "ingest_not_enabled", $"Collection {collection} is not open to ingest. An operator enables it with Memoria:Ingest:Collections:{collection}:Enabled, and its directory must be empty when ingest first uses it.");
+		}
+
+		if (await ledger.IsCollectionOpenAsync(collection, cancellationToken))
+		{
+			return;
+		}
+
+		await _opening.WaitAsync(cancellationToken);
+		try
+		{
+			await OpenAsync(collection, sidecar, cancellationToken);
+		}
+		finally
+		{
+			_opening.Release();
+		}
+	}
+
+	private async Task OpenAsync(string collection, IMemoriaQmdClient sidecar, CancellationToken cancellationToken)
+	{
+		if (await ledger.IsCollectionOpenAsync(collection, cancellationToken))
+		{
+			return;
+		}
+
+		SidecarCollectionEmptyResponse answer = await sidecar.IsCollectionEmptyAsync(collection, cancellationToken);
+		if (!answer.Empty)
+		{
+			throw new IngestRefusedException(StatusCodes.Status409Conflict, "collection_not_empty", $"Collection {collection} has files in its directory, or its directory does not exist, so it cannot be opened to ingest. Ingest owns everything in a collection it writes to, so it must start empty, and its volume must be mounted.");
+		}
+
+		await ledger.OpenCollectionAsync(collection, timeProvider.GetUtcNow(), cancellationToken);
+	}
+}
+
+/// <summary>Bounds the expensive work, which reading a request does not hold up.</summary>
 public sealed class IngestGates(IOptions<MemoriaOptions> options)
 {
 	private const int BusyRetrySeconds = 5;
 
 	private static readonly TimeSpan WorkWait = TimeSpan.FromSeconds(30);
 
+	private const long SmallWorkBytes = 1024 * 1024;
+
+	private const long LargeWorkBytes = 32L * 1024 * 1024;
+
+	private readonly SemaphoreSlim _smallWork = new(2, 2);
+	private readonly SemaphoreSlim _largeWork = new(1, 1);
 	private readonly SemaphoreSlim _work = new(options.Value.Ingest.MaxConcurrentRenders, options.Value.Ingest.MaxConcurrentRenders);
 
-	public IngestGate Sessions { get; } = new(
-		options.Value.Ingest.MaxConcurrentSessions,
-		options.Value.Ingest.MaxConcurrentSessionsPerKey,
-		"Too many transcripts are being processed. Try again shortly.");
-
-	public IngestGate Documents { get; } = new(
-		options.Value.Ingest.MaxConcurrentDocuments,
-		options.Value.Ingest.MaxConcurrentDocumentsPerKey,
-		"Too many documents are being processed. Try again shortly.");
-
-	/// <summary>Runs redaction and rendering, which is what takes the CPU and memory. Someone who already sent a whole body gets to wait a little rather than send it again.</summary>
-	public async Task<T> WorkAsync<T>(Func<T> work, CancellationToken cancellationToken)
+	/// <summary>Runs redaction and rendering, which is what takes the CPU and memory. A small job takes a moment and little memory, so it has a lane of its own that large uploads cannot keep waiting.</summary>
+	public async Task<T> WorkAsync<T>(long bytes, Func<T> work, CancellationToken cancellationToken)
 	{
-		if (!await _work.WaitAsync(WorkWait, cancellationToken))
-		{
-			throw new IngestRefusedException(StatusCodes.Status503ServiceUnavailable, "ingest_busy", "The server is busy redacting. Try again shortly.", BusyRetrySeconds);
-		}
-
+		SemaphoreSlim lane = bytes <= SmallWorkBytes ? _smallWork : _work;
+		await AcquireAsync(lane, cancellationToken);
 		try
 		{
+			return bytes < LargeWorkBytes ? work() : await LargeWorkAsync(work, cancellationToken);
+		}
+		finally
+		{
+			lane.Release();
+		}
+	}
+
+	/// <summary>
+	/// A large render takes several times its text in memory, so only one runs at a time. It asks for one piece as long as all that text, and reading the body has
+	/// left the large object heap in holes, which the runtime does not reliably compact first. Under a memory limit that request could fail with plenty free in total.
+	/// </summary>
+	private async Task<T> LargeWorkAsync<T>(Func<T> work, CancellationToken cancellationToken)
+	{
+		await AcquireAsync(_largeWork, cancellationToken);
+		try
+		{
+			GCSettings.LargeObjectHeapCompactionMode = GCLargeObjectHeapCompactionMode.CompactOnce;
+			GC.Collect();
 			return work();
 		}
 		finally
 		{
-			_work.Release();
+			_largeWork.Release();
+		}
+	}
+
+	private static async Task AcquireAsync(SemaphoreSlim slots, CancellationToken cancellationToken)
+	{
+		if (!await slots.WaitAsync(WorkWait, cancellationToken))
+		{
+			throw new IngestRefusedException(StatusCodes.Status503ServiceUnavailable, "ingest_busy", "The server is busy redacting. Try again shortly.", BusyRetrySeconds);
 		}
 	}
 }
@@ -135,6 +323,11 @@ internal static class IngestRules
 	public const int RefusalsReturned = 200;
 
 	public const int MaxAuditPaths = 64;
+
+	private const int UnconfirmedRetrySeconds = 5;
+
+	/// <summary>A write waits its turn however long that is, as the holder's own time is bounded by the sidecar timeout.</summary>
+	public static readonly TimeSpan NoLimit = Timeout.InfiniteTimeSpan;
 
 	/// <summary>Scope comes first, so a caller learns nothing about a collection or document they may not write to.</summary>
 	public static void RequireCollection(ICallerScope scope, string collection)
@@ -152,13 +345,35 @@ internal static class IngestRules
 			IngestClaimOutcome.Stale => new IngestRefusedException(StatusCodes.Status409Conflict, "stale_version", "A newer version is already stored, or this was deleted after this version. Nothing was changed."),
 			IngestClaimOutcome.Busy => new IngestRefusedException(StatusCodes.Status409Conflict, "ingest_in_progress", "Another upload of this is running. Nothing was changed.", claim.RetryAfterSeconds),
 			IngestClaimOutcome.PathConflict or IngestClaimOutcome.StemClash => new IngestRefusedException(StatusCodes.Status409Conflict, "path_owned", "A file this would write belongs to another document or session. Nothing was changed."),
-			IngestClaimOutcome.Shrunk => new IngestRefusedException(StatusCodes.Status409Conflict, "session_shrank", "This upload has fewer messages than the one stored, so it may be a cut copy. Nothing was changed. Send allowShrink=true if the session really did shrink."),
+			IngestClaimOutcome.Shrunk => Shrank(),
+			IngestClaimOutcome.LostContent => LostContent(),
 			_ => null,
 		};
 		if (refusal is not null)
 		{
 			throw refusal;
 		}
+	}
+
+	public static IngestRefusedException Shrank()
+	{
+		return new IngestRefusedException(StatusCodes.Status409Conflict, "session_shrank", "This upload has fewer messages than what is stored, so it may be a cut copy. Nothing was changed. Send allowShrink=true if the session really did lose them.");
+	}
+
+	public static IngestRefusedException LostContent()
+	{
+		return new IngestRefusedException(StatusCodes.Status409Conflict, "lost_content", "This upload's messages do not start with the ones stored, so storing it would replace text it does not have. Nothing was changed. Send a whole copy, or allowShrink=true if the history really did change.");
+	}
+
+	public static IngestRefusedException DeletedDuringUpload()
+	{
+		return new IngestRefusedException(StatusCodes.Status409Conflict, "deleted_during_upload", "A delete took this over while it was being written. It was not stored.");
+	}
+
+	/// <summary>What was asked is not confirmed done, and asking again is safe.</summary>
+	public static IngestRefusedException DeleteUnconfirmed()
+	{
+		return new IngestRefusedException(StatusCodes.Status503ServiceUnavailable, "delete_unconfirmed", "This delete could not be confirmed, so the file may still be there. Repeat the request: it is safe to.", UnconfirmedRetrySeconds);
 	}
 
 	public static IngestRefusedException TooLarge(string detail)
@@ -179,6 +394,36 @@ internal static class IngestRules
 		{
 			throw new IngestRefusedException(StatusCodes.Status408RequestTimeout, "upload_too_slow", "The request body did not arrive in time. Nothing was changed.");
 		}
+	}
+}
+
+/// <summary>
+/// Digests of content, kept so an upload or a tombstone can be compared with what was stored. Keyed with a secret outside the database, because
+/// a plain hash would let anyone holding the database confirm a guessed text, including a secret no rule matched. A previous key still
+/// matches, so rotating refuses nothing. New writes use the current key.
+/// </summary>
+public sealed class IngestDigests(IOptions<MemoriaOptions> options)
+{
+	public string Of(string value)
+	{
+		return Keyed(Current(), value);
+	}
+
+	public bool Matches(string stored, string value)
+	{
+		ArgumentNullException.ThrowIfNull(stored);
+		return options.Value.Ingest.PreviousDigestKeys.Prepend(Current()).Any(key => Keyed(key, value) == stored);
+	}
+
+	/// <summary>An empty key would make every digest confirmable. Ingest cannot run without API keys, and with them the host does not start without a key, so reaching this is a bug.</summary>
+	private string Current()
+	{
+		return string.IsNullOrEmpty(options.Value.Ingest.DigestKey) ? throw new InvalidOperationException("Memoria:Ingest:DigestKey is not set.") : options.Value.Ingest.DigestKey;
+	}
+
+	private static string Keyed(string key, string value)
+	{
+		return Convert.ToHexStringLower(HMACSHA256.HashData(Encoding.UTF8.GetBytes(key), Encoding.UTF8.GetBytes(value)));
 	}
 }
 
@@ -212,6 +457,18 @@ public static class RequestBody
 			feature.MaxRequestBodySize = limit;
 		}
 	}
+
+	/// <summary>Lets the server cut off a body arriving slower than this, however long it would take, while a slow link sending steadily gets all the time it needs.</summary>
+	public static void RequireRate(HttpContext context, int bytesPerSecond)
+	{
+		ArgumentNullException.ThrowIfNull(context);
+		if (context.Features.Get<IHttpMinRequestBodyDataRateFeature>() is { } feature)
+		{
+			feature.MinDataRate = new MinDataRate(bytesPerSecond, RateGracePeriod);
+		}
+	}
+
+	private static readonly TimeSpan RateGracePeriod = TimeSpan.FromSeconds(10);
 
 	private static IngestRefusedException TooLarge(long limit)
 	{
@@ -256,6 +513,10 @@ public static partial class IngestHosting
 	{
 		services.AddSingleton<IIngestLedger, SqliteIngestLedger>();
 		services.AddSingleton<IngestGates>();
+		services.AddSingleton<LargeUploads>();
+		services.AddSingleton<IngestPathLocks>();
+		services.AddSingleton<IngestCollections>();
+		services.AddSingleton<IngestDigests>();
 		services.AddSingleton<IRedactor, Redactor>();
 		services.AddSingleton<IngestRedactionPolicy>();
 		services.AddSingleton<CollectionReindexer>();

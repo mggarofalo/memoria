@@ -1,117 +1,164 @@
 import assert from "node:assert/strict";
-import { mkdir, readdir, readFile, stat, utimes, writeFile } from "node:fs/promises";
+import fsPromises, { mkdir, readdir, readFile, utimes, writeFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
+import net from "node:net";
 import path from "node:path";
 import { test } from "node:test";
 import fastGlob from "fast-glob";
 import { HttpError } from "../src/errors.ts";
-import { resolveTarget, writeDocument } from "../src/ingest.ts";
+import { isRootEmpty, resolveTarget, writeDocument } from "../src/ingest.ts";
 import { matchesIgnorePattern, unsupportedIgnorePattern } from "../src/path-rules.ts";
 import { authHeaders, makeApp, tempDir } from "./helpers.ts";
 
 const isCode = (code: string) => (err: unknown) => err instanceof HttpError && err.code === code;
 
-// --- exclusive creation ---------------------------------------------------------
+// --- a write tied to its connection --------------------------------------------
 
-test("simultaneous overwrite=false writes of a new path: one wins, the rest get 409, and its content is whole", async () => {
+test("a write whose caller has gone is dropped at the last moment, and an old file stays", async () => {
   const root = await tempDir();
-  const target = resolveTarget(root, "**/*.md", "race.md");
-  // Several rounds, because a single one can pass by luck of scheduling.
-  for (let round = 0; round < 10; round++) {
-    const results = await Promise.allSettled(Array.from({ length: 16 }, (_, i) => writeDocument(target, `writer ${i}\n`, false)));
-    const won = results.filter((r) => r.status === "fulfilled");
-    const lost = results.filter((r) => r.status === "rejected");
-    if (round === 0) {
-      assert.equal(won.length, 1, "exactly one writer creates the document");
-      assert.equal((won[0] as PromiseFulfilledResult<{ created: boolean }>).value.created, true);
-    } else {
-      assert.equal(won.length, 0, "the document exists from round 0 on");
+  const target = resolveTarget(root, "**/*.md", "doc.md");
+  await writeDocument(target, "old");
+  await assert.rejects(writeDocument(target, "new", { stillConnected: () => false }), isCode("client_gone"));
+  assert.equal(await readFile(target.absolute, "utf8"), "old");
+  assert.deepEqual(await readdir(root), ["doc.md"], "no temp file is left behind");
+});
+
+test("the check runs after a turn of the event loop, so a close already delivered is seen", async () => {
+  const root = await tempDir();
+  const target = resolveTarget(root, "**/*.md", "doc.md");
+  let connected = true;
+  await assert.rejects(
+    writeDocument(target, "new", {
+      stillConnected: () => connected,
+      onStep: async (step) => {
+        if (step === "checked") setImmediate(() => (connected = false));
+      },
+    }),
+    isCode("client_gone"),
+  );
+  assert.deepEqual(await readdir(root), []);
+});
+
+test("a caller still connected gets its write, replacing what is there", async () => {
+  const root = await tempDir();
+  const target = resolveTarget(root, "**/*.md", "doc.md");
+  assert.deepEqual(await writeDocument(target, "one", { stillConnected: () => true }), { bytes: 3, created: true });
+  assert.deepEqual(await writeDocument(target, "two", { stillConnected: () => true }), { bytes: 3, created: false });
+  assert.equal(await readFile(target.absolute, "utf8"), "two");
+});
+
+/** Holds a write just before its last check, by holding the real-path lookup of its temp file, so a real socket can close during it. */
+function stallWrites(ms: number, onStall: () => void): () => void {
+  const patchable = fsPromises as unknown as { realpath: (...args: unknown[]) => Promise<string> };
+  const real = patchable.realpath;
+  patchable.realpath = async (...args: unknown[]) => {
+    if (String(args[0]).includes(".memoria-")) {
+      onStall();
+      await new Promise((resolve) => setTimeout(resolve, ms));
     }
-    for (const r of lost) assert.ok(isCode("exists")((r as PromiseRejectedResult).reason), String((r as PromiseRejectedResult).reason));
-    assert.match(await readFile(target.absolute, "utf8"), /^writer \d+\n$/);
-    assert.deepEqual(await readdir(root), ["race.md"], "no temp file is left behind");
-    assert.equal((await stat(target.absolute)).nlink, 1, "the temp name is gone, so the document can be overwritten later");
-  }
-});
+    return real(...args);
+  };
+  syncBuiltinESMExports();
+  return () => {
+    patchable.realpath = real;
+    syncBuiltinESMExports();
+  };
+}
 
-test("fresh paths each get exactly one winner", async () => {
-  const root = await tempDir();
-  for (let round = 0; round < 20; round++) {
-    const target = resolveTarget(root, "**/*.md", `new-${round}.md`);
-    const results = await Promise.allSettled(Array.from({ length: 8 }, (_, i) => writeDocument(target, `writer ${i}\n`, false)));
-    assert.equal(results.filter((r) => r.status === "fulfilled").length, 1, `round ${round}`);
+/** What a directory holds once no write in it is still running, however long the stalls took. */
+async function settled(dir: string): Promise<string[]> {
+  for (let attempt = 0; attempt < 100 && (await readdir(dir)).some((name) => name.startsWith(".memoria-")); attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
   }
-});
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  return readdir(dir);
+}
 
-test("through the route: exactly one 202 with created=true, the rest 409 exists", async () => {
+function send(port: number, name: string): { socket: net.Socket; answer: Promise<string> } {
+  const body = JSON.stringify({ collection: "claude-sessions", path: name, content: "# from a socket\n", embed: false });
+  const socket = net.connect(port, "127.0.0.1");
+  socket.write(`POST /documents HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: ${authHeaders.authorization}\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`);
+  const answer = new Promise<string>((resolve) => {
+    let text = "";
+    socket.on("data", (chunk) => (text += chunk.toString("utf8")));
+    socket.on("close", () => resolve(text));
+    socket.on("error", () => undefined);
+  });
+  return { socket, answer };
+}
+
+for (const [how, close] of [
+  ["a FIN", (socket: net.Socket) => socket.end()],
+  ["a destroyed socket", (socket: net.Socket) => socket.destroy()],
+  ["an RST", (socket: net.Socket) => socket.resetAndDestroy()],
+] as const) {
+  test(`through a real socket: ${how} during a stalled write leaves no document`, async () => {
+    const { app, roots } = await makeApp();
+    const name = "gone.md";
+    let closing: net.Socket | undefined;
+    const restore = stallWrites(200, () => {
+      if (closing) close(closing);
+      closing = undefined;
+    });
+    try {
+      await app.listen({ host: "127.0.0.1", port: 0 });
+      const { socket, answer } = send((app.server.address() as net.AddressInfo).port, name);
+      closing = socket;
+      await answer;
+      assert.deepEqual(await settled(roots.claude), [], "neither the document nor a temp file");
+    } finally {
+      restore();
+      await app.close();
+    }
+  });
+}
+
+test("through a real socket: an RST right after the body never stores anything", async () => {
   const { app, roots } = await makeApp();
+  const restore = stallWrites(300, () => undefined);
   try {
-    const responses = await Promise.all(
-      Array.from({ length: 16 }, (_, i) =>
-        app.inject({ method: "POST", url: "/documents", headers: authHeaders, payload: { collection: "claude-sessions", path: "race.md", content: `# writer ${i}\n`, overwrite: false } }),
-      ),
-    );
-    const accepted = responses.filter((r) => r.statusCode === 202);
-    assert.equal(accepted.length, 1, responses.map((r) => r.statusCode).join(","));
-    assert.equal(accepted[0]!.json().created, true);
-    for (const r of responses.filter((x) => x.statusCode !== 202)) {
-      assert.equal(r.statusCode, 409, r.body);
-      assert.equal(r.json().error, "exists");
+    await app.listen({ host: "127.0.0.1", port: 0 });
+    const port = (app.server.address() as net.AddressInfo).port;
+    for (let round = 0; round < 25; round++) {
+      const { socket, answer } = send(port, `rst-${round}.md`);
+      socket.once("connect", () => setTimeout(() => socket.resetAndDestroy(), round % 3));
+      await answer;
     }
-    // The metadata and the file describe the same winner.
-    assert.deepEqual(await readdir(roots.claude), ["race.md"]);
+    assert.deepEqual(await settled(roots.claude), [], "neither a document nor a temp file");
   } finally {
+    restore();
     await app.close();
   }
 });
 
-test("an existing file created between the check and the link is not replaced", async () => {
-  const root = await tempDir();
-  const target = resolveTarget(root, "**/*.md", "late.md");
-  await assert.rejects(
-    writeDocument(target, "mine", false, {
-      onStep: async (s) => {
-        if (s === "checked") await writeFile(target.absolute, "theirs");
-      },
-    }),
-    isCode("exists"),
-  );
-  assert.equal(await readFile(target.absolute, "utf8"), "theirs");
-  assert.deepEqual(await readdir(root), ["late.md"]);
-});
-
-test("a filesystem without hard links gets a clear failure, never a silent replace", async () => {
-  const root = await tempDir();
-  const target = resolveTarget(root, "**/*.md", "x.md");
-  for (const code of ["ENOTSUP", "ENOSYS", "EISDIR"]) {
-    const noHardLinks = async () => {
-      throw Object.assign(new Error("no hard links"), { code });
-    };
-    await assert.rejects(writeDocument(target, "body", false, { link: noHardLinks }), (err: unknown) => {
-      assert.ok(isCode("exclusive_create_failed")(err));
-      assert.equal((err as HttpError).statusCode, 500);
-      assert.match((err as Error).message, new RegExp(code));
-      return true;
-    });
+test("through a real socket: a caller that stays connected through a stall gets its document", async () => {
+  const { app, roots } = await makeApp();
+  const restore = stallWrites(100, () => undefined);
+  try {
+    await app.listen({ host: "127.0.0.1", port: 0 });
+    const { answer } = send((app.server.address() as net.AddressInfo).port, "kept.md");
+    assert.match(await answer, /^HTTP\/1\.1 202/);
+    assert.deepEqual(await readdir(roots.claude), ["kept.md"]);
+  } finally {
+    restore();
+    await app.close();
   }
-  assert.deepEqual(await readdir(root), [], "nothing was published and the temp file is gone");
-  // overwrite=true does not need hard links.
-  assert.deepEqual(
-    await writeDocument(target, "body", true, {
-      link: async () => {
-        throw new Error("must not be called");
-      },
-    }),
-    { bytes: 4, created: true },
-  );
 });
 
-test("a missing directory during the link is a changed path, not a filesystem complaint", async () => {
-  const root = await tempDir();
-  const target = resolveTarget(root, "**/*.md", "x.md");
-  const gone = async () => {
-    throw Object.assign(new Error("gone"), { code: "ENOENT" });
-  };
-  await assert.rejects(writeDocument(target, "body", false, { link: gone }), isCode("path_changed"));
+test("a collection's emptiness: temp files do not count, and anything else does", async () => {
+  const { app, roots } = await makeApp();
+  try {
+    const ask = async () => (await app.inject({ method: "GET", url: "/collections/claude-sessions/empty", headers: authHeaders })).json();
+    assert.deepEqual(await ask(), { collection: "claude-sessions", empty: true });
+    await writeFile(path.join(roots.claude, `.memoria-${"a".repeat(24)}.tmp`), "left by a crash");
+    assert.equal((await ask()).empty, true);
+    await writeFile(path.join(roots.claude, "foreign.md"), "someone else's");
+    assert.equal((await ask()).empty, false);
+    assert.equal((await app.inject({ method: "GET", url: "/collections/nope/empty", headers: authHeaders })).statusCode, 404);
+    assert.equal(await isRootEmpty(path.join(roots.claude, "not-here")), false, "a missing directory may be a volume not mounted yet");
+  } finally {
+    await app.close();
+  }
 });
 
 // --- stale temp files -------------------------------------------------------------
@@ -125,7 +172,7 @@ test("a write sweeps old temp files from its directory, leaving recent ones and 
   for (const name of [staleName, liveName, otherName]) await writeFile(path.join(root, name), "x");
   await utimes(path.join(root, staleName), old, old);
   await utimes(path.join(root, otherName), old, old);
-  await writeDocument(resolveTarget(root, "**/*.md", "doc.md"), "body", true);
+  await writeDocument(resolveTarget(root, "**/*.md", "doc.md"), "body");
   assert.deepEqual((await readdir(root)).sort(), [liveName, otherName, "doc.md"].sort());
 });
 
@@ -133,13 +180,13 @@ test("a crash between link and unlink stops blocking an overwrite once the temp 
   const root = await tempDir();
   const { link } = await import("node:fs/promises");
   const target = resolveTarget(root, "**/*.md", "doc.md");
-  await writeDocument(target, "one", true);
+  await writeDocument(target, "one");
   const leftover = path.join(root, `.memoria-${"c".repeat(24)}.tmp`);
   await link(target.absolute, leftover);
-  await assert.rejects(writeDocument(target, "two", true), isCode("hard_link"));
+  await assert.rejects(writeDocument(target, "two"), isCode("hard_link"));
   const old = new Date(Date.now() - 2 * 60 * 60 * 1000);
   await utimes(leftover, old, old);
-  await writeDocument(target, "two", true);
+  await writeDocument(target, "two");
   assert.equal(await readFile(target.absolute, "utf8"), "two");
   assert.deepEqual(await readdir(root), ["doc.md"]);
 });

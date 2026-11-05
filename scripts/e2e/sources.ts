@@ -5,7 +5,7 @@
 import { mkdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { issueKey, parse } from "./auth-helpers.ts";
-import { type CliResult, type Harness } from "./harness.ts";
+import { pause, type CliResult, type Harness } from "./harness.ts";
 import { forceIndex, SAFE } from "./ingest.ts";
 
 const SOURCE = "notes-e2e";
@@ -126,11 +126,16 @@ async function neverDeletes(c: Context): Promise<void> {
   c.h.check("sources sync: that document is still searchable", (await hits(c, "betaword")) === 1);
 }
 
-/** Another writer's version, ahead of anything this run can reach, so the refusal does not depend on how fast the machine is. */
+/**
+ * Another writer got there first, and the local copy is dated before it. The server records a date no later than its clock, and the CLI has dated this
+ * file up to two seconds past when it was last written, by a second for each resend, so those have to pass before the other writer does or a fast machine sees no refusal.
+ */
 async function perFileRefusal(c: Context): Promise<void> {
+  await pause(2500);
   const newer = new Date(Date.now() + NEWER_BY_MS).toISOString();
   const other = await c.h.request({ method: "POST", path: "/v1/documents", key: c.writer, body: { collection: SAFE, source: SOURCE, sourceId: "first.md", updated: newer, body: "from another machine" } });
-  write(c, "first.md", "# First\n\nthetaword from this machine\n");
+  const older = new Date(Date.now() - NEWER_BY_MS);
+  utimesSync(write(c, "first.md", "# First\n\nthetaword from this machine\n"), older, older);
   write(c, "fourth.md", "# Fourth\n\niotaword\n");
   const from = c.h.proxiedCount();
   const mixed = sync(c);

@@ -45,6 +45,7 @@ internal sealed class ClaudeTranscript(SessionSource source, SessionRenderOption
 	public override RedactedSession Render()
 	{
 		RedactMessages();
+		MessageChain chain = MessageChain.Of(Messages);
 		string relocated = SessionPaths.RelocatedCopySuffix(_rawCwd, Source.ProjectDirectory);
 		string shortId = SessionPaths.ClaudeShortId(PathId(Source.SessionId)) + relocated;
 		SessionPathing pathing = Pathing($"claude\0{Source.SessionId}\0{relocated}", shortId);
@@ -66,12 +67,13 @@ internal sealed class ClaudeTranscript(SessionSource source, SessionRenderOption
 			CountsByRule,
 			Refusals,
 			pathing.IsFamily,
-			pathing);
+			pathing)
+		{ MessageChain = chain };
 	}
 
 	private SessionPathing Pathing(string identity, string stem)
 	{
-		return new SessionPathing(identity, stem, SessionPaths.ClaudeGlob(stem), path => SessionPaths.IsClaudeFamily(path, stem), next => Pathing(identity, next), Source.SessionId);
+		return new SessionPathing(identity, stem, path => SessionPaths.IsClaudeFamily(path, stem), next => Pathing(identity, next), Source.SessionId);
 	}
 
 	/// <summary>Keeps the raw first cwd too, only to compare with the project folder. It is never written out.</summary>

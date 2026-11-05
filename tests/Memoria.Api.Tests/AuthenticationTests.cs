@@ -417,7 +417,11 @@ public sealed class AuthConfigurationTests
 	public async Task ModeOmitted_WithADatabase_RequiresKeys()
 	{
 		string path = Path.Combine(Path.GetTempPath(), "memoria-tests", Guid.NewGuid().ToString("N"), "control.db");
-		using UnconfiguredFactory factory = new(builder => builder.UseSetting("Memoria:Auth:DatabasePath", path));
+		using UnconfiguredFactory factory = new(builder =>
+		{
+			builder.UseSetting("Memoria:Auth:DatabasePath", path);
+			builder.UseSetting("Memoria:Ingest:DigestKey", "a-key-of-at-least-thirty-two-characters");
+		});
 
 		HttpResponseMessage response = await factory.CreateClient().GetAsync("/v1/collections");
 

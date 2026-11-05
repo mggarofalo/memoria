@@ -39,32 +39,6 @@ internal static class SessionFrontmatter
 	private static readonly SearchValues<char> s_mustEscape = SearchValues.Create(
 		[.. Enumerable.Range(0, 0x20).Concat(Enumerable.Range(0x7F, 0x21)).Concat([0x2028, 0x2029, 0xFEFF, 0xFFFE, 0xFFFF]).Select(static code => (char)code)]);
 
-	/// <summary>The <c>session_id</c> in a document's frontmatter, or null when it has none. Reads only the opening block, so a body cannot claim one.</summary>
-	public static string? ReadSessionId(string documentHead)
-	{
-		const string Key = "session_id:";
-		string[] lines = documentHead.Split('\n');
-		if (lines[0].TrimEnd('\r') != "---")
-		{
-			return null;
-		}
-
-		foreach (string line in lines.Skip(1))
-		{
-			if (line.TrimEnd('\r') == "---")
-			{
-				return null;
-			}
-
-			if (line.StartsWith(Key, StringComparison.Ordinal))
-			{
-				return line[Key.Length..].Trim().Trim('"', '\'');
-			}
-		}
-
-		return null;
-	}
-
 	public static string Clip(string value, SessionReadReport? report = null, int maxBytes = MaxFieldBytes)
 	{
 		int end = ClipEnd(value, maxBytes);

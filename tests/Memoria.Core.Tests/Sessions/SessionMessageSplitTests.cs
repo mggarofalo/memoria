@@ -188,20 +188,6 @@ public sealed class SessionMessageSplitTests
 	}
 
 	[Fact]
-	public async Task Listing_patterns_match_every_path_of_a_session_and_no_others()
-	{
-		RedactedSession claude = await Claude(ClaudeLine("user", new string('a', 3000)) + ClaudeLine("assistant", new string('b', 3000)), Small);
-		RedactedSession codex = await Codex(CodexMeta() + CodexMessage("user", new string('a', 3000)) + CodexMessage("assistant", new string('b', 3000)), Small);
-
-		foreach (RedactedSession session in new[] { claude, codex })
-		{
-			string pattern = "^" + System.Text.RegularExpressions.Regex.Escape(session.ExistingPathsGlob).Replace("\\?", ".").Replace("\\*", ".*") + "$";
-			Assert.All(session.Documents, document => Assert.Matches(pattern, document.Path));
-			Assert.DoesNotContain('/', session.ExistingPathsGlob);
-		}
-	}
-
-	[Fact]
 	public async Task Render_limits_must_leave_room_for_a_character()
 	{
 		SessionRenderOptions bad = new() { MaxMessageBytes = 3 };

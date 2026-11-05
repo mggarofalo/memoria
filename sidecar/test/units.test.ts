@@ -83,7 +83,7 @@ test("resolveTarget rejects traversal, absolute paths, and pattern misses", asyn
 test("removeDocument deletes the file and is idempotent on anything missing", async () => {
   const root = await tempDir();
   const t = resolveTarget(root, "**/*.md", "deep/x.md");
-  await writeDocument(t, "one", true);
+  await writeDocument(t, "one");
   assert.equal(await removeDocument(t), true);
   await assert.rejects(readFile(t.absolute), /ENOENT/);
   assert.equal(await removeDocument(t), false);
@@ -112,8 +112,8 @@ test("delete and ingest cannot follow a link out of the collection root", async 
 
   const victim = resolveTarget(root, "**/*.md", "linked/victim.md");
   await assert.rejects(removeDocument(victim), escapes);
-  await assert.rejects(writeDocument(victim, "overwritten", true), escapes);
-  await assert.rejects(writeDocument(resolveTarget(root, "**/*.md", "linked/new/dir/x.md"), "x", true), escapes);
+  await assert.rejects(writeDocument(victim, "overwritten"), escapes);
+  await assert.rejects(writeDocument(resolveTarget(root, "**/*.md", "linked/new/dir/x.md"), "x"), escapes);
   assert.equal(await readFile(path.join(outside, "victim.md"), "utf8"), "keep");
 });
 
@@ -131,7 +131,7 @@ test("a symlink at the last segment is removed itself and never written through"
     throw err;
   }
   const target = resolveTarget(root, "**/*.md", "link.md");
-  await assert.rejects(writeDocument(target, "overwritten", true), (err: unknown) => err instanceof HttpError && err.code === "invalid_path");
+  await assert.rejects(writeDocument(target, "overwritten"), (err: unknown) => err instanceof HttpError && err.code === "invalid_path");
   assert.equal(await readFile(victim, "utf8"), "keep");
   assert.equal(await removeDocument(target), true);
   assert.equal(await readFile(victim, "utf8"), "keep");
@@ -151,18 +151,17 @@ test("parseSelectors keeps globs apart from references", () => {
   assert.deepEqual(parseSelectors(undefined, undefined), { globs: [], references: [] });
 });
 
-test("writeDocument creates, overwrites, and honours overwrite=false", async () => {
+test("writeDocument creates and overwrites", async () => {
   const root = await tempDir();
   const t = resolveTarget(root, "**/*.md", "deep/x.md");
-  const first = await writeDocument(t, "one", true);
+  const first = await writeDocument(t, "one");
   assert.deepEqual(first, { bytes: 3, created: true });
   assert.equal(await readFile(t.absolute, "utf8"), "one");
-  const second = await writeDocument(t, "twoé", true);
+  const second = await writeDocument(t, "twoé");
   assert.deepEqual(second, { bytes: 5, created: false });
-  await assert.rejects(writeDocument(t, "three", false), (err: unknown) => err instanceof HttpError && err.statusCode === 409);
   const dir = resolveTarget(root, "**/*.md", "deep.md");
   await (await import("node:fs/promises")).mkdir(dir.absolute);
-  await assert.rejects(writeDocument(dir, "x", true), (err: unknown) => err instanceof HttpError && err.code === "is_directory");
+  await assert.rejects(writeDocument(dir, "x"), (err: unknown) => err instanceof HttpError && err.code === "is_directory");
 });
 
 // --- job queue -----------------------------------------------------------------

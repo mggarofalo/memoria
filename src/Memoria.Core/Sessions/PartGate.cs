@@ -28,6 +28,7 @@ internal static class PartGate
 	{
 		string frontmatter = FrontmatterOf(document);
 		Body body = Body.Parse(document[frontmatter.Length..], part);
+		string bodyBefore = body.Render();
 		for (int i = 0; i < MaxReplacements * 2; i++)
 		{
 			string current = frontmatter + body.Render();
@@ -38,7 +39,8 @@ internal static class PartGate
 
 			if (found is not { } hit)
 			{
-				return new RedactedMarkdown(current, new Dictionary<string, int>());
+				string kept = bodyBefore == body.Render() ? frontmatter : ReplaceMessageDigest(frontmatter);
+				return new RedactedMarkdown(kept + body.Render(), new Dictionary<string, int>());
 			}
 
 			if (i >= MaxReplacements && hit.Start >= frontmatter.Length && body.RefuseAll(hit.Rule, part, refusals))
@@ -62,6 +64,16 @@ internal static class PartGate
 		}
 
 		throw new RedactionException(RedactionException.WholeDocument, RedactionFailure.DidNotConverge, part.Number);
+	}
+
+	/// <summary>
+	/// A Codex part's frontmatter holds a digest of its messages, taken before this check. Once a message is replaced, that digest is the only trace of what the
+	/// message said, and could confirm a guess at it, so it goes too. Otherwise a part's digest says no more than the part's own text.
+	/// </summary>
+	private static string ReplaceMessageDigest(string frontmatter)
+	{
+		string[] lines = frontmatter.Split('\n');
+		return string.Join('\n', lines.Select(static line => line.StartsWith("message_sha256:", StringComparison.Ordinal) ? $"message_sha256: \"{FieldMarker}\"" : line));
 	}
 
 	/// <summary>True when the check could not finish, so the body was replaced and the part must be checked again.</summary>

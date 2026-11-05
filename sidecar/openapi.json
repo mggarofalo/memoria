@@ -1766,7 +1766,7 @@
         "tags": [
           "documents"
         ],
-        "description": "Write markdown into a collection's directory on the sidecar host and queue an index update for that collection. The file on disk is the durable artifact; the index is rebuilt from it. Returns 202 with the job that will make the document searchable. The job is debounced: a burst of documents for one collection shares a single job, which stays `queued` until writes go quiet. Redaction is the caller's responsibility and must happen before this call.",
+        "description": "Write markdown into a collection's directory on the sidecar host and queue an index update for that collection. The file on disk is the durable artifact; the index is rebuilt from it. Returns 202 with the job that will make the document searchable. The job is debounced: a burst of documents for one collection shares a single job, which stays `queued` until writes go quiet. Redaction is the caller's responsibility and must happen before this call. A path that exists is replaced. If the caller has disconnected by the moment before the file would land, the write is dropped, so a caller that died or gave up leaves nothing behind. That only works with nothing buffering between the caller and this service.",
         "requestBody": {
           "required": true,
           "content": {
@@ -1798,11 +1798,6 @@
                     "type": "boolean",
                     "default": true,
                     "description": "Generate embeddings after indexing."
-                  },
-                  "overwrite": {
-                    "type": "boolean",
-                    "default": true,
-                    "description": "false returns 409 when the path already exists."
                   }
                 }
               }
@@ -1969,6 +1964,100 @@
                     },
                     "job": {
                       "$ref": "#/components/schemas/Job"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/collections/{name}/empty": {
+      "get": {
+        "summary": "Whether a collection's directory is empty",
+        "tags": [
+          "collections"
+        ],
+        "description": "Reads the directory and keeps no record. The API asks this once, before opening a collection to ingest. A directory that does not exist is not empty.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "in": "path",
+            "name": "name",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "collection",
+                    "empty"
+                  ],
+                  "properties": {
+                    "collection": {
+                      "type": "string"
+                    },
+                    "empty": {
+                      "type": "boolean"
                     }
                   }
                 }

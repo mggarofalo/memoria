@@ -404,7 +404,7 @@ public sealed class DocumentIngestTests(AuthApiFactory factory) : IClassFixture<
 	public async Task Deleting_what_is_not_there_is_safe_and_costs_no_reindex()
 	{
 		FakeCorpus corpus = new(factory.Sidecar);
-		string collection = "nothing-" + UniqueId();
+		const string collection = "nothing";
 
 		HttpResponseMessage response = await (await WriterAsync(collection)).DeleteAsync($"/v1/documents?collection={collection}&source=notes&sourceId={UniqueId()}");
 
@@ -449,7 +449,7 @@ public sealed class DocumentIngestTests(AuthApiFactory factory) : IClassFixture<
 	public async Task When_the_reindex_cannot_be_queued_the_answer_says_so_and_a_retry_finishes()
 	{
 		FakeCorpus corpus = new(factory.Sidecar);
-		string collection = "owed-" + UniqueId();
+		const string collection = "owed";
 		HttpClient client = await WriterAsync(collection);
 		string id = UniqueId();
 		await PostDocumentAsync(client, collection: collection, sourceId: id);
@@ -481,7 +481,7 @@ public sealed class DocumentIngestTests(AuthApiFactory factory) : IClassFixture<
 
 		Assert.Equal(HttpStatusCode.Conflict, replay.StatusCode);
 		Assert.Empty(corpus.Files);
-		Assert.Equal(HttpStatusCode.Accepted, (await PostDocumentAsync(client, sourceId: id, updated: DateTimeOffset.UtcNow.AddMinutes(30))).StatusCode);
+		Assert.Equal(HttpStatusCode.Accepted, (await PostDocumentAsync(client, sourceId: id, body: "new text", updated: DateTimeOffset.UtcNow.AddMinutes(30))).StatusCode);
 	}
 
 	[Fact]
@@ -499,20 +499,20 @@ public sealed class DocumentIngestTests(AuthApiFactory factory) : IClassFixture<
 	}
 
 	[Fact]
-	public async Task A_delete_while_an_upload_holds_the_document_gets_409()
+	public async Task A_delete_takes_the_lease_from_an_upload_holding_the_document()
 	{
-		FakeCorpus corpus = new(factory.Sidecar);
+		_ = new FakeCorpus(factory.Sidecar);
 		string id = UniqueId();
 		string path = new DocumentEnvelope("notes", id).StoragePath();
+		string identity = DocumentIngestor.IdentityOf("c", path);
 		IIngestLedger ledger = factory.Services.GetRequiredService<IIngestLedger>();
-		await ledger.ClaimAsync(new IngestClaimRequest(DocumentIngestor.IdentityOf("c", path), "c", Stamp, DateTimeOffset.UtcNow, [path]), default);
+		DateTimeOffset now = DateTimeOffset.UtcNow;
+		IngestClaim held = await ledger.ClaimAsync(new IngestClaimRequest(identity, "c", Stamp, now, [path]), default);
 
 		HttpResponseMessage response = await (await WriterAsync()).DeleteAsync($"/v1/documents?collection=c&source=notes&sourceId={id}");
 
-		Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
-		Assert.Equal("ingest_in_progress", (await ReadAsync(response)).GetProperty("code").GetString());
-		Assert.InRange(int.Parse(response.Headers.GetValues("Retry-After").Single(), System.Globalization.CultureInfo.InvariantCulture), 200, 300);
-		Assert.Empty(corpus.Calls);
+		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+		Assert.False(await ledger.BeginWriteAsync(identity, held.LeaseToken!, "c", path, now, default));
 	}
 
 	// --- audit ---------------------------------------------------------------------------

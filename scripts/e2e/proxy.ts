@@ -16,7 +16,13 @@ export type BatchPlan = { kind: "canned"; body: string } | { kind: "oversize"; b
 /** The sidecar accepts this many more documents, then fails until told otherwise. `null` ends it. */
 export type DocumentPlan = { kind: "failDocuments"; after: number | null };
 
-export type Plan = BatchPlan | DocumentPlan;
+/**
+ * What happens to writes. `drop` lets one land and loses its answer. `holdTail` sends all of a body but its end, and sends the end when the caller goes away, with
+ * the close right behind it, as the kernel delivers what a dead process had sent. `every` picks every nth write, and `count` the next few.
+ */
+export type WritePlan = { kind: "writes"; mode: "drop" | "holdTail" | "off"; every?: number; count?: number; ms?: number };
+
+export type Plan = BatchPlan | DocumentPlan | WritePlan;
 
 export interface ProxyRecord {
   method?: string;
@@ -34,6 +40,8 @@ const CHUNK = Buffer.alloc(1024 * 1024, "x");
 const [listenPort, sidecarPort, recordFile] = process.argv.slice(2) as [string, string, string];
 let plan: BatchPlan | null = null;
 let documentsLeft: number | null = null;
+let writes: WritePlan = { kind: "writes", mode: "off" };
+let writesSeen = 0;
 
 function record(entry: ProxyRecord): void {
   appendFileSync(recordFile, JSON.stringify(entry) + "\n");
@@ -45,13 +53,57 @@ async function readBody(request: http.IncomingMessage): Promise<Buffer> {
   return Buffer.concat(parts);
 }
 
+function open(request: http.IncomingMessage, onAnswer: (answer: http.IncomingMessage) => void): http.ClientRequest {
+  const upstream = http.request({ host: "127.0.0.1", port: sidecarPort, method: request.method, path: request.url, headers: request.headers }, onAnswer);
+  return upstream;
+}
+
+/** A closed connection is passed on, or the sidecar could not tell its caller had gone, as it can on a direct connection. */
 function forward(request: http.IncomingMessage, response: http.ServerResponse, body: Buffer): void {
-  const upstream = http.request({ host: "127.0.0.1", port: sidecarPort, method: request.method, path: request.url, headers: request.headers }, (answer) => {
+  const upstream = open(request, (answer) => {
+    response.writeHead(answer.statusCode ?? 502, answer.headers);
+    answer.pipe(response);
+  });
+  response.once("close", () => {
+    if (!response.writableFinished) upstream.destroy();
+  });
+  upstream.on("error", () => response.destroy());
+  upstream.end(body);
+}
+
+function dropAnswer(request: http.IncomingMessage, response: http.ServerResponse, body: Buffer): void {
+  const upstream = open(request, (answer) => {
+    answer.resume();
+    answer.once("end", () => response.destroy());
+  });
+  upstream.on("error", () => response.destroy());
+  upstream.end(body);
+}
+
+function holdTail(request: http.IncomingMessage, response: http.ServerResponse, body: Buffer, ms: number): void {
+  const upstream = open(request, (answer) => {
     response.writeHead(answer.statusCode ?? 502, answer.headers);
     answer.pipe(response);
   });
   upstream.on("error", () => response.destroy());
-  upstream.end(body);
+  const cut = Math.max(0, body.length - 1024);
+  upstream.write(body.subarray(0, cut));
+  const finish = setTimeout(() => upstream.end(body.subarray(cut)), ms);
+  response.once("close", () => {
+    if (response.writableFinished) return;
+    clearTimeout(finish);
+    upstream.write(body.subarray(cut), () => upstream.destroy());
+  });
+}
+
+/** Which treatment this write gets, as the plan counts them. */
+function writeTreatment(request: http.IncomingMessage): WritePlan["mode"] {
+  if (writes.mode === "off" || request.method !== "POST" || request.url !== DOCUMENTS_PATH) return "off";
+  writesSeen++;
+  if (writes.every !== undefined) return writesSeen % writes.every === 0 ? writes.mode : "off";
+  if ((writes.count ?? 0) <= 0) return "off";
+  writes.count = (writes.count ?? 0) - 1;
+  return writes.mode;
 }
 
 /** Valid JSON as far as it goes, and far past any limit. Stops when the API hangs up. */
@@ -72,7 +124,10 @@ async function sendOversized(response: http.ServerResponse, offered: number): Pr
 
 function setPlan(next: Plan): void {
   if (next.kind === "failDocuments") documentsLeft = next.after;
-  else plan = next;
+  else if (next.kind === "writes") {
+    writes = next;
+    writesSeen = 0;
+  } else plan = next;
 }
 
 /** True when this write should be refused. */
@@ -110,6 +165,9 @@ async function handle(request: http.IncomingMessage, response: http.ServerRespon
     plan = null;
     return answerFromPlan(response, current);
   }
+  const treatment = writeTreatment(request);
+  if (treatment === "drop") return dropAnswer(request, response, body);
+  if (treatment === "holdTail") return holdTail(request, response, body, writes.ms ?? 0);
   forward(request, response, body);
 }
 

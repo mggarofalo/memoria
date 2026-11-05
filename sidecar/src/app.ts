@@ -206,7 +206,7 @@ export async function buildApp(options: BuildAppOptions): Promise<App> {
   });
 
   app.addHook("onResponse", async (request, reply) => {
-    request.log.info({ method: request.method, path: loggablePath(request.url), status: reply.statusCode, durationMs: Math.round(reply.elapsedTime) }, "request");
+    request.log.info({ method: request.method, route: request.routeOptions.url ?? "(no route)", status: reply.statusCode, durationMs: Math.round(reply.elapsedTime) }, "request");
   });
 
   // --- errors -----------------------------------------------------------------

@@ -56,6 +56,7 @@ internal sealed partial class CodexTranscript : SessionTranscript
 	public override RedactedSession Render()
 	{
 		RedactMessages();
+		MessageChain chain = MessageChain.Of(Messages);
 		string safeId = SessionPaths.SafeSegment(_pathId);
 		SessionPathing pathing = Pathing(safeId);
 		string project = SessionProject.FromCodexCwd(_cwd, Source.HomeDirectory);
@@ -71,12 +72,13 @@ internal sealed partial class CodexTranscript : SessionTranscript
 			CountsByRule,
 			Refusals,
 			pathing.IsFamily,
-			pathing);
+			pathing)
+		{ MessageChain = chain };
 	}
 
 	private SessionPathing Pathing(string stem)
 	{
-		return new SessionPathing($"codex\0{_namedId}", stem, SessionPaths.CodexGlob(stem), path => SessionPaths.IsCodexFamily(path, stem), Pathing, _namedId, _namesAnother);
+		return new SessionPathing($"codex\0{_namedId}", stem, path => SessionPaths.IsCodexFamily(path, stem), Pathing, _namedId, _namesAnother);
 	}
 
 	private void Apply(string type, JsonElement payload, SessionTimestamp? time)

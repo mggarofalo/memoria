@@ -236,6 +236,21 @@ async function logging(): Promise<{ app: App; lines: string[] }> {
   return { app, lines };
 }
 
+test("the log holds route patterns, never a path or query string a caller sent", async () => {
+  const { app, lines } = await logging();
+  const marker = "markerdocumentpath";
+  try {
+    const headers = { authorization: `Bearer ${testConfig().secret}` };
+    for (const url of [`/docs/${marker}.md?query=${marker}`, `/documents?collection=${marker}&path=${marker}.md`, `/no-such-route/${marker}`]) {
+      await app.inject({ method: url.startsWith("/documents") ? "DELETE" : "GET", url, headers });
+    }
+    assert.ok(lines.some((line) => line.includes("/docs/")), "the route pattern is logged");
+    assert.ok(lines.every((line) => !line.includes(marker)), lines.join("\n"));
+  } finally {
+    await app.close();
+  }
+});
+
 test("one unauthenticated request cannot write much to the log", async () => {
   const { app, lines } = await logging();
   try {
@@ -254,7 +269,7 @@ test("query strings are not logged", async () => {
   try {
     await app.inject({ method: "DELETE", url: "/documents?collection=c&path=private-name.md", headers: authHeaders });
     assert.ok(!lines.join("").includes("private-name"));
-    assert.ok(lines.join("").includes('"path":"/documents"'));
+    assert.ok(lines.join("").includes('"route":"/documents"'));
   } finally {
     await app.close();
   }

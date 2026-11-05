@@ -124,6 +124,9 @@ public sealed class ReadSessionTranscript
 		_report = report;
 	}
 
+	/// <summary>How much was read, which says roughly how much work rendering will be.</summary>
+	public long BytesRead => _report.BytesRead;
+
 	/// <summary>Redacts, splits and renders. Slow and memory-hungry on a large session, so bound how many run at once. Call it once.</summary>
 	public RedactedSession Render()
 	{

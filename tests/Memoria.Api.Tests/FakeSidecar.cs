@@ -16,6 +16,9 @@ public sealed class FakeSidecar : HttpMessageHandler
 
 	public ConcurrentQueue<RecordedRequest> Requests { get; } = new();
 
+	/// <summary>For each answered request, whether the caller had cancelled it by the time the answer was ready.</summary>
+	public ConcurrentQueue<bool> CancelledBeforeAnswer { get; } = new();
+
 	/// <summary>Scripts a JSON response for <c>METHOD /path</c> (path without query string).</summary>
 	public FakeSidecar On(string method, string path, HttpStatusCode status, string json)
 	{
@@ -87,7 +90,9 @@ public sealed class FakeSidecar : HttpMessageHandler
 
 		if (_routes.TryGetValue(Key(request.Method.Method, request.RequestUri!.AbsolutePath), out Func<HttpRequestMessage, string?, HttpResponseMessage>? responder))
 		{
-			return responder(request, body);
+			HttpResponseMessage answer = responder(request, body);
+			CancelledBeforeAnswer.Enqueue(cancellationToken.IsCancellationRequested);
+			return answer;
 		}
 
 		string key = Key(request.Method.Method, request.RequestUri!.AbsolutePath);
