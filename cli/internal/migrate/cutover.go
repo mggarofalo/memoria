@@ -301,12 +301,21 @@ func entrySummary(raw json.RawMessage) string {
 		return "(an entry this cannot read)"
 	}
 	if entry.Command != "" {
-		return fmt.Sprintf("(runs %q; its arguments and other fields are not shown)", baseName(entry.Command))
+		return fmt.Sprintf("(runs %q; its arguments and other fields are not shown)", programName(entry.Command))
 	}
 	if parsed, err := url.Parse(entry.URL); err == nil && parsed.Host != "" {
 		return fmt.Sprintf("(at %s; the rest is not shown)", parsed.Host)
 	}
 	return "(fields not shown)"
+}
+
+// programName is an entry's program. A command that also holds a space or an = could hold anything, so it is not shown.
+func programName(command string) string {
+	name := baseName(command)
+	if strings.ContainsAny(name, " \t=") {
+		return "a program"
+	}
+	return name
 }
 
 func baseName(path string) string {
@@ -502,20 +511,44 @@ func hookNote(path string) string {
 }
 
 // commandName shows what a hook runs and none of its arguments, which can hold anything: the program, and a script it is given.
+//
+// A field holding = is never shown: TOKEN=value before a command, or --token=value after it, is how a hook is given a secret.
 func commandName(command string) string {
-	fields := strings.Fields(command)
-	if len(fields) == 0 {
-		return "an empty command"
+	var fields []string
+	for _, field := range shellFields(command) {
+		if trimmed := strings.Trim(field, `"'`); trimmed != "" && !strings.Contains(trimmed, "=") {
+			fields = append(fields, trimmed)
+		}
 	}
-	name := baseName(strings.Trim(fields[0], `"'`))
+	if len(fields) == 0 {
+		return "a command"
+	}
+	name := baseName(fields[0])
 	for _, field := range fields[1:] {
-		trimmed := strings.Trim(field, `"'`)
-		extension := strings.ToLower(filepath.Ext(trimmed))
+		extension := strings.ToLower(filepath.Ext(field))
 		if extension == ".py" || extension == ".sh" || extension == ".js" || extension == ".ps1" {
-			return name + " " + baseName(trimmed)
+			return name + " " + baseName(field)
 		}
 	}
 	return name
+}
+
+// shellFields splits on spaces outside quotes, so a quoted value stays one field and is dropped as one.
+func shellFields(command string) []string {
+	var quote rune
+	return strings.FieldsFunc(command, func(r rune) bool {
+		switch {
+		case quote != 0:
+			if r == quote {
+				quote = 0
+			}
+		case r == '"' || r == '\'':
+			quote = r
+		default:
+			return r == ' ' || r == '\t'
+		}
+		return false
+	})
 }
 
 // planSkill installs into a client that is there, and not through a link, which could write into a repository. Without a skill
@@ -657,7 +690,7 @@ func (m *CutoverManifest) note(edit FileEdit) error {
 		}
 		m.Entries = append(m.Entries, fresh)
 		entry = &m.Entries[len(m.Entries)-1]
-	} else if hash(edit.Before) != entry.After {
+	} else if hash(edit.Before) != entry.After && !m.isOriginal(entry, edit) {
 		entry.EditedSince = true
 	}
 	entry.After = hash(edit.After)
@@ -666,6 +699,15 @@ func (m *CutoverManifest) note(edit FileEdit) error {
 	entry.AddedEnabled = entry.AddedEnabled || edit.AddedEnabled
 	entry.AddedRules = append(entry.AddedRules, edit.AddedRules...)
 	return nil
+}
+
+// isOriginal is a file a failed or killed cutover never got to: it still holds what was backed up, so it has not been edited.
+func (m *CutoverManifest) isOriginal(entry *CutoverEntry, edit FileEdit) bool {
+	if !entry.Existed {
+		return !edit.Existed
+	}
+	backup, err := auth.ReadPrivateFile(filepath.Join(m.dir, entry.Backup))
+	return err == nil && edit.Existed && bytes.Equal(backup, edit.Before)
 }
 
 // missingFolders is the folders above a file that do not exist yet, deepest first.
@@ -834,7 +876,7 @@ func planRestore(m *CutoverManifest, entry CutoverEntry) (RollbackStep, bool, er
 	step := RollbackStep{Entry: entry, current: hash(current)}
 	if !entry.Existed {
 		step.Action = RemoveCreated
-		step.Changed = present && hash(current) != entry.After
+		step.Changed = present && (hash(current) != entry.After || entry.EditedSince)
 		return step, present, nil
 	}
 	backup, err := auth.ReadPrivateFile(filepath.Join(m.dir, entry.Backup))

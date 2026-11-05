@@ -189,6 +189,48 @@ func TestVerifyFetchesOnlyASampleAndRefusesNone(t *testing.T) {
 	}
 }
 
+// writeSameVersion changes a file's text but not its time, so it is the same version with other text in it.
+func writeSameVersion(t *testing.T, path, text string) {
+	t.Helper()
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, path, text)
+	if err := os.Chtimes(path, before.ModTime(), before.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWhatCannotBeLinedUpIsNamedPrivatelyAndFailsNothing(t *testing.T) {
+	f := newVerifyFixture(t)
+	writeSameVersion(t, filepath.Join(f.notes, "a.md"), "-----BEGIN PRIVATE KEY-----\nAAAA\nBBBB\n")
+	f.server.bodies["a.md"] = "[REDACTED:private-key]\n"
+	summary, code, report := f.verify(t)
+	if code != 0 || summary.SampleCouldNotCompare != 1 || summary.SampleDifferent != 0 {
+		t.Fatalf("code = %d, summary = %+v", code, summary)
+	}
+	if problems := verifyProblems(t, report); len(problems) != 1 || problems[0].Kind != "sample_could_not_compare" || problems[0].Name != "a.md" {
+		t.Fatalf("problems = %+v", problems)
+	}
+	if code := f.h.run("migrate", "verify", "--qmd-config", f.config); code != 0 || !strings.Contains(f.h.stdout.String(), "could not be compared") || strings.Contains(f.h.stdout.String(), "a.md") {
+		t.Fatalf("code = %d, stdout = %q", code, f.h.stdout.String())
+	}
+}
+
+func TestAQueryWithAControlCharacterIsRefused(t *testing.T) {
+	f := newVerifyFixture(t)
+	queries := filepath.Join(t.TempDir(), "queries.txt")
+	writeFile(t, queries, "fine\r\nsecretpart\rcut\n")
+	if code := f.h.run("migrate", "verify", "--qmd-config", f.config, "--queries", queries); code != apperr.ExitUsage || !strings.Contains(f.h.stderr.String(), "line 2") || strings.Contains(f.h.stderr.String(), "secretpart") {
+		t.Fatalf("code = %d, stderr = %q", code, f.h.stderr.String())
+	}
+	writeFile(t, queries, "fine\r\na\ttab\r\n")
+	if got, err := readQueries(queries); err != nil || len(got) != 2 {
+		t.Fatalf("got = %q, err = %v", got, err)
+	}
+}
+
 func TestASampleSpreadsOverTheListAndVaries(t *testing.T) {
 	names := make([]string, 39)
 	for i := range names {

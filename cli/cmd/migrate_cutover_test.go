@@ -325,7 +325,7 @@ func TestEscapingForABatchFile(t *testing.T) {
 			t.Errorf("%q = %q, want %q", arg, got, want)
 		}
 	}
-	if line := CmdLine(`C:\q md.cmd`, []string{"x"}); !strings.HasPrefix(line, `/d /s /c "^"C:\q^ md.cmd^"`) || !strings.HasSuffix(line, `"`) {
+	if line := CmdLine(`C:\q md.cmd`, []string{"x"}); !strings.HasPrefix(line, `/d /s /c "^"C^:\q^ md.cmd^"`) || !strings.HasSuffix(line, `"`) {
 		t.Fatalf("line = %q", line)
 	}
 }

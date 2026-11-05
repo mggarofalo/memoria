@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/spf13/cobra"
 
@@ -60,9 +61,14 @@ It exits 1 if a file is not held, is held at another version, or a sampled docum
 match. Overlap never fails it: local QMD ranks differently and may use another embedder, so
 100% is not expected, and no threshold has been measured. It reports the number.
 
+A sampled document whose differences all sit around redaction marks, but cannot be lined up, is
+counted as could not compare and named in the report. It does not fail the run: look at it by hand.
+
 It does not prove every document's text is right: only the sample is fetched. A file removed
-from the server's disk behind its ledger shows only if it is in the sample. Documents a session
-took over are counted on their state, which says nothing of their text.
+from the server's disk behind its ledger reads clean until the index updates, and after that
+shows only if it is in the sample. Documents a session took over are counted on their state,
+which says nothing of their text, and one takeover turns the count check off for its collection.
+A document just pushed is not counted or fetched until it is indexed, so wait for the index first.
 
 Local results come from 'qmd search', which only reads and uses no model, so it is keyword
 search compared with the server's hybrid search, and overlap will be lower for it. --local-mode
@@ -94,12 +100,20 @@ func readQueries(path string) ([]string, error) {
 		return nil, apperr.New(apperr.KindUsage, "the file of queries cannot be read")
 	}
 	var queries []string
-	for _, line := range strings.Split(string(data), "\n") {
-		if query := strings.TrimSpace(line); query != "" {
+	for number, line := range strings.Split(string(data), "\n") {
+		query := strings.TrimSpace(line)
+		if strings.ContainsFunc(query, isControlInQuery) {
+			return nil, apperr.New(apperr.KindUsage, "line %d of the file of queries holds a control character, which could cut the query short", number+1)
+		}
+		if query != "" {
 			queries = append(queries, query)
 		}
 	}
 	return queries, nil
+}
+
+func isControlInQuery(r rune) bool {
+	return r != '\t' && unicode.IsControl(r)
 }
 
 func (o migrateVerifyOptions) validate() error {
@@ -361,6 +375,9 @@ func (r *pushRun) compareOne(v *verifying, name string) {
 		v.summary.SampleSame++
 	case migrate.TextRedacted:
 		v.summary.SampleRedacted++
+	case migrate.TextCouldNotCompare:
+		v.summary.SampleCouldNotCompare++
+		v.note("sample_could_not_compare", name, "")
 	default:
 		v.summary.SampleDifferent++
 		v.note("sample_differs", name, "")
@@ -463,8 +480,9 @@ func runLocalQMD(ctx context.Context, command string, args []string) ([]byte, er
 	return stdout.Bytes(), nil
 }
 
-// cmdMetaCharacters are what cmd.exe gives a meaning to, even inside quotes.
-const cmdMetaCharacters = "()[]%!^\"`<>&|;, *?"
+// cmdMetaCharacters are what cmd.exe gives a meaning to, even inside quotes. The colon is here for %VAR:x=y%, which is expanded
+// even with a caret before its closing percent sign, and could bring in a variable holding a command.
+const cmdMetaCharacters = "()[]%!^\"`<>&|;, *?:"
 
 // EscapeForCmd makes an argument one word that cmd.exe passes on untouched, the way cross-spawn does for the same problem. It
 // escapes twice, as npm's .cmd shims hand their arguments to cmd.exe a second time through %*.

@@ -77,7 +77,7 @@ func TestAReportCountsCredentialNamesAndCaveatsGitleaks(t *testing.T) {
 
 func TestAVerifySaysWhatItFoundAndWhatItDoesNotShow(t *testing.T) {
 	result := &migrate.VerifyResult{LocalMode: "search", ReportFile: "report.json", Collections: []migrate.VerifySummary{
-		{Name: "a", Target: "a", LocalFiles: 2, Confirmed: 1, NotHeld: 1, CountDiffers: true, Sampled: 1, SampleRedacted: 1, Overlap: migrate.Overlap{Queries: 3, NoLocalResults: 1, Mean: 0.5, Lowest: 0.25}},
+		{Name: "a", Target: "a", LocalFiles: 2, Confirmed: 1, NotHeld: 1, CountDiffers: true, SampleCouldNotCompare: 1, Sampled: 1, SampleRedacted: 1, Overlap: migrate.Overlap{Queries: 3, NoLocalResults: 1, Mean: 0.5, Lowest: 0.25}},
 		{Name: "b", Target: "b", Overlap: migrate.Overlap{Queries: 1, Failed: 1}},
 		{Name: "c", Target: "c"},
 	}}
@@ -86,4 +86,25 @@ func TestAVerifySaysWhatItFoundAndWhatItDoesNotShow(t *testing.T) {
 	checkHolds(t, renderedBy(t, func(w io.Writer) error { return MigrateVerifyMarkdown(w, result) }), "need a look", "does not show every document", "mean 50%, lowest 25%", "1 not held")
 	clean := &migrate.VerifyResult{LocalMode: "search", Collections: []migrate.VerifySummary{{Name: "a", Target: "a", Confirmed: 1}}}
 	checkHolds(t, renderedBy(t, func(w io.Writer) error { return MigrateVerifyTable(w, clean) }), "Nothing here needs a look, within the limits below")
+}
+
+func TestAVerifySaysWhatItsCountsMayMean(t *testing.T) {
+	limits := []string{"reads clean until the index updates", "up to about 255", "could not be compared: every difference sits around a redaction mark", "Look at them by hand"}
+	shapes := &migrate.VerifyResult{Collections: []migrate.VerifySummary{{Name: "a", SampleCouldNotCompare: 2}}}
+	checkHolds(t, renderedBy(t, func(w io.Writer) error { return MigrateVerifyTable(w, shapes) }), append(limits, "Nothing here needs a look")...)
+	if text := renderedBy(t, func(w io.Writer) error { return MigrateVerifyTable(w, shapes) }); strings.Contains(text, "catching up") {
+		t.Fatalf("a run that fetched everything said the index was behind: %s", text)
+	}
+	behind := &migrate.VerifyResult{Collections: []migrate.VerifySummary{{Name: "a", LocalFiles: 3, ServerDocuments: 0, CountDiffers: true}}}
+	checkHolds(t, renderedBy(t, func(w io.Writer) error { return MigrateVerifyTable(w, behind) }), "index may still be catching up", "the counts differ: 3 local, 0 on the server")
+	extra := &migrate.VerifyResult{Collections: []migrate.VerifySummary{{Name: "a", LocalFiles: 1, ServerDocuments: 5, CountDiffers: true}}}
+	if text := renderedBy(t, func(w io.Writer) error { return MigrateVerifyTable(w, extra) }); strings.Contains(text, "catching up") {
+		t.Fatalf("more on the server than here is not the index being behind: %s", text)
+	}
+	notFetched := &migrate.VerifyResult{Collections: []migrate.VerifySummary{{Name: "a", SampleFailed: 1}}}
+	checkHolds(t, renderedBy(t, func(w io.Writer) error { return MigrateVerifyMarkdown(w, notFetched) }), "index may still be catching up")
+	taken := &migrate.VerifyResult{Collections: []migrate.VerifySummary{{Name: "a", TakenOver: 2}}}
+	for _, render := range []func(io.Writer, *migrate.VerifyResult) error{MigrateVerifyTable, MigrateVerifyMarkdown} {
+		checkHolds(t, renderedBy(t, func(w io.Writer) error { return render(w, taken) }), "one takeover turns that check off for the whole collection")
+	}
 }

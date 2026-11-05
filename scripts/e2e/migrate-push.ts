@@ -26,6 +26,7 @@ const OWN_FOLDER = "-srv-demo";
 const DECOMPOSED_TARGET = "migrated-decomposed";
 const CREDENTIAL_TARGET = "migrated-credential";
 const OLDER_TARGET = "migrated-older";
+const SHAPES_TARGET = "migrated-shapes";
 const CLOSED = "closed";
 const FILLED = "filled";
 const FILE_TIME = new Date("2025-06-01T12:00:00Z");
@@ -42,6 +43,8 @@ interface VerifyRow {
   sampled: number;
   sampleSame: number;
   sampleSameApartFromRedaction: number;
+  sampleCouldNotCompare: number;
+  sampleDifferent: number;
   overlap: { queries: number; noLocalResults: number; mean: number };
 }
 
@@ -378,6 +381,24 @@ function verifyRuns(h: Harness, key: string, s: Setup): void {
   h.check("verify: a key it cannot use stops it", narrow.code !== 0, narrow.out + narrow.err);
 }
 
+/** Honest documents the real redactor leaves in shapes that do not line up. They are named privately, and fail nothing. */
+async function redactedShapes(h: Harness, key: string): Promise<void> {
+  const head = "---\ndate: \"2024-03-01\"\n---\n\nkept line one\n\n";
+  const begin = "-----BEGIN " + "RSA PRIVATE KEY-----\n";
+  const body = "MIIEpAIBAAKCAQEA7bq3RsGkV1xQ2mN8pYtZ4uWcJd6HfLoE9sTaXn0vKiMbPrUg\n".repeat(4);
+  const s = setup(h, key, "shapes", SHAPES_TARGET, {
+    "no-end.md": `${head}${begin}${body}`,
+    "second-begin.md": `${head}${begin}${body}${begin}${body}-----END ${"RSA PRIVATE KEY-----"}\nkept line two\n`,
+    "joined.md": `${head}PASSWORD=hunter2hunter2hunter2\nAuthorization: Bearer abcdefghijklmnopqrstuvwxyz012345\nkept line two\n`,
+  });
+  const sent = push(s, h.apiUrl, "--apply", "--format", "json");
+  await forceIndex({ h });
+  const run = h.memoria(["migrate", "verify", "--qmd-config", s.config, "--api-url", h.apiUrl, "--format", "json"], { key });
+  const row = ((JSON.parse(run.out || "{}") as { collections?: VerifyRow[] }).collections ?? [])[0];
+  h.check("verify: what the redactor leaves does not read as a difference, and fails nothing", sent.code === 0 && run.code === 0 && row?.sampled === 3 && row.sampleDifferent === 0, run.out + run.err);
+  h.check("verify: no name reaches its output when a document could not be compared", !(run.out + run.err).includes("no-end.md") && !(run.out + run.err).includes("joined.md"), run.out + run.err);
+}
+
 /** Saved progress is only a note: what the server no longer holds is not called stored. */
 async function trustNoNote(h: Harness, key: string): Promise<void> {
   const s = setup(h, key, "trust", TRUST_TARGET, { "kept.md": "---\ndate: \"2024-03-01\"\n---\n\nkept\n", "gone.md": "---\ndate: \"2024-03-01\"\n---\n\ngone\n" });
@@ -475,12 +496,13 @@ function stops(h: Harness, key: string, narrow: string): void {
 
 /** Runs against a server started with INGEST_SERVER, where these targets are opened and empty. */
 export async function migratePush(h: Harness, admin: string): Promise<void> {
-  const collections = [TARGET, SECOND_TARGET, REFUSING_TARGET, KILLED_TARGET, RULES_TARGET, TAKEOVER_TARGET, TRUST_TARGET, SPELLING_TARGET, DECOMPOSED_TARGET, CREDENTIAL_TARGET, OLDER_TARGET, FILLED, CLOSED];
+  const collections = [TARGET, SECOND_TARGET, REFUSING_TARGET, KILLED_TARGET, RULES_TARGET, TAKEOVER_TARGET, TRUST_TARGET, SPELLING_TARGET, DECOMPOSED_TARGET, CREDENTIAL_TARGET, OLDER_TARGET, SHAPES_TARGET, FILLED, CLOSED];
   // A key has a budget of requests a minute, and this should not spend its time waiting out a window. A real push does, and goes at that rate.
   const fresh = async (label: string): Promise<string> => (await issueKey(h, admin, { label, scopes: ["ingest", "read"], collections })).token;
   const pushKey = await fresh("push");
   const first = await dryRunAndSend(h, pushKey);
   verifyRuns(h, pushKey, first);
+  await redactedShapes(h, await fresh("push-shapes"));
   await pathRules(h, await fresh("push-rules"));
   const other = await fresh("push-other");
   planCounts(h, other);

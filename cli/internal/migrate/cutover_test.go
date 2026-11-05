@@ -169,6 +169,37 @@ func TestAHookIsShownByNameAndNotAdded(t *testing.T) {
 	}
 }
 
+func TestAHooksSecretIsNeverShown(t *testing.T) {
+	for command, want := range map[string]string{
+		"TOKEN=hidden python3 /x/run.py":                   "python3 run.py",
+		`TOKEN="a hidden value" python3 /x/run.py`:         "python3 run.py",
+		"A=hidden B=hidden /x/run.sh":                      "run.sh",
+		"python3 /x/run.py --token=hidden.py":              "python3 run.py",
+		"python3 --token=hidden.py /x/run.py":              "python3 run.py",
+		"env TOKEN=hidden node /x/run.js":                  "env run.js",
+		"TOKEN=hidden":                                     "a command",
+		"   ":                                              "a command",
+		`"C:/Program Files/node.exe" 'C:/my dir/run.js' x`: "node.exe run.js",
+	} {
+		if got := commandName(command); got != want {
+			t.Errorf("%q = %q, want %q", command, got, want)
+		}
+	}
+	for command, want := range map[string]string{"/opt/qmd": "qmd", "TOKEN=hidden qmd": "a program", "qmd --key hidden": "a program"} {
+		if got := entrySummary(json.RawMessage(`{"command":"` + command + `"}`)); !strings.Contains(got, want) || strings.Contains(got, "hidden") {
+			t.Errorf("%q = %q", command, got)
+		}
+	}
+}
+
+func TestAHookCommandsSecretStaysOutOfThePlan(t *testing.T) {
+	paths := tempPaths(t)
+	writeTestFile(t, paths.ClaudeSettings, `{"hooks":{"SessionEnd":[{"hooks":[{"type":"command","command":"TOKEN=hidden python3 /x/run.py"}]}]}}`)
+	if notes := strings.Join(planned(t, CutoverOptions{Paths: paths}).Notes, "\n"); strings.Contains(notes, "hidden") || !strings.Contains(notes, "python3 run.py") {
+		t.Fatalf("notes = %q", notes)
+	}
+}
+
 func TestMemoriasToolsAreAllowedWhereQMDsWere(t *testing.T) {
 	paths := tempPaths(t)
 	writeTestFile(t, paths.ClaudeLocalSettings, `{"z":1,"permissions":{"allow":["Read","mcp__qmd__query","mcp__qmd__get","mcp__qmd__multi_get","mcp__qmd__status","mcp__qmd__*","mcp__qmd","Bash(qmd:*)","mcp__qmd__unknown"]},"enabledMcpjsonServers":["qmd"],"a":2}`)
@@ -541,6 +572,49 @@ func TestASecondCutoverKeepsTheOriginalAndNotesAnEditBetween(t *testing.T) {
 	text := readTestFile(t, paths.MCPConfig)
 	if steps[0].Action != UndoOwnChange || !strings.Contains(text, "an edit") || !strings.Contains(text, `"qmd"`) {
 		t.Fatalf("steps = %+v, text = %s", steps, text)
+	}
+}
+
+// A cutover killed after its record was saved leaves a file it never wrote. Run again, that file is not an edit, so a rollback
+// brings it back byte for byte.
+func TestAFileACutoverNeverGotToIsRestoredWhole(t *testing.T) {
+	paths := tempPaths(t)
+	mcp := `{ "mcpServers" : { "other" : {} , "qmd" : { "command" : "qmd" } } , "z" : 1 }`
+	writeTestFile(t, paths.MCPConfig, mcp)
+	plan := planned(t, CutoverOptions{Paths: paths})
+	manifest, err := manifestToExtend()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manifest.note(plan.Edits[0]); err != nil {
+		t.Fatal(err)
+	}
+	if err := manifest.save(); err != nil {
+		t.Fatal(err)
+	}
+	applied(t, CutoverOptions{Paths: paths})
+	if activeOf(t, paths).Entries[0].EditedSince {
+		t.Fatal("a file never written was marked as edited")
+	}
+	if steps := rollBack(t, paths); steps[0].Action != RestoreWhole || readTestFile(t, paths.MCPConfig) != mcp {
+		t.Fatalf("steps = %+v, file = %s", steps, readTestFile(t, paths.MCPConfig))
+	}
+}
+
+func TestASkillFileThatTurnedUpBetweenCutoversIsNotRemovedQuietly(t *testing.T) {
+	paths := tempPaths(t)
+	applied(t, CutoverOptions{Paths: paths, Skill: []byte("skill")})
+	skill := filepath.Join(paths.ClaudeSkills, "memoria", "SKILL.md")
+	writeTestFile(t, skill, "mine")
+	applied(t, CutoverOptions{Paths: paths, Skill: []byte("skill")})
+	steps, err := PlanRollback(activeOf(t, paths))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range steps {
+		if step.Entry.Path == skill && !step.Changed {
+			t.Fatal("a file that was not the cutover's would be removed with no word")
+		}
 	}
 }
 

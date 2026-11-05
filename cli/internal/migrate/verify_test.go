@@ -31,6 +31,32 @@ func TestCompareTextAllowsOnlyWhatRedactionExplains(t *testing.T) {
 	}
 }
 
+func TestWhatCannotBeLinedUpIsSaidAndWhatDiffersStillFails(t *testing.T) {
+	begin, end := "-----BEGIN PRIVATE KEY-----", "-----END PRIVATE KEY-----"
+	mark := "[REDACTED:token]"
+	for name, c := range map[string]struct {
+		local, server string
+		want          int
+	}{
+		"a key with no end":          {"before\n" + begin + "\nAAAA\nBBBB\n", "before\n" + mark + "\n", TextCouldNotCompare},
+		"a key then a second BEGIN":  {begin + "\nAAAA\n" + begin + "\nBBBB\n" + end + "\nafter\n", mark + "\n" + mark + "\nafter\n", TextCouldNotCompare},
+		"a value joined to a header": {"PASSWORD=abc\nAuthorization: Bearer abc\nend\n", "PASSWORD=" + mark + "\nend\n", TextCouldNotCompare},
+		"a line changed above":       {"one\ntwo\n" + begin + "\nAAAA\n", "one\nchanged\n" + mark + "\n", TextDifferent},
+		"a line lost above":          {"one\nlost line\nkept\n" + begin + "\nAAAA\n", "one\nkept\n" + mark + "\n", TextDifferent},
+		"a line lost beside a mark":  {"one\ntwo\n" + begin + "\nAAAA\n", "one\n" + mark + "\n", TextCouldNotCompare},
+		"a line lost far below":      {"PASSWORD=abc\nAuthorization: Bearer abc\nkept\nlost line\n", "PASSWORD=" + mark + "\nkept\n", TextDifferent},
+		"a line added":               {"PASSWORD=abc\nAuthorization: Bearer abc\nend\n", "PASSWORD=" + mark + "\nend\nadded\n", TextDifferent},
+		"two lines swapped":          {"PASSWORD=abc\nAuthorization: Bearer abc\nb\nc\n", "PASSWORD=" + mark + "\nc\nb\n", TextDifferent},
+		"text around a mark changed": {"PASSWORD=abc\nAuthorization: Bearer abc\nend\n", "OTHER=" + mark + "\nend\n", TextDifferent},
+		"two spaced lines under one": {"PASSWORD=abc\nspaced line\nspaced again\nend\n", "PASSWORD=" + mark + "\nend\n", TextDifferent},
+		"no mark at all":             {"one\ntwo\n", "one\n", TextDifferent},
+	} {
+		if got := CompareText(c.local, c.server); got != c.want {
+			t.Errorf("%s = %d, want %d", name, got, c.want)
+		}
+	}
+}
+
 func TestOneMarkMayCoverOnlyWhatRedactionFolds(t *testing.T) {
 	block := "before\n-----BEGIN PRIVATE KEY-----\nAAAA\nBBBB\n-----END PRIVATE KEY-----\nafter\n"
 	if got := CompareText(block, "before\n[REDACTED:private-key]\nafter\n"); got != TextRedacted {

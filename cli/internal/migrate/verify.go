@@ -23,16 +23,18 @@ type VerifySummary struct {
 	// CountDiffers is the two counts not agreeing, with no takeover to explain it.
 	CountDiffers bool `json:"countDiffers"`
 	// SecondSpellings is files sharing a composed name with an earlier one. A push refuses them.
-	SecondSpellings int     `json:"secondSpellings"`
-	LocalUnreadable int     `json:"localUnreadable"`
-	NotChecked      int     `json:"notChecked"`
-	FoldersSkipped  int     `json:"foldersSkipped"`
-	Sampled         int     `json:"sampled"`
-	SampleSame      int     `json:"sampleSame"`
-	SampleRedacted  int     `json:"sampleSameApartFromRedaction"`
-	SampleDifferent int     `json:"sampleDifferent"`
-	SampleFailed    int     `json:"sampleNotFetched"`
-	Overlap         Overlap `json:"overlap"`
+	SecondSpellings int `json:"secondSpellings"`
+	LocalUnreadable int `json:"localUnreadable"`
+	NotChecked      int `json:"notChecked"`
+	FoldersSkipped  int `json:"foldersSkipped"`
+	Sampled         int `json:"sampled"`
+	SampleSame      int `json:"sampleSame"`
+	SampleRedacted  int `json:"sampleSameApartFromRedaction"`
+	SampleDifferent int `json:"sampleDifferent"`
+	SampleFailed    int `json:"sampleNotFetched"`
+	// SampleCouldNotCompare is documents whose differences all sit around redaction marks, but cannot be lined up. It is not a failure.
+	SampleCouldNotCompare int     `json:"sampleCouldNotCompare"`
+	Overlap               Overlap `json:"overlap"`
 }
 
 // Overlap is how many of local QMD's top results the server also returned. Each query's share is of local QMD's results.
@@ -75,6 +77,7 @@ type VerifyProblem struct {
 const (
 	TextSame = iota
 	TextRedacted
+	TextCouldNotCompare
 	TextDifferent
 )
 
@@ -83,30 +86,47 @@ var redactedMark = regexp.MustCompile(`\[REDACTED:[^\]]*\]`)
 // maxSecretLines bounds one mark's reach. A 4096-bit key block is about 50 lines; past this a sample reads as different, not as clean.
 const maxSecretLines = 256
 
+// maxSpacedLinesUnderMark is how many lines with spaces, or blank ones, a mark may stand for when lining up has failed. Redaction joins
+// a value and the header below it, but a mark standing for more than that looks like lost text, and reads as different.
+const maxSpacedLinesUnderMark = 1
+
 // CompareText compares a local file with what a server returns for it, line by line and in order. Redaction changes bytes on
 // purpose, so a line with a mark must match its local line apart from the marks. One mark may cover several local lines only where
 // redaction really does that: a key block, or a token wrapped over lines with no spaces. Where a mark could end at more than one
 // line, each is followed. This cannot see a change inside a mark.
+//
+// Redaction can leave shapes that do not line up that way, such as a key block with no end. If every line away from a mark still
+// matches, in order, and only what sits under a mark is unexplained, the answer is TextCouldNotCompare and not a difference.
 func CompareText(local, server string) int {
 	if normalized(local) == normalized(server) {
 		return TextSame
 	}
 	localLines, serverLines := strings.Split(normalized(local), "\n"), strings.Split(normalized(server), "\n")
+	if linesUp(localLines, serverLines, secretEnds) {
+		return TextRedacted
+	}
+	if linesUp(localLines, serverLines, looseEnds) {
+		return TextCouldNotCompare
+	}
+	return TextDifferent
+}
+
+// markReach says how far one mark may reach from a line.
+type markReach func(lines []string, at int) []int
+
+func linesUp(localLines, serverLines []string, reach markReach) bool {
 	reached := map[int]bool{0: true}
 	for _, line := range serverLines {
-		reached = stepLine(localLines, reached, line)
+		reached = stepLine(localLines, reached, line, reach)
 	}
-	if !reached[len(localLines)] {
-		return TextDifferent
-	}
-	return TextRedacted
+	return reached[len(localLines)]
 }
 
 // stepLine is every position one server line can lead to, from every position reached so far.
-func stepLine(lines []string, reached map[int]bool, line string) map[int]bool {
+func stepLine(lines []string, reached map[int]bool, line string, reach markReach) map[int]bool {
 	next := map[int]bool{}
 	for at := range reached {
-		for _, end := range lineEnds(lines, at, line) {
+		for _, end := range lineEnds(lines, at, line, reach) {
 			next[end] = true
 		}
 	}
@@ -114,7 +134,7 @@ func stepLine(lines []string, reached map[int]bool, line string) map[int]bool {
 }
 
 // lineEnds is where the next line can start if this server line matches at a position.
-func lineEnds(lines []string, at int, line string) []int {
+func lineEnds(lines []string, at int, line string, reach markReach) []int {
 	if at >= len(lines) {
 		return nil
 	}
@@ -125,12 +145,17 @@ func lineEnds(lines []string, at int, line string) []int {
 		return nil
 	}
 	var ends []int
-	for _, end := range secretEnds(lines, at) {
+	for _, end := range reach(lines, at) {
 		if fitsApartFromMarks(strings.Join(lines[at:end], "\n"), line) {
 			ends = append(ends, end)
 		}
 	}
 	return ends
+}
+
+func hasSpaceOrIsBlank(line string) bool {
+	text := strings.TrimSpace(line)
+	return text == "" || strings.ContainsAny(text, " \t")
 }
 
 // secretEnds is how far one mark may reach from a line: that line alone, a key block, or a token wrapped over lines with no spaces.
@@ -146,7 +171,23 @@ func secretEnds(lines []string, at int) []int {
 			}
 			continue
 		}
-		if strings.TrimSpace(lines[end]) == "" || strings.ContainsAny(strings.TrimSpace(lines[end]), " \t") {
+		if hasSpaceOrIsBlank(lines[end]) {
+			break
+		}
+		ends = append(ends, end+1)
+	}
+	return ends
+}
+
+// looseEnds is any end a mark could explain, for when the exact shapes have not lined up. It is why this says could not compare.
+func looseEnds(lines []string, at int) []int {
+	ends := []int{at + 1}
+	spaced := 0
+	for end := at + 1; end < min(len(lines), at+maxSecretLines); end++ {
+		if hasSpaceOrIsBlank(lines[end]) {
+			spaced++
+		}
+		if spaced > maxSpacedLinesUnderMark {
 			break
 		}
 		ends = append(ends, end+1)

@@ -301,7 +301,8 @@ func MigratePushMarkdown(w io.Writer, result *migrate.PushResult) error {
 // verifyLimits is said on every run, so a clean result does not read as more than it is.
 var verifyLimits = []string{
 	"This shows each path's state and version, and that the sampled documents match apart from redaction.",
-	"It does not show every document's text is right: only the sample was fetched. A file gone from the server's disk behind its ledger shows only if sampled, and taken-over documents are counted on their state alone.",
+	"It does not show every document's text is right: only the sample was fetched. A file gone from the server's disk behind its ledger reads clean until the index updates, and after that shows only if sampled. Taken-over documents are counted on their state alone.",
+	"A redaction mark can stand for lines with no spaces below it, up to about 255, so lines of that shape lost under a mark cannot be seen, and neither can a change inside a mark.",
 	"Overlap is a number to read, not a pass or fail. Local QMD ranks differently and may use another embedder, so 100% is not expected.",
 }
 
@@ -326,7 +327,37 @@ func verifyNotes(result *migrate.VerifyResult) []string {
 		verdict = fmt.Sprintf("%d thing(s) need a look. The local report names them, and these counts do not.", problems)
 	}
 	seed := fmt.Sprintf("Sample seed: %d. Pass it as --seed to fetch the same sample again.", result.Seed)
-	return append([]string{verdict}, append(verifyLimits, seed, "Local report: "+result.ReportFile)...)
+	notes := append([]string{verdict}, situationNotes(result)...)
+	return append(notes, append(verifyLimits, seed, "Local report: "+result.ReportFile)...)
+}
+
+// situationNotes says what this run's counts may mean, where they could otherwise be misread.
+func situationNotes(result *migrate.VerifyResult) []string {
+	uncompared, behind := 0, false
+	for i := range result.Collections {
+		s := &result.Collections[i]
+		uncompared += s.SampleCouldNotCompare
+		behind = behind || s.SampleFailed > 0 || (s.CountDiffers && s.ServerDocuments < s.LocalFiles-s.NotHeld)
+	}
+	var notes []string
+	if uncompared > 0 {
+		notes = append(notes, fmt.Sprintf("%d sampled document(s) could not be compared: every difference sits around a redaction mark, but they could not be lined up. This is not a failure. Look at them by hand: the local report names them.", uncompared))
+	}
+	if behind {
+		notes = append(notes, "If you pushed in the last few minutes, the index may still be catching up, as a document is counted and fetched only once it is indexed. Wait, and run this again before treating these as failures.")
+	}
+	return notes
+}
+
+// countNote says when the two counts tell something: they differ, or a takeover means they were not compared.
+func countNote(s *migrate.VerifySummary) string {
+	switch {
+	case s.CountDiffers:
+		return fmt.Sprintf("the counts differ: %d local, %d on the server", s.LocalFiles, s.ServerDocuments)
+	case s.TakenOver > 0:
+		return fmt.Sprintf("the counts were not compared, as one takeover turns that check off for the whole collection, and there are %d", s.TakenOver)
+	}
+	return ""
 }
 
 // MigrateVerifyTable renders a check. It names no file or query: only the local report does.
@@ -336,8 +367,8 @@ func MigrateVerifyTable(w io.Writer, result *migrate.VerifyResult) error {
 	for i := range result.Collections {
 		s := &result.Collections[i]
 		rows = append(rows, row(s.Name, s.Target, s.LocalFiles, s.ServerDocuments, s.Confirmed, s.TakenOver, s.VersionDiffers, s.NotHeld, s.SecondSpellings, s.LocalUnreadable+s.FoldersSkipped, s.NotChecked))
-		if s.CountDiffers {
-			b.WriteString(row(fmt.Sprintf("%s: the counts differ: %d local, %d on the server", s.Name, s.LocalFiles, s.ServerDocuments)) + "\n")
+		if note := countNote(s); note != "" {
+			b.WriteString(row(s.Name+": "+note) + "\n")
 		}
 		b.WriteString(row(s.Name+": sample: "+sampleText(s)) + "\n")
 		b.WriteString(row(s.Name+": overlap: "+overlapText(s.Overlap, result.LocalMode)) + "\n")
@@ -353,7 +384,7 @@ func MigrateVerifyTable(w io.Writer, result *migrate.VerifyResult) error {
 }
 
 func sampleText(s *migrate.VerifySummary) string {
-	return fmt.Sprintf("%d fetched: %d the same, %d the same apart from redaction, %d different, %d not fetched", s.Sampled, s.SampleSame, s.SampleRedacted, s.SampleDifferent, s.SampleFailed)
+	return fmt.Sprintf("%d fetched: %d the same, %d the same apart from redaction, %d could not be compared, %d different, %d not fetched", s.Sampled, s.SampleSame, s.SampleRedacted, s.SampleCouldNotCompare, s.SampleDifferent, s.SampleFailed)
 }
 
 // MigrateVerifyMarkdown renders a check as a bullet list, naming no file or query.
@@ -363,8 +394,8 @@ func MigrateVerifyMarkdown(w io.Writer, result *migrate.VerifyResult) error {
 		s := &result.Collections[i]
 		fmt.Fprintf(&b, "- **%s** to %s: %d local files, %d server documents, %d confirmed, %d taken over, %d at another version, %d not held, %d second spellings, %d not read here, %d not checked\n",
 			inlineText(s.Name), inlineText(s.Target), s.LocalFiles, s.ServerDocuments, s.Confirmed, s.TakenOver, s.VersionDiffers, s.NotHeld, s.SecondSpellings, s.LocalUnreadable+s.FoldersSkipped, s.NotChecked)
-		if s.CountDiffers {
-			b.WriteString("  - the counts differ\n")
+		if note := countNote(s); note != "" {
+			b.WriteString("  - " + note + "\n")
 		}
 		b.WriteString("  - sample: " + sampleText(s) + "\n")
 		b.WriteString("  - overlap: " + inlineText(overlapText(s.Overlap, result.LocalMode)) + "\n")
