@@ -364,15 +364,17 @@ function localQMD(h: Harness, config: string): string {
 /** Against what the first push stored, with its own key, as a real check needs the read scope too. */
 function verifyRuns(h: Harness, key: string, s: Setup): void {
   const queries = h.privatePath("verify-queries.txt");
-  writeFileSync(queries, "spacedword\nnosuchwordanywhere\n");
+  const marker = h.privatePath("verify-a-query-ran");
+  writeFileSync(queries, `spacedword\nnosuchwordanywhere\nnosuchword & echo ran> ${marker}\n-nosuchflag\n`);
   const shim = localQMD(h, s.config);
   const run = h.memoria(["migrate", "verify", "--qmd-config", s.config, "--api-url", h.apiUrl, "--queries", queries, "--qmd-command", shim, "--no-rerank", "--format", "json"], { key });
   const row = ((JSON.parse(run.out || "{}") as { collections?: VerifyRow[] }).collections ?? [])[0];
   h.check("verify: it confirms each path at its version, and counts what the server holds", run.code === 0 && row?.confirmed === 4 && row.localFiles === 4 && row.serverDocuments === 4, run.out + run.err);
   h.check("verify: it fetches a sample and finds it the same, apart from redaction", row?.sampled === 4 && row.sampleSame + row.sampleSameApartFromRedaction === 4 && row.sampleSameApartFromRedaction >= 1, run.out);
-  h.check("verify: it compares top results with the real local QMD, and leaves out a query with no local results", row?.overlap.queries === 2 && row.overlap.noLocalResults === 1 && row.overlap.mean === 1, run.out + run.err);
+  h.check("verify: it compares top results with the real local QMD, and leaves out a query with no local results", row?.overlap.queries === 4 && row.overlap.noLocalResults === 3 && row.overlap.mean === 1, run.out + run.err);
+  h.check("verify: a query is only ever a query, with shell characters or a leading dash", !existsSync(marker), marker);
   h.check("verify: no query or file name reached its output", !(run.out + run.err).includes("spacedword") && !(run.out + run.err).includes("front.md"), run.out + run.err);
-  const narrow = h.memoria(["migrate", "verify", "--qmd-config", s.config, "--api-url", h.apiUrl, "--sample", "0"], { key: "mem_" + "0".repeat(16) + "_" + "0".repeat(64) });
+  const narrow = h.memoria(["migrate", "verify", "--qmd-config", s.config, "--api-url", h.apiUrl, "--sample", "1"], { key: "mem_" + "0".repeat(16) + "_" + "0".repeat(64) });
   h.check("verify: a key it cannot use stops it", narrow.code !== 0, narrow.out + narrow.err);
 }
 

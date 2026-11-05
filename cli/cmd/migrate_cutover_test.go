@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,25 +9,22 @@ import (
 	"github.com/mggarofalo/memoria/cli/internal/apperr"
 )
 
-const claudeConfigWithQMD = `{
-  "numStartups": 12345678901234567890,
-  "oauthAccount": {"emailAddress": "someone@example.test"},
-  "mcpServers": {
-    "qmd": {"command": "qmd", "args": ["mcp"], "env": {"SECRET_VALUE": "do-not-show-me"}},
-    "other": {"command": "other", "url": "https://x.test/a?b=<c>&d"}
-  }
-}
-`
-
-const codexConfigWithQMD = "model = \"m\"\n\n[mcp_servers.qmd]\ncommand = \"qmd\"\nargs = [\"mcp\"]\n\n[mcp_servers.qmd.env]\nSECRET_VALUE = \"do-not-show-me\"\n\n[mcp_servers.other]\ncommand = \"other\"\n"
+const (
+	mcpWithQMD    = `{"mcpServers":{"qmd":{"command":"qmd","args":["mcp","--key","do-not-show-me"],"env":{"SECRET_VALUE":"do-not-show-me"}}}}` + "\n"
+	claudeNoQMD   = `{"numStartups":12345678901234567890,"oauthAccount":{"emailAddress":"someone@example.test"},"mcpServers":{"other":{"command":"other"}}}` + "\n"
+	codexNoQMD    = "model = \"m\"\n\n[mcp_servers.other]\ncommand = \"other\"\n"
+	settingsHook  = `{"theme":"dark","hooks":{"SessionEnd":[{"hooks":[{"type":"command","command":"python3 /h/session-end-export.py"}]}]}}` + "\n"
+	settingsLocal = `{"permissions":{"allow":["mcp__qmd__*"]},"enabledMcpjsonServers":["qmd"]}` + "\n"
+)
 
 type cutoverHome struct {
-	h                                      *harness
-	home                                   string
-	claude, codex, settings, skill, source string
+	h                                                *harness
+	home, mcp, claude, codex, settings, local, skill string
+	source                                           string
 }
 
-// newCutoverHome is a temporary home with both clients and a local QMD, so nothing here can reach a real one.
+// newCutoverHome is a temporary home laid out as the owner's is: qmd in ~/.mcp.json, none in Codex, an export hook already set, and
+// a local QMD beside it. Nothing here can reach a real home.
 func newCutoverHome(t *testing.T) *cutoverHome {
 	t.Helper()
 	home := t.TempDir()
@@ -36,13 +32,15 @@ func newCutoverHome(t *testing.T) *cutoverHome {
 	t.Setenv("USERPROFILE", home)
 	c := &cutoverHome{
 		h: newHarness(t), home: home,
-		claude: filepath.Join(home, ".claude.json"), codex: filepath.Join(home, ".codex", "config.toml"),
-		settings: filepath.Join(home, ".claude", "settings.json"), skill: filepath.Join(home, ".claude", "skills", "memoria", "SKILL.md"),
-		source: filepath.Join(t.TempDir(), "SKILL.md"),
+		mcp: filepath.Join(home, ".mcp.json"), claude: filepath.Join(home, ".claude.json"), codex: filepath.Join(home, ".codex", "config.toml"),
+		settings: filepath.Join(home, ".claude", "settings.json"), local: filepath.Join(home, ".claude", "settings.local.json"),
+		skill: filepath.Join(home, ".claude", "skills", "memoria", "SKILL.md"), source: filepath.Join(t.TempDir(), "SKILL.md"),
 	}
-	writeFile(t, c.claude, claudeConfigWithQMD)
-	writeFile(t, c.codex, codexConfigWithQMD)
-	writeFile(t, c.settings, `{"theme": "dark"}`)
+	writeFile(t, c.mcp, mcpWithQMD)
+	writeFile(t, c.claude, claudeNoQMD)
+	writeFile(t, c.codex, codexNoQMD)
+	writeFile(t, c.settings, settingsHook)
+	writeFile(t, c.local, settingsLocal)
 	writeFile(t, c.source, "the skill\n")
 	writeFile(t, filepath.Join(home, ".config", "qmd", "index.yml"), "collections: {}\n")
 	writeFile(t, filepath.Join(home, ".cache", "qmd", "index.sqlite"), "an index")
@@ -50,7 +48,7 @@ func newCutoverHome(t *testing.T) *cutoverHome {
 }
 
 func (c *cutoverHome) cutover(extra ...string) int {
-	return c.h.run(append([]string{"migrate", "cutover", "--skill", c.source, "--hook-command", "push-hook"}, extra...)...)
+	return c.h.run(append([]string{"migrate", "cutover", "--skill", c.source}, extra...)...)
 }
 
 func readText(t *testing.T, path string) string {
@@ -64,8 +62,10 @@ func readText(t *testing.T, path string) string {
 
 func checkOriginals(t *testing.T, c *cutoverHome) {
 	t.Helper()
-	if readText(t, c.claude) != claudeConfigWithQMD || readText(t, c.codex) != codexConfigWithQMD || readText(t, c.settings) != `{"theme": "dark"}` {
-		t.Fatal("a client file is not its original")
+	for path, want := range map[string]string{c.mcp: mcpWithQMD, c.claude: claudeNoQMD, c.codex: codexNoQMD, c.settings: settingsHook, c.local: settingsLocal} {
+		if readText(t, path) != want {
+			t.Errorf("%s is not its original: %q", path, readText(t, path))
+		}
 	}
 	if _, err := os.Stat(c.skill); !os.IsNotExist(err) {
 		t.Fatalf("the skill is still there: %v", err)
@@ -78,7 +78,7 @@ func TestCutoverIsDryByDefaultAndShowsTheChange(t *testing.T) {
 		t.Fatalf("code = %d, stderr = %q", code, c.h.stderr.String())
 	}
 	out := c.h.stdout.String()
-	for _, want := range []string{c.claude, "- mcpServers.qmd", "+ mcpServers.memoria", c.codex, "- [mcp_servers.qmd]", "+ hooks.SessionEnd", "+ the memoria skill", "Nothing was changed"} {
+	for _, want := range []string{c.mcp, "- mcpServers.qmd", "+ mcpServers.memoria", c.local, "+ permissions.allow mcp__memoria__*", "+ enabledMcpjsonServers memoria", "+ the memoria skill", "session-end-export.py", "memoria was not added there", "Nothing was changed"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("%q is missing from %q", want, out)
 		}
@@ -101,57 +101,48 @@ func TestCutoverAsksFirstAndRefusesWithNoOneToAsk(t *testing.T) {
 	}
 	checkOriginals(t, c)
 	c.h.stdin = strings.NewReader("yes\n")
-	if code := c.cutover("--apply"); code != 0 || !strings.Contains(readText(t, c.claude), "memoria") {
+	if code := c.cutover("--apply"); code != 0 || !strings.Contains(readText(t, c.mcp), "memoria") {
 		t.Fatalf("agreed: code = %d, stderr = %q", code, c.h.stderr.String())
 	}
 }
 
-func TestCutoverSwapsTheEntriesAndKeepsTheRest(t *testing.T) {
+func TestCutoverSwapsWhereQMDIsAndLeavesTheRest(t *testing.T) {
 	c := newCutoverHome(t)
 	if code := c.cutover("--apply", "--yes"); code != 0 {
 		t.Fatalf("code = %d, stderr = %q", code, c.h.stderr.String())
 	}
-	checkClaudeAfterCutover(t, c)
-	checkOthersAfterCutover(t, c)
+	mcp := readText(t, c.mcp)
+	if strings.Contains(mcp, `"qmd"`) || strings.Contains(mcp, "do-not-show-me") || !strings.Contains(mcp, `"memoria"`) {
+		t.Fatalf(".mcp.json = %q", mcp)
+	}
+	if readText(t, c.claude) != claudeNoQMD || readText(t, c.codex) != codexNoQMD || readText(t, c.settings) != settingsHook {
+		t.Fatal("a file with no qmd in it changed")
+	}
+	checkPermissionsAndSkill(t, c)
 }
 
-func checkOthersAfterCutover(t *testing.T, c *cutoverHome) {
+func checkPermissionsAndSkill(t *testing.T, c *cutoverHome) {
 	t.Helper()
-	codex := readText(t, c.codex)
-	if strings.Contains(codex, "mcp_servers.qmd") || strings.Contains(codex, "do-not-show-me") || !strings.Contains(codex, "[mcp_servers.memoria]") || !strings.Contains(codex, "[mcp_servers.other]") || !strings.Contains(codex, `model = "m"`) {
-		t.Fatalf("codex = %q", codex)
+	local := readText(t, c.local)
+	if !strings.Contains(local, "mcp__memoria__*") || !strings.Contains(local, "mcp__qmd__*") || !strings.Contains(local, `"memoria"`) {
+		t.Fatalf("settings.local.json = %q", local)
 	}
-	checkHookAndSkill(t, c)
-}
-
-func checkHookAndSkill(t *testing.T, c *cutoverHome) {
-	t.Helper()
-	settings := readText(t, c.settings)
-	if !strings.Contains(settings, "push-hook") || !strings.Contains(settings, "SessionEnd") || !strings.Contains(settings, `"theme"`) {
-		t.Fatalf("settings = %q", settings)
-	}
-	if readText(t, c.skill) != "the skill\n" || readText(t, filepath.Join(c.home, ".codex", "skills", "memoria", "SKILL.md")) != "the skill\n" {
-		t.Fatal("the skill was not installed for both")
+	if readText(t, c.skill) != "the skill\n" {
+		t.Fatal("the skill was not installed")
 	}
 }
 
-func checkClaudeAfterCutover(t *testing.T, c *cutoverHome) {
-	t.Helper()
-	text := readText(t, c.claude)
-	if !strings.Contains(text, "12345678901234567890") || !strings.Contains(text, "someone@example.test") || !strings.Contains(text, "b=<c>&d") {
-		t.Fatalf("something else changed: %q", text)
+func TestNoQMDAnywhereIsSaidAndFails(t *testing.T) {
+	c := newCutoverHome(t)
+	writeFile(t, c.mcp, `{"mcpServers":{}}`)
+	if code := c.cutover("--apply", "--yes"); code != apperr.ExitGeneric || !strings.Contains(c.h.stderr.String(), "qmd was not found") || !strings.Contains(c.h.stderr.String(), c.mcp) {
+		t.Fatalf("code = %d, stderr = %q", code, c.h.stderr.String())
 	}
-	var config struct {
-		MCP map[string]struct {
-			Command string   `json:"command"`
-			Args    []string `json:"args"`
-		} `json:"mcpServers"`
+	if _, err := os.Stat(c.skill); !os.IsNotExist(err) {
+		t.Fatalf("it changed something: %v", err)
 	}
-	if err := json.Unmarshal([]byte(text), &config); err != nil {
-		t.Fatal(err)
-	}
-	if _, found := config.MCP["qmd"]; found || config.MCP["memoria"].Command != "memoria" || config.MCP["memoria"].Args[0] != "mcp" || config.MCP["other"].Command != "other" {
-		t.Fatalf("mcp = %+v", config.MCP)
+	if code := c.h.run("migrate", "cutover"); code != apperr.ExitGeneric {
+		t.Fatalf("dry: code = %d", code)
 	}
 }
 
@@ -186,7 +177,7 @@ func TestRollbackPutsEverythingBackAndRepeatsSafely(t *testing.T) {
 	if code := c.cutover("--apply", "--yes"); code != 0 {
 		t.Fatalf("code = %d", code)
 	}
-	if code := c.h.run("migrate", "rollback"); code != 0 || !strings.Contains(c.h.stdout.String(), "remove, as the cutover created it") || strings.Contains(readText(t, c.claude), `"qmd"`) {
+	if code := c.h.run("migrate", "rollback"); code != 0 || !strings.Contains(c.h.stdout.String(), "remove, as the cutover created it") || strings.Contains(readText(t, c.mcp), `"qmd"`) {
 		t.Fatalf("dry: code = %d, stdout = %q", code, c.h.stdout.String())
 	}
 	if code := c.h.run("migrate", "rollback", "--apply"); code != apperr.ExitUsage {
@@ -202,61 +193,68 @@ func TestRollbackPutsEverythingBackAndRepeatsSafely(t *testing.T) {
 	checkOriginals(t, c)
 }
 
-func TestASecondCutoverKeepsTheOriginalBackup(t *testing.T) {
+func TestARepeatedCutoverChangesNothingMore(t *testing.T) {
 	c := newCutoverHome(t)
 	if code := c.cutover("--apply", "--yes"); code != 0 {
 		t.Fatalf("code = %d", code)
 	}
 	if code := c.cutover(); code != 0 || !strings.Contains(c.h.stdout.String(), "Nothing to change") {
-		t.Fatalf("nothing left: code = %d, stdout = %q", code, c.h.stdout.String())
+		t.Fatalf("code = %d, stdout = %q", code, c.h.stdout.String())
 	}
-	if code := c.cutover("--apply", "--yes"); code != 0 {
-		t.Fatalf("code = %d", code)
-	}
-	// Something brings the entry back, and a third cutover swaps it again.
-	writeFile(t, c.claude, claudeConfigWithQMD+" ")
 	if code := c.cutover("--apply", "--yes"); code != 0 {
 		t.Fatalf("code = %d", code)
 	}
 	if code := c.h.run("migrate", "rollback", "--apply", "--yes"); code != 0 {
-		t.Fatalf("code = %d, stderr = %q", code, c.h.stderr.String())
+		t.Fatalf("code = %d", code)
 	}
 	checkOriginals(t, c)
 }
 
 func TestACutoverAfterARollbackBacksUpWhatIsThereThen(t *testing.T) {
 	c := newCutoverHome(t)
-	for _, args := range [][]string{{"--apply", "--yes"}} {
-		if code := c.cutover(args...); code != 0 {
-			t.Fatalf("code = %d", code)
-		}
-	}
-	if code := c.h.run("migrate", "rollback", "--apply", "--yes"); code != 0 {
-		t.Fatalf("code = %d", code)
-	}
-	changed := strings.Replace(claudeConfigWithQMD, "12345678901234567890", "7", 1)
-	writeFile(t, c.claude, changed)
 	if code := c.cutover("--apply", "--yes"); code != 0 {
 		t.Fatalf("code = %d", code)
 	}
 	if code := c.h.run("migrate", "rollback", "--apply", "--yes"); code != 0 {
 		t.Fatalf("code = %d", code)
 	}
-	if readText(t, c.claude) != changed {
-		t.Fatalf("a later edit was lost: %q", readText(t, c.claude))
+	changed := strings.Replace(mcpWithQMD, `"mcpServers"`, `"later":"an edit","mcpServers"`, 1)
+	writeFile(t, c.mcp, changed)
+	if code := c.cutover("--apply", "--yes"); code != 0 {
+		t.Fatalf("code = %d", code)
+	}
+	if code := c.h.run("migrate", "rollback", "--apply", "--yes"); code != 0 {
+		t.Fatalf("code = %d", code)
+	}
+	if readText(t, c.mcp) != changed {
+		t.Fatalf("a later edit was lost: %q", readText(t, c.mcp))
 	}
 }
 
-func TestRollbackWillNotLoseAnEditUnlessTold(t *testing.T) {
+func TestARollbackSaysWhenItOnlyUndoesItsOwnChange(t *testing.T) {
 	c := newCutoverHome(t)
 	if code := c.cutover("--apply", "--yes"); code != 0 {
 		t.Fatalf("code = %d", code)
 	}
-	writeFile(t, c.settings, `{"theme": "edited"}`)
+	writeFile(t, c.mcp, strings.Replace(readText(t, c.mcp), `"mcpServers"`, `"later": 1, "mcpServers"`, 1))
+	if code := c.h.run("migrate", "rollback", "--apply", "--yes"); code != 0 || !strings.Contains(c.h.stdout.String(), "reverse only the cutover's change") {
+		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, c.h.stdout.String(), c.h.stderr.String())
+	}
+	if text := readText(t, c.mcp); !strings.Contains(text, `"later"`) || !strings.Contains(text, "SECRET_VALUE") || strings.Contains(text, "memoria") {
+		t.Fatalf(".mcp.json = %q", text)
+	}
+}
+
+func TestRollbackWillNotLoseAnEditItCannotSeparateUnlessTold(t *testing.T) {
+	c := newCutoverHome(t)
+	if code := c.cutover("--apply", "--yes"); code != 0 {
+		t.Fatalf("code = %d", code)
+	}
+	writeFile(t, c.skill, "edited by hand")
 	if code := c.h.run("migrate", "rollback", "--apply", "--yes"); code != apperr.ExitGeneric || !strings.Contains(c.h.stderr.String(), "edited since") {
 		t.Fatalf("code = %d, stderr = %q", code, c.h.stderr.String())
 	}
-	if readText(t, c.settings) != `{"theme": "edited"}` || !strings.Contains(readText(t, c.claude), "memoria") {
+	if readText(t, c.skill) != "edited by hand" || !strings.Contains(readText(t, c.mcp), "memoria") {
 		t.Fatal("a refused rollback changed something")
 	}
 	if code := c.h.run("migrate", "rollback", "--apply", "--yes", "--overwrite-edits"); code != 0 {
@@ -270,7 +268,7 @@ func TestAClientThatIsNotThereIsLeftAlone(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
-	if code := c.h.run("migrate", "cutover", "--skill", c.source, "--apply", "--yes"); code != 0 || !strings.Contains(c.h.stdout.String(), "Nothing to change") {
+	if code := c.h.run("migrate", "cutover", "--skill", c.source, "--apply", "--yes"); code != apperr.ExitGeneric {
 		t.Fatalf("code = %d, stdout = %q", code, c.h.stdout.String())
 	}
 	if entries, err := os.ReadDir(home); err != nil || len(entries) != 0 {
@@ -281,21 +279,16 @@ func TestAClientThatIsNotThereIsLeftAlone(t *testing.T) {
 func TestEachClientsOwnSettingForItsFolderIsHonoured(t *testing.T) {
 	c := newCutoverHome(t)
 	claudeDir, codexDir := t.TempDir(), t.TempDir()
-	writeFile(t, filepath.Join(claudeDir, ".claude.json"), claudeConfigWithQMD)
-	writeFile(t, filepath.Join(codexDir, "config.toml"), codexConfigWithQMD)
+	writeFile(t, filepath.Join(claudeDir, ".claude.json"), mcpWithQMD)
+	writeFile(t, filepath.Join(codexDir, "config.toml"), "[mcp_servers.qmd]\ncommand = \"qmd\"\n")
 	c.h.env["CLAUDE_CONFIG_DIR"], c.h.env["CODEX_HOME"] = claudeDir, codexDir
 	if code := c.h.run("migrate", "cutover", "--apply", "--yes"); code != 0 {
-		t.Fatalf("code = %d", code)
+		t.Fatalf("code = %d, stderr = %q", code, c.h.stderr.String())
 	}
 	if strings.Contains(readText(t, filepath.Join(claudeDir, ".claude.json")), `"qmd"`) || strings.Contains(readText(t, filepath.Join(codexDir, "config.toml")), "mcp_servers.qmd") {
 		t.Fatal("not changed where each client said")
 	}
-	checkOriginalsExceptSkill(t, c)
-}
-
-func checkOriginalsExceptSkill(t *testing.T, c *cutoverHome) {
-	t.Helper()
-	if readText(t, c.claude) != claudeConfigWithQMD || readText(t, c.codex) != codexConfigWithQMD {
+	if readText(t, c.claude) != claudeNoQMD || readText(t, c.codex) != codexNoQMD {
 		t.Fatal("the default location was changed")
 	}
 }
@@ -303,36 +296,36 @@ func checkOriginalsExceptSkill(t *testing.T, c *cutoverHome) {
 func TestAConfigItCannotReadChangesNothing(t *testing.T) {
 	c := newCutoverHome(t)
 	writeFile(t, c.claude, "not json")
-	if code := c.cutover("--apply", "--yes"); code != apperr.ExitGeneric || !strings.Contains(c.h.stderr.String(), "not valid JSON") {
+	if code := c.cutover("--apply", "--yes"); code != apperr.ExitGeneric || !strings.Contains(c.h.stderr.String(), "not a valid JSON object") {
 		t.Fatalf("code = %d, stderr = %q", code, c.h.stderr.String())
 	}
-	if readText(t, c.codex) != codexConfigWithQMD {
-		t.Fatal("another client changed anyway")
+	if readText(t, c.mcp) != mcpWithQMD {
+		t.Fatal("another file changed anyway")
 	}
 }
 
-func TestWindowsLineEndingsSurviveInCodexConfig(t *testing.T) {
+func TestSkippingTheSkillIsSaid(t *testing.T) {
 	c := newCutoverHome(t)
-	writeFile(t, c.codex, strings.ReplaceAll(codexConfigWithQMD, "\n", "\r\n"))
-	if code := c.cutover("--apply", "--yes"); code != 0 {
-		t.Fatalf("code = %d", code)
-	}
-	text := readText(t, c.codex)
-	if strings.Contains(strings.ReplaceAll(text, "\r\n", ""), "\n") || strings.Contains(text, "mcp_servers.qmd") {
-		t.Fatalf("codex = %q", text)
-	}
-}
-
-func TestSkippingTheSkillAndHookIsSaid(t *testing.T) {
-	c := newCutoverHome(t)
-	if code := c.h.run("migrate", "cutover"); code != 0 {
-		t.Fatalf("code = %d", code)
-	}
-	out := c.h.stdout.String()
-	if !strings.Contains(out, "hook push: not enabled") || !strings.Contains(out, "the skill was not installed") {
-		t.Fatalf("stdout = %q", out)
+	if code := c.h.run("migrate", "cutover"); code != 0 || !strings.Contains(c.h.stdout.String(), "the skill was not installed") {
+		t.Fatalf("code = %d, stdout = %q", code, c.h.stdout.String())
 	}
 	if code := c.h.run("migrate", "cutover", "--skill", filepath.Join(c.home, "absent.md")); code != apperr.ExitUsage {
 		t.Fatalf("code = %d", code)
+	}
+}
+
+func TestEscapingForABatchFile(t *testing.T) {
+	for arg, want := range map[string]string{
+		"plain": `^^^"plain^^^"`,
+		"a&b":   `^^^"a^^^&b^^^"`,
+		`a"b`:   `^^^"a\^^^"b^^^"`,
+		`a\`:    `^^^"a\\^^^"`,
+	} {
+		if got := EscapeForCmd(arg); got != want {
+			t.Errorf("%q = %q, want %q", arg, got, want)
+		}
+	}
+	if line := CmdLine(`C:\q md.cmd`, []string{"x"}); !strings.HasPrefix(line, `/d /s /c "^"C:\q^ md.cmd^"`) || !strings.HasSuffix(line, `"`) {
+		t.Fatalf("line = %q", line)
 	}
 }

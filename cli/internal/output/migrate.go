@@ -325,7 +325,8 @@ func verifyNotes(result *migrate.VerifyResult) []string {
 	if problems > 0 {
 		verdict = fmt.Sprintf("%d thing(s) need a look. The local report names them, and these counts do not.", problems)
 	}
-	return append([]string{verdict}, append(verifyLimits, "Local report: "+result.ReportFile)...)
+	seed := fmt.Sprintf("Sample seed: %d. Pass it as --seed to fetch the same sample again.", result.Seed)
+	return append([]string{verdict}, append(verifyLimits, seed, "Local report: "+result.ReportFile)...)
 }
 
 // MigrateVerifyTable renders a check. It names no file or query: only the local report does.
@@ -335,6 +336,9 @@ func MigrateVerifyTable(w io.Writer, result *migrate.VerifyResult) error {
 	for i := range result.Collections {
 		s := &result.Collections[i]
 		rows = append(rows, row(s.Name, s.Target, s.LocalFiles, s.ServerDocuments, s.Confirmed, s.TakenOver, s.VersionDiffers, s.NotHeld, s.SecondSpellings, s.LocalUnreadable+s.FoldersSkipped, s.NotChecked))
+		if s.CountDiffers {
+			b.WriteString(row(fmt.Sprintf("%s: the counts differ: %d local, %d on the server", s.Name, s.LocalFiles, s.ServerDocuments)) + "\n")
+		}
 		b.WriteString(row(s.Name+": sample: "+sampleText(s)) + "\n")
 		b.WriteString(row(s.Name+": overlap: "+overlapText(s.Overlap, result.LocalMode)) + "\n")
 	}
@@ -359,6 +363,9 @@ func MigrateVerifyMarkdown(w io.Writer, result *migrate.VerifyResult) error {
 		s := &result.Collections[i]
 		fmt.Fprintf(&b, "- **%s** to %s: %d local files, %d server documents, %d confirmed, %d taken over, %d at another version, %d not held, %d second spellings, %d not read here, %d not checked\n",
 			inlineText(s.Name), inlineText(s.Target), s.LocalFiles, s.ServerDocuments, s.Confirmed, s.TakenOver, s.VersionDiffers, s.NotHeld, s.SecondSpellings, s.LocalUnreadable+s.FoldersSkipped, s.NotChecked)
+		if s.CountDiffers {
+			b.WriteString("  - the counts differ\n")
+		}
 		b.WriteString("  - sample: " + sampleText(s) + "\n")
 		b.WriteString("  - overlap: " + inlineText(overlapText(s.Overlap, result.LocalMode)) + "\n")
 	}

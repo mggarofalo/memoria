@@ -5,10 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -34,6 +35,7 @@ type migrateVerifyOptions struct {
 	targets    []string
 	queries    string
 	sample     int
+	seed       uint64
 	qmdCommand string
 	localMode  string
 	noRerank   bool
@@ -75,7 +77,8 @@ Files and queries that need a look are named only in a private local report.`,
 	f.StringVar(&o.qmdConfig, "qmd-config", "", "Path to QMD's index.yml (required). There is no default")
 	f.StringArrayVar(&o.targets, "target", nil, "A collection that went to another name, as local=target; repeatable")
 	f.StringVar(&o.queries, "queries", "", "A file of queries, one a line, to compare top results with local QMD")
-	f.IntVar(&o.sample, "sample", defaultVerifySample, "Documents to fetch and compare, per collection")
+	f.IntVar(&o.sample, "sample", defaultVerifySample, "Documents to fetch and compare, per collection, at least 1")
+	f.Uint64Var(&o.seed, "seed", 0, "Which sample to take, to repeat one. Each run picks its own and prints it")
 	f.StringVar(&o.qmdCommand, "qmd-command", "qmd", "The local QMD command")
 	f.StringVar(&o.localMode, "local-mode", localModeSearch, "How local QMD searches: search, or query, which loads models and writes to its LLM cache")
 	f.BoolVar(&o.noRerank, "no-rerank", false, "Search the server without its reranker")
@@ -100,8 +103,8 @@ func readQueries(path string) ([]string, error) {
 }
 
 func (o migrateVerifyOptions) validate() error {
-	if o.sample < 0 {
-		return apperr.New(apperr.KindUsage, "--sample cannot be negative")
+	if o.sample < 1 {
+		return apperr.New(apperr.KindUsage, "--sample must be at least 1, as a check that fetches nothing shows nothing about the text")
 	}
 	if o.localMode != localModeSearch && o.localMode != localModeQuery {
 		return apperr.New(apperr.KindUsage, "--local-mode must be search or query")
@@ -127,6 +130,9 @@ func (a *app) migrateVerify(ctx context.Context, o migrateVerifyOptions) error {
 	}
 	run, cancel := newPushRun(ctx, a, s, migratePushOptions{})
 	defer cancel()
+	if o.seed == 0 {
+		o.seed = rand.Uint64()
+	}
 	result, problems := run.verifyAll(jobs, verifyInputs{options: o, queries: queries, counts: counts})
 	report, err := verifyReportPath(s)
 	if err != nil {
@@ -232,7 +238,7 @@ func (v *verifying) note(kind, name, detail string) {
 }
 
 func (r *pushRun) verifyAll(jobs []pushJob, in verifyInputs) (*migrate.VerifyResult, []migrate.VerifyProblem) {
-	result := &migrate.VerifyResult{LocalMode: in.options.localMode}
+	result := &migrate.VerifyResult{LocalMode: in.options.localMode, Seed: in.options.seed}
 	var problems []migrate.VerifyProblem
 	for _, job := range jobs {
 		v := r.verifyCollection(job, in)
@@ -258,9 +264,19 @@ func (r *pushRun) verifyCollection(job pushJob, in verifyInputs) *verifying {
 	defer func() { _ = root.Close() }()
 	v.c.root = root
 	r.checkPaths(v)
-	r.checkSample(v, in.options.sample)
+	r.checkSample(v, in.options)
+	v.noteCount()
 	r.checkOverlap(v, in)
 	return v
+}
+
+// noteCount flags counts that differ. A session that took over documents writes its own parts, so its count is not comparable, and
+// a file not held is already reported and explains a lower count.
+func (v *verifying) noteCount() {
+	if v.summary.TakenOver == 0 && v.summary.ServerDocuments != v.summary.LocalFiles-v.summary.NotHeld {
+		v.summary.CountDiffers = true
+		v.note("count_differs", v.summary.Target, strconv.Itoa(v.summary.LocalFiles)+" local, "+strconv.Itoa(v.summary.ServerDocuments)+" on the server")
+	}
 }
 
 func (r *pushRun) checkPaths(v *verifying) {
@@ -303,21 +319,22 @@ func (r *pushRun) checkPath(v *verifying, name string) {
 	}
 }
 
-// sampleOf spreads a sample over the list, the same each time.
-func sampleOf(names []string, size int) []string {
-	if size <= 0 || len(names) == 0 {
-		return nil
+// sampleOf picks across the whole list, and differently each run unless given the same seed.
+func sampleOf(names []string, size int, seed uint64) []string {
+	if len(names) <= size {
+		return names
 	}
-	step := max(len(names)/size, 1)
+	picked := rand.New(rand.NewPCG(seed, seed)).Perm(len(names))[:size]
+	slices.Sort(picked)
 	sample := make([]string, 0, size)
-	for i := 0; i < len(names) && len(sample) < size; i += step {
-		sample = append(sample, names[i])
+	for _, index := range picked {
+		sample = append(sample, names[index])
 	}
 	return sample
 }
 
-func (r *pushRun) checkSample(v *verifying, size int) {
-	for _, name := range sampleOf(v.confirmed, size) {
+func (r *pushRun) checkSample(v *verifying, o migrateVerifyOptions) {
+	for _, name := range sampleOf(v.confirmed, o.sample, o.seed) {
 		if r.ctx.Err() != nil {
 			return
 		}
@@ -403,7 +420,7 @@ func (r *pushRun) compareQuery(v *verifying, o migrateVerifyOptions, number int,
 }
 
 func (r *pushRun) localHits(c *pushCollection, o migrateVerifyOptions, query string) ([]string, error) {
-	out, err := r.a.localQMD(r.ctx, o.qmdCommand, []string{o.localMode, query, "--json", "-n", strconv.Itoa(overlapTop), "-c", c.job.collection.Name})
+	out, err := r.a.localQMD(r.ctx, o.qmdCommand, []string{o.localMode, "--json", "-n", strconv.Itoa(overlapTop), "-c", c.job.collection.Name, "--", query})
 	if err != nil {
 		return nil, err
 	}
@@ -434,11 +451,62 @@ func (r *pushRun) serverHits(c *pushCollection, o migrateVerifyOptions, query st
 
 // runLocalQMD runs the local command. Its stderr is left behind, as a failure there could quote a path or a query.
 func runLocalQMD(ctx context.Context, command string, args []string) ([]byte, error) {
-	run := exec.CommandContext(ctx, command, args...)
+	run, err := localCommand(ctx, command, args)
+	if err != nil {
+		return nil, err
+	}
 	var stdout bytes.Buffer
 	run.Stdout = &stdout
 	if err := run.Run(); err != nil {
 		return nil, err
 	}
 	return stdout.Bytes(), nil
+}
+
+// cmdMetaCharacters are what cmd.exe gives a meaning to, even inside quotes.
+const cmdMetaCharacters = "()[]%!^\"`<>&|;, *?"
+
+// EscapeForCmd makes an argument one word that cmd.exe passes on untouched, the way cross-spawn does for the same problem. It
+// escapes twice, as npm's .cmd shims hand their arguments to cmd.exe a second time through %*.
+func EscapeForCmd(arg string) string {
+	var quoted strings.Builder
+	quoted.WriteByte('"')
+	backslashes := 0
+	for _, r := range arg {
+		if r == '\\' {
+			backslashes++
+			continue
+		}
+		count := backslashes
+		if r == '"' {
+			count = backslashes*2 + 1
+		}
+		quoted.WriteString(strings.Repeat(`\`, count))
+		backslashes = 0
+		quoted.WriteRune(r)
+	}
+	quoted.WriteString(strings.Repeat(`\`, backslashes*2))
+	quoted.WriteByte('"')
+	return caretEscape(caretEscape(quoted.String()))
+}
+
+func caretEscape(text string) string {
+	var out strings.Builder
+	for _, r := range text {
+		if strings.ContainsRune(cmdMetaCharacters, r) {
+			out.WriteByte('^')
+		}
+		out.WriteRune(r)
+	}
+	return out.String()
+}
+
+// CmdLine is the line to give cmd.exe to run a batch file with these arguments, none of them interpreted.
+func CmdLine(program string, args []string) string {
+	parts := make([]string, 0, len(args)+1)
+	parts = append(parts, caretEscape(`"`+program+`"`))
+	for _, arg := range args {
+		parts = append(parts, EscapeForCmd(arg))
+	}
+	return `/d /s /c "` + strings.Join(parts, " ") + `"`
 }

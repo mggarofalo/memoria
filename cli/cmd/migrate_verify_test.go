@@ -152,8 +152,9 @@ func TestVerifyComparesTheVersionNotJustTheState(t *testing.T) {
 func TestVerifySaysWhatIsNotHeld(t *testing.T) {
 	f := newVerifyFixture(t)
 	f.server.forget()
+	f.server.documents = 0
 	summary, code, report := f.verify(t)
-	if code != apperr.ExitGeneric || summary.NotHeld != 3 || summary.Sampled != 0 {
+	if code != apperr.ExitGeneric || summary.NotHeld != 3 || summary.Sampled != 0 || summary.CountDiffers {
 		t.Fatalf("code = %d, summary = %+v", code, summary)
 	}
 	if problems := verifyProblems(t, report); len(problems) != 3 || problems[0].Detail != "none" {
@@ -175,26 +176,67 @@ func TestVerifyFetchesTheTextAndAllowsOnlyRedaction(t *testing.T) {
 	}
 }
 
-func TestVerifyFetchesOnlyASample(t *testing.T) {
+func TestVerifyFetchesOnlyASampleAndRefusesNone(t *testing.T) {
 	f := newVerifyFixture(t)
 	summary, code, _ := f.verify(t, "--sample", "1")
 	if code != 0 || summary.Sampled != 1 {
 		t.Fatalf("code = %d, summary = %+v", code, summary)
 	}
-	summary, code, _ = f.verify(t, "--sample", "0")
-	if code != 0 || summary.Sampled != 0 {
+	for _, sample := range []string{"0", "-1"} {
+		if code := f.h.run("migrate", "verify", "--qmd-config", f.config, "--sample", sample); code != apperr.ExitUsage {
+			t.Errorf("--sample %s: code = %d", sample, code)
+		}
+	}
+}
+
+func TestASampleSpreadsOverTheListAndVaries(t *testing.T) {
+	names := make([]string, 39)
+	for i := range names {
+		names[i] = fmt.Sprintf("%02d", i)
+	}
+	first := sampleOf(names, 20, 1)
+	if len(first) != 20 || first[len(first)-1] <= "19" {
+		t.Fatalf("it took the start of the list: %v", first)
+	}
+	if strings.Join(first, "") != strings.Join(sampleOf(names, 20, 1), "") {
+		t.Fatal("the same seed gave another sample")
+	}
+	if strings.Join(first, "") == strings.Join(sampleOf(names, 20, 2), "") {
+		t.Fatal("another seed gave the same sample")
+	}
+	if got := sampleOf(names, 100, 1); len(got) != 39 {
+		t.Fatalf("got %d", len(got))
+	}
+}
+
+func TestTheSeedIsPrintedAndCanBeGiven(t *testing.T) {
+	f := newVerifyFixture(t)
+	if code := f.h.run("migrate", "verify", "--qmd-config", f.config, "--seed", "42"); code != 0 || !strings.Contains(f.h.stdout.String(), "Sample seed: 42") {
+		t.Fatalf("code = %d, stdout = %q", code, f.h.stdout.String())
+	}
+}
+
+func TestCountsThatDifferAreNotClean(t *testing.T) {
+	f := newVerifyFixture(t)
+	f.server.documents = 2
+	summary, code, report := f.verify(t)
+	if code != apperr.ExitGeneric || !summary.CountDiffers {
 		t.Fatalf("code = %d, summary = %+v", code, summary)
 	}
-	if code := f.h.run("migrate", "verify", "--qmd-config", f.config, "--sample", "-1"); code != apperr.ExitUsage {
-		t.Fatalf("code = %d", code)
+	if problems := verifyProblems(t, report); len(problems) != 1 || problems[0].Kind != "count_differs" {
+		t.Fatalf("problems = %+v", problems)
+	}
+	if code := f.h.run("migrate", "verify", "--qmd-config", f.config); code != apperr.ExitGeneric || !strings.Contains(f.h.stdout.String(), "the counts differ") {
+		t.Fatalf("code = %d, stdout = %q", code, f.h.stdout.String())
 	}
 }
 
 func TestTakenOverIsCountedApartAndNotCalledConfirmed(t *testing.T) {
 	f := newVerifyFixture(t)
 	f.server.state.Store(migrate.StateTakenOver)
+	f.server.documents = 9
 	summary, code, _ := f.verify(t)
-	if code != 0 || summary.TakenOver != 3 || summary.Confirmed != 0 || summary.Sampled != 0 {
+	if code != 0 || summary.CountDiffers || summary.TakenOver != 3 || summary.Confirmed != 0 || summary.Sampled != 0 {
 		t.Fatalf("code = %d, summary = %+v", code, summary)
 	}
 }
@@ -227,7 +269,7 @@ func TestOverlapIsReportedAndNeverFailsTheCheck(t *testing.T) {
 	if code != 0 || summary.Overlap.Queries != 2 || summary.Overlap.Mean != 0.5 || summary.Overlap.Lowest != 0.5 {
 		t.Fatalf("code = %d, summary = %+v", code, summary)
 	}
-	if len(seen) != 2 || seen[0][0] != "search" || seen[0][1] != "secretquery" || strings.Join(seen[0][2:], " ") != "--json -n 10 -c notes" {
+	if len(seen) != 2 || strings.Join(seen[0], " ") != "search --json -n 10 -c notes -- secretquery" {
 		t.Fatalf("args = %v", seen)
 	}
 	if strings.Contains(f.h.stdout.String()+f.h.stderr.String(), "secretquery") {

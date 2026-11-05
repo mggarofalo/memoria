@@ -15,10 +15,9 @@ import (
 )
 
 type migrateCutoverOptions struct {
-	apply       bool
-	yes         bool
-	skill       string
-	hookCommand string
+	apply bool
+	yes   bool
+	skill string
 }
 
 func newMigrateCutoverCmd(a *app) *cobra.Command {
@@ -26,21 +25,26 @@ func newMigrateCutoverCmd(a *app) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "cutover",
 		Short: "Point your clients at Memoria instead of local QMD. Shows the change unless you pass --apply",
-		Long: `Change Claude Code and Codex to use Memoria: swap the qmd MCP entry for memoria, install the
-skill, and turn on the hook that pushes sessions. Without --apply it only shows what it would
-change. With --apply it shows that and asks you to confirm, unless you also pass --yes.
+		Long: `Change your clients to use Memoria: swap the qmd MCP entry for memoria wherever it is defined
+(~/.mcp.json, ~/.claude.json and Codex's config.toml), allow memoria's tools wherever qmd's were
+allowed, and install the skill. Without --apply it only shows what it would change. With --apply
+it shows that and asks you to confirm, unless you also pass --yes. If qmd is nowhere, it says so
+and exits 1, rather than add memoria beside something else.
 
 It backs up every file it changes first, under the CLI's config folder. Running it again is
 safe: it changes only what is left to change, and keeps the original backup.
 
-The skill is in a checkout of this repository, so pass its path with --skill. The hook is not
-part of this repository, so pass the command that runs it with --hook-command. Without either,
-that part is skipped and it says so.
+The skill is in a checkout of this repository, so pass its path with --skill. It is installed
+into each client's skills folder, but not through a link, which could write into a repository.
+A config that is a link, read-only, or not valid is refused, and nothing changes.
+
+It adds no hook. It shows any SessionEnd hook already set: pushing sessions is that hook's own
+setting, and a second one would export twice. See docs/migration.md for what the hook needs.
 
 It never touches local QMD or its index, so 'memoria migrate rollback' can put everything
 back. It changes only user-level entries: a qmd entry in one project's own config stays.`,
 		Example: `  memoria migrate cutover --skill skills/memoria/SKILL.md
-  memoria migrate cutover --skill skills/memoria/SKILL.md --hook-command "my-hook" --apply`,
+  memoria migrate cutover --skill skills/memoria/SKILL.md --apply`,
 		Args: noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error { return a.migrateCutover(cmd.Context(), o) },
 	}
@@ -48,7 +52,6 @@ back. It changes only user-level entries: a qmd entry in one project's own confi
 	f.BoolVar(&o.apply, "apply", false, "Make the change, after showing it and asking")
 	f.BoolVar(&o.yes, "yes", false, "With --apply, do not ask")
 	f.StringVar(&o.skill, "skill", "", "Path to skills/memoria/SKILL.md in a checkout of this repository")
-	f.StringVar(&o.hookCommand, "hook-command", "", "The command that pushes sessions, to run when a Claude Code session ends")
 	return cmd
 }
 
@@ -71,11 +74,15 @@ func (a *app) migrateCutover(_ context.Context, o migrateCutoverOptions) error {
 			return apperr.New(apperr.KindUsage, "--skill cannot be read")
 		}
 	}
-	edits, notes, err := migrate.PlanCutover(migrate.CutoverOptions{Paths: paths, Skill: skill, HookCommand: o.hookCommand})
+	plan, err := migrate.PlanCutover(migrate.CutoverOptions{Paths: paths, Skill: skill})
 	if err != nil {
 		return apperr.Wrap(apperr.KindGeneric, err, err.Error())
 	}
-	a.showCutover(edits, notes)
+	edits := plan.Edits
+	a.showCutover(edits, plan.Notes)
+	if !plan.Found {
+		return apperr.New(apperr.KindGeneric, "qmd was not found in %s, so there is nothing to swap, and nothing was changed", strings.Join(plan.Searched, ", "))
+	}
 	if len(edits) == 0 {
 		a.say("Nothing to change.")
 		return nil
@@ -141,8 +148,10 @@ func newMigrateRollbackCmd(a *app) *cobra.Command {
 Without --apply it only shows what it would do. With --apply it shows that and asks you to
 confirm, unless you also pass --yes. Running it again is safe, and does nothing.
 
-A file edited since the cutover is not overwritten unless you pass --overwrite-edits, as a
-rollback would lose that edit. Nothing on the server changes, and neither does local QMD.`,
+A client that has rewritten its file since keeps what it wrote: a rollback then reverses only the
+cutover's own change, and says so. A file where that cannot be done, such as an edited skill, is
+not overwritten unless you pass --overwrite-edits, as that would lose the edit. Nothing on the
+server changes, and neither does local QMD.`,
 		Example: `  memoria migrate rollback
   memoria migrate rollback --apply`,
 		Args: noArgs,
@@ -156,7 +165,11 @@ rollback would lose that edit. Nothing on the server changes, and neither does l
 }
 
 func (a *app) migrateRollback(_ context.Context, o migrateRollbackOptions) error {
-	manifest, err := migrate.ActiveManifest()
+	paths, err := a.clientPaths()
+	if err != nil {
+		return err
+	}
+	manifest, err := migrate.ActiveManifest(paths.Home)
 	if err != nil {
 		return apperr.Wrap(apperr.KindGeneric, err, err.Error())
 	}
@@ -190,8 +203,11 @@ func (a *app) showRollback(steps []migrate.RollbackStep) int {
 	edited := 0
 	for _, step := range steps {
 		action := "restore from backup"
-		if !step.Entry.Existed {
+		switch step.Action {
+		case migrate.RemoveCreated:
 			action = "remove, as the cutover created it"
+		case migrate.UndoOwnChange:
+			action = "reverse only the cutover's change, as something else has changed it since, and that stays"
 		}
 		if step.Changed {
 			action += " (edited since the cutover)"

@@ -77,7 +77,7 @@ func TestAReportCountsCredentialNamesAndCaveatsGitleaks(t *testing.T) {
 
 func TestAVerifySaysWhatItFoundAndWhatItDoesNotShow(t *testing.T) {
 	result := &migrate.VerifyResult{LocalMode: "search", ReportFile: "report.json", Collections: []migrate.VerifySummary{
-		{Name: "a", Target: "a", LocalFiles: 2, Confirmed: 1, NotHeld: 1, Sampled: 1, SampleRedacted: 1, Overlap: migrate.Overlap{Queries: 3, NoLocalResults: 1, Mean: 0.5, Lowest: 0.25}},
+		{Name: "a", Target: "a", LocalFiles: 2, Confirmed: 1, NotHeld: 1, CountDiffers: true, Sampled: 1, SampleRedacted: 1, Overlap: migrate.Overlap{Queries: 3, NoLocalResults: 1, Mean: 0.5, Lowest: 0.25}},
 		{Name: "b", Target: "b", Overlap: migrate.Overlap{Queries: 1, Failed: 1}},
 		{Name: "c", Target: "c"},
 	}}
