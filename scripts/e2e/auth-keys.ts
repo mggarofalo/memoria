@@ -40,8 +40,7 @@ export async function authModes(h: Harness, admin: string): Promise<void> {
   const outcomes = await Promise.all(refusals.map((refusal) => h.refusedHost(refusal.env)));
   refusals.forEach((refusal, index) => {
     const outcome = outcomes[index];
-    // A code of null means it did not stop by itself: it started, and was killed.
-    h.check(refusal.name, outcome && outcome.code !== null && outcome.code !== 0 && outcome.output.includes(refusal.expects), outcome);
+    h.check(refusal.name, outcome?.refused && outcome.output.includes(refusal.expects), outcome);
   });
 
   const anonymous = await h.request({ path: COLLECTIONS });

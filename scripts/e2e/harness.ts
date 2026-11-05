@@ -250,17 +250,24 @@ await store.close();`;
     await fetch(`http://127.0.0.1:${this.proxyPort}/__e2e/plan`, { method: "POST", body: JSON.stringify(plan) });
   }
 
-  /** Runs a host that should refuse to start. A host that starts instead is killed, and reports no exit code. */
-  refusedHost(overrides: NodeJS.ProcessEnv): Promise<{ code: number | null; output: string }> {
+  /**
+   * Runs a host that should refuse to start. A host that starts instead is killed, which is not a refusal.
+   * One that stops itself on Linux has no exit code, since an unhandled .NET exception ends in SIGABRT.
+   */
+  refusedHost(overrides: NodeJS.ProcessEnv): Promise<{ refused: boolean; output: string }> {
     return new Promise((resolve) => {
       const child = spawn("dotnet", [apiDll()], { cwd: apiDirectory(), env: this.extraHostEnvironment(overrides, `http://127.0.0.1:0`) });
       let output = "";
       child.stdout.on("data", (chunk: Buffer) => (output += chunk.toString("utf8")));
       child.stderr.on("data", (chunk: Buffer) => (output += chunk.toString("utf8")));
-      const timer = setTimeout(() => child.kill("SIGKILL"), REFUSAL_TIMEOUT_MS);
+      let started = false;
+      const timer = setTimeout(() => {
+        started = true;
+        child.kill("SIGKILL");
+      }, REFUSAL_TIMEOUT_MS);
       child.on("close", (code) => {
         clearTimeout(timer);
-        resolve({ code, output });
+        resolve({ refused: !started && code !== 0, output });
       });
     });
   }
