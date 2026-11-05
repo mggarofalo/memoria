@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using Memoria.Core.Redaction;
 
 namespace Memoria.Core.Sessions;
 
@@ -59,15 +60,21 @@ public sealed record DocumentEnvelope(
 		string? trimmed = value?.Trim();
 		if (!string.IsNullOrEmpty(trimmed))
 		{
-			SessionFrontmatter.Scalar(output, key, SessionFrontmatter.Clip(trimmed, maxBytes: MaxFieldBytes));
+			SessionFrontmatter.Scalar(output, key, RedactThenClip(trimmed, MaxFieldBytes));
 		}
+	}
+
+	/// <summary>Cutting first would leave a token's head too short for any rule to recognize, and the later pass over the document would miss it.</summary>
+	private static string RedactThenClip(string value, int maxBytes)
+	{
+		return SessionFrontmatter.Clip(Redactor.Shared.RedactFragment(value).Text, maxBytes: maxBytes);
 	}
 
 	private List<string> CleanTags()
 	{
 		return (Tags ?? [])
 			.Where(static tag => !string.IsNullOrWhiteSpace(tag))
-			.Select(static tag => SessionFrontmatter.Clip(tag.Trim(), maxBytes: MaxTagBytes))
+			.Select(static tag => RedactThenClip(tag.Trim(), MaxTagBytes))
 			.Take(MaxTags)
 			.ToList();
 	}

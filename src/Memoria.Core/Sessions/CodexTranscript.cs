@@ -15,6 +15,7 @@ internal sealed partial class CodexTranscript : SessionTranscript
 		new(["session_meta", "turn_context", "event_msg", "compacted", "response_item"], StringComparer.Ordinal);
 
 	private string _sessionId;
+	private string _pathId;
 	private string _rootThreadId = "";
 	private string _parentThreadId = "";
 	private string _forkedFromId = "";
@@ -28,7 +29,9 @@ internal sealed partial class CodexTranscript : SessionTranscript
 		: base(source, options, report)
 	{
 		Match uuid = UuidPattern().Match(source.SessionId);
-		_sessionId = Clip(uuid.Success ? uuid.Value : source.SessionId);
+		string id = uuid.Success ? uuid.Value : source.SessionId;
+		_sessionId = Clip(id);
+		_pathId = PathId(id);
 	}
 
 	public override void Add(JsonElement record)
@@ -47,19 +50,22 @@ internal sealed partial class CodexTranscript : SessionTranscript
 		}
 	}
 
-	public override UnredactedSession Render()
+	public override RedactedSession Render()
 	{
-		string safeId = SessionPaths.SafeSegment(_sessionId);
+		RedactMessages();
+		string safeId = SessionPaths.SafeSegment(_pathId);
 		string project = SessionProject.FromCodexCwd(_cwd, Source.HomeDirectory);
-		List<UnredactedSessionDocument> documents = BuildDocuments(
+		List<RedactedSessionDocument> documents = BuildDocuments(
 			SplitIntoParts(),
 			part => RenderPart(project, part),
 			(date, part) => SessionPaths.CodexPart(date, safeId, part));
-		return new UnredactedSession(
+		return new RedactedSession(
 			SessionFormat.Codex,
 			_sessionId,
 			documents,
 			Report,
+			CountsByRule,
+			Refusals,
 			path => SessionPaths.IsCodexFamily(path, safeId));
 	}
 
@@ -87,6 +93,8 @@ internal sealed partial class CodexTranscript : SessionTranscript
 
 	private void ApplyMeta(JsonElement payload)
 	{
+		string? rawId = JsonValues.String(payload, "id", Report);
+		_pathId = string.IsNullOrEmpty(rawId) ? _pathId : PathId(rawId);
 		_sessionId = MetaOr(payload, "id", _sessionId);
 		_rootThreadId = MetaOr(payload, "session_id", _sessionId);
 		_parentThreadId = MetaOr(payload, "parent_thread_id", "");
@@ -174,7 +182,7 @@ internal sealed partial class CodexTranscript : SessionTranscript
 		AppendTurnIds(output, part);
 		output.Append("---\n");
 
-		SessionFrontmatter.Body(output, Title(part.FirstUserMessage), part.Messages);
+		SessionFrontmatter.Body(output, RedactTitle(Title(part.FirstUserMessage)), part.Messages);
 		return output.ToString();
 	}
 
@@ -201,6 +209,11 @@ internal sealed partial class CodexTranscript : SessionTranscript
 		return PythonText.Strip(prefix.Replace("#", "", StringComparison.Ordinal));
 	}
 
+	/// <summary>
+	/// Over redacted text, because messages are redacted before this runs. A digest of the raw text would
+	/// survive into the corpus and let anyone confirm a guess at a short message or a secret in it. It
+	/// therefore equals the Python exporter's only for a part in which nothing was redacted.
+	/// </summary>
 	private static string Digest(ArraySegment<SessionMessage> messages)
 	{
 		using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);

@@ -15,6 +15,7 @@ internal sealed class ClaudeTranscript(SessionSource source, SessionRenderOption
 
 	private readonly Dictionary<string, int> _files = new(StringComparer.Ordinal);
 	private string _cwd = "";
+	private string _rawCwd = "";
 	private string _slug = "";
 	private string _gitBranch = "";
 
@@ -22,7 +23,7 @@ internal sealed class ClaudeTranscript(SessionSource source, SessionRenderOption
 	{
 		_gitBranch = FirstNonEmpty(_gitBranch, record, "gitBranch");
 		_slug = FirstNonEmpty(_slug, record, "slug");
-		_cwd = FirstNonEmpty(_cwd, record, "cwd");
+		NoteCwd(record);
 
 		switch (JsonValues.String(record, "type", Report))
 		{
@@ -41,25 +42,44 @@ internal sealed class ClaudeTranscript(SessionSource source, SessionRenderOption
 		}
 	}
 
-	public override UnredactedSession Render()
+	public override RedactedSession Render()
 	{
-		string shortId = SessionPaths.ClaudeShortId(Source.SessionId);
+		RedactMessages();
+		string shortId = SessionPaths.ClaudeShortId(PathId(Source.SessionId)) + SessionPaths.RelocatedCopySuffix(_rawCwd, Source.ProjectDirectory);
 		string sessionId = Clip(Source.SessionId);
 		string project = Clip(_cwd.Length > 0
 			? SessionProject.FromClaudeCwd(_cwd, Source.HomeDirectory)
 			: SessionProject.FromClaudeDirectory(Source.ProjectDirectory, Source.HomeDirectory));
 		List<ArraySegment<SessionMessage>> segments = SplitIntoParts();
 		List<string>[] filesByPart = BucketFiles(segments);
-		List<UnredactedSessionDocument> documents = BuildDocuments(
+		List<RedactedSessionDocument> documents = BuildDocuments(
 			segments,
 			part => RenderPart(sessionId, project, part, filesByPart[part.Number - 1]),
 			(date, part) => SessionPaths.ClaudePart(date, shortId, part));
-		return new UnredactedSession(
+		return new RedactedSession(
 			SessionFormat.ClaudeCode,
 			sessionId,
 			documents,
 			Report,
+			CountsByRule,
+			Refusals,
 			path => SessionPaths.IsClaudeFamily(path, shortId));
+	}
+
+	/// <summary>Keeps the raw first cwd too, only to compare with the project folder. It is never written out.</summary>
+	private void NoteCwd(JsonElement record)
+	{
+		if (_cwd.Length > 0)
+		{
+			return;
+		}
+
+		string? value = JsonValues.String(record, "cwd", Report);
+		if (!string.IsNullOrEmpty(value))
+		{
+			_rawCwd = value;
+			_cwd = Clip(value);
+		}
 	}
 
 	private string FirstNonEmpty(string current, JsonElement record, string name)
@@ -96,7 +116,8 @@ internal sealed class ClaudeTranscript(SessionSource source, SessionRenderOption
 		{
 			return;
 		}
-		string path = Clip(name).Replace('\\', '/');
+		// Redacted after the transform, because turning backslashes into slashes can form a URL.
+		string path = Clip(name.Replace('\\', '/'));
 		if (_files.ContainsKey(path))
 		{
 			return;
@@ -176,16 +197,17 @@ internal sealed class ClaudeTranscript(SessionSource source, SessionRenderOption
 		SessionFrontmatter.Sequence(output, "files_touched", files[..kept]);
 		output.Append("---\n");
 
-		SessionFrontmatter.Body(output, Title(part.FirstUserMessage), part.Messages);
+		SessionFrontmatter.Body(output, RedactTitle(Title(part.FirstUserMessage)), part.Messages);
 		return output.ToString();
 	}
 
 	private List<string> Tags(string project)
 	{
-		List<string> tags = [$"project/{project}"];
+		List<string> tags = [RedactMetadata($"project/{project}")];
 		if (_gitBranch.Length > 0)
 		{
-			tags.Add($"branch/{_gitBranch.Replace('/', '-')}");
+			// Redacted after the transform, because turning slashes into dashes can form a token.
+			tags.Add(RedactMetadata($"branch/{_gitBranch.Replace('/', '-')}"));
 		}
 		return tags;
 	}

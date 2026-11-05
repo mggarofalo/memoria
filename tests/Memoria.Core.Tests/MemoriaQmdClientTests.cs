@@ -320,7 +320,7 @@ public sealed class MemoriaQmdClientTests
 		(MemoriaQmdClient client, FakeHttpHandler handler) = Create();
 		handler.Respond(HttpStatusCode.Accepted, """{"collection":"claude-sessions","path":"2026-11-01_x.md","file":"claude-sessions/2026-11-01_x.md","bytes":12,"created":true,"metadata":null,"job":""" + Fixtures.Job + "}");
 
-		SidecarIngestResponse response = await client.IngestAsync(new SidecarIngestRequest("claude-sessions", "2026-11-01_x.md", "# hello\n"));
+		SidecarIngestResponse response = await client.IngestAsync(new SidecarIngestRequest("claude-sessions", "2026-11-01_x.md", new Memoria.Core.Redaction.Redactor().Redact(new Memoria.Core.Sessions.UnredactedMarkdown("# hello\n"))));
 
 		Assert.True(response.Created);
 		Assert.Null(response.Metadata);

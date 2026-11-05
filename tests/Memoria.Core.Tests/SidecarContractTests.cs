@@ -151,6 +151,12 @@ public sealed class SidecarContractTests
 			type = underlying;
 		}
 
+		// On the wire it is a string; the type only proves the text went through the redactor.
+		if (type == typeof(Memoria.Core.Redaction.RedactedMarkdown))
+		{
+			type = typeof(string);
+		}
+
 		if (type == typeof(JsonElement))
 		{
 			return;

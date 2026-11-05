@@ -10,9 +10,9 @@ namespace Memoria.Core.Sessions;
 /// to serialize. <see cref="ToString"/> withholds the text, so it is also safe in logs.
 /// </summary>
 /// <remarks>
-/// The only way to the text is <see cref="ExposeForRedaction"/>. Its one legitimate caller
-/// is the ingest step that hands the result to the redactor, which makes misuse easy to find
-/// in review with a single search.
+/// The text cannot be read back outside this assembly. <see cref="ExposeForRedaction"/> is
+/// internal and its one caller is the redactor, so the only thing anyone else can do with this
+/// type is pass it there.
 /// </remarks>
 [JsonConverter(typeof(RefuseSerialization))]
 public sealed class UnredactedMarkdown
@@ -24,8 +24,15 @@ public sealed class UnredactedMarkdown
 		_markdown = markdown;
 	}
 
-	/// <summary>Returns the unredacted text. Pass it to the redactor and nowhere else.</summary>
-	public string ExposeForRedaction()
+	/// <summary>Wraps text that has not been redacted. The only thing to do with the result is pass it to the redactor.</summary>
+	public static UnredactedMarkdown FromText(string markdown)
+	{
+		ArgumentNullException.ThrowIfNull(markdown);
+		return new UnredactedMarkdown(markdown);
+	}
+
+	/// <summary>Returns the unredacted text, for the redactor.</summary>
+	internal string ExposeForRedaction()
 	{
 		return _markdown;
 	}

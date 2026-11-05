@@ -5,7 +5,10 @@ namespace Memoria.Core.Tests.Sessions;
 
 /// <summary>
 /// Byte parity with the Python exporters. The goldens are their output on synthetic inputs,
-/// produced by Fixtures/generate_goldens.py; nothing here came from a real transcript.
+/// produced by Fixtures/generate_goldens.py; nothing here came from a real transcript. Rendering
+/// always redacts, so this also proves redaction changes nothing in non-secret content. Where a
+/// session does hold a secret the output differs from the exporters by design: titles are cut from
+/// redacted text, parts are sized by it, and <c>message_sha256</c> is computed over it.
 /// </summary>
 public sealed class SessionGoldenTests
 {
@@ -21,11 +24,11 @@ public sealed class SessionGoldenTests
 	public async Task Output_matches_the_exporter_byte_for_byte(string name)
 	{
 		JsonElement testCase = LoadCases().Single(c => c.GetProperty("name").GetString() == name);
-		UnredactedSession session = await RenderCaseAsync(testCase, name);
+		RedactedSession session = await RenderCaseAsync(testCase, name);
 
 		string[] expected = testCase.GetProperty("documents").EnumerateArray().Select(static d => d.GetString()!).ToArray();
 		Assert.Equal(expected, session.Documents.Select(static document => document.Path));
-		foreach (UnredactedSessionDocument document in session.Documents)
+		foreach (RedactedSessionDocument document in session.Documents)
 		{
 			byte[] golden = await File.ReadAllBytesAsync(Path.Combine(s_fixtures, "goldens", name, document.Path));
 			Assert.Equal(golden, System.Text.Encoding.UTF8.GetBytes(document.Text()));
@@ -50,7 +53,7 @@ public sealed class SessionGoldenTests
 	public async Task The_part_split_counts_code_points_not_utf16_units()
 	{
 		JsonElement testCase = LoadCases().Single(static c => c.GetProperty("name").GetString() == "claude-parts");
-		UnredactedSession session = await RenderCaseAsync(testCase, "claude-parts");
+		RedactedSession session = await RenderCaseAsync(testCase, "claude-parts");
 
 		// Part one holds 40000 As and 25000 rockets, which is 65025 code points but 90000 UTF-16 units.
 		Assert.Equal(2, session.Documents[0].MessageCount);
@@ -58,7 +61,7 @@ public sealed class SessionGoldenTests
 		Assert.Equal(1, session.Documents[1].MessageCount);
 	}
 
-	private static async Task<UnredactedSession> RenderCaseAsync(JsonElement testCase, string name)
+	private static async Task<RedactedSession> RenderCaseAsync(JsonElement testCase, string name)
 	{
 		SessionFormat format = testCase.GetProperty("format").GetString() == "claude-code" ? SessionFormat.ClaudeCode : SessionFormat.Codex;
 		SessionSource source = new(format, testCase.GetProperty("session_id").GetString()!)

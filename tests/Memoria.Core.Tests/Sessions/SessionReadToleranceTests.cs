@@ -14,7 +14,7 @@ public sealed class SessionReadToleranceTests
 	{
 		string jsonl = "\n   \t\r\n{not json\n[1,2]\n\"text\"\n" + s_good + "{\"type\":\"future\"}\n" + ClaudeLine("assistant", "also kept");
 
-		UnredactedSession session = await Claude(jsonl);
+		RedactedSession session = await Claude(jsonl);
 
 		Assert.Equal(8, session.Report.Lines);
 		Assert.Equal(2, session.Report.BlankLines);
@@ -30,7 +30,7 @@ public sealed class SessionReadToleranceTests
 	[Fact]
 	public async Task A_clean_payload_reports_nothing_skipped_even_with_routine_unrendered_records()
 	{
-		UnredactedSession session = await Claude(s_good + "{\"type\":\"progress\"}\n");
+		RedactedSession session = await Claude(s_good + "{\"type\":\"progress\"}\n");
 
 		Assert.False(session.Report.HasSkippedContent);
 		Assert.Equal(1, session.Report.UnrenderedRecords);
@@ -68,7 +68,7 @@ public sealed class SessionReadToleranceTests
 	public async Task The_report_exposes_only_counts_so_it_cannot_echo_content()
 	{
 		const string Secret = "sk-live-do-not-echo";
-		UnredactedSession session = await Claude("{\"" + Secret + "\n{\"type\":\"" + Secret + "\"}\n");
+		RedactedSession session = await Claude("{\"" + Secret + "\n{\"type\":\"" + Secret + "\"}\n");
 
 		foreach (System.Reflection.PropertyInfo property in typeof(SessionReadReport).GetProperties())
 		{
@@ -80,7 +80,7 @@ public sealed class SessionReadToleranceTests
 	[Fact]
 	public async Task A_final_line_without_a_newline_is_left_unread()
 	{
-		UnredactedSession session = await Claude(s_good + ClaudeLine("assistant", "complete but unterminated").TrimEnd('\n'));
+		RedactedSession session = await Claude(s_good + ClaudeLine("assistant", "complete but unterminated").TrimEnd('\n'));
 
 		Assert.Equal(1, session.Report.UnterminatedLines);
 		Assert.Equal(1, session.Report.Messages);
@@ -91,7 +91,7 @@ public sealed class SessionReadToleranceTests
 	[Fact]
 	public async Task A_byte_order_mark_does_not_lose_the_line()
 	{
-		UnredactedSession session = await Claude("\uFEFF" + s_good + "\uFEFF\n");
+		RedactedSession session = await Claude("\uFEFF" + s_good + "\uFEFF\n");
 
 		Assert.Equal(1, session.Report.Messages);
 		Assert.Equal(1, session.Report.BlankLines);
@@ -104,7 +104,7 @@ public sealed class SessionReadToleranceTests
 		byte[] bad = [.. "{\"type\":\"user\",\"x\":\""u8, 0xFF, 0xFE, .. "\"}\n"u8];
 		using MemoryStream stream = new([.. bad, .. Encoding.UTF8.GetBytes(s_good)]);
 
-		UnredactedSession session = await SessionRenderer.RenderAsync(stream, new SessionSource(SessionFormat.ClaudeCode, ClaudeId));
+		RedactedSession session = await SessionRenderer.RenderAsync(stream, new SessionSource(SessionFormat.ClaudeCode, ClaudeId));
 
 		Assert.Equal(1, session.Report.MalformedLines);
 		Assert.Equal(1, session.Report.Messages);
@@ -115,7 +115,7 @@ public sealed class SessionReadToleranceTests
 	{
 		string deep = new string('[', 5000) + new string(']', 5000);
 
-		UnredactedSession session = await Claude(deep + "\n" + s_good);
+		RedactedSession session = await Claude(deep + "\n" + s_good);
 
 		Assert.Equal(1, session.Report.MalformedLines);
 		Assert.Equal(1, session.Report.Messages);
@@ -155,7 +155,7 @@ public sealed class SessionReadToleranceTests
 	{
 		string text = new('z', 300_000);
 
-		UnredactedSession session = await Claude(s_good + ClaudeLine("assistant", text) + ClaudeLine("user", "after"));
+		RedactedSession session = await Claude(s_good + ClaudeLine("assistant", text) + ClaudeLine("user", "after"));
 
 		Assert.Equal(3, session.Report.Messages);
 		Assert.Contains(text, session.Documents.Single(d => d.Text().Contains('z')).Text());
@@ -168,7 +168,7 @@ public sealed class SessionReadToleranceTests
 		byte[] bytes = Encoding.UTF8.GetBytes(s_good + ClaudeLine("assistant", "caf\u00e9 \U0001F680"));
 		using OneByteStream stream = new(bytes);
 
-		UnredactedSession session = await SessionRenderer.RenderAsync(stream, new SessionSource(SessionFormat.ClaudeCode, ClaudeId));
+		RedactedSession session = await SessionRenderer.RenderAsync(stream, new SessionSource(SessionFormat.ClaudeCode, ClaudeId));
 
 		Assert.Equal(2, session.Report.Messages);
 		Assert.Contains("caf\u00e9 \U0001F680", session.Documents[0].Text());
@@ -182,7 +182,7 @@ public sealed class SessionReadToleranceTests
 		using RepeatingStream stream = new((byte)'x', HugeBytes, Encoding.UTF8.GetBytes("\n" + s_good));
 
 		long before = GC.GetAllocatedBytesForCurrentThread();
-		UnredactedSession session = await SessionRenderer.RenderAsync(stream, new SessionSource(SessionFormat.ClaudeCode, ClaudeId), options);
+		RedactedSession session = await SessionRenderer.RenderAsync(stream, new SessionSource(SessionFormat.ClaudeCode, ClaudeId), options);
 		long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
 
 		Assert.Equal(1, session.Report.OversizedLines);
@@ -197,7 +197,7 @@ public sealed class SessionReadToleranceTests
 		string big = new('b', 200);
 		string jsonl = ClaudeLine("user", "first") + ClaudeLine("assistant", big) + ClaudeLine("user", "tiny but after the cut");
 
-		UnredactedSession session = await Claude(jsonl, options);
+		RedactedSession session = await Claude(jsonl, options);
 
 		Assert.Equal(1, session.Report.Messages);
 		Assert.Equal(2, session.Report.MessagesOverLimit);
@@ -224,7 +224,7 @@ public sealed class SessionReadToleranceTests
 		SessionRenderOptions options = new() { MaxRetainedChars = 100 };
 		string snapshot = "{\"type\":\"file-history-snapshot\",\"snapshot\":{\"trackedFileBackups\":{\"a.txt\":{},\"b.txt\":{}}}}\n";
 
-		UnredactedSession session = await Claude(ClaudeLine("user", "x") + snapshot, options);
+		RedactedSession session = await Claude(ClaudeLine("user", "x") + snapshot, options);
 
 		Assert.Equal(2, session.Report.FilesOverLimit);
 		Assert.Contains("files_touched: []", session.Documents[0].Text());

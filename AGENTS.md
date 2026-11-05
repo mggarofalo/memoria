@@ -54,6 +54,7 @@ Conventional Commits: `<type>(<scope>): <description>`. Scopes track the layout:
 dotnet build Memoria.slnx -p:TreatWarningsAsErrors=true   # build (CI parity)
 dotnet test Memoria.slnx                                  # test
 dotnet format Memoria.slnx --verify-no-changes            # format gate (CI parity)
+sh scripts/redaction-report.sh <corpus-dir>               # local release check: gitleaks over redacted output, counts only. Not for CI
 MEMORIA_WRITE_OPENAPI=1 dotnet test Memoria.slnx --filter OpenApiContract   # refresh src/Memoria.Api/openapi.json after an endpoint change
 npx --yes @stoplight/spectral-cli@6.17.0 lint --fail-severity warn src/Memoria.Api/openapi.json   # lint gate (CI parity)
 
@@ -139,7 +140,8 @@ clients (Claude Code / CLI / scripts)
 | Path | Contains |
 |---|---|
 | `src/Memoria.Api/` | ASP.NET Core host: REST endpoints, outward MCP server, auth handler, ingest |
-| `src/Memoria.Core/` | Document envelope, search contracts, redaction rules |
+| `src/Memoria.Core/` | Document envelope, search contracts, session rendering, redaction rules |
+| `tools/RedactionCheck/` | Local report behind `scripts/redaction-report.sh`. Not part of the solution or CI |
 | `tests/Memoria.Api.Tests/` | xUnit tests against `WebApplicationFactory<Program>` with a scripted `FakeSidecar` handler. `MemoriaApiFactory` opts in to disabled auth; `AuthApiFactory` enforces keys on a temp control database. |
 | `tests/Memoria.Core.Tests/` | Client unit tests and `SidecarContractTests`, which pins the C# wire types to `sidecar/openapi.json` |
 | `sidecar/` | `memoria-qmd`: TypeScript REST service over the QMD SDK; `openapi.json` is its contract |
@@ -156,7 +158,7 @@ clients (Claude Code / CLI / scripts)
 **Key invariants:**
 
 - **QMD is never exposed directly.** The sidecar is the only process that opens the index, and it is reachable only on the LAN behind a shared secret; all external traffic goes through `Memoria.Api`. QMD ships no authentication whatsoever — the API is the only thing standing between the corpus and the internet. QMD's own MCP HTTP transport is not used: it binds `localhost` only, requires an `Mcp-Session-Id` handshake, and cannot filter on frontmatter.
-- **Redaction is a precondition of indexing, not a post-filter.** Transcripts carry live credentials. If a document reaches the index unredacted, the secret is already searchable.
+- **Redaction is a precondition of indexing, not a post-filter.** Transcripts carry live credentials. If a document reaches the index unredacted, the secret is already searchable. `SidecarIngestRequest.Content` is a `RedactedMarkdown`, which only `Redactor` can create, so skipping redaction fails to compile. `SessionRenderer` redacts every metadata string and all message text, joined so a key spread across messages is one key, before the title, digest, sizing, and split, then checks each finished part and refuses the session if anything is still found.
 - **API keys are scoped to collections.** Never issue an all-collections key by default; the corpus mixes sensitivity levels. An all-collections key takes the explicit `allCollections: true`, never an omission.
 - **Auth fails closed.** `Memoria:Auth:Mode` defaults to `ApiKey`, and a fallback authorization policy covers any endpoint without an explicit `AllowAnonymous`. New `/v1` routes get `MemoriaScopeAttribute` metadata from their group. Scopes do not imply each other: `admin` does not grant `read`.
 - **Never pass an empty collection list to the sidecar.** It reads `collections: []` as "the default collections", so it would widen the caller's scope. Empty scope means no results. Read the corpus through `ScopedCorpus`, not `IMemoriaQmdClient`, so results are re-checked against the scope.

@@ -11,17 +11,17 @@ internal static partial class SessionTestKit
 	public const string ClaudeId = "abcdef12-3456-7890-abcd-ef1234567890";
 	public const string CodexId = "11111111-2222-4333-8444-555555555555";
 
-	public static Task<UnredactedSession> Claude(string jsonl, SessionRenderOptions? options = null, string sessionId = ClaudeId)
+	public static Task<RedactedSession> Claude(string jsonl, SessionRenderOptions? options = null, string sessionId = ClaudeId)
 	{
 		return Render(jsonl, new SessionSource(SessionFormat.ClaudeCode, sessionId), options);
 	}
 
-	public static Task<UnredactedSession> Codex(string jsonl, SessionRenderOptions? options = null, string sessionId = CodexId)
+	public static Task<RedactedSession> Codex(string jsonl, SessionRenderOptions? options = null, string sessionId = CodexId)
 	{
 		return Render(jsonl, new SessionSource(SessionFormat.Codex, sessionId), options);
 	}
 
-	public static Task<UnredactedSession> Render(string jsonl, SessionSource source, SessionRenderOptions? options = null)
+	public static Task<RedactedSession> Render(string jsonl, SessionSource source, SessionRenderOptions? options = null)
 	{
 		return SessionRenderer.RenderAsync(new MemoryStream(Encoding.UTF8.GetBytes(jsonl)), source, options);
 	}
@@ -66,9 +66,9 @@ internal static partial class SessionTestKit
 		return JsonSerializer.Serialize(new Dictionary<string, object?> { ["timestamp"] = timestamp, ["type"] = type, ["payload"] = payload }) + "\n";
 	}
 
-	public static string Text(this UnredactedSessionDocument document)
+	public static string Text(this RedactedSessionDocument document)
 	{
-		return document.Content.ExposeForRedaction();
+		return document.Content.Text;
 	}
 
 	/// <summary>Parses frontmatter the way the sidecar finds it: the same fence regex, then a real YAML parser.</summary>

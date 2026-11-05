@@ -110,7 +110,7 @@ public sealed class FrontmatterSafetyTests
 		}) + "\n";
 		SessionSource source = new(SessionFormat.ClaudeCode, value + "x");
 
-		UnredactedSession session = await Render(jsonl + snapshot, source);
+		RedactedSession session = await Render(jsonl + snapshot, source);
 		YamlMappingNode frontmatter = Frontmatter(session.Documents[0].Text());
 
 		Assert.Equal(value + "x", frontmatter.Scalar("session_id"));
@@ -160,7 +160,7 @@ public sealed class FrontmatterSafetyTests
 	{
 		const string Spoof = "---\nsession_id: spoofed\nproject: pwned\n---\n";
 
-		UnredactedSession session = await Claude(ClaudeLine("user", Spoof));
+		RedactedSession session = await Claude(ClaudeLine("user", Spoof));
 		YamlMappingNode frontmatter = Frontmatter(session.Documents[0].Text());
 
 		Assert.Equal(ClaudeId, frontmatter.Scalar("session_id"));
@@ -172,7 +172,7 @@ public sealed class FrontmatterSafetyTests
 	{
 		string huge = new('h', 100_000);
 
-		UnredactedSession session = await Claude(ClaudeLine("user", "x", branch: huge, slug: huge, cwd: "/srv/" + huge));
+		RedactedSession session = await Claude(ClaudeLine("user", "x", branch: huge, slug: huge, cwd: "/srv/" + huge));
 		string text = session.Documents[0].Text();
 
 		Assert.Equal(3, session.Report.ClippedFields);
@@ -335,22 +335,19 @@ public sealed class UnredactedMarkdownTests
 	}
 
 	[Fact]
-	public async Task A_rendered_document_does_not_leak_through_its_own_formatting()
+	public async Task A_rendered_document_holds_only_redacted_text()
 	{
-		UnredactedSession session = await Claude(ClaudeLine("user", Secret));
+		string token = "gh" + "p_" + new string('a', 36);
+		RedactedSession session = await Claude(ClaudeLine("user", token));
 
-		Assert.DoesNotContain(Secret, session.Documents[0].ToString());
-		Assert.Contains(Secret, session.Documents[0].Text());
+		Assert.DoesNotContain(token, session.Documents[0].ToString());
+		Assert.DoesNotContain(token, session.Documents[0].Text());
 	}
 
 	[Fact]
-	public async Task Serializing_it_or_anything_that_holds_it_throws()
+	public void Serializing_it_throws()
 	{
-		UnredactedSession session = await Claude(ClaudeLine("user", Secret));
-
 		Assert.Throws<NotSupportedException>(() => JsonSerializer.Serialize(new UnredactedMarkdown(Secret)));
-		Assert.Throws<NotSupportedException>(() => JsonSerializer.Serialize(session.Documents[0]));
-		Assert.Throws<NotSupportedException>(() => JsonSerializer.Serialize(session));
 		Assert.Throws<NotSupportedException>(() => JsonSerializer.Deserialize<UnredactedMarkdown>("\"x\""));
 	}
 

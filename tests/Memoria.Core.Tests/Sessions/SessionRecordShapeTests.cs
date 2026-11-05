@@ -23,7 +23,7 @@ public sealed class SessionRecordShapeTests
 	[InlineData("{\"gitBranch\":7,\"slug\":[],\"cwd\":{}}")]
 	public async Task A_claude_record_of_the_wrong_shape_adds_no_message(string line)
 	{
-		UnredactedSession session = await Claude(line + "\n" + Good);
+		RedactedSession session = await Claude(line + "\n" + Good);
 
 		Assert.Equal(1, session.Report.Messages);
 		YamlMappingNode frontmatter = Frontmatter(session.Documents[0].Text());
@@ -42,7 +42,7 @@ public sealed class SessionRecordShapeTests
 	[InlineData("{\"type\":\"turn_context\",\"payload\":{\"turn_id\":7}}")]
 	public async Task A_codex_record_of_the_wrong_shape_adds_no_message(string line)
 	{
-		UnredactedSession session = await Codex(line + "\n" + CodexMessage("user", "kept"));
+		RedactedSession session = await Codex(line + "\n" + CodexMessage("user", "kept"));
 
 		Assert.Equal(1, session.Report.Messages);
 		Assert.Equal("[unassigned]", TurnIds(session.Documents[0]));
@@ -56,7 +56,7 @@ public sealed class SessionRecordShapeTests
 			+ "{\"type\":\"user\",\"timestamp\":\"garbage\",\"message\":{\"content\":\"c\"}}\n"
 			+ "{\"type\":\"user\",\"message\":{\"content\":\"d\"}}\n";
 
-		UnredactedSession session = await Claude(jsonl);
+		RedactedSession session = await Claude(jsonl);
 
 		Assert.Equal(2, session.Report.InvalidTimestamps);
 		Assert.Equal(4, session.Report.Messages);
@@ -68,7 +68,7 @@ public sealed class SessionRecordShapeTests
 	{
 		string line = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\" one \"},{\"type\":\"thinking\",\"text\":\"hidden\"},{\"type\":\"text\",\"text\":\"\\ntwo\\n\"}]}}\n";
 
-		UnredactedSession session = await Claude(line);
+		RedactedSession session = await Claude(line);
 
 		Assert.EndsWith("## Assistant\n\none\n\ntwo\n", session.Documents[0].Text());
 	}
@@ -78,7 +78,7 @@ public sealed class SessionRecordShapeTests
 	{
 		string line = "{\"type\":\"user\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"message\":{\"content\":\"[Request interrupted by user for tool use]\"}}\n";
 
-		UnredactedSession session = await Claude(line + ClaudeLine("assistant", "later"));
+		RedactedSession session = await Claude(line + ClaudeLine("assistant", "later"));
 
 		Assert.Equal(1, session.Report.Messages);
 		Assert.StartsWith("2026-01-01_", session.Documents[0].Path);
@@ -98,7 +98,7 @@ public sealed class SessionRecordShapeTests
 	{
 		string line = "{\"type\":\"user\",\"message\":{\"content\":\"[" + escaped + "]\"}}\n";
 
-		UnredactedSession session = await Claude(line);
+		RedactedSession session = await Claude(line);
 
 		Assert.Equal(1, session.Report.RepairedStrings);
 		Assert.EndsWith($"## User\n\n[{expected}]\n", session.Documents[0].Text());
@@ -109,7 +109,7 @@ public sealed class SessionRecordShapeTests
 	[Fact]
 	public async Task A_valid_surrogate_pair_is_not_repaired()
 	{
-		UnredactedSession session = await Claude("{\"type\":\"user\",\"message\":{\"content\":\"\\ud83d\\ude00\"}}\n");
+		RedactedSession session = await Claude("{\"type\":\"user\",\"message\":{\"content\":\"\\ud83d\\ude00\"}}\n");
 
 		Assert.Equal(0, session.Report.RepairedStrings);
 		Assert.EndsWith("\U0001F600\n", session.Documents[0].Text());
@@ -120,7 +120,7 @@ public sealed class SessionRecordShapeTests
 	{
 		string snapshot = "{\"type\":\"file-history-snapshot\",\"snapshot\":{\"trackedFileBackups\":{\"bad\\ud83d\":{},\"good.txt\":{}}}}\n";
 
-		UnredactedSession session = await Claude(Good + snapshot);
+		RedactedSession session = await Claude(Good + snapshot);
 
 		Assert.Equal(1, session.Report.InvalidKeys);
 		Assert.True(session.Report.HasSkippedContent);
@@ -133,7 +133,7 @@ public sealed class SessionRecordShapeTests
 		string snapshot = "{\"type\":\"file-history-snapshot\",\"snapshot\":{\"trackedFileBackups\":{"
 			+ "\"dir\\\\b.txt\":{},\"dir/b.txt\":{},\"\\uFFFD.txt\":{},\"\\ud83d\\ude00.txt\":{},\"a.txt\":{}}}}\n";
 
-		UnredactedSession session = await Claude(Good + snapshot);
+		RedactedSession session = await Claude(Good + snapshot);
 
 		Assert.Equal(["a.txt", "dir/b.txt", "\uFFFD.txt", "\U0001F600.txt"], Frontmatter(session.Documents[0].Text()).Sequence("files_touched"));
 	}
@@ -146,7 +146,7 @@ public sealed class SessionRecordShapeTests
 		string jsonl = Snapshot("before-any.txt") + ClaudeLine("user", new string('a', 30)) + Snapshot("one.txt")
 			+ ClaudeLine("assistant", new string('b', 30)) + Snapshot("two.txt") + Snapshot("one.txt");
 
-		UnredactedSession session = await Claude(jsonl, options);
+		RedactedSession session = await Claude(jsonl, options);
 
 		Assert.Equal(2, session.Documents.Count);
 		Assert.Equal(["before-any.txt", "one.txt"], Frontmatter(session.Documents[0].Text()).Sequence("files_touched"));
@@ -158,7 +158,7 @@ public sealed class SessionRecordShapeTests
 	{
 		string snapshot = "{\"type\":\"file-history-snapshot\",\"snapshot\":{\"timestamp\":\"2026-02-03T00:00:00Z\"}}\n";
 
-		UnredactedSession session = await Claude(snapshot + ClaudeLine("user", "x"));
+		RedactedSession session = await Claude(snapshot + ClaudeLine("user", "x"));
 
 		Assert.Equal("2026-02-03", Frontmatter(session.Documents[0].Text()).Scalar("date"));
 	}
@@ -170,7 +170,7 @@ public sealed class SessionRecordShapeTests
 			+ ClaudeLine("user", "a", "2026-10-01T20:00:00-05:00")
 			+ ClaudeLine("user", "c", "2026-10-02T01:00:00Z");
 
-		UnredactedSession session = await Claude(jsonl);
+		RedactedSession session = await Claude(jsonl);
 
 		Assert.Equal("2026-10-01", Frontmatter(session.Documents[0].Text()).Scalar("date"));
 		Assert.StartsWith("2026-10-01_", session.Documents[0].Path);
@@ -196,8 +196,8 @@ public sealed class SessionRecordShapeTests
 		DateTimeOffset fallback = new(2026, 3, 4, 5, 6, 7, TimeSpan.FromHours(-5));
 		SessionSource source = new(SessionFormat.ClaudeCode, ClaudeId) { FallbackStart = fallback };
 
-		UnredactedSession untimed = await Render("{\"type\":\"user\",\"message\":{\"content\":\"x\"}}\n", source);
-		UnredactedSession timed = await Render(ClaudeLine("user", "x"), source);
+		RedactedSession untimed = await Render("{\"type\":\"user\",\"message\":{\"content\":\"x\"}}\n", source);
+		RedactedSession timed = await Render(ClaudeLine("user", "x"), source);
 
 		Assert.Equal("2026-03-04T05:06:07-05:00", Frontmatter(untimed.Documents[0].Text()).Scalar("start_time"));
 		Assert.StartsWith("2026-10-01_", timed.Documents[0].Path);
@@ -206,7 +206,7 @@ public sealed class SessionRecordShapeTests
 	[Fact]
 	public async Task A_part_with_no_user_message_has_no_title()
 	{
-		UnredactedSession session = await Claude(ClaudeLine("assistant", "only me"));
+		RedactedSession session = await Claude(ClaudeLine("assistant", "only me"));
 
 		Assert.DoesNotContain("\n# ", session.Documents[0].Text());
 		Assert.Contains("---\n\n## Assistant\n\nonly me\n", session.Documents[0].Text());
@@ -217,7 +217,7 @@ public sealed class SessionRecordShapeTests
 	{
 		string rockets = string.Concat(Enumerable.Repeat("\U0001F680", 150));
 
-		UnredactedSession session = await Claude(ClaudeLine("user", rockets + "\nsecond"));
+		RedactedSession session = await Claude(ClaudeLine("user", rockets + "\nsecond"));
 
 		Assert.Contains("\n# " + string.Concat(Enumerable.Repeat("\U0001F680", 100)) + "\n\n## User", session.Documents[0].Text());
 	}
@@ -267,7 +267,7 @@ public sealed class SessionRecordShapeTests
 			+ CodexRecord("session_meta", new Dictionary<string, object?> { ["id"] = "third", ["cwd"] = "/srv/other", ["agent_role"] = "three" })
 			+ CodexMessage("user", "x");
 
-		UnredactedSession session = await Codex(jsonl);
+		RedactedSession session = await Codex(jsonl);
 		YamlMappingNode frontmatter = Frontmatter(session.Documents[0].Text());
 
 		Assert.Equal("second", frontmatter.Scalar("session_id"));
@@ -281,8 +281,8 @@ public sealed class SessionRecordShapeTests
 	{
 		string stem = $"rollout-2026-09-09T10-00-00-{CodexId.ToUpperInvariant()}";
 
-		UnredactedSession withoutMeta = await Codex(CodexMessage("user", "x"), sessionId: stem);
-		UnredactedSession plainStem = await Codex(CodexMessage("user", "x"), sessionId: "not-a-uuid");
+		RedactedSession withoutMeta = await Codex(CodexMessage("user", "x"), sessionId: stem);
+		RedactedSession plainStem = await Codex(CodexMessage("user", "x"), sessionId: "not-a-uuid");
 
 		Assert.Equal(CodexId.ToUpperInvariant(), withoutMeta.SessionId);
 		Assert.Equal("not-a-uuid", plainStem.SessionId);
@@ -346,8 +346,8 @@ public sealed class SessionRecordShapeTests
 	[Fact]
 	public async Task A_codex_part_with_no_user_message_has_no_title_and_a_title_loses_its_hashes()
 	{
-		UnredactedSession untitled = await Codex(CodexMessage("assistant", "only me"));
-		UnredactedSession titled = await Codex(CodexMessage("user", "  ## #Fix # it\u2028next line"));
+		RedactedSession untitled = await Codex(CodexMessage("assistant", "only me"));
+		RedactedSession titled = await Codex(CodexMessage("user", "  ## #Fix # it\u2028next line"));
 
 		Assert.DoesNotContain("\n# ", untitled.Documents[0].Text());
 		Assert.Contains("\n# Fix  it\n\n## User", titled.Documents[0].Text());
@@ -358,7 +358,7 @@ public sealed class SessionRecordShapeTests
 	{
 		string jsonl = "{\"type\":\"future\",\"timestamp\":\"2026-01-01T00:00:00Z\"}\n" + CodexMessage("user", "x");
 
-		UnredactedSession session = await Codex(jsonl);
+		RedactedSession session = await Codex(jsonl);
 
 		Assert.Equal(1, session.Report.UnrenderedRecords);
 		Assert.Equal("2026-01-01", Frontmatter(session.Documents[0].Text()).Scalar("date"));
@@ -372,7 +372,7 @@ public sealed class SessionRecordShapeTests
 		Assert.Empty((await Claude("")).Documents);
 	}
 
-	private static string TurnIds(UnredactedSessionDocument document)
+	private static string TurnIds(RedactedSessionDocument document)
 	{
 		return "[" + string.Join(", ", Frontmatter(document.Text()).Sequence("turn_ids")) + "]";
 	}
