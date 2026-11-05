@@ -50,6 +50,7 @@ async function runIngest(h: Harness): Promise<void> {
   h.seedIndex();
   await h.choosePorts();
   await h.startSidecar();
+  await h.startProxy();
   const admin = bootstrap(h);
   await h.startApi();
   await ingest(h, admin);

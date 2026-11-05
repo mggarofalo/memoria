@@ -25,9 +25,6 @@ export const INGEST_SERVER: HarnessOptions = {
     [`Memoria__Ingest__Collections__${OPEN}__Redaction`]: "Disabled",
     [`Memoria__Ingest__Collections__${TYPO}__Redaction`]: "disabled",
     Memoria__Ingest__MinReindexInterval: "00:00:00",
-    // The harness runs from the repository, where appsettings.json is not found. This is the level it ships.
-    // At Information the framework logs every request's query string, and this run searches for each token by value.
-    "Logging__LogLevel__Microsoft.AspNetCore": "Warning",
   },
 };
 
@@ -198,8 +195,12 @@ async function searchEveryWay(c: Context, secrets: Record<string, string>): Prom
 }
 
 function nothingOnDisk(c: Context, secrets: Record<string, string>): void {
-  const found = filesHolding(c.h.dir, Object.values(secrets), (file) => /\.(exe|dll)$/.test(file) || path.basename(file) === "memoria");
+  // The proxy's record holds what this run searched for, which is each token by value. What was written is checked next.
+  const found = filesHolding(c.h.dir, Object.values(secrets), (file) => /\.(exe|dll)$/.test(file) || ["memoria", "proxy-records.jsonl"].includes(path.basename(file)));
   c.h.check("ingest: no file of the run holds a credential, in raw bytes, logs and databases included", found.length === 0, found);
+
+  const writes = c.h.proxied().filter((call) => call.method === "POST" && call.url === "/documents");
+  c.h.check("ingest: every write on the wire to the sidecar is free of credentials", writes.length >= 2 && !writes.some((call) => holdsAny(call.body ?? "", Object.values(secrets))), writes.length);
 }
 
 /** The same key and secret, one collection along, where an operator chose otherwise. */

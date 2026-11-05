@@ -24,7 +24,7 @@ With no worker, there is no query expansion, reranking or vector search, so quer
 
 ## The secret proof
 
-`ingest.ts` is the most important check here. On a server of its own, a document and a session holding credentials go in through the real routes. Each token is built at run time from random bytes, so the source holds none and none can be printed. Then every route that can read returns only redacted text: REST search, `GET /v1/docs` by id and by path, multi-get, and MCP search and get. Searching for each token finds nothing, and no file of the run holds one in its raw bytes, including the index, the control database, their write-ahead logs, and the logs.
+`ingest.ts` is the most important check here. On a server of its own, a document and a session holding credentials go in through the real routes. Each token is built at run time from random bytes, so the source holds none and none can be printed. Then every route that can read returns only redacted text: REST search, `GET /v1/docs` by id and by path, multi-get, and MCP search and get. Searching for each token finds nothing, no file of the run holds one in its raw bytes, including the index, the control database, their write-ahead logs, and the logs, and no write reaching the sidecar holds one.
 
 The same file then proves the operator's off switch against the collection next door, deletes against a 10-minute debounce, scope, shrinking, and who owns a file. Long-running proofs of limits and memory are not here, because they would take the run past its time limit.
 
