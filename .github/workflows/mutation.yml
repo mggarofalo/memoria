@@ -92,6 +92,9 @@ jobs:
         run: |
           npm ci --no-fund --no-audit
           npm ci --no-fund --no-audit --prefix ${{ matrix.package }}
+      # Temporary: the worker's full run has been killed on the runner, and this says why.
+      - name: Log memory in the background
+        run: (while sleep 120; do echo "$(date +%H:%M) $(free -m | awk '/Mem:/ {print "used="$3" available="$7}') node=$(pgrep -c node) fake-servers=$(pgrep -fc fake-llama-server) top=$(ps -eo rss=,args= --sort=-rss | head -1 | cut -c1-90)"; done) &
       - name: Mutate
         run: sh scripts/mutation-js.sh ${{ matrix.package }}
         env:
