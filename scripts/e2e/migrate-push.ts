@@ -189,13 +189,22 @@ async function dryRunAndSend(h: Harness, key: string): Promise<void> {
   });
   writeFileSync(path.join(s.root, "index.sqlite"), "not a database, and nothing should open it");
   const before = fingerprint(s.root);
+  dryRun(h, s);
+  const reportFile = firstSend(h, s, token, before);
+  await afterSend(h, key, s);
+  report(h, s, reportFile);
+}
+
+function dryRun(h: Harness, s: Setup): void {
   const dry = h.memoria(["migrate", "push", "--qmd-config", s.config, "--format", "json"], { noUrl: true });
   h.check("push: without --apply it is a dry run, with no key or server, and says what it would send", dry.code === 0 && rowOf(dry).selected === 4 && storedFiles(h, TARGET).length === 0, dry.out + dry.err);
 
   const plan = h.memoria(["migrate", "plan", "--qmd-config", s.config, "--format", "json"], { noUrl: true });
   const planned = (JSON.parse(plan.out || "{}") as { collections?: Array<{ files: number }> }).collections?.[0]?.files;
   h.check("push: selects what plan counts", planned === rowOf(dry).selected, { planned, selected: rowOf(dry).selected });
+}
 
+function firstSend(h: Harness, s: Setup, token: string, before: string): string {
   const sent = push(s, h.apiUrl, "--apply", "--format", "json");
   const row = rowOf(sent);
   h.check("push: --apply stores what was selected, at the same paths", sent.code === 0 && row.sent === 4 && storedFiles(h, TARGET).join() === ["a.md", "café/文.md", "long/front.md", "my dir/b+c &d.md"].sort().join(), sent.out + sent.err + storedFiles(h, TARGET).join());
@@ -203,6 +212,10 @@ async function dryRunAndSend(h: Harness, key: string): Promise<void> {
   const stored = readFileSync(path.join(h.dir, "corpus", TARGET, "a.md"), "utf8");
   h.check("push: the server's redaction applied to what it stored", !stored.includes(token) && stored.includes("pushedword"), stored.length);
   h.check("push: sources, and the index beside them, are left as they were", fingerprint(s.root) === before);
+  return row.report;
+}
+
+async function afterSend(h: Harness, key: string, s: Setup): Promise<void> {
   const ledger = await status(h, key, TARGET, "my dir/b+c &d.md");
   h.check("push: the ledger holds the path, with the file's time", ledger.state === "complete" && new Date(ledger.updated ?? 0).getTime() === FILE_TIME.getTime(), ledger);
   const again = push(s, h.apiUrl, "--apply", "--format", "json");
@@ -210,7 +223,6 @@ async function dryRunAndSend(h: Harness, key: string): Promise<void> {
   await forceIndex({ h });
   const hits = await fetch(`${h.apiUrl}/v1/search?query=spacedword&rerank=false&limit=20&collection=${TARGET}`, { headers: { authorization: `Bearer ${key}` } });
   h.check("push: what it stored is searchable, once", ((await hits.json()) as { results: unknown[] }).results.length === 1);
-  report(h, s, row.report);
 }
 
 function report(h: Harness, s: Setup, file: string): void {
@@ -296,13 +308,7 @@ async function takenOver(h: Harness, key: string): Promise<void> {
   const text = `---\nsession_id: "${id}"\nmessage_end: 0\n---\n\n## User\n\nold\n`;
   const s = setup(h, key, "takeover", TAKEOVER_TARGET, { "2026-01-15_dededede.md": text });
   const first = push(s, h.apiUrl, "--apply", "--format", "json");
-  const session = async (sessionId: string, ...words: string[]): Promise<number> => {
-    const query = new URLSearchParams({ collection: TAKEOVER_TARGET, format: "claude", sessionId, projectDirectory: OWN_FOLDER, updated: new Date(Date.now() + 60_000).toISOString() });
-    const answer = await fetch(`${h.apiUrl}/v1/ingest/session?${query}`, { method: "POST", headers: { authorization: `Bearer ${key}`, "content-type": "application/x-ndjson" }, body: words.map((word, index) => line(index % 2 === 0 ? "user" : "assistant", word)).join("") });
-    await answer.arrayBuffer();
-    return answer.status;
-  };
-  const took = await session(id, "one", "two");
+  const took = await postSession(h, key, id, "one", "two");
   const repush = push(s, h.apiUrl, "--apply", "--ignore-state", "--format", "json");
   h.check("push: a path its session took over counts as migrated, not as a failure", first.code === 0 && took === 202 && repush.code === 0 && rowOf(repush).takenOver === 1 && rowOf(repush).sent === 0, { first: first.code, took, out: repush.out, err: repush.err });
   const again = push(s, h.apiUrl, "--apply", "--format", "json");
@@ -311,9 +317,19 @@ async function takenOver(h: Harness, key: string): Promise<void> {
   writeFileSync(file, `${text}\nedited\n`);
   const edited = push(s, h.apiUrl, "--apply");
   h.check("push: a local edit after a takeover is said not to have been sent", edited.code === 0 && edited.out.includes("local changes that were not sent") && edited.out.includes("not that their text is still held") && !edited.out.includes("Every selected document is stored"), edited.out + edited.err);
+  await ownedNotTakenOver(h, key);
+}
 
+async function postSession(h: Harness, key: string, sessionId: string, ...words: string[]): Promise<number> {
+  const query = new URLSearchParams({ collection: TAKEOVER_TARGET, format: "claude", sessionId, projectDirectory: OWN_FOLDER, updated: new Date(Date.now() + 60_000).toISOString() });
+  const answer = await fetch(`${h.apiUrl}/v1/ingest/session?${query}`, { method: "POST", headers: { authorization: `Bearer ${key}`, "content-type": "application/x-ndjson" }, body: words.map((word, index) => line(index % 2 === 0 ? "user" : "assistant", word)).join("") });
+  await answer.arrayBuffer();
+  return answer.status;
+}
+
+async function ownedNotTakenOver(h: Harness, key: string): Promise<void> {
   const before = new Set(storedFiles(h, TAKEOVER_TARGET));
-  const owned = await session("efefefef-1111-2222-3333-444444444444", "mine");
+  const owned = await postSession(h, key, "efefefef-1111-2222-3333-444444444444", "mine");
   const name = storedFiles(h, TAKEOVER_TARGET).find((file) => !before.has(file)) ?? "";
   const other = setup(h, key, "takeover-owned", TAKEOVER_TARGET, { [name]: "---\ndate: \"2024-03-01\"\n---\n\nanother\n" });
   const refused = push(other, h.apiUrl, "--apply", "--format", "json");
