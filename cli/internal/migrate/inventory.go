@@ -41,6 +41,8 @@ type Plan struct {
 	// Blank is the files the pattern takes that hold nothing but space. QMD does not index them, so they are not selected.
 	Blank      int      `json:"blank,omitempty"`
 	BlankNames []string `json:"-"`
+	// UnreadableNames is what Unreadable counts, for a push's private report. It never reaches any output.
+	UnreadableNames []string `json:"-"`
 	// Decomposed is the selected files stored under a composed spelling of their name, as a server refuses any other.
 	Decomposed int    `json:"decomposedNames,omitempty"`
 	Problem    string `json:"problem,omitempty"`
@@ -87,7 +89,7 @@ func Inventory(collection Collection, target string) (Plan, []string) {
 		}
 	}, func(name string) {
 		// A folder that cannot be listed may hold anything, so it counts whatever its name says.
-		plan.Unreadable++
+		plan.noteUnreadable(name)
 	})
 	if err != nil {
 		plan.Problem = "its folder cannot be read"
@@ -104,7 +106,7 @@ func (p *Plan) keep(root *os.Root, name string, info fs.FileInfo, local map[stri
 		p.BlankNames = append(p.BlankNames, name)
 		return false
 	case textUnreadable:
-		p.Unreadable++
+		p.noteUnreadable(name)
 		return false
 	case textInvalid:
 		local[name] = ReasonNotUTF8
@@ -113,6 +115,11 @@ func (p *Plan) keep(root *os.Root, name string, info fs.FileInfo, local map[stri
 		local[name] = ReasonFutureTime
 	}
 	return true
+}
+
+func (p *Plan) noteUnreadable(name string) {
+	p.Unreadable++
+	p.UnreadableNames = append(p.UnreadableNames, name)
 }
 
 func (p *Plan) noteNames(names []string, local map[string]string) {

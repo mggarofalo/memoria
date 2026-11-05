@@ -2,7 +2,9 @@ package migrate
 
 import (
 	"net/http"
+	"os"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/mggarofalo/memoria/cli/internal/auth"
@@ -140,5 +142,27 @@ func TestDamagedOrEmptyProgress(t *testing.T) {
 	}
 	if _, err := LoadPushState("o", "c", "t", false); err == nil {
 		t.Fatal("damaged progress read as a fresh start")
+	}
+}
+
+// A file that cannot be read is named for the report, as a folder is, and is not selected.
+func TestAnUnreadableFileIsNamedForTheReport(t *testing.T) {
+	dir := t.TempDir()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	plan := Plan{}
+	info := fstest.MapFS{"gone.md": {Data: []byte("x")}}
+	entry, err := info.Stat("gone.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.keep(root, "gone.md", entry, map[string]string{}) {
+		t.Fatal("a file that cannot be opened was kept")
+	}
+	if plan.Unreadable != 1 || len(plan.UnreadableNames) != 1 || plan.UnreadableNames[0] != "gone.md" {
+		t.Fatalf("plan = %+v", plan)
 	}
 }

@@ -58,7 +58,8 @@ func newMigratePushCmd(a *app) *cobra.Command {
 		Use:   "push --qmd-config <index.yml>",
 		Short: "Send a QMD setup to a Memoria server. A dry run unless you pass --apply",
 		Long: `Send exactly the files 'migrate plan' counts, as they are, to the collection each one
-goes to. Without --apply this is a dry run: it reads no file's text, and needs no key.
+goes to. Without --apply this is a dry run: it sends nothing and needs no key. It still reads
+each selected file to judge it, as 'migrate plan' does, and keeps none of the text.
 
 It only reads your files, and never opens QMD's index.sqlite.
 
@@ -333,6 +334,9 @@ func (r *pushRun) collection(job pushJob, origin string) (migrate.PushSummary, [
 	c := &pushCollection{job: job, root: root, state: state, summary: summaryOf(job), finished: make(map[string]bool, len(job.paths)), held: map[string]bool{}, saved: time.Now()}
 	for _, name := range job.plan.BlankNames {
 		c.addProblem(name, migrate.ProblemBlank, "")
+	}
+	for _, name := range job.plan.UnreadableNames {
+		c.addProblem(name, migrate.ProblemUnreadable, "")
 	}
 	r.a.warnIfNoFiles(job.collection.Name, job.plan.Files, job.plan.Unreadable)
 	if err := state.Save(); err != nil {
