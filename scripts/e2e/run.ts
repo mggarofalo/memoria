@@ -7,6 +7,7 @@ import { forwardedHeaders, limits } from "./auth-limits.ts";
 import { issueScopeKeys, mcpScope, multiGetLimits, scopeMatrix, secretsAbsent, sendCanaries } from "./auth-reads.ts";
 import { bootstrap, keyManagement, login, mcp, noModels, rateLimits, scopedReads, scopeErrors, traversal, type Keys } from "./checks.ts";
 import { Harness } from "./harness.ts";
+import { ingest, INGEST_SERVER } from "./ingest.ts";
 
 async function runAll(h: Harness): Promise<void> {
   h.seedIndex();
@@ -44,21 +45,41 @@ async function authChecks(h: Harness, { admin, reader }: Keys): Promise<void> {
   await finishExpiry(h, admin, expiring);
 }
 
-const started = Date.now();
-const h = new Harness();
-let crashed = false;
-try {
-  h.buildCli();
-  if (!process.argv.includes("--no-build")) h.buildServers();
-  await runAll(h);
-} catch (error) {
-  crashed = true;
-  console.error(h.scrub(String(error instanceof Error ? error.stack : error)));
-} finally {
-  await h.cleanUp();
+/** On a server of its own, because it needs settings of its own and uses a different rate budget. */
+async function runIngest(h: Harness): Promise<void> {
+  h.seedIndex();
+  await h.choosePorts();
+  await h.startSidecar();
+  const admin = bootstrap(h);
+  await h.startApi();
+  await ingest(h, admin);
+  noModels(h);
 }
 
-const failed = h.results.filter((result) => !result.ok);
-console.log(`\n${h.results.length - failed.length} passed, ${failed.length} failed, in ${Math.round((Date.now() - started) / 1000)}s`);
+async function guarded(h: Harness, body: (h: Harness) => Promise<void>): Promise<boolean> {
+  try {
+    await body(h);
+    return false;
+  } catch (error) {
+    console.error(h.scrub(String(error instanceof Error ? error.stack : error)));
+    return true;
+  } finally {
+    await h.cleanUp();
+  }
+}
+
+const started = Date.now();
+const h = new Harness();
+const ingestServer = new Harness(INGEST_SERVER);
+let crashed = await guarded(h, async (first) => {
+  first.buildCli();
+  if (!process.argv.includes("--no-build")) first.buildServers();
+  await runAll(first);
+});
+crashed = (await guarded(ingestServer, runIngest)) || crashed;
+
+const results = [...h.results, ...ingestServer.results];
+const failed = results.filter((result) => !result.ok);
+console.log(`\n${results.length - failed.length} passed, ${failed.length} failed, in ${Math.round((Date.now() - started) / 1000)}s`);
 for (const result of failed) console.log(`  FAILED: ${result.name}`);
 process.exitCode = failed.length > 0 || crashed ? 1 : 0;

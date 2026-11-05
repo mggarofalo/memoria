@@ -76,6 +76,14 @@ export interface CliOptions {
   noUrl?: boolean;
 }
 
+/** What a server started by a check file needs beyond the defaults. */
+export interface HarnessOptions {
+  /** Empty collections to index, beside the two fixtures. */
+  extraCollections?: readonly string[];
+  apiEnv?: NodeJS.ProcessEnv;
+  sidecarEnv?: NodeJS.ProcessEnv;
+}
+
 export class Harness {
   readonly dir = mkdtempSync(path.join(os.tmpdir(), "memoria-e2e-"));
   readonly secrets: string[] = [];
@@ -95,7 +103,10 @@ export class Harness {
   private readonly isolated: NodeJS.ProcessEnv;
   private readonly apiEnv: NodeJS.ProcessEnv;
 
-  constructor() {
+  private readonly options: HarnessOptions;
+
+  constructor(options: HarnessOptions = {}) {
+    this.options = options;
     chmodSync(this.dir, 0o700);
     const home = path.join(this.dir, "home");
     mkdirSync(home);
@@ -110,7 +121,7 @@ export class Harness {
     };
     delete this.isolated["MEMORIA_API_KEY"];
     delete this.isolated["MEMORIA_URL"];
-    this.apiEnv = {};
+    this.apiEnv = options.apiEnv ?? {};
   }
 
   check(name: string, ok: unknown, detail?: unknown): void {
@@ -167,7 +178,13 @@ export class Harness {
       mkdirSync(folder, { recursive: true });
       writeFileSync(path.join(folder, file), text);
     }
-    const collections = Object.fromEntries(["notes", "secret", "bulk", "many"].map((name) => [name, { path: path.join(this.dir, "corpus", name), pattern: "**/*.md" }]));
+    const collections: Record<string, { path: string; pattern: string }> = Object.fromEntries(["notes", "secret", "bulk", "many"].map((name) => [name, { path: path.join(this.dir, "corpus", name), pattern: "**/*.md" }]));
+    for (const name of this.options.extraCollections ?? []) {
+      const folder = path.join(this.dir, "corpus", name);
+      mkdirSync(folder, { recursive: true });
+      writeFileSync(path.join(folder, "seed.md"), `# Seed\n\nSeed text for ${name}.\n`);
+      collections[name] = { path: folder, pattern: "**/*.md" };
+    }
     const code = `const qmd = await import("@tobilu/qmd");
 const store = await qmd.createStore({ dbPath: ${JSON.stringify(path.join(this.dir, "index.sqlite"))}, config: { collections: ${JSON.stringify(collections)} } });
 await store.update();
@@ -204,6 +221,7 @@ await store.close();`;
       MEMORIA_QMD_LLM: "remote",
       MEMORIA_QMD_LLM_FALLBACK: "0",
       MEMORIA_QMD_WORKER_URL: "http://127.0.0.1:9",
+      ...this.options.sidecarEnv,
     };
     this.launch(process.execPath, ["dist/main.js"], path.join(repo, "sidecar"), env, "sidecar.log");
     this.check("sidecar answers", await waitForHttp(`http://127.0.0.1:${this.sidecarPort}/health`), this.log("sidecar"));
@@ -343,6 +361,16 @@ await store.close();`;
     const fd = openSync(path.join(this.dir, logName), "a");
     this.fds.push(fd);
     this.children.push(spawn(command, args, { cwd, env, stdio: ["ignore", fd, fd] }));
+  }
+
+  /** Talks to the sidecar directly, as only a check should, for what the API does not offer such as forcing the index up to date. */
+  async sidecar(method: string, route: string, body?: unknown): Promise<{ status: number; text: string }> {
+    const response = await fetch(`http://127.0.0.1:${this.sidecarPort}${route}`, {
+      method,
+      headers: { Authorization: `Bearer ${this.sidecarSecret}`, "Content-Type": "application/json" },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+    return { status: response.status, text: await response.text() };
   }
 
   rawGet(rawPath: string, key: string): Promise<ApiResponse> {
