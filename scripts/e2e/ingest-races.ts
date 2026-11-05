@@ -75,23 +75,74 @@ async function deleteUntilDone(h: Harness, key: string, sourceId: string): Promi
   }
 }
 
-/** A delete with two uploads around it. Whatever the order, an upload answering success must find its file there. */
-async function deleteBetweenUploads(h: Harness, keys: ApiKeyMaker): Promise<void> {
+function newerUpload(h: Harness, key: string, sourceId: string): Promise<Answer> {
+  return postDocument(h, key, sourceId, `newer ${"w".repeat(1_000)}`, { updated: new Date(Date.now() + 60_000).toISOString() });
+}
+
+function saidDeleted(answer: Answer): boolean {
+  return answer.status === 202 && (JSON.parse(answer.text) as { deleted?: boolean }).deleted === true;
+}
+
+/**
+ * An upload and a delete in flight together can land in either order, so an upload can answer success and its file then go. That is true only if the delete
+ * says it removed something: an upload answering success with its file gone and no delete claiming it is a false success.
+ */
+async function deleteAroundAnUpload(h: Harness, keys: ApiKeyMaker): Promise<void> {
   const key = await keys("between", ["ingest", "read"]);
-  let lied = 0;
+  const unexplained: string[] = [];
   for (let round = 0; round < 30; round++) {
     const sourceId = `between-${round}`;
     const first = postDocument(h, key, sourceId, `older ${"w".repeat(1_000_000)}`);
     await pause(round % 8);
     const deleting = deleteById(h, key, sourceId);
     await pause(round % 5);
-    const newer = await postDocument(h, key, sourceId, `newer ${"w".repeat(1_000)}`, { updated: new Date(Date.now() + 60_000).toISOString() });
-    await Promise.all([first, deleting]);
+    const newer = await newerUpload(h, key, sourceId);
+    const [, deleted] = await Promise.all([first, deleting]);
     const held = existsSync(path.join(folder(h), documentPath(sourceId)));
-    if (newer.status === 202 && !held) lied++;
+    if (newer.status === 202 && !held && !saidDeleted(deleted)) unexplained.push(`round ${round}: delete ${deleted.status} ${deleted.text.slice(0, 120)}`);
   }
 
-  h.check("races: an upload answering success never finds a delete took its file", lied === 0, `${lied} of 30`);
+  h.check("races: an upload answering success loses its file only to a delete that says it removed it", unexplained.length === 0, unexplained.join("; "));
+}
+
+/** Once a delete has answered, it is over: an upload sent after that and answering success must find its file, with an older upload still running around them. */
+async function uploadAfterADeleteAnswered(h: Harness, keys: ApiKeyMaker): Promise<void> {
+  const key = await keys("after-delete", ["ingest", "read"]);
+  const lost: string[] = [];
+  for (let round = 0; round < 15; round++) {
+    const sourceId = `after-delete-${round}`;
+    const first = postDocument(h, key, sourceId, `older ${"w".repeat(1_000_000)}`);
+    await pause(round % 8);
+    const deleted = await deleteById(h, key, sourceId);
+    let newer = await newerUpload(h, key, sourceId);
+    for (let tries = 0; newer.status === 409 && code(newer) === "ingest_in_progress" && tries < 50; tries++) {
+      await pause(50);
+      newer = await newerUpload(h, key, sourceId);
+    }
+
+    await first;
+    await pause(150);
+    const held = existsSync(path.join(folder(h), documentPath(sourceId)));
+    if (newer.status !== 202 || !held) lost.push(`round ${round}: delete ${deleted.status}, upload ${newer.status}, ${held ? "held" : "gone"}`);
+  }
+
+  h.check("races: an upload sent after a delete answered keeps its file", lost.length === 0, lost.join("; "));
+}
+
+/** The delete follows the upload in, so it often lands second. Either answer is honest, and the file agrees with them. */
+async function deleteFollowingAnUpload(h: Harness, keys: ApiKeyMaker): Promise<void> {
+  const key = await keys("following", ["ingest", "read"]);
+  const wrong: string[] = [];
+  for (let round = 0; round < 15; round++) {
+    const sourceId = `following-${round}`;
+    const sent = newerUpload(h, key, sourceId);
+    await pause(round % 4);
+    const [newer, deleted] = await Promise.all([sent, deleteById(h, key, sourceId)]);
+    const held = existsSync(path.join(folder(h), documentPath(sourceId)));
+    if (held === saidDeleted(deleted) || (newer.status !== 202 && code(newer) !== "deleted_during_upload")) wrong.push(`round ${round}: upload ${newer.status}, delete ${deleted.status} ${deleted.text.slice(0, 120)}, ${held ? "held" : "gone"}`);
+  }
+
+  h.check("races: a delete says whether it took the file, and the file agrees", wrong.length === 0, wrong.join("; "));
 }
 
 /** The clients hang up at the worst moments. After a delete answers done, nothing may be there or arrive later. */
@@ -174,7 +225,9 @@ export async function ingestRaces(h: Harness, keys: ApiKeyMaker): Promise<void> 
   await postSession(h, writer, "dddddddd-aaaa-2222-3333-444444444444", line("user", guess));
   storedDigestsConfirmNothing(h, [guess, onlyGuess]);
   await slowLinksHoldNoSlot(h, keys);
-  await deleteBetweenUploads(h, keys);
+  await deleteAroundAnUpload(h, keys);
+  await uploadAfterADeleteAnswered(h, keys);
+  await deleteFollowingAnUpload(h, keys);
   await clientsHangUp(h, keys);
   await killedInTheWindow(h, keys);
 }
