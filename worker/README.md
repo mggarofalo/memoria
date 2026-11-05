@@ -87,6 +87,7 @@ Every route needs `Authorization: Bearer <token>` when a token is set. Errors ar
 | `POST /v1/rerank` | `{ query, documents }`, up to 1000 | `{ results: [{ index, score }], transport }` |
 | `POST /v1/complete` | `{ prompt, grammar?, maxTokens?, temperature?, topK?, topP?, repeatLastN?, presencePenalty? }` | `{ text }` |
 | `POST /v1/tokenize` | `{ text }` | `{ tokens }` |
+| `POST /v1/tokenize-batch` | `{ texts }`, up to 256 | `{ tokens }`, one list per text |
 | `POST /v1/detokenize` | `{ tokens }` | `{ text }` |
 
 `busy` is advice for a dispatcher: the worker keeps serving requests. A role the machine does not serve returns 501, and a model still loading returns 503.

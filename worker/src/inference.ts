@@ -336,6 +336,11 @@ export class Inference {
     return this.#servers.tokenize("embed", text);
   }
 
+  /** llama-server tokenizes one text per call, so these run side by side. */
+  tokenizeMany(texts: string[]): Promise<number[][]> {
+    return mapLimited(texts, TOKENIZE_CONCURRENCY, (text) => this.#servers.tokenize("embed", text));
+  }
+
   detokenize(tokens: number[]): Promise<string> {
     return this.#servers.detokenize("embed", tokens);
   }

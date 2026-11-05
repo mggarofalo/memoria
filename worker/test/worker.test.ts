@@ -413,6 +413,15 @@ test("an oversized grammar is refused before it reaches llama-server", async () 
   });
 });
 
+test("a batch of texts is tokenized in order, and its size is limited", async () => {
+  await withWorker(async (w) => {
+    const ok = await json(post(w, "/v1/tokenize-batch", { texts: ["ab", "c", ""] }));
+    assert.deepEqual(ok.tokens, [Array.from("ab", (c) => c.codePointAt(0)! + 1), ["c".codePointAt(0)! + 1], []]);
+    assert.equal((await post(w, "/v1/tokenize-batch", { texts: Array.from({ length: 257 }, () => "x") })).status, 400);
+    assert.equal((await post(w, "/v1/tokenize-batch", { texts: [] })).status, 400);
+  });
+});
+
 test("stopping the worker stops its children", async () => {
   const worker = await startWorker();
   assert.equal(await worker.supervisor.waitReady(10_000), true);

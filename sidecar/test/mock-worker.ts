@@ -48,6 +48,7 @@ export class MockWorker {
         return { body: { text: `lex: ${query}\nvec: about ${query}\nhyde: a passage on ${query}\n` } };
       }],
       ["POST /v1/tokenize", (b) => ({ body: { tokens: Array.from(String(b.text), (c) => c.codePointAt(0)) } })],
+      ["POST /v1/tokenize-batch", (b) => ({ body: { tokens: (b.texts as string[]).map((text) => Array.from(text, (c) => c.codePointAt(0))) } })],
       ["POST /v1/detokenize", (b) => ({ body: { text: String.fromCodePoint(...(b.tokens as number[])) } })],
     ]);
   }

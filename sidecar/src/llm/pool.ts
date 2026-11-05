@@ -483,9 +483,18 @@ export class WorkerPool {
     const budget = klass === "interactive" ? this.#interactiveBudgetMs() : null;
     const deadline = this.#now() + Math.min(this.#queueTimeoutMs[klass], budget ?? Infinity);
     this.#waiting[klass]++;
+    let rechecked = klass !== "background";
     try {
       for (;;) {
         const candidates = this.#candidates(capability, key, exclude);
+        if (candidates.length === 0 && !rechecked) {
+          // A long synchronous index write stalls this thread past a heartbeat's
+          // timeout, which marks a healthy worker down. Background work can afford
+          // to ask again rather than call that an outage.
+          rechecked = true;
+          await Promise.all(this.#entries.filter((e) => e.reachable === false).map((e) => this.#heartbeat(e)));
+          continue;
+        }
         if (candidates.length === 0) return null;
         const taken = this.#takeFreeSlot(candidates, key, klass);
         if (taken) return taken;

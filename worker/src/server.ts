@@ -18,6 +18,7 @@ export const WORKER_VERSION = resolveVersion();
 
 /** Hard limits on one request, so a bad caller cannot queue unbounded model work. */
 const MAX_EMBED_TEXTS = 256;
+const MAX_TOKENIZE_TEXTS = 256;
 const MAX_RERANK_DOCUMENTS = 1000;
 const MAX_DETOKENIZE_TOKENS = 1_000_000;
 /**
@@ -257,6 +258,11 @@ export function createWorkerServer(options: WorkerServerOptions): { server: Serv
       const { text } = await read(request);
       if (typeof text !== "string") throw new HttpFailure(400, "invalid_body", "text must be a string");
       return { tokens: await gate.run(() => inference.tokenize(text)) };
+    },
+    "/v1/tokenize-batch": async (request) => {
+      const gate = served("embed");
+      const texts = stringList((await read(request)).texts, "texts", MAX_TOKENIZE_TEXTS);
+      return { tokens: await gate.run(() => inference.tokenizeMany(texts)) };
     },
     "/v1/detokenize": async (request) => {
       const gate = served("embed");

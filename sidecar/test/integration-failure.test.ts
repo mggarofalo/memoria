@@ -188,6 +188,8 @@ test("parity holds on awkward documents: no heading, unicode, frontmatter, dupli
   const farm = await openBackend({ dbPath: farmDb, keepWarm: false, llm: remoteOptions([worker("w", mock)]) });
   const out = await farm.embed({ force: false });
   assert.equal(out.errors, 0);
+  assert.ok(mock.count("/v1/tokenize-batch") > 0, "chunks are tokenized in batches");
+  assert.equal(mock.count("/v1/tokenize"), 0, "and the chunker's own questions are answered from them");
   await farm.close();
   await mock.stop();
 

@@ -140,3 +140,10 @@ export function parseHealth(raw: unknown): WorkerHealth {
     queueDepth: typeof depth === "number" && Number.isFinite(depth) && depth > 0 ? depth : 0,
   };
 }
+
+/** One list of tokens per text, each held to the same rules as a single answer. */
+export function parseTokenLists(raw: unknown, texts: readonly string[]): number[][] {
+  const lists = (raw as { tokens?: unknown } | null)?.tokens;
+  if (!Array.isArray(lists) || lists.length !== texts.length) throw new ResponseViolation("token list count does not match the request");
+  return lists.map((tokens, i) => parseTokens({ tokens }, texts[i]!));
+}
