@@ -3,6 +3,7 @@ import type { DocumentHead, MetadataSource } from "./metadata.ts";
 import type { EmbedSummary, UpdateSummary } from "./jobs.ts";
 import type { BreakerOptions } from "./llm/pool.ts";
 import type { RemoteLlm } from "./llm/remote.ts";
+import { requireSdkFixes, type SdkStoreFunctions } from "./sdk-check.ts";
 import { withShortBusyTimeout } from "./sqlite-busy.ts";
 import type { DeadLetter, DegradedReason, EmbeddingResult, LlmCallSink, LlmHealth, LlmSurface, PoolLoad, PoolWorkerConfig, Queryable, RerankDocument, RerankResult, WorkerView } from "./llm/types.ts";
 import type { SdkDb, SdkHandles, WiredRemote } from "./llm/wire.ts";
@@ -376,6 +377,7 @@ export async function openBackend(options: OpenBackendOptions): Promise<OpenedBa
   const llmOptions = options.llm ?? { mode: "local" as const };
   keepFallbackOffGpu(llmOptions);
   const qmd = await import("@tobilu/qmd");
+  requireSdkFixes((await import(new URL("./store.js", import.meta.resolve("@tobilu/qmd")).href)) as SdkStoreFunctions);
   const dbPath = options.dbPath ?? qmd.getDefaultDbPath();
   requireIndex(dbPath);
   // DB-only mode: collections and contexts come from store_collections inside

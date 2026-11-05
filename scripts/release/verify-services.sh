@@ -40,7 +40,8 @@ test "$reported" = "$version"
 (cd "$work/sidecar" && npm ci --omit=dev --no-audit --no-fund)
 cd "$work/sidecar"
 # The sidecar opens an existing index and never creates one. This also loads the
-# native dependencies that were just installed.
+# native dependencies that were just installed, and it refuses to start if installing
+# did not apply the SDK patch.
 db="$work/verify.sqlite"
 node --input-type=module -e "import { createStore } from '@tobilu/qmd'; const store = await createStore({ dbPath: process.argv[1], config: { collections: {} } }); await store.close();" "$db"
 MEMORIA_QMD_DB_PATH="$db" MEMORIA_QMD_WARMUP=0 MEMORIA_QMD_PORT="$port" node dist/main.js &

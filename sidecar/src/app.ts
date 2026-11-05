@@ -1,4 +1,8 @@
-import Fastify, { type FastifyError, type FastifyInstance, type FastifyServerOptions } from "fastify";
+import { SearchBusy, SearchGate } from "./search-gate.ts";
+import { randomUUID } from "node:crypto";
+import { createServer } from "node:http";
+import { limitConnectionsPerSource, loggablePath, refuseAtBoundary, validRequestId } from "./boundary.ts";
+import Fastify, { type FastifyError, type FastifyInstance, type FastifyServerOptions, LogController } from "fastify";
 import swagger from "@fastify/swagger";
 import { bearerMatches } from "./auth.ts";
 import type { SidecarConfig } from "./config.ts";
@@ -26,6 +30,7 @@ export interface WarmupState {
 }
 
 export interface AppContext {
+  searchGate: SearchGate;
   backend: QmdBackend;
   config: SidecarConfig;
   metadata: MetadataIndex;
@@ -58,7 +63,7 @@ export async function buildApp(options: BuildAppOptions): Promise<App> {
   metadata.refresh();
 
   const embedRequested = async (request: ReindexRequest, context: JobRunContext): Promise<EmbedSummary> => {
-    const run = { force: request.force, forceSince: context.jobCreatedAt, signal: context.signal, onWorker: context.noteWorker, onProgress: context.noteProgress };
+    const run = { force: request.force, ...(context.firstAttempt ? {} : { forceSince: context.jobCreatedAt }), signal: context.signal, onWorker: context.noteWorker, onProgress: context.noteProgress };
     if (request.collections === null) return backend.embed(run);
     // The SDK embeds one collection per call; keep the job scoped to
     // exactly the collections that were updated.
@@ -105,6 +110,7 @@ export async function buildApp(options: BuildAppOptions): Promise<App> {
       onStoreError: (message) => logStoreError(message),
       onDeferred: (job, reason) => logDeferred(job, reason),
     }),
+    searchGate: new SearchGate({ running: config.searchConcurrency, queued: config.searchQueue, maxWaitMs: config.searchMaxWaitMs }),
     startedAt: Date.now(),
     warmup: { requested: config.warmup, done: false, error: null, durationMs: null },
   };
@@ -113,9 +119,20 @@ export async function buildApp(options: BuildAppOptions): Promise<App> {
     logger: options.logger ?? false,
     bodyLimit: config.bodyLimitBytes,
     trustProxy: false,
+    // Logged by the hook below instead: after the auth check, bounded, with no query string.
+    logController: new LogController({ disableRequestLogging: true }),
     // Memoria.Api sends its W3C trace id here; adopting it as reqId lets one id
     // join the API's request log line and this process's pino lines.
-    requestIdHeader: "request-id",
+    requestIdHeader: false,
+    genReqId: (request) => validRequestId(request.headers["request-id"]) ?? randomUUID(),
+    requestTimeout: config.requestTimeoutMs,
+    serverFactory: (handler) => {
+      // Fastify's own 72 s keep-alive: Node's 5 s would close sockets a pooled client is about to reuse.
+      const server = createServer({ headersTimeout: config.headersTimeoutMs, requestTimeout: config.requestTimeoutMs, keepAliveTimeout: 72_000, connectionsCheckingInterval: Math.min(config.headersTimeoutMs, 5_000) }, handler);
+      server.maxConnections = config.maxConnections;
+      limitConnectionsPerSource(server, config.maxConnectionsPerSource, { addresses: config.apiAddresses, limit: config.maxConnectionsPerApiAddress });
+      return server;
+    },
     ajv: { customOptions: { removeAdditional: false, useDefaults: true, coerceTypes: "array", allErrors: false } },
   });
   const app = Object.assign(fastify, { ctx }) as App;
@@ -175,7 +192,11 @@ export async function buildApp(options: BuildAppOptions): Promise<App> {
 
   // --- auth -------------------------------------------------------------------
   app.addHook("onRequest", async (request, reply) => {
-    if (config.secret === undefined) return;
+    const refusal = refuseAtBoundary({ host: request.headers.host, origin: request.headers.origin }, config.allowedHosts);
+    if (refusal) {
+      await reply.code(refusal.statusCode).send({ error: refusal.error, message: refusal.message });
+      return reply;
+    }
     const pathname = request.url.split("?")[0] ?? request.url;
     if (PUBLIC_PATHS.has(pathname)) return;
     if (!bearerMatches(request.headers.authorization, config.secret)) {
@@ -184,13 +205,18 @@ export async function buildApp(options: BuildAppOptions): Promise<App> {
     }
   });
 
+  app.addHook("onResponse", async (request, reply) => {
+    request.log.info({ method: request.method, path: loggablePath(request.url), status: reply.statusCode, durationMs: Math.round(reply.elapsedTime) }, "request");
+  });
+
   // --- errors -----------------------------------------------------------------
   app.setNotFoundHandler(async (request, reply) => {
-    await reply.code(404).send({ error: "no_route", message: `${request.method} ${request.url} is not a route` });
+    await reply.code(404).send({ error: "no_route", message: `${request.method} ${loggablePath(request.url)} is not a route` });
   });
 
   app.setErrorHandler(async (error: FastifyError | Error, request, reply) => {
     if (error instanceof HttpError) {
+      if (error instanceof SearchBusy) reply.header("Retry-After", "2");
       await reply.code(error.statusCode).send({ error: error.code, message: error.message });
       return;
     }

@@ -41,6 +41,8 @@ export interface RoleConfig {
 
 export interface WorkerConfig {
   host: string;
+  /** DNS names a request may arrive under. An IP address is always fine. */
+  allowedHosts: ReadonlySet<string>;
   port: number;
   token: string | undefined;
   llamaServer: string;
@@ -96,6 +98,42 @@ function readNumber(value: string | undefined, fallback: number, name: string, m
   return n;
 }
 
+const PLACEHOLDERS = ["a-long-random", "at-least-16", "changeme", "change-me", "replace-me", "replaceme", "placeholder", "your-token", "yourtoken", "example", "password"];
+const KEYBOARD_ROWS = ["1234567890", "qwertyuiop", "asdfghjkl", "zxcvbnm"];
+
+function shareInRuns(lower: string): number {
+  const nextTo = (a: string, b: string): boolean => Math.abs(a.charCodeAt(0) - b.charCodeAt(0)) === 1 || KEYBOARD_ROWS.some((row) => row.includes(a + b) || row.includes(b + a));
+  let inRuns = 0;
+  let run = 1;
+  for (let i = 1; i <= lower.length; i++) {
+    if (i < lower.length && nextTo(lower[i - 1]!, lower[i]!)) {
+      run++;
+      continue;
+    }
+    if (run >= 4) inRuns += run;
+    run = 1;
+  }
+  return inRuns / lower.length;
+}
+
+/** The same rules as the sidecar's, which cannot be shared between these two packages. */
+function checkTokenStrength(token: string): void {
+  if (token.length < 16) throw new Error("MEMORIA_WORKER_TOKEN must be at least 16 characters");
+  const lower = token.toLowerCase();
+  if (new Set(token).size < 6 || PLACEHOLDERS.some((p) => lower.includes(p)) || shareInRuns(lower) >= 0.75) {
+    throw new Error("MEMORIA_WORKER_TOKEN is too weak: it looks like a placeholder or repeats itself. Generate one with a random source.");
+  }
+}
+
+function checkPlaintextOptIn(host: string, env: NodeJS.ProcessEnv): void {
+  if (isLoopback(host) || ["1", "true", "yes", "on"].includes((env.MEMORIA_WORKER_ALLOW_HTTP_ON_PRIVATE_NETWORK ?? "").trim().toLowerCase())) return;
+  throw new Error(`The worker serves plain http, and MEMORIA_WORKER_HOST (${host}) is not loopback, so its token and every text it embeds are in clear unless the network itself is encrypted. On a WireGuard tunnel, which is the intended setup, set MEMORIA_WORKER_ALLOW_HTTP_ON_PRIVATE_NETWORK=1. See docs/deployment.md.`);
+}
+
+function readAllowedHosts(env: NodeJS.ProcessEnv): ReadonlySet<string> {
+  return new Set(["localhost", ...(env.MEMORIA_WORKER_ALLOWED_HOSTS ?? "").split(",").map((h) => h.trim().toLowerCase()).filter((h) => h !== "")]);
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
   const host = (env.MEMORIA_WORKER_HOST ?? "127.0.0.1").trim();
   if (!isLanAddress(host)) {
@@ -103,7 +141,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
   }
   const token = resolveSecret(env, "MEMORIA_WORKER_TOKEN");
   if (token === undefined && !isLoopback(host)) throw new Error("MEMORIA_WORKER_TOKEN is required when binding a LAN address");
-  if (token !== undefined && token.length < 16) throw new Error("MEMORIA_WORKER_TOKEN must be at least 16 characters");
+  if (token !== undefined) checkTokenStrength(token);
+  checkPlaintextOptIn(host, env);
 
   const enabled = (env.MEMORIA_WORKER_ROLES ?? ROLES.join(",")).split(",").map((r) => r.trim().toLowerCase()).filter(Boolean);
   for (const r of enabled) {
@@ -132,6 +171,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
   const cacheDir = env.XDG_CACHE_HOME?.trim() || path.join(homedir(), ".cache");
   return {
     host,
+    allowedHosts: readAllowedHosts(env),
     port: readNumber(env.MEMORIA_WORKER_PORT, 8383, "MEMORIA_WORKER_PORT", 1, 65535),
     token,
     llamaServer: env.MEMORIA_WORKER_LLAMA_SERVER?.trim() || "llama-server",

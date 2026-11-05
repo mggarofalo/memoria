@@ -8,7 +8,7 @@ import { busyReasons, CachedMachine, parseNvidiaSmi, parsePmsetThermal, readMach
 import { Gate } from "../src/server.ts";
 import { childEnvironment, llamaServerArgs } from "../src/supervisor.ts";
 
-const GOOD_TOKEN = "0123456789abcdefXYZ";
+const GOOD_TOKEN = "Xk29vQmB7fLp3ZtRw";
 
 // --- config --------------------------------------------------------------------
 
@@ -36,7 +36,7 @@ test("the bind address must be loopback or a private LAN address", () => {
 test("a LAN bind needs a token of real length", () => {
   assert.throws(() => loadConfig({ MEMORIA_WORKER_HOST: "192.168.1.20" }), /MEMORIA_WORKER_TOKEN is required/);
   assert.throws(() => loadConfig({ MEMORIA_WORKER_TOKEN: "short" }), /at least 16/);
-  assert.equal(loadConfig({ MEMORIA_WORKER_HOST: "192.168.1.20", MEMORIA_WORKER_TOKEN: GOOD_TOKEN }).token, GOOD_TOKEN);
+  assert.equal(loadConfig({ MEMORIA_WORKER_HOST: "192.168.1.20", MEMORIA_WORKER_ALLOW_HTTP_ON_PRIVATE_NETWORK: "1", MEMORIA_WORKER_TOKEN: GOOD_TOKEN }).token, GOOD_TOKEN);
 });
 
 test("roles, model paths and external servers are configurable, and bad values fail", () => {
@@ -321,4 +321,20 @@ test("upstream failures become fixed codes that repeat none of the upstream's te
   await assert.rejects(noRoute.embed(["x"]), (err) => err instanceof UpstreamError && err.code === "not_served");
   const down = new Inference(new LlamaServers({ baseUrlFor: () => "http://127.0.0.1:1/" }, { fetch: (async () => { throw new TypeError("fetch failed"); }) as unknown as typeof globalThis.fetch, timeoutMs: 100 }));
   await assert.rejects(down.tokenize("x"), (err) => err instanceof UpstreamError && err.code === "upstream_unavailable");
+});
+
+test("a worker token cannot be a placeholder or a pattern, and random ones pass", () => {
+  for (const token of ["a".repeat(16), "1234567890123456", "qwertyuiopasdfgh", "abcdefghabcdefgh", "0123456789abcdef", "changeme-changeme-123"]) {
+    assert.throws(() => loadConfig({ MEMORIA_WORKER_TOKEN: token }), /too weak/, token);
+  }
+  assert.equal(loadConfig({ MEMORIA_WORKER_TOKEN: GOOD_TOKEN }).token, GOOD_TOKEN);
+});
+
+test("binding beyond loopback needs an explicit opt-in to plain http, and host names can be listed", () => {
+  const lan = { MEMORIA_WORKER_HOST: "192.168.1.20", MEMORIA_WORKER_TOKEN: GOOD_TOKEN };
+  assert.throws(() => loadConfig(lan), /in clear.*MEMORIA_WORKER_ALLOW_HTTP_ON_PRIVATE_NETWORK=1/);
+  assert.throws(() => loadConfig({ ...lan, MEMORIA_WORKER_ALLOW_HTTP_ON_PRIVATE_NETWORK: "0" }), /in clear/);
+  assert.equal(loadConfig({ ...lan, MEMORIA_WORKER_ALLOW_HTTP_ON_PRIVATE_NETWORK: "yes" }).host, "192.168.1.20");
+  assert.equal(loadConfig({}).host, "127.0.0.1");
+  assert.deepEqual([...loadConfig({ MEMORIA_WORKER_ALLOWED_HOSTS: " GPU.lan, ," }).allowedHosts], ["localhost", "gpu.lan"]);
 });

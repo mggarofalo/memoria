@@ -46,7 +46,7 @@ export const TARGETS: readonly Target[] = (["windows", "linux", "darwin"] as con
  * that directory: it has to reach an install location that holds no `.git`.
  */
 export const SERVICES: readonly Service[] = [
-  { name: "memoria-sidecar", dir: "sidecar", stampDir: "dist", include: ["dist", "scripts/install-service.ps1", "scripts/uninstall-service.ps1", ".env.example", "README.md", "package.json", "package-lock.json"] },
+  { name: "memoria-sidecar", dir: "sidecar", stampDir: "dist", include: ["dist", "scripts/install-service.ps1", "scripts/uninstall-service.ps1", "scripts/patch-qmd.ts", ".env.example", "README.md", "package.json", "package-lock.json"] },
   { name: "memoria-worker", dir: "worker", stampDir: "src", include: ["src", "scripts", "README.md", "package.json", "package-lock.json"] },
 ];
 

@@ -82,7 +82,7 @@ git tag -a <tag> <sha> -m "<tag>"
 git push origin refs/tags/<tag>
 ```
 
-Do not use `git push --tags`, which would push every local tag. If the push is rejected, report it, and do not retry under another name.
+Do not use `git push --tags`, which would push every local tag. The `release tags` ruleset restricts creating, updating and deleting `refs/tags/v*`, so this push needs a credential with a repository role that can bypass it, which today means an admin's. If the push is rejected, report it, and do not retry under another name or credential.
 
 ## Step 6: Watch the workflows
 
@@ -103,7 +103,7 @@ Read the log first: `gh run view <run-id> --log-failed`.
 - **The release notes guard refused:** a tracker reference is in a generated note, which means a pull request title holds one. Ask the human to fix that title, then re-run. Do not edit the guard.
 - **A real defect in the commit:** fix it on `main` through a pull request and release again from this skill, which will compute the next version. Leave the failed tag unless the human decides otherwise.
 
-To remove a tag, first check that no release used it (`gh release view <tag>` fails) and that the image was not published (see step 7). Tell the human exactly what will be deleted, wait for an explicit yes to that deletion, then:
+To remove a tag, first check that no release used it (`gh release view <tag>` fails) and that the image was not published (see step 7). Tell the human exactly what will be deleted, wait for an explicit yes to that deletion, then, with the same admin credential as the push:
 
 ```bash
 git push origin --delete refs/tags/<tag>

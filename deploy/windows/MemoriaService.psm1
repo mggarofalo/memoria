@@ -99,7 +99,7 @@ function New-MemoriaNssmSettingSteps {
     $node = Join-Path $Spec.InstallDir "node.exe"
     $settings = @(
         @("Application", $node),
-        @("AppParameters", "`"$entry`""),
+        @("AppParameters", ((@(if ($Spec.ContainsKey("NodeArguments")) { $Spec.NodeArguments }) + "`"$entry`"") -join " ")),
         @("AppDirectory", $Spec.InstallDir),
         @("DisplayName", $Spec.DisplayName),
         @("Description", $Spec.Description),

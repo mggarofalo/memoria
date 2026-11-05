@@ -31,7 +31,7 @@ service on whichever machine owns the models and index:
   not a configuration one.
 
 The sidecar runs under NSSM on Windows (`sidecar/scripts/install-service.ps1`)
-or as a systemd unit on Linux (`node dist/main.js`). See `sidecar/README.md`.
+or as a systemd unit on Linux (`node --max-old-space-size=4096 dist/main.js`). See `sidecar/README.md`.
 Install it from its release package; see
 [releasing.md](releasing.md#installing-the-sidecar-and-worker).
 
@@ -241,6 +241,75 @@ own scoped keys with it; see [configuration.md](configuration.md#memoriaauth--ap
 
 Everything else has a default. Pass secrets through the environment or a
 Docker secret; never bake them into the image or commit them.
+
+## Traffic between hosts: WireGuard
+
+Traffic between the API, the sidecar and workers runs over a WireGuard tunnel. The services speak plain http on tunnel addresses, and the tunnel does the encrypting, including of the shared secret and whole transcripts.
+
+The addresses here are examples:
+
+| Host | Tunnel address | Serves | Port |
+|---|---|---|---|
+| API | `10.0.0.1` | | |
+| Sidecar | `10.0.0.2` | `Memoria.Api` | 8282 |
+| Worker | `10.0.0.3` | the sidecar | 8383 |
+
+**Bind each service to its tunnel address, and tell it this is intended.** Nothing detects a tunnel, so the setting is what states it. Without it, a non-loopback bind or a plain http worker URL on another machine stops the start, with a message naming the setting.
+
+```sh
+# Sidecar. The install script's -AllowHttpOnPrivateNetwork sets the first of these.
+MEMORIA_QMD_ALLOW_HTTP_ON_PRIVATE_NETWORK=1
+MEMORIA_QMD_HOST=10.0.0.2
+MEMORIA_QMD_WORKER_URL=http://10.0.0.3:8383
+MEMORIA_QMD_API_ADDRESSES=10.0.0.1
+
+# Worker. Its installers take -AllowHttpOnPrivateNetwork or --allow-http-on-private-network.
+MEMORIA_WORKER_ALLOW_HTTP_ON_PRIVATE_NETWORK=1
+MEMORIA_WORKER_HOST=10.0.0.3
+
+# API
+Memoria__Sidecar__BaseUrl=http://10.0.0.2:8282
+```
+
+**Firewall each port to the tunnel,** so nothing reaches it from the LAN even by mistake. For example:
+
+```sh
+ufw allow in on wg0 to any port 8282 proto tcp
+```
+
+```powershell
+New-NetFirewallRule -DisplayName "memoria-qmd" -Direction Inbound -Protocol TCP -LocalPort 8282 -LocalAddress 10.0.0.2 -RemoteAddress 10.0.0.1 -Action Allow
+```
+
+**Start order.** The tunnel must be up before a service binds its address, or the service fails to start. Make the service depend on the tunnel, or let it restart until the address exists.
+
+**Upgrading a LAN install:** it stops starting until the setting is added. Move it onto the tunnel first, because the setting does not encrypt anything.
+
+TLS is not the chosen setup. A TLS reverse proxy would also work, with the sidecar on loopback behind it, and clients pointed at `https://`.
+
+**Host names.** A request must arrive under an IP address, `localhost`, or a name in `MEMORIA_QMD_ALLOWED_HOSTS`, and any request carrying an `Origin` is refused. That stops a web page reaching the service through DNS rebinding. Tunnel addresses need no listing. A deployment calling by name, such as `host.docker.internal`, must list it or gets a 421 that says so. The worker has the same rule, with `MEMORIA_WORKER_ALLOWED_HOSTS`.
+
+**Secrets.** With no secret set, each run makes its own and nothing else can call it. Placeholders, the old README example and repeated characters are refused.
+
+## Memory and large documents
+
+Run the sidecar with `--max-old-space-size=4096`. The install script sets it; elsewhere use `node --max-old-space-size=4096 dist/main.js`. This is a ceiling, not a target. Node's default on a smaller host can be lower, and a search that reaches the limit kills the process.
+
+`sidecar/scripts/patch-qmd.ts` runs on install and fixes the SDK's scans. Without it, one search over six 21 MB documents froze for 35 s and needed over 1 GB of heap. With it, the same search took 2 to 3 s and fitted in 512 MiB. The SDK's functions are checked at start, and a sidecar on an unpatched SDK refuses to start. `/ready` shows `sdk.patched`.
+
+`POST /documents` refuses anything over `MEMORIA_QMD_MAX_DOCUMENT_BYTES` (2 MiB) with a 413 `document_too_large`, and writes nothing. The rest of this section is about stalls, meaning time when the sidecar answers nothing else, including `/health`.
+
+- **Within the cap.** A single search stalls for under a second: 675 ms at worst with one sub-query over 2 MiB documents.
+- **Files already on disk, at any size.** The cap applies only at ingest, so these stay indexed and searchable, and their stalls are longer. Measured: 16 MiB of blank lines stalled for 6.0 s, and an update scan of a 170 MiB file for 5.8 s. A 21 MB ordinary transcript chunks in about 340 ms.
+- **Very large files of blank lines.** Past 2.2 million break points, about 2 MiB of nothing but newlines, the chunker stops collecting more and cuts the rest at its plain chunk size. So such a document searches and embeds, with cruder chunks. A document that still cannot be chunked is set aside, and costs only itself.
+
+**Concurrent searches.** Each search holds whole bodies while it runs, so memory grows with how many run at once. `MEMORIA_QMD_SEARCH_CONCURRENCY` (4) run together, `MEMORIA_QMD_SEARCH_QUEUE` (16) wait for up to `MEMORIA_QMD_SEARCH_MAX_WAIT_MS` (10 s), and the rest get a 503 `search_busy` with `Retry-After`. Memoria.Api passes that on as a 503. Four is chosen against the 4096 MiB heap: 20 searches of 10 sub-queries over 2 MiB documents peaked at 3.1 GB with 4 running, and the same load ran out of heap at 1024 MiB unless cut to 2 running. If you lower the heap, lower this with it.
+
+**Connections.** One address may hold `MEMORIA_QMD_MAX_CONNECTIONS_PER_SOURCE` (64) connections, so a peer with no secret cannot use up the `MEMORIA_QMD_MAX_CONNECTIONS` total (1,024). List Memoria.Api's address in `MEMORIA_QMD_API_ADDRESSES` to give it 512. Reaching the total takes 16 addresses.
+
+**Frontmatter.** When a key repeats, the last one wins, where it used to give no metadata. That spoofs nothing: filters read a document's own frontmatter, whoever can write that can write any value, and on a transcript the renderer writes those keys itself.
+
+**Why not a worker thread.** Running the SDK in one was evaluated and not adopted. With the scans fixed, a search within the cap stalls for under a second. It would not reliably contain an out-of-memory error either: of four allocation patterns tried, three failed only the worker and one killed the whole process. It would also mean making about 25 backend methods asynchronous and copying 21 MB bodies between threads.
 
 ## Reverse proxy and TLS
 

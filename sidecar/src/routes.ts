@@ -1,3 +1,4 @@
+import type { SearchGate } from "./search-gate.ts";
 import { isBusy } from "./sqlite-busy.ts";
 import type { FastifyInstance } from "fastify";
 import type { AppContext } from "./app.ts";
@@ -80,7 +81,26 @@ function checkedSearchInput(body: SearchBody): string | null {
   const text = body.query?.trim() ?? "";
   const hasSearches = Array.isArray(body.searches) && body.searches.length > 0;
   if ((text !== "") === hasSearches) throw new HttpError(400, "validation", "Provide exactly one of `query` or `searches`");
+  checkSearchable(text, body.searches);
   return text === "" ? null : text;
+}
+
+/** The SDK's own checks on a query, and the search engine's limits, are the caller's to fix. */
+const BAD_QUERY = /^Structured search \(|^fts5 /;
+
+async function searchRefusingBadInput<T>(gate: SearchGate, search: () => Promise<T>): Promise<T> {
+  try {
+    return await gate.run(search);
+  } catch (err) {
+    if (err instanceof Error && BAD_QUERY.test(err.message)) throw new HttpError(400, "validation", "The search engine cannot run this query. Check its quotes, and use fewer terms.");
+    throw err;
+  }
+}
+
+/** Quotes or punctuation alone are a syntax error in the search engine, and that is the caller's to fix. */
+function checkSearchable(query: string, searches: SearchQuery[] | undefined): void {
+  const lexical = [...(searches ?? []).filter((s) => s.type === "lex").map((s) => s.query), ...(query === "" ? [] : [query])];
+  if (lexical.some((q) => !/[\p{L}\p{N}]/u.test(q))) throw new HttpError(400, "validation", "A search needs at least one letter or number");
 }
 
 /** Bounds are validated up front so a bad date is a 400, not an empty result. */
@@ -210,7 +230,12 @@ interface ReindexBody {
 
 // --- routes ------------------------------------------------------------------
 
+/** Matches the nine digits a line suffix may have. */
+const MAX_LINE = 999_999_999;
+
 function definedRange(fromLine: number | undefined, maxLines: number | undefined): { fromLine?: number; maxLines?: number } {
+  // A long enough string of digits coerces to Infinity, and gets past the schema's maximum.
+  if (!Number.isFinite(fromLine ?? 0) || !Number.isFinite(maxLines ?? 0)) throw new HttpError(400, "validation", "A line number is too large");
   return { ...(fromLine !== undefined ? { fromLine } : {}), ...(maxLines !== undefined ? { maxLines } : {}) };
 }
 
@@ -319,6 +344,12 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         required: ["documents", "refreshedAt"],
         properties: { documents: { type: "integer" }, refreshedAt: { type: "string", nullable: true } },
       },
+      sdk: {
+        type: "object",
+        required: ["patched"],
+        description: "This sidecar's fixes to the QMD SDK are in the code it is running. It refuses to start otherwise.",
+        properties: { patched: { type: "boolean" } },
+      },
       jobs: {
         type: "object",
         required: ["pending"],
@@ -378,6 +409,8 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         models,
         warmup: warmupState,
         metadata: { documents: ctx.metadata.size, refreshedAt: ctx.metadata.refreshedAt?.toISOString() ?? null },
+        // Always true: a sidecar on an unpatched SDK refuses to start. Stated so a caller can see it.
+        sdk: { patched: true },
         jobs: { pending: ctx.jobs.pending, persistent: ctx.jobs.persistence().healthy, stuck },
       };
       if (request.query.requireModels && !models.resident) {
@@ -496,6 +529,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
             },
           },
           ...errorResponses,
+          503: { $ref: "Error#", description: "Too many searches are running. Retry after `Retry-After` seconds." },
         },
       },
     },
@@ -508,7 +542,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       const { fetchLimit, candidateLimit } = searchWindow(body, filtered, config);
 
       const started = Date.now();
-      const { hits, degradedReasons } = await backend.searchDetailed({
+      const { hits, degradedReasons } = await searchRefusingBadInput(ctx.searchGate, () => backend.searchDetailed({
         ...(text !== null ? { query: text } : { queries: body.searches!.map((s) => ({ type: s.type, query: s.query })) }),
         ...(body.intent ? { intent: body.intent } : {}),
         ...(candidateLimit !== undefined ? { candidateLimit } : {}),
@@ -516,7 +550,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         limit: fetchLimit,
         minScore: body.minScore,
         rerank: body.rerank,
-      });
+      }));
 
       const primaryQuery = text ?? primarySearch(body.searches!);
       const results = [];
@@ -555,8 +589,8 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         querystring: {
           type: "object",
           properties: {
-            fromLine: { type: "integer", minimum: 1 },
-            maxLines: { type: "integer", minimum: 1 },
+            fromLine: { type: "integer", minimum: 1, maximum: MAX_LINE },
+            maxLines: { type: "integer", minimum: 1, maximum: MAX_LINE },
             lineNumbers: { type: "boolean", default: false, description: "Prefix each body line with `N: `." },
             body: { type: "boolean", default: true, description: "false returns metadata only." },
             collections: {
@@ -612,7 +646,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
             maxBytes: { type: "integer", minimum: 1, maximum: MAX_BYTES_CEILING, default: 65536 },
             maxTotalBytes: { type: "integer", minimum: 1, maximum: MAX_TOTAL_BYTES_CEILING, default: DEFAULT_MAX_TOTAL_BYTES, description: "Budget for all bodies in this response. Documents that would pass it are listed under `skipped` and are not read." },
             similarFiles: { type: "boolean", default: true, description: "false resolves the reference without QMD's scan of every path on a miss, and returns no suggestions. Memoria.Api always sends false." },
-            maxLines: { type: "integer", minimum: 1, description: "Truncate each body to this many lines." },
+            maxLines: { type: "integer", minimum: 1, maximum: MAX_LINE, description: "Truncate each body to this many lines." },
             lineNumbers: { type: "boolean", default: false },
             includeBody: { type: "boolean", default: true },
           },
@@ -699,9 +733,11 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       const row = (await backend.listCollections()).find((c) => c.name === collection);
       if (!row) throw new HttpError(404, "unknown_collection", `Unknown collection: ${collection}`);
       const target = resolveTarget(row.pwd, row.glob_pattern, path, backend.ignorePatterns(collection));
+      if (Buffer.byteLength(content, "utf8") > ctx.config.maxDocumentBytes) throw new HttpError(413, "document_too_large", `A document can be at most ${ctx.config.maxDocumentBytes} bytes. Split it into parts.`);
+      const parsed = ctx.metadata.parse(content);
       const written = await writeDocument(target, content, overwrite);
       const file = `${collection}/${target.relative}`;
-      const metadata = ctx.metadata.set(file, content) ?? null;
+      const metadata = ctx.metadata.store(file, parsed) ?? null;
       const job = ctx.jobs.enqueue({ collections: [collection], embed, force: false, reason: `POST /documents ${file}` }, { debounce: true });
       request.log.info({ file, bytes: written.bytes, created: written.created, jobId: job.id }, "document ingested");
       return reply.code(202).send({ collection, path: target.relative, file, bytes: written.bytes, created: written.created, metadata, job });

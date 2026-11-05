@@ -33,6 +33,8 @@
 param(
     [string]$ServiceName = "memoria-worker",
     [string]$BindHost = "127.0.0.1",
+    # The worker serves plain http. For binding a WireGuard tunnel address, the intended setup.
+    [switch]$AllowHttpOnPrivateNetwork,
     [int]$Port = 8383,
     [string]$TokenFile = "",
     [Parameter(Mandatory = $true)][string]$LlamaServer,
@@ -76,6 +78,9 @@ $token = Get-MemoriaSecretValue -SourceFile $TokenFile -EnvValue $env:MEMORIA_WO
 if (-not (Test-MemoriaLoopback -BindHost $BindHost) -and $null -eq $token) {
     throw "A token is required when binding $BindHost. Pass -TokenFile or set MEMORIA_WORKER_TOKEN."
 }
+if (-not (Test-MemoriaLoopback -BindHost $BindHost) -and -not $AllowHttpOnPrivateNetwork) {
+    throw "The worker serves plain http, so its token and every text it embeds are in clear unless the network itself is encrypted. On a WireGuard tunnel, which is the intended setup, pass -AllowHttpOnPrivateNetwork. See docs/deployment.md."
+}
 
 if ([string]::IsNullOrWhiteSpace($InstallDir)) { $InstallDir = Join-Path $env:ProgramFiles "Memoria\$ServiceName" }
 if ([string]::IsNullOrWhiteSpace($StateDir)) { $StateDir = Join-Path $env:ProgramData $ServiceName }
@@ -85,6 +90,7 @@ $secretPath = Join-Path $StateDir "secret\token.txt"
 
 $environment = @(
     "MEMORIA_WORKER_HOST=$BindHost",
+    "MEMORIA_WORKER_ALLOW_HTTP_ON_PRIVATE_NETWORK=$(if ($AllowHttpOnPrivateNetwork) { '1' } else { '0' })",
     "MEMORIA_WORKER_PORT=$Port",
     "MEMORIA_WORKER_LLAMA_SERVER=$LlamaServer",
     "MEMORIA_WORKER_MODEL_DIR=$ModelDir"

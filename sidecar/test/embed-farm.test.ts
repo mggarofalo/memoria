@@ -710,3 +710,45 @@ test("a success wipes the count", async () => {
   await run();
   assert.equal(w.deps.recentFailures.size, 0);
 });
+
+test("a document the chunker cannot take costs only itself, and is set aside", async () => {
+  const w = world({ big: ["BIG"], ok: ["ok0"] });
+  const inner = w.deps.chunk;
+  const deps: FarmDeps = {
+    ...w.deps,
+    chunk: async (body, path, signal) => {
+      if (body === "BIG") throw new RangeError("Map maximum size exceeded");
+      return inner(body, path, signal);
+    },
+  };
+  const out = await runEmbedFarm(deps, opts());
+  assert.deepEqual(w.deadLetters, ["big"]);
+  assert.deepEqual([...w.written.keys()], ["ok"]);
+  assert.equal(out.docsDeadLettered, 1);
+});
+
+test("a cancelled job's chunking error still cancels", async () => {
+  const abort = new AbortController();
+  const w = world({ a: ["a0"] }, {
+    chunk: async () => {
+      abort.abort();
+      throw new Error("aborted");
+    },
+  });
+  await assert.rejects(runEmbedFarm(w.deps, opts({ signal: abort.signal })), /aborted/);
+  assert.deepEqual(w.deadLetters, []);
+});
+
+test("a force job with nothing to resume asks for everything, whatever the clock says", async () => {
+  const seen: Array<string | undefined> = [];
+  const w = world({ a: ["a0"] });
+  const deps: FarmDeps = {
+    ...w.deps,
+    pendingDocs: (collection, redoBefore) => {
+      seen.push(redoBefore);
+      return w.deps.pendingDocs(collection, redoBefore);
+    },
+  };
+  await runEmbedFarm(deps, opts({ force: true }));
+  assert.equal(seen[0], "9999-12-31T23:59:59.999Z");
+});

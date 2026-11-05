@@ -598,6 +598,18 @@
                         }
                       }
                     },
+                    "sdk": {
+                      "type": "object",
+                      "required": [
+                        "patched"
+                      ],
+                      "description": "This sidecar's fixes to the QMD SDK are in the code it is running. It refuses to start otherwise.",
+                      "properties": {
+                        "patched": {
+                          "type": "boolean"
+                        }
+                      }
+                    },
                     "jobs": {
                       "type": "object",
                       "required": [
@@ -882,6 +894,18 @@
                             "string",
                             "null"
                           ]
+                        }
+                      }
+                    },
+                    "sdk": {
+                      "type": "object",
+                      "required": [
+                        "patched"
+                      ],
+                      "description": "This sidecar's fixes to the QMD SDK are in the code it is running. It refuses to start otherwise.",
+                      "properties": {
+                        "patched": {
+                          "type": "boolean"
                         }
                       }
                     },
@@ -1394,6 +1418,16 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "Too many searches are running. Retry after `Retry-After` seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }
@@ -1409,7 +1443,8 @@
           {
             "schema": {
               "type": "integer",
-              "minimum": 1
+              "minimum": 1,
+              "maximum": 999999999
             },
             "in": "query",
             "name": "fromLine",
@@ -1418,7 +1453,8 @@
           {
             "schema": {
               "type": "integer",
-              "minimum": 1
+              "minimum": 1,
+              "maximum": 999999999
             },
             "in": "query",
             "name": "maxLines",
@@ -1602,6 +1638,7 @@
                   "maxLines": {
                     "type": "integer",
                     "minimum": 1,
+                    "maximum": 999999999,
                     "description": "Truncate each body to this many lines."
                   },
                   "lineNumbers": {

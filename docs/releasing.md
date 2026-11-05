@@ -1,6 +1,6 @@
 # Releasing Memoria
 
-The whole repository has one version, and the only place it is written down is a git tag, `vX.Y.Z`. To cut a release, use the release skill (`.claude/skills/release/SKILL.md`). It runs the steps below and asks a human before it pushes the tag.
+The whole repository has one version, and the only place it is written down is a git tag, `vX.Y.Z`. To cut a release, use the release skill (`.claude/skills/release/SKILL.md`). It runs the steps below and asks a human before it pushes the tag. The `release tags` ruleset restricts creating, updating and deleting `refs/tags/v*`, so pushing or removing a tag needs an admin's credential.
 
 ## Computing the version
 

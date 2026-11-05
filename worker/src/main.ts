@@ -28,6 +28,7 @@ async function main(): Promise<void> {
   for (const role of config.roles) concurrency[role.role] = role.parallel;
   const { server } = createWorkerServer({
     token: config.token,
+    allowedHosts: config.allowedHosts,
     bodyLimitBytes: config.bodyLimitBytes,
     maxQueue: config.maxQueue,
     concurrency,

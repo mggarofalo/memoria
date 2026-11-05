@@ -24,7 +24,7 @@
     without installing.
 
 .EXAMPLE
-    .\scripts\install-service.ps1 -BindHost 192.168.1.20 -SecretFile .\secret.txt -CollectionRoot D:\corpus\sessions -WhatIf
+    .\scripts\install-service.ps1 -BindHost 10.0.0.2 -AllowHttpOnPrivateNetwork -SecretFile .\secret.txt -CollectionRoot D:\corpus\sessions -WhatIf
 #>
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
@@ -39,6 +39,8 @@ param(
     [string]$CacheHome = "",
     [string]$ConfigHome = "",
     [string[]]$CollectionRoot = @(),
+    # The sidecar serves plain http. For binding a WireGuard tunnel address, the intended setup.
+    [switch]$AllowHttpOnPrivateNetwork,
     [switch]$NoBuild
 )
 
@@ -68,6 +70,10 @@ if (-not (Test-MemoriaLoopback -BindHost $BindHost) -and $null -eq $secret) {
     throw "A shared secret is required when binding $BindHost. Pass -SecretFile or set MEMORIA_QMD_SECRET."
 }
 
+if (-not (Test-MemoriaLoopback -BindHost $BindHost) -and -not $AllowHttpOnPrivateNetwork) {
+    throw "The sidecar serves plain http, so the secret and transcripts are in clear unless the network itself is encrypted. On a WireGuard tunnel, which is the intended setup, pass -AllowHttpOnPrivateNetwork. See docs/deployment.md."
+}
+
 if ([string]::IsNullOrWhiteSpace($InstallDir)) { $InstallDir = Join-Path $env:ProgramFiles "Memoria\$ServiceName" }
 if ([string]::IsNullOrWhiteSpace($StateDir)) { $StateDir = Join-Path $env:ProgramData $ServiceName }
 if ([string]::IsNullOrWhiteSpace($LogDir)) { $LogDir = Join-Path $StateDir "logs" }
@@ -89,6 +95,7 @@ $environment = @(
     "XDG_CACHE_HOME=$CacheHome",
     "XDG_CONFIG_HOME=$ConfigHome"
 )
+if ($AllowHttpOnPrivateNetwork) { $environment += "MEMORIA_QMD_ALLOW_HTTP_ON_PRIVATE_NETWORK=1" }
 if ($null -ne $secret) { $environment += "MEMORIA_QMD_SECRET_FILE=$secretPath" }
 if (-not [string]::IsNullOrWhiteSpace($DbPath)) { $environment += "MEMORIA_QMD_DB_PATH=$DbPath" }
 
@@ -110,7 +117,10 @@ $plan = New-MemoriaInstallPlan -Spec @{
     Description = "REST sidecar over the QMD SDK for Memoria. Keeps the search models warm."
     SourceDir = $sidecar
     Entry = "dist\main.js"
-    CopyItems = @("dist", "package.json", "package-lock.json")
+    # A ceiling, not a target. docs/deployment.md says how it was chosen.
+    NodeArguments = @("--max-old-space-size=4096")
+    # scripts holds the SDK patch that npm ci applies below.
+    CopyItems = @("dist", "scripts", "package.json", "package-lock.json")
     InstallDir = $InstallDir
     StateDir = $StateDir
     LogDir = $LogDir

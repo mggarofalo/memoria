@@ -38,7 +38,7 @@ Single-trunk model: `main` is the only long-lived branch. Cut a short-lived
 If a PR looks like a blocker, report it and stop — do not close it.
 
 `main` is protected by the `main protection` ruleset: no direct pushes, no force
-pushes, no deletion, and all four required CI checks must pass. Those job names
+pushes, no deletion, and all seven required CI checks must pass. Those job names
 must not change, and they must always report, so path filtering in `ci.yml`
 happens per job and never under `on:`. `non_fast_forward` has no
 API bypass — recovering from a bad merge means temporarily disabling "Block force
@@ -84,7 +84,7 @@ The sidecar's `npm test` and `npm run typecheck` also cover `worker/` and `scrip
 docker build -t memoria-api:local .                       # the image CI publishes to ghcr.io/mggarofalo/memoria
 ```
 
-Four gates are required status checks on `main`: `Build & Test`, `Code Formatting`, `CLI Build & Test`, `CLI Lint`. `Sidecar Build & Test` and `Worker Build & Test` run the Node commands above, and `Docker Image` (`.github/workflows/docker.yml`) builds and verifies the image on every event, and a separate `Publish Image` job publishes it on pushes to `main` and release tags; none of `Sidecar Build & Test`, `Worker Build & Test`, or `Docker Image` is in the ruleset's required list yet.
+Seven gates are required status checks on `main`: `Build & Test`, `Code Formatting`, `CLI Build & Test`, `CLI Lint`, `Sidecar Build & Test`, `Worker Build & Test` and `Docker Image`. `Sidecar Build & Test` and `Worker Build & Test` run the Node commands above, and `Docker Image` (`.github/workflows/docker.yml`) builds and verifies the image on every event, and a separate `Publish Image` job publishes it on pushes to `main` and release tags.
 
 ### Releases
 

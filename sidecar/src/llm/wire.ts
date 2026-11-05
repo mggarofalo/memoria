@@ -80,7 +80,7 @@ const PENDING_DOCS = `
     GROUP BY hash, model, embed_fingerprint
   ) v ON d.hash = v.hash
   WHERE d.active = 1
-    AND (v.hash IS NULL OR v.chunk_count < v.expected_chunks OR (? IS NOT NULL AND (v.last_embedded < ? OR v.last_embedded > ?)))
+    AND (v.hash IS NULL OR v.chunk_count < v.expected_chunks OR (? IS NOT NULL AND (v.last_embedded <= ? OR v.last_embedded > ?)))
     AND (? IS NULL OR d.collection = ?)
   GROUP BY d.hash
   ) g

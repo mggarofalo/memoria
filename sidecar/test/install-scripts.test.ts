@@ -66,7 +66,7 @@ function workerDryRun(extra: string[] = [], env: NodeJS.ProcessEnv = {}) {
 }
 
 test("the sidecar's dry run keeps the secret out of the plan and out of the registry environment", { skip: needsPowerShell }, () => {
-  const run = sidecarDryRun(["-BindHost", "192.168.1.20"], { MEMORIA_QMD_SECRET: SECRET_CANARY });
+  const run = sidecarDryRun(["-BindHost", "192.168.1.20", "-AllowHttpOnPrivateNetwork"], { MEMORIA_QMD_SECRET: SECRET_CANARY });
   assert.equal(run.status, 0, run.stdout + run.stderr);
   assert.ok(!(run.stdout + run.stderr).includes(SECRET_CANARY), "the secret must not appear anywhere in the output");
   assert.match(run.stdout, /AppEnvironmentExtra .*MEMORIA_QMD_SECRET_FILE=/);
@@ -81,9 +81,13 @@ test("the sidecar's dry run keeps the secret out of the plan and out of the regi
 });
 
 test("the worker's dry run keeps the token out, and grants read on models and llama-server", { skip: needsPowerShell }, () => {
-  const run = workerDryRun(["-BindHost", "192.168.1.20"], { MEMORIA_WORKER_TOKEN: SECRET_CANARY });
+  const refused = workerDryRun(["-BindHost", "192.168.1.20"], { MEMORIA_WORKER_TOKEN: SECRET_CANARY });
+  assert.notEqual(refused.status, 0);
+  assert.match(refused.stdout + refused.stderr, /AllowHttpOnPrivateNetwork/);
+  const run = workerDryRun(["-BindHost", "192.168.1.20", "-AllowHttpOnPrivateNetwork"], { MEMORIA_WORKER_TOKEN: SECRET_CANARY });
   assert.equal(run.status, 0, run.stdout + run.stderr);
   assert.ok(!(run.stdout + run.stderr).includes(SECRET_CANARY));
+  assert.match(run.stdout, /MEMORIA_WORKER_ALLOW_HTTP_ON_PRIVATE_NETWORK=1/);
   assert.match(run.stdout, /MEMORIA_WORKER_TOKEN_FILE=/);
   assert.doesNotMatch(run.stdout, /MEMORIA_WORKER_TOKEN=/);
   assert.match(run.stdout, /NT SERVICE\\memoria-worker/);
@@ -92,6 +96,26 @@ test("the worker's dry run keeps the token out, and grants read on models and ll
   assert.match(run.stdout, /AppKillProcessTree 1/);
   assert.match(run.stdout, /\/models \/grant .*RX/);
   assert.match(run.stdout, /[\\/]pf[\\/]llama \/grant .*RX/);
+});
+
+test("the sidecar's service runs with the heap limit and the SDK patch's script, and says so in its plan", { skip: needsPowerShell }, () => {
+  const run = sidecarDryRun();
+  assert.equal(run.status, 0, run.stdout + run.stderr);
+  assert.match(run.stdout, /AppParameters .*--max-old-space-size=4096/);
+  assert.match(run.stdout, /scripts/);
+  assert.doesNotMatch(run.stdout, /MEMORIA_QMD_ALLOW_HTTP_ON_PRIVATE_NETWORK/, "on loopback, no opt-in");
+  const worker = workerDryRun();
+  assert.equal(worker.status, 0, worker.stdout + worker.stderr);
+  assert.doesNotMatch(worker.stdout, /--max-old-space-size/);
+});
+
+test("a LAN bind needs the plaintext opt-in, and the service gets it when given", { skip: needsPowerShell }, () => {
+  const refused = sidecarDryRun(["-BindHost", "192.168.1.20"], { MEMORIA_QMD_SECRET: SECRET_CANARY });
+  assert.notEqual(refused.status, 0);
+  assert.match(refused.stdout + refused.stderr, /AllowHttpOnPrivateNetwork/);
+  const allowed = sidecarDryRun(["-BindHost", "192.168.1.20", "-AllowHttpOnPrivateNetwork"], { MEMORIA_QMD_SECRET: SECRET_CANARY });
+  assert.equal(allowed.status, 0, allowed.stdout + allowed.stderr);
+  assert.match(allowed.stdout, /MEMORIA_QMD_ALLOW_HTTP_ON_PRIVATE_NETWORK=1/);
 });
 
 test("no install script offers a secret as a parameter, and no comment claims the old behaviour", async () => {
@@ -113,7 +137,7 @@ test("a dry run refuses a LAN bind with no secret, and takes one from a file", {
 
   const file = path.join(await tempDir("memoria-install-"), "s.txt");
   await writeFile(file, `${SECRET_CANARY}\n`);
-  const fromFile = sidecarDryRun(["-BindHost", "192.168.1.20", "-SecretFile", file]);
+  const fromFile = sidecarDryRun(["-BindHost", "192.168.1.20", "-AllowHttpOnPrivateNetwork", "-SecretFile", file]);
   assert.equal(fromFile.status, 0, fromFile.stdout + fromFile.stderr);
   assert.ok(!(fromFile.stdout + fromFile.stderr).includes(SECRET_CANARY));
   assert.match(fromFile.stdout, /MEMORIA_QMD_SECRET_FILE=/);

@@ -748,7 +748,7 @@ test("the vector repair covers a missing table, a healthy one, and a host that c
 
 // --- configuration ---------------------------------------------------------------------------------
 
-const SECRET = "0123456789abcdefXYZ";
+const SECRET = "Xk29vQmB7fLp3ZtRw";
 const listed = (tokenEnv: string, extra: NodeJS.ProcessEnv = {}) => () => loadConfig({ MEMORIA_QMD_LLM: "remote", MEMORIA_QMD_SECRET: SECRET, MEMORIA_QMD_WORKERS: JSON.stringify([{ name: "a", url: "http://127.0.0.1:1", tokenEnv }]), ...extra });
 
 test("a worker's token cannot be the sidecar's secret, by any route: values are compared, not names", async () => {

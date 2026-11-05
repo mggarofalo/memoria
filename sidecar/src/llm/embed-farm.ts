@@ -88,7 +88,7 @@ export interface RepeatedFailure {
 export interface FarmOptions {
   force: boolean;
   collection: string | undefined;
-  /** When the job was first accepted. A resumed force job skips what it already redid. */
+  /** Set when resuming: when the job was accepted, as it skips what it already redid. */
   forceSince?: string | undefined;
   signal: AbortSignal;
   onWorker: (name: string) => void;
@@ -133,6 +133,12 @@ const TOO_SMALL = "A worker refused a full-size test text, so its refusals of re
 const TOO_MANY_REFUSED = "Workers refused too many documents, more than have ever embedded, so none were set aside. Check the worker's context size and model. This job will retry.";
 const TOO_MANY_FAILED = "Workers keep failing on real documents while answering a short test text. The documents stay pending and this job will retry.";
 const NO_WORKER = "No worker can embed right now; the documents stay pending and this job will retry.";
+/**
+ * A force job with nothing to resume redoes everything, with no clock to compare. The time
+ * of day is not good enough: a document last written in the same millisecond, or under a
+ * clock that has stepped back, read as already redone and kept its old vectors.
+ */
+const REDO_EVERYTHING = "9999-12-31T23:59:59.999Z";
 const DEFAULT_RETRIES = 3;
 const DEFAULT_RETRY_BASE_MS = 500;
 
@@ -252,8 +258,10 @@ class Farm {
     try {
       chunks = await this.#deps.chunk(body, doc.path, this.#options.signal);
     } catch (err) {
-      if (!(err instanceof WorkerError)) throw err;
-      if (await this.#workersAlive()) this.#noteFailed(state, err);
+      if (this.#options.signal.aborted) throw err;
+      // Not the workers' doing, and it would be the same on any retry.
+      const failure = err instanceof WorkerError ? err : new WorkerError("rejected", "chunk", "sidecar", "the document could not be chunked");
+      if (await this.#workersAlive()) this.#noteFailed(state, failure);
       return [];
     }
     state.total = chunks.length;
@@ -374,7 +382,7 @@ async function embedPending(deps: FarmDeps, options: FarmOptions, docs: PendingD
 }
 
 export async function runEmbedFarm(deps: FarmDeps, options: FarmOptions): Promise<EmbedSummary> {
-  const redoBefore = options.force ? (options.forceSince ?? new Date().toISOString()) : undefined;
+  const redoBefore = options.force ? (options.forceSince ?? REDO_EVERYTHING) : undefined;
   try {
     const pending = deps.pendingDocs(options.collection, redoBefore);
     // Before the work, so it holds whatever becomes of the run. The vectors of a deleted

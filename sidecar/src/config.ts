@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import type { Capability, PoolWorkerConfig } from "./llm/types.ts";
 
 /**
@@ -13,8 +14,30 @@ export interface SidecarConfig {
   port: number;
   /** Path to QMD's index.sqlite. Undefined means the SDK default (~/.cache/qmd/index.sqlite). */
   dbPath: string | undefined;
-  /** Shared secret for `Authorization: Bearer`. Required unless bound to loopback. */
-  secret: string | undefined;
+  /** Shared secret for `Authorization: Bearer`. There always is one: see `secretGenerated`. */
+  secret: string;
+  /** None was set, on loopback, so this run made its own. */
+  secretGenerated: boolean;
+  /** DNS names a request may arrive under. An IP address is always fine. */
+  allowedHosts: ReadonlySet<string>;
+  /** Largest document `POST /documents` takes. */
+  maxDocumentBytes: number;
+  /** Time a client has to finish sending its request headers. */
+  headersTimeoutMs: number;
+  /** Time a client has to finish sending a whole request. */
+  requestTimeoutMs: number;
+  /** Connections held at once. */
+  maxConnections: number;
+  /** Connections any one address may hold, so one peer cannot use up the total. */
+  maxConnectionsPerSource: number;
+  /** Memoria.Api's address, which gets more. */
+  apiAddresses: ReadonlySet<string>;
+  maxConnectionsPerApiAddress: number;
+  /** Searches running at once. Each holds whole document bodies. */
+  searchConcurrency: number;
+  /** Searches that may wait for a turn. Past that, or `searchMaxWaitMs`, a 503. */
+  searchQueue: number;
+  searchMaxWaitMs: number;
   /** Disable the SDK's five-minute idle unload so models stay resident. */
   keepWarm: boolean;
   /** Run one reranked query at startup so the first real request hits the warm path. */
@@ -62,7 +85,7 @@ export type LlmConfig =
 const CAPABILITIES: readonly Capability[] = ["embed", "rerank", "generate"];
 
 /** Checks one worker's address. Messages never quote the URL: it could hold a credential. */
-function checkWorkerUrl(raw: string, setting: string): URL {
+function checkWorkerUrl(raw: string, setting: string, env: NodeJS.ProcessEnv): URL {
   let url: URL;
   try {
     url = new URL(raw);
@@ -72,6 +95,7 @@ function checkWorkerUrl(raw: string, setting: string): URL {
   if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error(`${setting} must be http or https`);
   if (url.username !== "" || url.password !== "") throw new Error(`${setting} must not contain credentials; use a token setting`);
   if (url.search !== "" || url.hash !== "") throw new Error(`${setting} must not contain a query or fragment`);
+  if (url.protocol === "http:" && !isLoopbackHost(url.hostname.replace(/^\[|\]$/g, ""))) requirePlaintextOptIn(env, `${setting} is plain http to another machine`);
   return url;
 }
 
@@ -79,7 +103,7 @@ function checkWorkerToken(token: string | undefined, url: URL, setting: string):
   if (token === undefined && !isLoopbackHost(url.hostname.replace(/^\[|\]$/g, ""))) {
     throw new Error(`${setting} is required when the worker is not on loopback`);
   }
-  if (token !== undefined && token.length < 16) throw new Error(`${setting} must be at least 16 characters`);
+  if (token !== undefined) checkSecretStrength(token, setting);
 }
 
 /**
@@ -104,7 +128,7 @@ function workerFromEntry(env: NodeJS.ProcessEnv, item: unknown, at: string, name
   if ("token" in w) throw new Error(`${at} must not hold a token; name an environment variable with tokenEnv`);
   const name = readWorkerName(w.name, at, names);
   if (typeof w.url !== "string") throw new Error(`${at}.url is required`);
-  const url = checkWorkerUrl(w.url, `${at}.url`);
+  const url = checkWorkerUrl(w.url, `${at}.url`, env);
   const token = readTokenEnv(env, w.tokenEnv, at);
   checkWorkerToken(token, url, `${at}.tokenEnv`);
   return {
@@ -149,6 +173,53 @@ function readCount(value: unknown, fallback: number, name: string, min: number, 
   return value;
 }
 
+/** Text from examples and templates, which someone may well have pasted in as it stood. */
+const PLACEHOLDERS = ["a-long-random", "at-least-16", "changeme", "change-me", "replace-me", "replaceme", "placeholder", "your-secret", "yoursecret", "example", "password"];
+const MIN_SECRET_LENGTH = 16;
+// Of the secret as written. Folding case first, with 8, refused about 1 random 16-character secret in 40,000.
+const MIN_DISTINCT_CHARACTERS = 6;
+const KEYBOARD_ROWS = ["1234567890", "qwertyuiop", "asdfghjkl", "zxcvbnm"];
+const MIN_RUN = 4;
+const MAX_SHARE_IN_RUNS = 0.75;
+
+function nextTo(a: string, b: string): boolean {
+  if (Math.abs(a.charCodeAt(0) - b.charCodeAt(0)) === 1) return true;
+  return KEYBOARD_ROWS.some((row) => row.includes(a + b) || row.includes(b + a));
+}
+
+/** How much of it is abcd, 4321 or qwer. A random secret has next to none of this. */
+function shareInRuns(lower: string): number {
+  let inRuns = 0;
+  let run = 1;
+  for (let i = 1; i <= lower.length; i++) {
+    if (i < lower.length && nextTo(lower[i - 1]!, lower[i]!)) {
+      run++;
+      continue;
+    }
+    if (run >= MIN_RUN) inRuns += run;
+    run = 1;
+  }
+  return inRuns / lower.length;
+}
+
+/** Only says what is wrong with a secret, never what the secret is. */
+function checkSecretStrength(secret: string, setting: string): void {
+  if (secret.length < MIN_SECRET_LENGTH) throw new Error(`${setting} must be at least ${MIN_SECRET_LENGTH} characters`);
+  const lower = secret.toLowerCase();
+  const weak = new Set(secret).size < MIN_DISTINCT_CHARACTERS || PLACEHOLDERS.some((p) => lower.includes(p)) || shareInRuns(lower) >= MAX_SHARE_IN_RUNS;
+  if (weak) throw new Error(`${setting} is too weak: it looks like a placeholder or repeats itself. Generate one: node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"`);
+}
+
+/**
+ * The services speak plain http, which is the intended setup on a WireGuard tunnel: the
+ * tunnel does the encrypting. Nothing here can tell a tunnel from an open LAN, so whoever
+ * deploys it has to say which this is. See docs/deployment.md.
+ */
+function requirePlaintextOptIn(env: NodeJS.ProcessEnv, what: string): void {
+  if (readBool(env.MEMORIA_QMD_ALLOW_HTTP_ON_PRIVATE_NETWORK, false)) return;
+  throw new Error(`${what}, so the secret and transcripts are in clear unless the network itself is encrypted. On a WireGuard tunnel, which is the intended setup, set MEMORIA_QMD_ALLOW_HTTP_ON_PRIVATE_NETWORK=1. See docs/deployment.md.`);
+}
+
 const LOOPBACK_HOSTS = new Set(["localhost", "::1", "0:0:0:0:0:0:0:1"]);
 
 export function isLoopbackHost(host: string): boolean {
@@ -190,7 +261,7 @@ function loadWorkers(env: NodeJS.ProcessEnv): PoolWorkerConfig[] {
   if (list && raw) throw new Error("Set MEMORIA_QMD_WORKERS or MEMORIA_QMD_WORKER_URL, not both");
   if (list) return loadWorkerList(env, list);
   if (!raw) throw new Error("MEMORIA_QMD_WORKERS or MEMORIA_QMD_WORKER_URL is required when MEMORIA_QMD_LLM=remote");
-  const url = checkWorkerUrl(raw, "MEMORIA_QMD_WORKER_URL");
+  const url = checkWorkerUrl(raw, "MEMORIA_QMD_WORKER_URL", env);
   const token = resolveSecret(env, "MEMORIA_QMD_WORKER_TOKEN");
   checkWorkerToken(token, url, "MEMORIA_QMD_WORKER_TOKEN");
   return [{ name: url.host, url: raw, token, capabilities: [...CAPABILITIES], priority: 100, maxConcurrent: 4 }];
@@ -231,9 +302,19 @@ function checkSecret(secret: string | undefined, host: string): void {
         "QMD has no auth of its own and the corpus contains credentials.",
     );
   }
-  if (secret !== undefined && secret.length < 16) {
-    throw new Error("MEMORIA_QMD_SECRET must be at least 16 characters");
-  }
+  if (secret !== undefined) checkSecretStrength(secret, "MEMORIA_QMD_SECRET");
+}
+
+function checkBindAddress(host: string, env: NodeJS.ProcessEnv): void {
+  if (!isLoopbackHost(host)) requirePlaintextOptIn(env, `The sidecar serves plain http, and MEMORIA_QMD_HOST (${host}) is not loopback`);
+}
+
+function readList(value: string | undefined): ReadonlySet<string> {
+  return new Set((value ?? "").split(",").map((h) => h.trim().toLowerCase()).filter((h) => h !== ""));
+}
+
+function readAllowedHosts(env: NodeJS.ProcessEnv): ReadonlySet<string> {
+  return new Set(["localhost", ...readList(env.MEMORIA_QMD_ALLOWED_HOSTS)]);
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): SidecarConfig {
@@ -241,6 +322,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): SidecarConfig 
   if (host === "") throw new Error("MEMORIA_QMD_HOST must not be empty");
   const secret = resolveSecret(env, "MEMORIA_QMD_SECRET");
   checkSecret(secret, host);
+  checkBindAddress(host, env);
   const reindexDebounceMs = readInt(env.MEMORIA_QMD_REINDEX_DEBOUNCE_MS, 60_000, "MEMORIA_QMD_REINDEX_DEBOUNCE_MS", 0, 3_600_000);
   const reindexMaxWaitMs = readInt(env.MEMORIA_QMD_REINDEX_MAX_WAIT_MS, 300_000, "MEMORIA_QMD_REINDEX_MAX_WAIT_MS", 0, 86_400_000);
   if (reindexMaxWaitMs < reindexDebounceMs) {
@@ -250,7 +332,19 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): SidecarConfig 
     host,
     port: readInt(env.MEMORIA_QMD_PORT, 8282, "MEMORIA_QMD_PORT", 1, 65535),
     dbPath: trimmed(env.MEMORIA_QMD_DB_PATH),
-    secret,
+    secret: secret ?? randomBytes(32).toString("base64url"),
+    secretGenerated: secret === undefined,
+    allowedHosts: readAllowedHosts(env),
+    maxDocumentBytes: readInt(env.MEMORIA_QMD_MAX_DOCUMENT_BYTES, 2 * 1024 * 1024, "MEMORIA_QMD_MAX_DOCUMENT_BYTES", 1024, 256 * 1024 * 1024),
+    headersTimeoutMs: readInt(env.MEMORIA_QMD_HEADERS_TIMEOUT_MS, 10_000, "MEMORIA_QMD_HEADERS_TIMEOUT_MS", 100, 120_000),
+    requestTimeoutMs: readInt(env.MEMORIA_QMD_REQUEST_TIMEOUT_MS, 300_000, "MEMORIA_QMD_REQUEST_TIMEOUT_MS", 1_000, 3_600_000),
+    maxConnections: readInt(env.MEMORIA_QMD_MAX_CONNECTIONS, 1024, "MEMORIA_QMD_MAX_CONNECTIONS", 1, 65_536),
+    maxConnectionsPerSource: readInt(env.MEMORIA_QMD_MAX_CONNECTIONS_PER_SOURCE, 64, "MEMORIA_QMD_MAX_CONNECTIONS_PER_SOURCE", 1, 65_536),
+    apiAddresses: readList(env.MEMORIA_QMD_API_ADDRESSES),
+    maxConnectionsPerApiAddress: readInt(env.MEMORIA_QMD_MAX_CONNECTIONS_PER_API_ADDRESS, 512, "MEMORIA_QMD_MAX_CONNECTIONS_PER_API_ADDRESS", 1, 65_536),
+    searchConcurrency: readInt(env.MEMORIA_QMD_SEARCH_CONCURRENCY, 4, "MEMORIA_QMD_SEARCH_CONCURRENCY", 1, 256),
+    searchQueue: readInt(env.MEMORIA_QMD_SEARCH_QUEUE, 16, "MEMORIA_QMD_SEARCH_QUEUE", 0, 4096),
+    searchMaxWaitMs: readInt(env.MEMORIA_QMD_SEARCH_MAX_WAIT_MS, 10_000, "MEMORIA_QMD_SEARCH_MAX_WAIT_MS", 1, 110_000),
     keepWarm: readBool(env.MEMORIA_QMD_KEEP_WARM, true),
     warmup: readBool(env.MEMORIA_QMD_WARMUP, true),
     logLevel: trimmed(env.MEMORIA_QMD_LOG_LEVEL) ?? "info",

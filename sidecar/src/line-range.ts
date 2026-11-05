@@ -13,7 +13,8 @@ export interface LineRange {
 }
 
 export function parseLineRange(reference: string): LineRange {
-  const range = reference.match(/:(\d+):(\d+)$/);
+  // Nine digits at most: past that it is not a line number, so it is part of the name.
+  const range = reference.match(/:(\d{1,9}):(\d{1,9})$/);
   if (range) {
     return {
       lookup: reference.slice(0, -range[0].length),
@@ -21,7 +22,7 @@ export function parseLineRange(reference: string): LineRange {
       maxLines: parseInt(range[2]!, 10),
     };
   }
-  const from = reference.match(/:(\d+)$/);
+  const from = reference.match(/:(\d{1,9})$/);
   if (from) {
     return {
       lookup: reference.slice(0, -from[0].length),

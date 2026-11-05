@@ -23,7 +23,7 @@ On Windows PowerShell:
 cd sidecar
 npm ci
 npm run build
-$env:MEMORIA_QMD_SECRET = "a-long-random-string-at-least-16-chars"
+$env:MEMORIA_QMD_SECRET = node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
 npm start
 ```
 

@@ -109,3 +109,7 @@ Tests launch `test/fixtures/fake-llama-server.ts` as a real child process in pla
 | `src/server.ts` | HTTP routes, auth, validation, concurrency limits. |
 | `src/probes.ts` | Load, thermal and VRAM readings, and the `busy` policy. |
 | `scripts/smoke.ts` | Exercises every endpoint of a running worker. |
+
+## Requests
+
+`POST` bodies must be sent as `application/json`, or the worker answers 415. A browser can send `text/plain` to any address with no preflight, and cannot send this. Any `Origin` gets a 403, and a host name not in `MEMORIA_WORKER_ALLOWED_HOSTS` gets a 421, though an IP address and `localhost` always work. Between hosts the worker runs on a WireGuard tunnel, speaking plain http with the tunnel doing the encrypting, so binding a tunnel address needs `MEMORIA_WORKER_ALLOW_HTTP_ON_PRIVATE_NETWORK=1`, or `-AllowHttpOnPrivateNetwork` or `--allow-http-on-private-network` on the installers: see [`docs/deployment.md`](../docs/deployment.md).
