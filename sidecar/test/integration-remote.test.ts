@@ -106,6 +106,8 @@ async function openRemote(): Promise<Remote> {
 test("documents embed through the worker, including the chunker's tokenizer", { skip }, async () => {
   const r = await openRemote();
   try {
+    // Without batches, as with a worker from before that route, so the chunker's calls show.
+    r.worker.on("POST /v1/tokenize-batch", () => ({ status: 404, body: { error: "no_route" } }));
     const embed = await r.backend.embed({ force: false });
     assert.equal(embed.errors, 0);
     assert.ok(embed.chunksEmbedded >= 2, `chunks: ${embed.chunksEmbedded}`);
