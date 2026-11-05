@@ -86,8 +86,9 @@ var redactedMark = regexp.MustCompile(`\[REDACTED:[^\]]*\]`)
 // maxSecretLines bounds one mark's reach. A 4096-bit key block is about 50 lines; past this a sample reads as different, not as clean.
 const maxSecretLines = 256
 
-// maxSpacedLinesUnderMark is how many lines with spaces, or blank ones, a mark may stand for when lining up has failed. Redaction joins
-// a value and the header below it, but a mark standing for more than that looks like lost text, and reads as different.
+// maxSpacedLinesUnderMark is how many lines with spaces a mark may stand for when lining up has failed. Redaction has joined a value
+// to the header below it, and to the sentence after a blank line, so blank lines do not count. A mark standing for more than that looks
+// like lost text, and reads as different. This is per mark, so a document with many marks can hide that many lines.
 const maxSpacedLinesUnderMark = 1
 
 // CompareText compares a local file with what a server returns for it, line by line and in order. Redaction changes bytes on
@@ -184,7 +185,7 @@ func looseEnds(lines []string, at int) []int {
 	ends := []int{at + 1}
 	spaced := 0
 	for end := at + 1; end < min(len(lines), at+maxSecretLines); end++ {
-		if hasSpaceOrIsBlank(lines[end]) {
+		if strings.TrimSpace(lines[end]) != "" && hasSpaceOrIsBlank(lines[end]) {
 			spaced++
 		}
 		if spaced > maxSpacedLinesUnderMark {

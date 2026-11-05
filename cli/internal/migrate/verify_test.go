@@ -38,18 +38,23 @@ func TestWhatCannotBeLinedUpIsSaidAndWhatDiffersStillFails(t *testing.T) {
 		local, server string
 		want          int
 	}{
-		"a key with no end":          {"before\n" + begin + "\nAAAA\nBBBB\n", "before\n" + mark + "\n", TextCouldNotCompare},
-		"a key then a second BEGIN":  {begin + "\nAAAA\n" + begin + "\nBBBB\n" + end + "\nafter\n", mark + "\n" + mark + "\nafter\n", TextCouldNotCompare},
-		"a value joined to a header": {"PASSWORD=abc\nAuthorization: Bearer abc\nend\n", "PASSWORD=" + mark + "\nend\n", TextCouldNotCompare},
-		"a line changed above":       {"one\ntwo\n" + begin + "\nAAAA\n", "one\nchanged\n" + mark + "\n", TextDifferent},
-		"a line lost above":          {"one\nlost line\nkept\n" + begin + "\nAAAA\n", "one\nkept\n" + mark + "\n", TextDifferent},
-		"a line lost beside a mark":  {"one\ntwo\n" + begin + "\nAAAA\n", "one\n" + mark + "\n", TextCouldNotCompare},
-		"a line lost far below":      {"PASSWORD=abc\nAuthorization: Bearer abc\nkept\nlost line\n", "PASSWORD=" + mark + "\nkept\n", TextDifferent},
-		"a line added":               {"PASSWORD=abc\nAuthorization: Bearer abc\nend\n", "PASSWORD=" + mark + "\nend\nadded\n", TextDifferent},
-		"two lines swapped":          {"PASSWORD=abc\nAuthorization: Bearer abc\nb\nc\n", "PASSWORD=" + mark + "\nc\nb\n", TextDifferent},
-		"text around a mark changed": {"PASSWORD=abc\nAuthorization: Bearer abc\nend\n", "OTHER=" + mark + "\nend\n", TextDifferent},
-		"two spaced lines under one": {"PASSWORD=abc\nspaced line\nspaced again\nend\n", "PASSWORD=" + mark + "\nend\n", TextDifferent},
-		"no mark at all":             {"one\ntwo\n", "one\n", TextDifferent},
+		"a key with no end":                {"before\n" + begin + "\nAAAA\nBBBB\n", "before\n" + mark + "\n", TextCouldNotCompare},
+		"a key then a second BEGIN":        {begin + "\nAAAA\n" + begin + "\nBBBB\n" + end + "\nafter\n", mark + "\n" + mark + "\nafter\n", TextCouldNotCompare},
+		"a value joined to a header":       {"PASSWORD=abc\nAuthorization: Bearer abc\nend\n", "PASSWORD=" + mark + "\nend\n", TextCouldNotCompare},
+		"a line changed above":             {"one\ntwo\n" + begin + "\nAAAA\n", "one\nchanged\n" + mark + "\n", TextDifferent},
+		"a line lost above":                {"one\nlost line\nkept\n" + begin + "\nAAAA\n", "one\nkept\n" + mark + "\n", TextDifferent},
+		"a line lost beside a mark":        {"one\ntwo\n" + begin + "\nAAAA\n", "one\n" + mark + "\n", TextCouldNotCompare},
+		"a line lost far below":            {"PASSWORD=abc\nAuthorization: Bearer abc\nkept\nlost line\n", "PASSWORD=" + mark + "\nkept\n", TextDifferent},
+		"a line added":                     {"PASSWORD=abc\nAuthorization: Bearer abc\nend\n", "PASSWORD=" + mark + "\nend\nadded\n", TextDifferent},
+		"two lines swapped":                {"PASSWORD=abc\nAuthorization: Bearer abc\nb\nc\n", "PASSWORD=" + mark + "\nc\nb\n", TextDifferent},
+		"text around a mark changed":       {"PASSWORD=abc\nAuthorization: Bearer abc\nend\n", "OTHER=" + mark + "\nend\n", TextDifferent},
+		"two spaced lines under one":       {"PASSWORD=abc\nspaced line\nspaced again\nend\n", "PASSWORD=" + mark + "\nend\n", TextDifferent},
+		"no mark at all":                   {"one\ntwo\n", "one\n", TextDifferent},
+		"a token joined over a blank line": {"see abc\n\nThe next sentence.\n", "see " + mark + " next sentence.\n", TextCouldNotCompare},
+		"a token joined to the next line":  {"see abc\nThe next sentence.\n", "see " + mark + " next sentence.\n", TextCouldNotCompare},
+		"several blank lines":              {"see abc\n\n\n\nThe next sentence.\n", "see " + mark + " next sentence.\n", TextCouldNotCompare},
+		"a blank line and two spaced ones": {"see abc\n\none more\nThe next sentence.\n", "see " + mark + " next sentence.\n", TextDifferent},
+		"a joined line that was changed":   {"see abc\n\nThe next sentence.\n", "see " + mark + " other sentence.\n", TextDifferent},
 	} {
 		if got := CompareText(c.local, c.server); got != c.want {
 			t.Errorf("%s = %d, want %d", name, got, c.want)

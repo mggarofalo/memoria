@@ -61,8 +61,9 @@ It exits 1 if a file is not held, is held at another version, or a sampled docum
 match. Overlap never fails it: local QMD ranks differently and may use another embedder, so
 100% is not expected, and no threshold has been measured. It reports the number.
 
-A sampled document whose differences all sit around redaction marks, but cannot be lined up, is
-counted as could not compare and named in the report. It does not fail the run: look at it by hand.
+A sampled document whose differences all sit beside redaction marks, but cannot be lined up, is
+counted as could not compare and named in the report. It does not fail the run, but it may be missing
+text beside a mark, so a person needs to compare it with its local file.
 
 It does not prove every document's text is right: only the sample is fetched. A file removed
 from the server's disk behind its ledger reads clean until the index updates, and after that

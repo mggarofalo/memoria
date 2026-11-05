@@ -89,11 +89,20 @@ func TestAVerifySaysWhatItFoundAndWhatItDoesNotShow(t *testing.T) {
 }
 
 func TestAVerifySaysWhatItsCountsMayMean(t *testing.T) {
-	limits := []string{"reads clean until the index updates", "up to about 255", "could not be compared: every difference sits around a redaction mark", "Look at them by hand"}
+	limits := []string{"reads clean until the index updates", "up to about 255", "could not be compared: every difference sits beside a redaction mark", "may be missing text beside a mark", "no limit on what a document with many marks can lose", "need a person to check them"}
 	shapes := &migrate.VerifyResult{Collections: []migrate.VerifySummary{{Name: "a", SampleCouldNotCompare: 2}}}
-	checkHolds(t, renderedBy(t, func(w io.Writer) error { return MigrateVerifyTable(w, shapes) }), append(limits, "Nothing here needs a look")...)
-	if text := renderedBy(t, func(w io.Writer) error { return MigrateVerifyTable(w, shapes) }); strings.Contains(text, "catching up") {
-		t.Fatalf("a run that fetched everything said the index was behind: %s", text)
+	for _, render := range []func(io.Writer, *migrate.VerifyResult) error{MigrateVerifyTable, MigrateVerifyMarkdown} {
+		text := renderedBy(t, func(w io.Writer) error { return render(w, shapes) })
+		checkHolds(t, text, limits...)
+		for _, gone := range []string{"Nothing here needs a look", "This is not a failure", "catching up"} {
+			if strings.Contains(text, gone) {
+				t.Fatalf("%q was said alongside a document that could not be compared: %s", gone, text)
+			}
+		}
+	}
+	failing := &migrate.VerifyResult{Collections: []migrate.VerifySummary{{Name: "a", SampleCouldNotCompare: 1, NotHeld: 1}}}
+	if text := renderedBy(t, func(w io.Writer) error { return MigrateVerifyTable(w, failing) }); strings.Contains(text, "Nothing") || !strings.Contains(text, "2 thing(s)") && !strings.Contains(text, "1 thing(s)") {
+		t.Fatalf("text = %s", text)
 	}
 	behind := &migrate.VerifyResult{Collections: []migrate.VerifySummary{{Name: "a", LocalFiles: 3, ServerDocuments: 0, CountDiffers: true}}}
 	checkHolds(t, renderedBy(t, func(w io.Writer) error { return MigrateVerifyTable(w, behind) }), "index may still be catching up", "the counts differ: 3 local, 0 on the server")

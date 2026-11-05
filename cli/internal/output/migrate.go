@@ -323,6 +323,9 @@ func verifyNotes(result *migrate.VerifyResult) []string {
 		problems += result.Collections[i].Problems()
 	}
 	verdict := "Nothing here needs a look, within the limits below."
+	if uncompared := countUncompared(result); uncompared > 0 && problems == 0 {
+		verdict = fmt.Sprintf("Nothing failed, but %d sampled document(s) need a person to check them. The local report names them.", uncompared)
+	}
 	if problems > 0 {
 		verdict = fmt.Sprintf("%d thing(s) need a look. The local report names them, and these counts do not.", problems)
 	}
@@ -331,17 +334,24 @@ func verifyNotes(result *migrate.VerifyResult) []string {
 	return append(notes, append(verifyLimits, seed, "Local report: "+result.ReportFile)...)
 }
 
+func countUncompared(result *migrate.VerifyResult) int {
+	uncompared := 0
+	for i := range result.Collections {
+		uncompared += result.Collections[i].SampleCouldNotCompare
+	}
+	return uncompared
+}
+
 // situationNotes says what this run's counts may mean, where they could otherwise be misread.
 func situationNotes(result *migrate.VerifyResult) []string {
-	uncompared, behind := 0, false
+	uncompared, behind := countUncompared(result), false
 	for i := range result.Collections {
 		s := &result.Collections[i]
-		uncompared += s.SampleCouldNotCompare
 		behind = behind || s.SampleFailed > 0 || (s.CountDiffers && s.ServerDocuments < s.LocalFiles-s.NotHeld)
 	}
 	var notes []string
 	if uncompared > 0 {
-		notes = append(notes, fmt.Sprintf("%d sampled document(s) could not be compared: every difference sits around a redaction mark, but they could not be lined up. This is not a failure. Look at them by hand: the local report names them.", uncompared))
+		notes = append(notes, fmt.Sprintf("%d sampled document(s) could not be compared: every difference sits beside a redaction mark, but they could not be lined up. Each may be missing text beside a mark, so compare it with its local file by hand. Each mark can hide one line with spaces, and any lines without, so there is no limit on what a document with many marks can lose.", uncompared))
 	}
 	if behind {
 		notes = append(notes, "If you pushed in the last few minutes, the index may still be catching up, as a document is counted and fetched only once it is indexed. Wait, and run this again before treating these as failures.")
