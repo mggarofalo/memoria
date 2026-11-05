@@ -168,7 +168,7 @@ export interface FilterArguments {
 
 /** The text of a `search` tool call, as a client of the MCP server gets it. */
 export function mcpSearch(h: Harness, key: string, args: { query: string; collections: string[]; rerank: boolean } & FilterArguments): Promise<string> {
-  return mcpTool(h, key, "search", args);
+  return mcpTool(h, key, "search", { ...args });
 }
 
 async function mcpTool(h: Harness, key: string, name: string, args: Record<string, unknown>): Promise<string> {

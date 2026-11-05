@@ -76,6 +76,7 @@ jobs:
               - sidecar/**
               - worker/**
               - scripts/release/**
+              - scripts/e2e/**
               - package.json
               - package-lock.json
               - eslint.config.mjs
