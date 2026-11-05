@@ -357,7 +357,12 @@ internal static class IngestRules
 
 	public static IngestRefusedException Shrank()
 	{
-		return new IngestRefusedException(StatusCodes.Status409Conflict, "session_shrank", "This upload has fewer messages than what is stored, so it may be a cut copy. Nothing was changed. Send allowShrink=true if the session really did lose them.");
+		return new IngestRefusedException(StatusCodes.Status409Conflict, "session_shrank", "This upload has fewer messages than what is stored, or a migrated document it would replace does not say how many it holds, so it may be a cut copy. Nothing was changed. If this copy really is the whole session, send it again with allowShrink=true, and it replaces what is stored.");
+	}
+
+	public static IngestRefusedException RenderedShrank()
+	{
+		return new IngestRefusedException(StatusCodes.Status409Conflict, "session_shrank", "This document says it holds fewer messages than the copy stored at its path, so it may be a cut copy. Nothing was changed. If it really is shorter, delete the path and send it again dated after the delete.");
 	}
 
 	public static IngestRefusedException LostContent()

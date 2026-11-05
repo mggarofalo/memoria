@@ -5,7 +5,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { type ApiKeyMaker, type Harness } from "./harness.ts";
-import { forceIndex } from "./ingest.ts";
+import { codexMessage, codexMeta, forceIndex, SESSION_DAY } from "./ingest.ts";
 import { code, folder, headers, line, SAFE, send, type Answer } from "./ingest-races.ts";
 
 const VERSION = "2026-02-01T00:00:00Z";
@@ -57,6 +57,66 @@ async function aDeletedPathStaysDeleted(h: Harness, key: string): Promise<void> 
   h.check("rendered: a deleted path stays deleted when its session arrives", !existsSync(path.join(folder(h), name)) && session.text.includes("part_deleted"), session.text);
 }
 
+function uploadSession(h: Harness, key: string, id: string, updated: string, body: string, format = "claude"): Promise<Answer> {
+  return send(`${h.apiUrl}/v1/ingest/session?${new URLSearchParams({ collection: SAFE, format, sessionId: id, updated })}`, { method: "POST", headers: headers(key, "application/x-ndjson"), body });
+}
+
+function exported(id: string, word: string, end: number): string {
+  return `---\nsession_id: "${id}"\nmessage_end: ${end}\n---\n\n## User\n\n${word}\n`;
+}
+
+async function aTakeoverIsFinal(h: Harness, key: string): Promise<void> {
+  const id = "cfcfcfcf-1111-2222-3333-444444444444";
+  const kept = "2026-01-15_cfcfcfcf.md";
+  const dropped = "2026-01-15_cfcfcfcf_part-009.md";
+  await post(h, key, kept, exported(id, "finalstayskept", 0));
+  await post(h, key, dropped, exported(id, "finalstaysdropped", 0));
+  const whole = await uploadSession(h, key, id, LATER, line("user", "finalstayskept"));
+  await send(`${h.apiUrl}/v1/documents?${new URLSearchParams({ collection: SAFE, path: kept })}`, { method: "DELETE", headers: headers(key) });
+  await forceIndex({ h });
+  h.check("rendered: a part deleted after a takeover leaves search", whole.status === 202 && !existsSync(path.join(folder(h), kept)) && (await hits(h, key, "finalstayskept")) === 0, whole.text);
+
+  const resent = await post(h, key, kept, exported(id, "finalstayskept", 0));
+  const superseded = await post(h, key, dropped, exported(id, "finalstaysdropped", 0));
+  await forceIndex({ h });
+  h.check("rendered: sending that export again is refused, and its text stays out", resent.status === 409 && code(resent) === "path_owned" && !existsSync(path.join(folder(h), kept)) && (await hits(h, key, "finalstayskept")) === 0, resent.text);
+  h.check("rendered: so is a name the session stopped writing", superseded.status === 409 && code(superseded) === "path_owned" && !existsSync(path.join(folder(h), dropped)) && (await hits(h, key, "finalstaysdropped")) === 0, superseded.text);
+}
+
+async function aNewNameLandsBeside(h: Harness, key: string): Promise<void> {
+  const id = "c0c0c0c0-1111-2222-3333-444444444444";
+  const fresh = "2026-01-15_c0c0c0c0_part-007.md";
+  await uploadSession(h, key, id, LATER, line("user", "beside"));
+  const landed = await post(h, key, fresh, exported(id, "freshnameword", 0));
+  await forceIndex({ h });
+  h.check("rendered: a copy under a name never used lands beside the session", landed.status === 202 && (await hits(h, key, "freshnameword")) === 1, landed.text);
+  const next = await uploadSession(h, key, id, LATEST, line("user", "beside") + line("assistant", "next"));
+  await forceIndex({ h });
+  h.check("rendered: and the session's next upload removes it", next.status === 202 && !existsSync(path.join(folder(h), fresh)) && (await hits(h, key, "freshnameword")) === 0, next.text);
+}
+
+async function otherFoldersStay(h: Harness, key: string): Promise<void> {
+  const id = "c1c1c1c1-1111-2222-3333-444444444444";
+  const root = "2026-01-15_c1c1c1c1.md";
+  const fork = "forked-export/2026-01-15_c1c1c1c1.md";
+  await post(h, key, root, exported(id, "forkrootword", 0));
+  await post(h, key, fork, exported(id, "onlyintheforkword", 50));
+  const whole = await uploadSession(h, key, id, LATER, line("user", "forknewword"));
+  await forceIndex({ h });
+  h.check("rendered: a session replaces the copy in its own folder", whole.status === 202 && !readFileSync(path.join(folder(h), root), "utf8").includes("forkrootword"), whole.text);
+  h.check("rendered: and leaves one in another folder, searchable, even one reaching further", existsSync(path.join(folder(h), ...fork.split("/"))) && (await hits(h, key, "onlyintheforkword")) === 1, whole.text);
+  h.check("rendered: which still takes its export", (await post(h, key, fork, exported(id, "onlyintheforkword", 50))).status === 202);
+
+  const codex = "c2c2c2c2-1111-2222-3333-444444444444";
+  const chunk = `${SESSION_DAY}_codex_${codex}_chunk-00009.md`;
+  await post(h, key, chunk, exported(codex, "codexoldword", 0));
+  await post(h, key, `forked-export/${chunk}`, exported(codex, "codexforkword", 0));
+  const session = await uploadSession(h, key, codex, LATER, codexMeta(codex) + codexMessage("codexnewword"), "codex");
+  await forceIndex({ h });
+  h.check("rendered: a Codex session replaces chunks in its own folder", session.status === 202 && !existsSync(path.join(folder(h), chunk)) && (await hits(h, key, "codexnewword")) === 1 && (await hits(h, key, "codexoldword")) === 0, session.text);
+  h.check("rendered: and leaves those in another", (await hits(h, key, "codexforkword")) === 1, session.text);
+}
+
 async function refusals(h: Harness, key: string, token: string): Promise<void> {
   const over = await post(h, key, "old-export/too-big.md", "x".repeat(MAX_DOCUMENT_BYTES + 1));
   h.check("rendered: over the cap gets 413, and nothing is written", over.status === 413 && !existsSync(path.join(folder(h), "old-export", "too-big.md")), over.status);
@@ -99,4 +159,7 @@ export async function ingestRendered(h: Harness, keys: ApiKeyMaker): Promise<voi
   await refusals(h, key, token);
   await sessionTakesOver(h, key);
   await aDeletedPathStaysDeleted(h, key);
+  await aTakeoverIsFinal(h, key);
+  await aNewNameLandsBeside(h, key);
+  await otherFoldersStay(h, key);
 }

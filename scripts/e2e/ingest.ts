@@ -19,7 +19,7 @@ const FILLED = "filled";
 const VERSION = "2026-02-01T00:00:00Z";
 const LATER = "2026-02-02T00:00:00Z";
 const ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-const SESSION_DAY = "2026-01-15";
+export const SESSION_DAY = "2026-01-15";
 
 /** A debounce far longer than the run: nothing reaches the index unless something forces it. */
 export const INGEST_SERVER: HarnessOptions = {
@@ -348,11 +348,11 @@ async function sessions(c: Context): Promise<void> {
   c.h.check("ingest: a transcript with no messages is never complete", noMessages.status === 207 && (JSON.parse(noMessages.text) as { complete: boolean }).complete === false, noMessages.text);
 }
 
-function codexMeta(id: string): string {
+export function codexMeta(id: string): string {
   return JSON.stringify({ timestamp: `${SESSION_DAY}T10:00:00.000Z`, type: "session_meta", payload: { id, cwd: "/srv/demo" } }) + "\n";
 }
 
-function codexMessage(text: string): string {
+export function codexMessage(text: string): string {
   return JSON.stringify({ timestamp: `${SESSION_DAY}T10:00:01.000Z`, type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text }] } }) + "\n";
 }
 

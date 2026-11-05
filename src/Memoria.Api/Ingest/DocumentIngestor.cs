@@ -15,7 +15,7 @@ namespace Memoria.Api.Ingest;
 /// from operator configuration: <see cref="SidecarIngestRequest"/> takes only a <see cref="RedactedMarkdown"/>, and nothing
 /// in a request can reach <see cref="IngestRedactionPolicy"/> except the collection name it looks up.
 /// </summary>
-public sealed class DocumentIngestor(
+public sealed partial class DocumentIngestor(
 	IMemoriaQmdClient sidecar,
 	IIngestLedger ledger,
 	IRedactor redactor,
@@ -28,7 +28,8 @@ public sealed class DocumentIngestor(
 	ICallerScope scope,
 	IRequestAudit audit,
 	IOptions<MemoriaOptions> options,
-	TimeProvider timeProvider)
+	TimeProvider timeProvider,
+	ILogger<DocumentIngestor> logger)
 {
 	/// <summary>The request has been validated: every field it needs is set.</summary>
 	public async Task<DocumentIngestResult> IngestAsync(DocumentIngestRequest request, bool restore, CancellationToken cancellationToken)
@@ -90,11 +91,10 @@ public sealed class DocumentIngestor(
 			throw IngestRules.TooLarge($"A document once redacted can be at most {limit} bytes.");
 		}
 
-
 		string identity = IdentityOf(collection, path);
-		IngestClaimRequest claiming = new(identity, collection, updated, timeProvider.GetUtcNow(), [path], Lookup: RenderedDocument.SessionIdOf(decided.Text) is { } sessionId ? IngestIdentity.ForRenderedSession(collection, sessionId) : null, MessageCount: RenderedDocument.MessagesThroughOf(decided.Text), ContentHash: digests.Of(decided.Text), IsSameContent: stored => digests.Matches(stored, decided.Text));
+		IngestClaimRequest claiming = new(identity, collection, updated, timeProvider.GetUtcNow(), [path], Lookup: RenderedDocument.SessionIdOf(decided.Text) is { } sessionId ? IngestIdentity.ForRenderedSession(collection, sessionId, path) : null, MessageCount: RenderedDocument.MessagesThroughOf(decided.Text), ContentHash: digests.Of(decided.Text), IsSameContent: stored => digests.Matches(stored, decided.Text));
 		IngestClaim claim = await ledger.ClaimAsync(claiming, cancellationToken);
-		IngestRules.RequireClaim(claim);
+		RequireRenderedClaim(claim, collection, identity);
 		int redactions = decided.CountsByRule.Values.Sum();
 		audit.SetTarget(new AuditIngest("rendered", redactionName, false, 0, 1, 0, redactions, 0, [path]));
 
@@ -102,6 +102,17 @@ public sealed class DocumentIngestor(
 		audit.SetResult([collection], 1);
 		audit.SetTarget(new AuditIngest("rendered", redactionName, true, 1, 0, 0, redactions, 0, [path]));
 		return new RenderedDocumentResult(collection, response.Path, response.File, response.Bytes, response.Created, redactionName, decided.CountsByRule, RenderedDocument.FrontmatterOf(decided.Text, response.Metadata is not null), response.Job.Id);
+	}
+
+	private void RequireRenderedClaim(IngestClaim claim, string collection, string identity)
+	{
+		if (claim.Outcome == IngestClaimOutcome.Shrunk)
+		{
+			LogRenderedLooksCut(logger, collection, identity);
+			throw IngestRules.RenderedShrank();
+		}
+
+		IngestRules.RequireClaim(claim);
 	}
 
 	/// <summary>What the ledger holds for a path, so a migration can check by path what arrived.</summary>
@@ -217,4 +228,7 @@ public sealed class DocumentIngestor(
 	{
 		return IngestIdentity.For("document", collection, path);
 	}
+
+	[LoggerMessage(EventId = 3312, Level = LogLevel.Warning, Message = "A rendered document for collection {Collection} was refused: it says it holds fewer messages than the copy at its path, and nothing was changed. The document is ingest_state identity {Identity}. If it really is shorter, delete the path and send it again dated after the delete.")]
+	private static partial void LogRenderedLooksCut(ILogger logger, string collection, string identity);
 }

@@ -60,7 +60,7 @@ public sealed record IngestClaimRequest(
 	Func<long, string, bool>? StartsWithStored = null,
 	Func<string, bool>? IsSameContent = null)
 {
-	/// <summary>For a session: the lookup its rendered documents were recorded under. Those it takes over, as the same text under the session's own rules.</summary>
+	/// <summary>For a session: the lookup its rendered documents in its own folder were recorded under. Those it takes over, as the same text under the session's own rules.</summary>
 	public string? RenderedLookup { get; init; }
 }
 
@@ -124,10 +124,14 @@ public static class IngestIdentity
 		return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join('\0', parts))));
 	}
 
-	/// <summary>Links a rendered document to the session it says it belongs to, whichever format that session is later sent in.</summary>
-	public static string ForRenderedSession(string collection, string sessionId)
+	/// <summary>
+	/// Links a rendered document to the session it says it belongs to, whichever format that session is later sent in, and only within one folder. Exports may be the only copy of what they
+	/// hold, and one in another folder can be another fork of the session, so a session leaves it alone: a double in search is better than a loss.
+	/// </summary>
+	public static string ForRenderedSession(string collection, string sessionId, string path)
 	{
-		return For("rendered-session", collection, sessionId);
+		ArgumentNullException.ThrowIfNull(path);
+		return For("rendered-session", collection, path[..(path.LastIndexOf('/') + 1)], sessionId);
 	}
 }
 
@@ -388,6 +392,12 @@ public sealed class SqliteIngestLedger(ControlDatabase database) : IIngestLedger
 		if (IsLeased(row, request.Now))
 		{
 			return IngestClaimOutcome.Busy;
+		}
+
+		// A session took this path over, so its text is the session's to write or delete, even once nothing owns the path because that session deleted or stopped writing it.
+		if (row.State == IngestStateName.TakenOver && !request.Restore)
+		{
+			return IngestClaimOutcome.PathConflict;
 		}
 
 		return IsStale(row, request) ? IngestClaimOutcome.Stale : WouldLoseStoredText(row, request);

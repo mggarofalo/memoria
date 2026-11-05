@@ -8,6 +8,7 @@ using Memoria.Core.Sessions;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using static Memoria.Api.Tests.IngestKit;
 
 namespace Memoria.Api.Tests;
@@ -457,12 +458,144 @@ public sealed class RenderedIngestTests(AuthApiFactory factory) : IClassFixture<
 	}
 
 	[Fact]
+	public async Task A_part_deleted_after_a_takeover_stays_gone_when_the_rendered_copy_is_sent_again()
+	{
+		FakeCorpus corpus = new(factory.Sidecar);
+		HttpClient client = await factory.ClientWithScopesAsync([MemoriaScopes.Ingest, MemoriaScopes.Read], ["c"]);
+		string id = Guid.NewGuid().ToString();
+		string path = $"2026-01-15_{id[..8]}.md";
+		await PostAsync(client, path, RenderedPart(id, "oldword", 0));
+		await PostSessionAsync(client, ClaudeLine("user", "newword"), sessionId: id, updated: Stamp.AddHours(1));
+		await client.DeleteAsync($"/v1/documents?collection=c&path={path}");
+
+		HttpResponseMessage again = await PostAsync(client, path, RenderedPart(id, "oldword", 0), updated: DateTimeOffset.UtcNow.AddMinutes(30));
+
+		Assert.Equal("path_owned", (await ReadAsync(again)).GetProperty("code").GetString());
+		Assert.Empty(corpus.Files);
+		JsonElement status = await ReadAsync(await client.GetAsync($"/v1/ingest/rendered?collection=c&path={path}"));
+		Assert.Equal(IngestStateName.TakenOver, status.GetProperty("state").GetString());
+	}
+
+	[Fact]
+	public async Task A_name_the_session_stopped_writing_stays_gone_when_the_rendered_copy_is_sent_again()
+	{
+		FakeCorpus corpus = new(factory.Sidecar);
+		HttpClient client = await WriterAsync();
+		string id = Guid.NewGuid().ToString();
+		string other = $"2026-01-15_{id[..8]}_part-009.md";
+		await PostAsync(client, other, RenderedPart(id, "oldword", 0));
+		await PostSessionAsync(client, ClaudeLine("user", "newword"), sessionId: id, updated: Stamp.AddHours(1));
+
+		HttpResponseMessage again = await PostAsync(client, other, RenderedPart(id, "oldword", 0), updated: Stamp.AddHours(2));
+
+		Assert.Equal("path_owned", (await ReadAsync(again)).GetProperty("code").GetString());
+		Assert.False(corpus.Files.ContainsKey(other));
+	}
+
+	[Fact]
+	public async Task A_rendered_copy_under_a_new_name_lands_beside_the_session_and_its_next_upload_removes_it()
+	{
+		FakeCorpus corpus = new(factory.Sidecar);
+		HttpClient client = await WriterAsync();
+		string id = Guid.NewGuid().ToString();
+		string fresh = $"2026-01-15_{id[..8]}_part-007.md";
+		await PostSessionAsync(client, ClaudeLine("user", "newword"), sessionId: id, updated: Stamp.AddHours(1));
+
+		HttpResponseMessage landed = await PostAsync(client, fresh, RenderedPart(id, "freshword", 0));
+
+		Assert.Equal(HttpStatusCode.Accepted, landed.StatusCode);
+		Assert.Contains("freshword", corpus.Files[fresh], StringComparison.Ordinal);
+		HttpResponseMessage next = await PostSessionAsync(client, ClaudeLine("user", "newword") + ClaudeLine("assistant", "more", 1), sessionId: id, updated: Stamp.AddHours(2));
+		Assert.Equal(HttpStatusCode.Accepted, next.StatusCode);
+		Assert.False(corpus.Files.ContainsKey(fresh));
+	}
+
+	[Fact]
+	public async Task A_copy_in_another_folder_is_left_alone_and_does_not_limit_the_session()
+	{
+		FakeCorpus corpus = new(factory.Sidecar);
+		HttpClient client = await WriterAsync();
+		string id = Guid.NewGuid().ToString();
+		string root = $"2026-01-15_{id[..8]}.md", elsewhere = $"old-export/2026-01-15_{id[..8]}.md";
+		await PostAsync(client, root, RenderedPart(id, "rootword", 0));
+		string fork = RenderedPart(id, "onlyinthefork", 50);
+		await PostAsync(client, elsewhere, fork);
+
+		HttpResponseMessage session = await PostSessionAsync(client, ClaudeLine("user", "newword"), sessionId: id, updated: Stamp.AddHours(1));
+
+		Assert.Equal(HttpStatusCode.Accepted, session.StatusCode);
+		Assert.Contains("newword", corpus.Files[root], StringComparison.Ordinal);
+		Assert.Equal(fork, corpus.Files[elsewhere]);
+		Assert.Equal(HttpStatusCode.Accepted, (await PostAsync(client, elsewhere, fork)).StatusCode);
+	}
+
+	[Fact]
+	public async Task Codex_chunks_in_the_same_folder_are_taken_over_and_those_in_another_are_not()
+	{
+		FakeCorpus corpus = new(factory.Sidecar);
+		HttpClient client = await WriterAsync();
+		string id = Guid.NewGuid().ToString();
+		string same = $"2026-01-15_codex_{id}_chunk-00009.md", elsewhere = $"old-export/2026-01-15_codex_{id}_chunk-00009.md";
+		await PostAsync(client, same, RenderedPart(id, "oldword", 0));
+		await PostAsync(client, elsewhere, RenderedPart(id, "forkword", 0));
+		string payload = JsonSerializer.Serialize(new { type = "message", role = "user", content = new object[] { new { type = "input_text", text = "newword" } } });
+		string transcript = "{\"timestamp\":\"2026-01-15T10:00:00.000Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"" + id + "\",\"cwd\":\"/srv/demo\"}}\n{\"timestamp\":\"2026-01-15T10:00:01.000Z\",\"type\":\"response_item\",\"payload\":" + payload + "}\n";
+
+		HttpResponseMessage session = await PostSessionAsync(client, transcript, format: "codex", sessionId: id, updated: Stamp.AddHours(1));
+
+		Assert.Equal(HttpStatusCode.Accepted, session.StatusCode);
+		Assert.False(corpus.Files.ContainsKey(same));
+		Assert.Contains("forkword", corpus.Files[elsewhere], StringComparison.Ordinal);
+		Assert.Contains(corpus.Files, pair => pair.Key.EndsWith("_chunk-00001.md", StringComparison.Ordinal) && !pair.Key.Contains('/', StringComparison.Ordinal) && pair.Value.Contains("newword", StringComparison.Ordinal));
+	}
+
+	[Fact]
+	public async Task A_refused_cut_copy_warns_by_digest_and_tells_the_person_what_to_send()
+	{
+		_ = new FakeCorpus(factory.Sidecar);
+		HttpClient client = await WriterAsync();
+		string id = Guid.NewGuid().ToString();
+		await PostAsync(client, $"2026-01-15_{id[..8]}.md", "---\nsession_id: \"" + id + "\"\n---\n\nsays no count\n");
+
+		string body = await (await PostSessionAsync(client, ClaudeLine("user", "cutcopytext"), sessionId: id, updated: Stamp.AddHours(1))).Content.ReadAsStringAsync();
+
+		Assert.Contains("session_shrank", body, StringComparison.Ordinal);
+		Assert.Contains("does not say how many", body, StringComparison.Ordinal);
+		Assert.Contains("allowShrink=true", body, StringComparison.Ordinal);
+		MemoriaApiFactory.CapturedLog[] warnings = [.. factory.Logs.Where(static log => log.EventId.Id == 3311)];
+		Assert.Contains(warnings, static log => log.Level == LogLevel.Warning && log.Message.Contains("collection c ", StringComparison.Ordinal) && log.Message.Contains("Shrunk", StringComparison.Ordinal));
+		Assert.DoesNotContain(warnings, log => log.Message.Contains(id, StringComparison.Ordinal) || log.Message.Contains(id[..8], StringComparison.Ordinal) || log.Message.Contains("cutcopytext", StringComparison.Ordinal));
+	}
+
+	[Fact]
+	public async Task A_shorter_rendered_copy_warns_and_says_what_works_on_this_route()
+	{
+		FakeCorpus corpus = new(factory.Sidecar);
+		HttpClient client = await WriterAsync();
+		string id = Guid.NewGuid().ToString();
+		string path = $"2026-01-15_{id[..8]}.md";
+		await PostAsync(client, path, RenderedPart(id, "longword", 5));
+
+		HttpResponseMessage shorter = await PostAsync(client, path, RenderedPart(id, "shortword", 1));
+
+		string body = await shorter.Content.ReadAsStringAsync();
+		Assert.Contains("session_shrank", body, StringComparison.Ordinal);
+		Assert.DoesNotContain("allowShrink", body, StringComparison.Ordinal);
+		Assert.Contains(factory.Logs, static log => log.EventId.Id == 3312 && log.Level == LogLevel.Warning);
+		Assert.Contains("longword", corpus.Files[path], StringComparison.Ordinal);
+
+		// What the answer says does work.
+		await client.DeleteAsync($"/v1/documents?collection=c&path={path}");
+		Assert.Equal(HttpStatusCode.Accepted, (await PostAsync(client, path, RenderedPart(id, "shortword", 1), updated: DateTimeOffset.UtcNow.AddMinutes(30))).StatusCode);
+	}
+
+	[Fact]
 	public async Task A_session_waits_for_a_rendered_write_still_running()
 	{
 		_ = new FakeCorpus(factory.Sidecar);
 		string id = Guid.NewGuid().ToString();
 		string path = $"2026-01-15_{id[..8]}.md";
-		IngestClaimRequest running = new(DocumentIngestor.IdentityOf("c", path), "c", Stamp, DateTimeOffset.UtcNow, [path], Lookup: IngestIdentity.ForRenderedSession("c", id));
+		IngestClaimRequest running = new(DocumentIngestor.IdentityOf("c", path), "c", Stamp, DateTimeOffset.UtcNow, [path], Lookup: IngestIdentity.ForRenderedSession("c", id, path));
 		await factory.Services.GetRequiredService<IIngestLedger>().ClaimAsync(running, default);
 
 		HttpResponseMessage session = await PostSessionAsync(await WriterAsync(), ClaudeLine("user", "x"), sessionId: id, updated: Stamp.AddHours(1));
