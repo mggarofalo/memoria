@@ -1,0 +1,28 @@
+{
+  "skill": "memoria",
+  "why": "Prompts for checking the skill's description. Show a reviewer the description and the prompts with no labels, ask which prompts should load the skill, and compare with these lists.",
+  "shouldTrigger": [
+    "What did we decide about retry behaviour for the uploader last spring?",
+    "Have I run into this Kestrel timeout before? I feel like we fixed something like it.",
+    "How did we set up the WireGuard tunnel last time? Find the session where we did that.",
+    "Before you start on the billing refactor, see what past work we have on it.",
+    "Did we ever try moving the sidecar to Bun? I can't remember why we stopped.",
+    "Find my notes about the keyring problem on Linux.",
+    "Which session was it where we worked out the redaction rules for AWS keys?",
+    "What was I working on in the Receipts project in March?",
+    "Pull up the transcript from the day we cut the first release.",
+    "memoria query keeps giving me 403 on the notes collection. What does that mean?"
+  ],
+  "shouldNotTrigger": [
+    "Where in this repo is the rate limiter configured?",
+    "What's the latest version of the .NET SDK?",
+    "Fix the failing test in cli/cmd/root_test.go.",
+    "What issues are open in the tracker for this sprint?",
+    "Summarize this README for me.",
+    "Search the web for how Stryker handles compile errors.",
+    "Who wrote this function? Check git blame.",
+    "Write a commit message for the staged changes.",
+    "What does the --no-rerank flag do in rerank-related ML papers generally?",
+    "Set up a Memoria server on a new machine with Docker."
+  ]
+}

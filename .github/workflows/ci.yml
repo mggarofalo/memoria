@@ -65,6 +65,7 @@ jobs:
             cli:
               - .github/workflows/ci.yml
               - cli/**
+              - skills/**
               - src/Memoria.Api/openapi.json
               - .gitattributes
               - scripts/coverage-go.sh
