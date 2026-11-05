@@ -60,7 +60,7 @@ async function runIngest(h: Harness): Promise<void> {
   await h.startApi();
   await ingest(h, admin);
   await sourcesSync(h, admin);
-  migrate(h);
+  await migrate(h);
   noModels(h);
 }
 

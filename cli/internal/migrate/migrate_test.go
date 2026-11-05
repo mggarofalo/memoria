@@ -140,15 +140,20 @@ func TestInventoryNamesWhatItCannotCount(t *testing.T) {
 	for name, collection := range map[string]Collection{
 		"its path is not absolute":    {Path: "relative/path", Pattern: defaultPattern},
 		"its folder cannot be opened": {Path: filepath.Join(dir, "absent"), Pattern: defaultPattern},
-		"its pattern is not valid":    {Path: dir, Pattern: "[unclosed"},
 	} {
 		plan, files := Inventory(collection, "t")
 		if plan.Problem != name || files != nil {
 			t.Errorf("%s: plan = %+v", name, plan)
 		}
 	}
-	if plan, _ := Inventory(Collection{Path: dir, Pattern: defaultPattern, Ignore: []string{"[unclosed"}}, "t"); plan.Problem == "" {
-		t.Error("a bad ignore rule was accepted")
+	for name, collection := range map[string]Collection{
+		"a pattern":  {Path: dir, Pattern: "[unclosed"},
+		"an extglob": {Path: dir, Pattern: "**/*.@(md|txt)"},
+		"an ignore":  {Path: dir, Pattern: defaultPattern, Ignore: []string{"[unclosed"}},
+	} {
+		if plan, files := Inventory(collection, "t"); !strings.Contains(plan.Problem, "refused") || files != nil {
+			t.Errorf("%s: plan = %+v", name, plan)
+		}
 	}
 }
 

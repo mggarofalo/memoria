@@ -42,7 +42,7 @@ func rawLine(raw *migrate.RawSessions) string {
 	if raw.Problem != "" {
 		return "raw Codex sessions: " + row(raw.Problem)
 	}
-	return row(fmt.Sprintf("raw Codex sessions: %d files, %d bytes, could go to %s", raw.Files, raw.Bytes, raw.Target))
+	return row(fmt.Sprintf("raw Codex sessions: %d files, %d bytes, %d unreadable, could go to %s", raw.Files, raw.Bytes, raw.Unreadable, raw.Target))
 }
 
 // MigratePlanMarkdown renders the plan as a bullet list.
@@ -60,7 +60,7 @@ func MigratePlanMarkdown(w io.Writer, plans []migrate.Plan, raw *migrate.RawSess
 
 func gitleaksSummary(report *migrate.Report) string {
 	if !report.GitleaksRan {
-		return "not run"
+		return "NOT RUN"
 	}
 	count := 0
 	for _, findings := range report.GitleaksResults {
@@ -83,9 +83,9 @@ func MigrateReportTable(w io.Writer, reports []migrate.Report) error {
 	rows := make([]string, 0, len(reports))
 	for i := range reports {
 		r := &reports[i]
-		rows = append(rows, row(r.Name, r.Files, r.Changed, r.Refused, gitleaksSummary(r)))
+		rows = append(rows, row(r.Name, r.Files, r.Changed, r.Refused, r.Skipped, gitleaksSummary(r)))
 	}
-	if err := table(w, "COLLECTION\tFILES\tCHANGED\tREFUSED\tGITLEAKS FINDINGS", rows); err != nil {
+	if err := table(w, "COLLECTION\tFILES\tCHANGED\tREFUSED\tSKIPPED\tGITLEAKS FINDINGS", rows); err != nil {
 		return err
 	}
 	var b strings.Builder
@@ -106,7 +106,7 @@ func MigrateReportMarkdown(w io.Writer, reports []migrate.Report) error {
 	var b strings.Builder
 	for i := range reports {
 		r := &reports[i]
-		fmt.Fprintf(&b, "- **%s**: %d files, %d changed, %d refused, gitleaks findings: %s\n", inlineText(r.Name), r.Files, r.Changed, r.Refused, gitleaksSummary(r))
+		fmt.Fprintf(&b, "- **%s**: %d files, %d changed, %d refused, %d skipped, gitleaks findings: %s\n", inlineText(r.Name), r.Files, r.Changed, r.Refused, r.Skipped, gitleaksSummary(r))
 		for _, rule := range ruleNames(r.Replacements) {
 			fmt.Fprintf(&b, "  - %s: %d replacements in %d files\n", inlineText(rule), r.Replacements[rule], r.FilesByRule[rule])
 		}

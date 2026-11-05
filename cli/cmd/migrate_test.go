@@ -8,8 +8,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mggarofalo/memoria/cli/internal/apperr"
 	"github.com/mggarofalo/memoria/cli/internal/migrate"
@@ -118,10 +120,10 @@ func TestMigratePlanCountsRawCodexSessions(t *testing.T) {
 	if code := f.h.run("migrate", "plan", "--qmd-config", f.config, "--codex-sessions", codex); code != 0 {
 		t.Fatalf("code = %d, stderr = %q", code, f.h.stderr.String())
 	}
-	if !strings.Contains(f.h.stdout.String(), "raw Codex sessions: 1 files, 4 bytes, could go to codex-sessions") {
+	if !strings.Contains(f.h.stdout.String(), "raw Codex sessions: 1 files, 4 bytes, 0 unreadable, could go to codex-sessions") {
 		t.Fatalf("stdout = %q", f.h.stdout.String())
 	}
-	if code := f.h.run("migrate", "plan", "--qmd-config", f.config, "--codex-sessions", filepath.Join(codex, "absent")); code != 0 || !strings.Contains(f.h.stdout.String(), "cannot be opened") {
+	if code := f.h.run("migrate", "plan", "--qmd-config", f.config, "--codex-sessions", filepath.Join(codex, "absent")); code != apperr.ExitGeneric || !strings.Contains(f.h.stdout.String(), "cannot be opened") {
 		t.Fatalf("code = %d, stdout = %q", code, f.h.stdout.String())
 	}
 	if code := f.h.run("migrate", "plan", "--qmd-config", f.config, "--codex-sessions", codex, "--format", "markdown"); code != 0 || !strings.Contains(f.h.stdout.String(), "raw Codex sessions") {
@@ -134,11 +136,206 @@ func TestMigratePlanShowsAProblemRatherThanAZero(t *testing.T) {
 	if err := os.RemoveAll(f.notes); err != nil {
 		t.Fatal(err)
 	}
-	if code := f.h.run("migrate", "plan", "--qmd-config", f.config); code != 0 || !strings.Contains(f.h.stdout.String(), "cannot be opened") {
+	if code := f.h.run("migrate", "plan", "--qmd-config", f.config); code != apperr.ExitGeneric || !strings.Contains(f.h.stdout.String(), "cannot be opened") {
 		t.Fatalf("code = %d, stdout = %q", code, f.h.stdout.String())
 	}
-	if code := f.h.run("migrate", "plan", "--qmd-config", f.config, "--format", "markdown"); code != 0 || !strings.Contains(f.h.stdout.String(), "cannot be opened") {
+	if code := f.h.run("migrate", "plan", "--qmd-config", f.config, "--format", "markdown"); code != apperr.ExitGeneric || !strings.Contains(f.h.stdout.String(), "cannot be opened") {
 		t.Fatalf("code = %d, stdout = %q", code, f.h.stdout.String())
+	}
+	if code := f.h.run("migrate", "plan", "--qmd-config", f.config, "--accept-skips"); code != apperr.ExitGeneric {
+		t.Fatalf("--accept-skips let a problem through: code = %d", code)
+	}
+}
+
+func TestAPatternThatCannotBeReadFailsLoudlyAndNotAsAZero(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "notes", "a.md"), "12345")
+	config := filepath.Join(dir, "index.yml")
+	writeFile(t, config, fmt.Sprintf("collections:\n  notes:\n    path: %q\n    pattern: \"**/*.@(md|txt)\"\n", filepath.Join(dir, "notes")))
+	h := newHarness(t)
+	if code := h.run("migrate", "plan", "--qmd-config", config); code != apperr.ExitGeneric || !strings.Contains(h.stderr.String(), "refused") {
+		t.Fatalf("code = %d, stderr = %q", code, h.stderr.String())
+	}
+	tool := filepath.Join(dir, "RedactionCheck.dll")
+	writeFile(t, tool, "")
+	if code := h.run("migrate", "report", "--qmd-config", config, "--tool", tool, "--no-gitleaks"); code != apperr.ExitUsage || !strings.Contains(h.stderr.String(), "refused") {
+		t.Fatalf("code = %d, stderr = %q", code, h.stderr.String())
+	}
+	if len(h.checkArgs) != 0 {
+		t.Fatalf("the tool ran: %v", h.checkArgs)
+	}
+}
+
+// denyFolder makes a folder unreadable for this user, and restores it after.
+func denyFolder(t *testing.T, dir string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		out, err := exec.Command("icacls", dir, "/deny", "*S-1-1-0:(RD)").CombinedOutput()
+		if err != nil {
+			t.Skipf("cannot deny a folder here: %v: %s", err, out)
+		}
+		t.Cleanup(func() { _ = exec.Command("icacls", dir, "/remove:d", "*S-1-1-0").Run() })
+		return
+	}
+	if err := os.Chmod(dir, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	if _, err := os.ReadDir(dir); err == nil {
+		t.Skip("this user can read anything, so nothing can be denied here")
+	}
+}
+
+func deniedFixture(t *testing.T) *migrateFixture {
+	t.Helper()
+	f := newMigrateFixture(t)
+	denied := filepath.Join(f.notes, "secretfolder")
+	writeFile(t, filepath.Join(denied, "one.md"), "token file")
+	writeFile(t, filepath.Join(denied, "two.md"), "token file")
+	denyFolder(t, denied)
+	return f
+}
+
+func TestAPlanThatCouldNotSeeAFolderSaysSoAndFails(t *testing.T) {
+	f := deniedFixture(t)
+	if code := f.h.run("migrate", "plan", "--qmd-config", f.config); code != apperr.ExitGeneric || !strings.Contains(f.h.stderr.String(), "1 file(s) or folder(s) could not be read") {
+		t.Fatalf("code = %d, stderr = %q", code, f.h.stderr.String())
+	}
+	if code := f.h.run("migrate", "plan", "--qmd-config", f.config, "--accept-skips"); code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, f.h.stderr.String())
+	}
+}
+
+func TestAReportThatCouldNotSeeAFolderSaysSoAndFails(t *testing.T) {
+	f := deniedFixture(t)
+	f.fakeCheck("["+cleanCheck+","+cleanCheck+"]", nil)
+	if code := f.report("--format", "json"); code != apperr.ExitGeneric {
+		t.Fatalf("code = %d, stderr = %q", code, f.h.stderr.String())
+	}
+	var reports []migrate.Report
+	if err := json.Unmarshal(f.h.stdout.Bytes(), &reports); err != nil {
+		t.Fatal(err)
+	}
+	if reports[0].Skipped != 1 || reports[1].Skipped != 0 {
+		t.Fatalf("reports = %+v", reports)
+	}
+	if strings.Contains(f.h.stdout.String()+f.h.stderr.String(), "secretfolder") {
+		t.Fatalf("the report named it: %q", f.h.stdout.String())
+	}
+}
+
+func TestAReportShowsSkipsInEveryFormat(t *testing.T) {
+	f := deniedFixture(t)
+	f.fakeCheck("["+cleanCheck+","+cleanCheck+"]", nil)
+	if code := f.report(); code != apperr.ExitGeneric || !strings.Contains(f.h.stdout.String(), "SKIPPED") {
+		t.Fatalf("code = %d, stdout = %q", code, f.h.stdout.String())
+	}
+	if code := f.report("--format", "markdown"); code != apperr.ExitGeneric || !strings.Contains(f.h.stdout.String(), "1 skipped") {
+		t.Fatalf("code = %d, stdout = %q", code, f.h.stdout.String())
+	}
+	if code := f.report("--accept-skips"); code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, f.h.stderr.String())
+	}
+}
+
+func TestAReportWithNoFilesAndASkipStillFails(t *testing.T) {
+	f := newMigrateFixture(t)
+	if err := os.Remove(filepath.Join(f.notes, "a.md")); err != nil {
+		t.Fatal(err)
+	}
+	denied := filepath.Join(f.notes, "secretfolder")
+	writeFile(t, filepath.Join(denied, "one.md"), "token file")
+	denyFolder(t, denied)
+	empty := `{"files":0,"changed":0,"refused":0,"replacements":{},"filesByRule":{},"gitleaksRan":false,"gitleaksFindings":{}}`
+	f.fakeCheck("["+empty+","+cleanCheck+"]", nil)
+	if code := f.report(); code != apperr.ExitGeneric {
+		t.Fatalf("code = %d, stderr = %q", code, f.h.stderr.String())
+	}
+}
+
+func TestAFileTheToolCouldNotReadCountsAsASkip(t *testing.T) {
+	f := newMigrateFixture(t)
+	one := `{"files":1,"changed":0,"refused":0,"skipped":1,"replacements":{},"filesByRule":{},"gitleaksRan":false,"gitleaksFindings":{}}`
+	f.fakeCheck("["+one+","+cleanCheck+"]", nil)
+	if code := f.report(); code != apperr.ExitGeneric || !strings.Contains(f.h.stderr.String(), "accept-skips") {
+		t.Fatalf("code = %d, stderr = %q", code, f.h.stderr.String())
+	}
+	if code := f.report("--accept-skips"); code != 0 {
+		t.Fatalf("code = %d", code)
+	}
+}
+
+func TestAReportWithoutGitleaksSaysItIsWeaker(t *testing.T) {
+	f := newMigrateFixture(t)
+	f.fakeCheck("["+cleanCheck+","+cleanCheck+"]", nil)
+	if code := f.report(); code != 0 {
+		t.Fatalf("code = %d", code)
+	}
+	if !strings.Contains(f.h.stderr.String(), "weaker check") || !strings.Contains(f.h.stdout.String(), "NOT RUN") {
+		t.Fatalf("stdout = %q, stderr = %q", f.h.stdout.String(), f.h.stderr.String())
+	}
+}
+
+func TestStaleListsFromAKilledRunAreSwept(t *testing.T) {
+	dir := t.TempDir()
+	stale, fresh := filepath.Join(dir, listDirPrefix+"old"), filepath.Join(dir, listDirPrefix+"new")
+	other := filepath.Join(dir, "something-else")
+	writeFile(t, filepath.Join(stale, "0.txt"), "a path")
+	writeFile(t, filepath.Join(fresh, "0.txt"), "a path")
+	writeFile(t, filepath.Join(other, "0.txt"), "not ours")
+	old := time.Now().Add(-2 * staleListAge)
+	for _, path := range []string{stale, other} {
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sweepStaleLists(dir)
+	if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a stale list stayed: %v", err)
+	}
+	for _, path := range []string{fresh, other} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("%s was removed: %v", path, err)
+		}
+	}
+}
+
+func TestAReportSweepsWhatAKilledRunLeft(t *testing.T) {
+	f := newMigrateFixture(t)
+	f.fakeCheck("["+cleanCheck+","+cleanCheck+"]", nil)
+	temp := t.TempDir()
+	for _, name := range []string{"TMP", "TEMP", "TMPDIR"} {
+		t.Setenv(name, temp)
+	}
+	stale := filepath.Join(temp, listDirPrefix+"old")
+	writeFile(t, filepath.Join(stale, "0.txt"), "a path")
+	old := time.Now().Add(-2 * staleListAge)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if code := f.report(); code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, f.h.stderr.String())
+	}
+	if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a stale list stayed: %v", err)
+	}
+}
+
+func TestTheRedactionToolIsBuiltByARequiredJob(t *testing.T) {
+	data, err := os.ReadFile("../../.github/workflows/ci.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := strings.ReplaceAll(string(data), "\r\n", "\n")
+	_, filter, _ := strings.Cut(text, "            dotnet:\n")
+	filter, _, _ = strings.Cut(filter, "            cli:\n")
+	if !strings.Contains(filter, "- tools/**") {
+		t.Fatalf("the dotnet filter does not include the tool: %s", filter)
+	}
+	_, build, _ := strings.Cut(text, "\n  build:\n")
+	build, _, _ = strings.Cut(build, "\n  cli")
+	if !strings.Contains(build, "dotnet build tools/RedactionCheck") {
+		t.Fatal("the required build job does not build the tool")
 	}
 }
 
@@ -178,7 +375,7 @@ func TestMigrateReportHoldsCountsAndNoPath(t *testing.T) {
 		t.Fatalf("code = %d, stderr = %q", code, f.h.stderr.String())
 	}
 	out := f.h.stdout.String()
-	if !strings.Contains(out, "notes: github_token: 3 replacements in 1 files") || !strings.Contains(out, "not run") {
+	if !strings.Contains(out, "notes: github_token: 3 replacements in 1 files") || !strings.Contains(out, "NOT RUN") {
 		t.Fatalf("stdout = %q", out)
 	}
 	if strings.Contains(out, f.notes) || strings.Contains(out, "a.md") {

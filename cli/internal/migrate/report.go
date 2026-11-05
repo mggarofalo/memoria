@@ -12,13 +12,15 @@ type CheckResult struct {
 	Files           int            `json:"files"`
 	Changed         int            `json:"changed"`
 	Refused         int            `json:"refused"`
+	Skipped         int            `json:"skipped"`
 	Replacements    map[string]int `json:"replacements"`
 	FilesByRule     map[string]int `json:"filesByRule"`
 	GitleaksRan     bool           `json:"gitleaksRan"`
 	GitleaksResults map[string]int `json:"gitleaksFindings"`
 }
 
-// Report is a collection's redaction check.
+// Report is a collection's redaction check. Skipped also counts what the plan could not read, so a folder that was
+// denied is not taken for one that was clean.
 type Report struct {
 	Name string `json:"name"`
 	CheckResult

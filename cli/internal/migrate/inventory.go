@@ -6,8 +6,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
-
-	"github.com/bmatcuk/doublestar/v4"
+	"unicode/utf8"
 )
 
 // DefaultMaxDocumentBytes is a server's default limit on one stored document. The server
@@ -34,11 +33,12 @@ type Plan struct {
 
 // RawSessions is a folder of raw transcripts that could be rendered and sent.
 type RawSessions struct {
-	Path    string `json:"path"`
-	Target  string `json:"target"`
-	Files   int    `json:"files"`
-	Bytes   int64  `json:"bytes"`
-	Problem string `json:"problem,omitempty"`
+	Path       string `json:"path"`
+	Target     string `json:"target"`
+	Files      int    `json:"files"`
+	Bytes      int64  `json:"bytes"`
+	Unreadable int    `json:"unreadable"`
+	Problem    string `json:"problem,omitempty"`
 }
 
 // Inventory counts what QMD would index in a collection, and returns those files' paths.
@@ -57,18 +57,21 @@ func Inventory(collection Collection, target string) (Plan, []string) {
 	}
 	defer func() { _ = root.Close() }()
 
-	selector, err := newSelector(collection.Pattern, collection.Ignore)
+	selection, err := NewSelection(collection.Pattern, collection.Ignore)
 	if err != nil {
-		plan.Problem = "its pattern is not valid"
+		plan.Problem = err.Error()
 		return plan, nil
 	}
 	var files []string
 	err = walk(root, func(name string, info fs.FileInfo) {
-		if selector.takes(name) {
+		if selection.Takes(name) {
 			plan.add(info.Size())
 			files = append(files, filepath.Join(collection.Path, filepath.FromSlash(name)))
 		}
-	}, func() { plan.Unreadable++ })
+	}, func(name string) {
+		// A folder that cannot be listed may hold anything, so it counts whatever its name says.
+		plan.Unreadable++
+	})
 	if err != nil {
 		plan.Problem = "its folder cannot be read"
 	}
@@ -85,13 +88,17 @@ func (p *Plan) add(size int64) {
 }
 
 // walk visits the regular files QMD could see. A link is neither followed nor visited.
-func walk(root *os.Root, visit func(string, fs.FileInfo), unreadable func()) error {
-	return fs.WalkDir(root.FS(), ".", func(name string, entry fs.DirEntry, err error) error {
+func walk(root *os.Root, visit func(string, fs.FileInfo), unreadable func(string)) error {
+	return walkFS(root.FS(), visit, unreadable)
+}
+
+func walkFS(tree fs.FS, visit func(string, fs.FileInfo), unreadable func(string)) error {
+	return fs.WalkDir(tree, ".", func(name string, entry fs.DirEntry, err error) error {
 		if name == "." {
 			return err
 		}
 		if err != nil {
-			unreadable()
+			unreadable(name)
 			return skipIfDirectory(entry)
 		}
 		if isExcluded(name, entry) {
@@ -100,14 +107,19 @@ func walk(root *os.Root, visit func(string, fs.FileInfo), unreadable func()) err
 		if !entry.Type().IsRegular() {
 			return nil
 		}
-		info, err := entry.Info()
-		if err != nil {
-			unreadable()
-			return nil
-		}
-		visit(name, info)
-		return nil
+		return visitFile(name, entry, visit, unreadable)
 	})
+}
+
+// visitFile counts a name that is not valid text as unreadable: it cannot go in a list for the tool, or on the wire.
+func visitFile(name string, entry fs.DirEntry, visit func(string, fs.FileInfo), unreadable func(string)) error {
+	info, err := entry.Info()
+	if err != nil || !utf8.ValidString(name) {
+		unreadable(name)
+		return nil
+	}
+	visit(name, info)
+	return nil
 }
 
 func isExcluded(name string, entry fs.DirEntry) bool {
@@ -120,52 +132,6 @@ func skipIfDirectory(entry fs.DirEntry) error {
 		return fs.SkipDir
 	}
 	return nil
-}
-
-type selector struct {
-	patterns []string
-	ignore   []string
-}
-
-func newSelector(pattern string, ignore []string) (*selector, error) {
-	s := &selector{patterns: splitPattern(pattern), ignore: ignore}
-	for _, candidate := range append(append([]string{}, s.patterns...), ignore...) {
-		if !doublestar.ValidatePattern(candidate) {
-			return nil, doublestar.ErrBadPattern
-		}
-	}
-	return s, nil
-}
-
-func (s *selector) takes(name string) bool {
-	return matchesAny(s.patterns, name) && !matchesAny(s.ignore, name)
-}
-
-func matchesAny(patterns []string, name string) bool {
-	for _, pattern := range patterns {
-		if doublestar.MatchUnvalidated(pattern, name) {
-			return true
-		}
-	}
-	return false
-}
-
-// splitPattern splits on commas outside braces and brackets, as QMD does.
-func splitPattern(pattern string) []string {
-	var parts []string
-	depth, start := 0, 0
-	for i, c := range pattern {
-		switch {
-		case c == '{' || c == '[':
-			depth++
-		case (c == '}' || c == ']') && depth > 0:
-			depth--
-		case c == ',' && depth == 0:
-			parts = append(parts, pattern[start:i])
-			start = i + 1
-		}
-	}
-	return append(parts, pattern[start:])
 }
 
 // InventoryRaw counts the raw Codex transcripts in a folder, in any subfolder.
@@ -182,7 +148,7 @@ func InventoryRaw(dir, target string) RawSessions {
 			raw.Files++
 			raw.Bytes += info.Size()
 		}
-	}, func() {})
+	}, func(string) { raw.Unreadable++ })
 	if err != nil {
 		raw.Problem = "its folder cannot be read"
 	}

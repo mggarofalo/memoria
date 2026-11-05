@@ -200,6 +200,11 @@ await store.close();`;
     return existsSync(cache) ? readdirSync(cache, { recursive: true, encoding: "utf8" }) : [];
   }
 
+  /** For a child that must touch nothing outside the private directory and reach no network. */
+  offlineEnvironment(): NodeJS.ProcessEnv {
+    return this.offline();
+  }
+
   /** Every proxy goes nowhere, as a second line behind the sidecar's remote mode. */
   private offline(): NodeJS.ProcessEnv {
     const nowhere = "http://127.0.0.1:9";

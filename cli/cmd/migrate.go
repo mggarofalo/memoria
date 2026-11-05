@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -20,7 +21,11 @@ import (
 	"github.com/mggarofalo/memoria/cli/internal/sources"
 )
 
-const defaultCodexTarget = "codex-sessions"
+const (
+	defaultCodexTarget = "codex-sessions"
+	listDirPrefix      = "memoria-migrate-"
+	staleListAge       = 24 * time.Hour
+)
 
 func newMigrateCmd(a *app) *cobra.Command {
 	cmd := &cobra.Command{
@@ -42,6 +47,7 @@ type migratePlanOptions struct {
 	targets     []string
 	codexDir    string
 	codexTarget string
+	acceptSkips bool
 }
 
 func newMigratePlanCmd(a *app) *cobra.Command {
@@ -53,7 +59,12 @@ func newMigratePlanCmd(a *app) *cobra.Command {
 the largest file, and how many are over a server's default 2 MiB limit on a document.
 No file's text is read.
 
-A migration will need each target collection to be empty, so choose names that are.`,
+A migration will need each target collection to be empty, so choose names that are.
+
+A pattern or ignore rule this cannot read the way QMD would, such as an extglob, a
+negation or brackets, is refused rather than guessed at. This exits 1 if any collection
+could not be counted, or if anything was skipped, unless you pass --accept-skips for
+the skips.`,
 		Example: `  memoria migrate plan --qmd-config ~/.config/qmd/index.yml
   memoria migrate plan --qmd-config index.yml --target notes=archive-notes --codex-sessions ~/.codex/sessions`,
 		Args: noArgs,
@@ -64,6 +75,7 @@ A migration will need each target collection to be empty, so choose names that a
 	f.StringArrayVar(&o.targets, "target", nil, "Send a collection to another name, as local=target; repeatable. Each keeps its name otherwise")
 	f.StringVar(&o.codexDir, "codex-sessions", "", "Also count the raw Codex transcripts in this folder")
 	f.StringVar(&o.codexTarget, "codex-target", defaultCodexTarget, "The collection raw Codex sessions would go to")
+	f.BoolVar(&o.acceptSkips, "accept-skips", false, "Exit 0 even if a file or folder could not be read. They stay counted")
 	return cmd
 }
 
@@ -159,16 +171,46 @@ func (a *app) migratePlan(ctx context.Context, o migratePlanOptions) error {
 	if err != nil {
 		return err
 	}
-	return a.present(ctx, output.Table, raw, map[output.Format]func(io.Writer) error{
+	if err := a.present(ctx, output.Table, raw, map[output.Format]func(io.Writer) error{
 		output.Markdown: func(w io.Writer) error { return output.MigratePlanMarkdown(w, result.Collections, result.Codex) },
 		output.Table:    func(w io.Writer) error { return output.MigratePlanTable(w, result.Collections, result.Codex) },
-	})
+	}); err != nil {
+		return err
+	}
+	return planOutcome(result, o.acceptSkips)
+}
+
+// planOutcome makes a plan that could not see everything fail, as its counts would read as the whole of it.
+func planOutcome(result migratePlanResult, acceptSkips bool) error {
+	skipped := 0
+	for i := range result.Collections {
+		if problem := result.Collections[i].Problem; problem != "" {
+			return apperr.New(apperr.KindGeneric, "collection %s: %s", result.Collections[i].Name, problem)
+		}
+		skipped += result.Collections[i].Unreadable
+	}
+	if result.Codex != nil {
+		if result.Codex.Problem != "" {
+			return apperr.New(apperr.KindGeneric, "raw Codex sessions: %s", result.Codex.Problem)
+		}
+		skipped += result.Codex.Unreadable
+	}
+	return skipsError(skipped, acceptSkips)
+}
+
+// skipsError is one rule for both commands: something unread is not something clean.
+func skipsError(skipped int, acceptSkips bool) error {
+	if skipped == 0 || acceptSkips {
+		return nil
+	}
+	return apperr.New(apperr.KindGeneric, "%d file(s) or folder(s) could not be read, so this does not cover them. Fix that, or pass --accept-skips to go on without them", skipped)
 }
 
 type migrateReportOptions struct {
-	qmdConfig  string
-	tool       string
-	noGitleaks bool
+	qmdConfig   string
+	tool        string
+	noGitleaks  bool
+	acceptSkips bool
 }
 
 func newMigrateReportCmd(a *app) *cobra.Command {
@@ -185,10 +227,13 @@ checkout of the repository, which needs the .NET runtime:
 
   dotnet build tools/RedactionCheck -c Release
 
-Gitleaks then looks over the redacted copies for anything left, so it must be on
-PATH, or pass --no-gitleaks to go without that second look. The tool makes those
-copies in a temporary folder, and deletes them on every exit path. This exits 1 if a
-document was refused, or gitleaks found something.`,
+Gitleaks then looks over the redacted text for anything left, so it must be on PATH.
+--no-gitleaks goes without that second look, which makes this a weaker check: it only
+says what the rules replaced, and nothing about what they missed. The text goes to
+gitleaks on its standard input, so no copy is written to disk.
+
+This exits 1 if a document was refused, gitleaks found something, or anything could not
+be read. Those last are counted, never named, and --accept-skips lets the exit be 0.`,
 		Example: `  memoria migrate report --qmd-config ~/.config/qmd/index.yml --tool tools/RedactionCheck/bin/Release/net10.0/RedactionCheck.dll`,
 		Args:    noArgs,
 		RunE:    func(cmd *cobra.Command, _ []string) error { return a.migrateReport(cmd.Context(), o) },
@@ -196,7 +241,8 @@ document was refused, or gitleaks found something.`,
 	f := cmd.Flags()
 	f.StringVar(&o.qmdConfig, "qmd-config", "", "Path to QMD's index.yml (required). There is no default")
 	f.StringVar(&o.tool, "tool", "", "Path to the built RedactionCheck.dll (required)")
-	f.BoolVar(&o.noGitleaks, "no-gitleaks", false, "Skip the second look at the redacted copies")
+	f.BoolVar(&o.noGitleaks, "no-gitleaks", false, "Skip the second look at the redacted text, which makes this a weaker check")
+	f.BoolVar(&o.acceptSkips, "accept-skips", false, "Exit 0 even if a file or folder could not be read. They stay counted")
 	return cmd
 }
 
@@ -207,6 +253,9 @@ func (a *app) migrateReport(ctx context.Context, o migrateReportOptions) error {
 	collections, err := loadCollections(o.qmdConfig, nil)
 	if err != nil {
 		return err
+	}
+	if o.noGitleaks {
+		a.warn("--no-gitleaks makes this a weaker check: it says what the rules replaced, and nothing about what they missed")
 	}
 	reports, err := a.runRedactionCheck(ctx, o, collections)
 	if err != nil {
@@ -222,16 +271,18 @@ func (a *app) migrateReport(ctx context.Context, o migrateReportOptions) error {
 	}); err != nil {
 		return err
 	}
-	return uncleanError(reports)
+	return uncleanError(reports, o.acceptSkips)
 }
 
-func uncleanError(reports []migrate.Report) error {
+func uncleanError(reports []migrate.Report, acceptSkips bool) error {
+	skipped := 0
 	for i := range reports {
 		if !reports[i].Clean() {
-			return apperr.New(apperr.KindGeneric, "a document was refused, or gitleaks found something in the redacted copies; see the counts above")
+			return apperr.New(apperr.KindGeneric, "a document was refused, or gitleaks found something in the redacted text; see the counts above")
 		}
+		skipped += reports[i].Skipped
 	}
-	return nil
+	return skipsError(skipped, acceptSkips)
 }
 
 func checkReportTools(o migrateReportOptions) error {
@@ -246,10 +297,25 @@ func checkReportTools(o migrateReportOptions) error {
 	return nil
 }
 
+// sweepStaleLists removes what a killed run left: lists of paths, in a private folder. It is the only thing a
+// run writes to disk, since the redacted text goes to gitleaks on its standard input. A day leaves any live run alone.
+func sweepStaleLists(dir string) {
+	found, err := filepath.Glob(filepath.Join(dir, listDirPrefix+"*"))
+	if err != nil {
+		return
+	}
+	for _, path := range found {
+		if info, err := os.Stat(path); err == nil && time.Since(info.ModTime()) > staleListAge {
+			_ = os.RemoveAll(path)
+		}
+	}
+}
+
 // runRedactionCheck gives the tool a list of exactly the files the plan counts, so the two
 // always agree. Those lists hold paths, so they stay in a private folder, deleted after.
 func (a *app) runRedactionCheck(ctx context.Context, o migrateReportOptions, collections []migrate.Collection) ([]migrate.Report, error) {
-	work, err := os.MkdirTemp("", "memoria-migrate-")
+	sweepStaleLists(os.TempDir())
+	work, err := os.MkdirTemp("", listDirPrefix+"*")
 	if err != nil {
 		return nil, apperr.Wrap(apperr.KindGeneric, err, "a temporary folder could not be made")
 	}
@@ -260,11 +326,13 @@ func (a *app) runRedactionCheck(ctx context.Context, o migrateReportOptions, col
 		args = append(args, "--no-gitleaks")
 	}
 	reports := make([]migrate.Report, 0, len(collections))
+	unread := make([]int, 0, len(collections))
 	for i, collection := range collections {
 		plan, files := migrate.Inventory(collection, collection.Name)
 		if plan.Problem != "" {
 			return nil, apperr.New(apperr.KindUsage, "collection %s: %s", collection.Name, plan.Problem)
 		}
+		unread = append(unread, plan.Unreadable)
 		list := filepath.Join(work, fmt.Sprintf("%d.txt", i))
 		if err := os.WriteFile(list, []byte(strings.Join(files, "\n")), 0o600); err != nil {
 			return nil, apperr.Wrap(apperr.KindGeneric, err, "a list of files could not be written")
@@ -282,6 +350,7 @@ func (a *app) runRedactionCheck(ctx context.Context, o migrateReportOptions, col
 	}
 	for i := range reports {
 		reports[i].CheckResult = results[i]
+		reports[i].Skipped += unread[i]
 	}
 	return reports, nil
 }
