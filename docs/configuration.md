@@ -297,7 +297,7 @@ A delete waits for any write of its path to answer, up to `DeleteWriteWait`. It 
 
 A name in another case is another file, so it answers `deleted: false`, or 409 `case_conflict` from the sidecar, and the document stays. A delete of a path holding nothing answers `deleted: false` and costs no index update.
 
-A delete and an upload that has not yet started writing are simply ordered. A delete arriving first answers `deleted: false` and the upload then lands. Both answers are true.
+A delete and an upload that has not yet started writing are simply ordered. A delete arriving first answers `deleted: false` and the upload then lands. Both answers are true. The other order is true as well: sent at about the same time, the delete can land second, so an upload can answer 202 with its file then gone, and that delete answers `deleted: true`. Sending them at the same moment does not say which lands first. Wait for a delete's answer before uploading, and the upload's file stays.
 
 **A delete is not a content ban.** A deleted document can come back only as new content dated after the delete. The same content under a later date is refused, by comparing a keyed digest of its redacted text. Only the last version deleted is remembered, so an older version replayed under a later date does come back. A deleted session part stays deleted however often the session is sent. A date ahead of the clock is recorded as the clock, so it cannot hold honest updates back. A leaked credential must also be removed from the source, or it can return under a new identity.
 
