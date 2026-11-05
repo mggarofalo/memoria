@@ -163,6 +163,7 @@ export class Harness {
 
   buildServers(): void {
     run("dotnet", ["build", "src/Memoria.Api", "-c", "Release", "-v", "quiet", "-nologo"], repo);
+    run("dotnet", ["build", "tools/RedactionCheck", "-c", "Release", "-v", "quiet", "-nologo"], repo);
     run("npm", ["run", "build", "--silent"], path.join(repo, "sidecar"));
   }
 
@@ -431,6 +432,11 @@ function manyFixtures(): Array<readonly [string, string, string]> {
 /** A host's content root is its working directory, so this is what makes it read the shipped appsettings.json. */
 function apiDirectory(): string {
   return path.join(repo, "src", "Memoria.Api", "bin", "Release", "net10.0");
+}
+
+/** The local redaction report's tool. It is not part of the solution, so it builds on its own. */
+export function redactionCheckDll(): string {
+  return path.join(repo, "tools", "RedactionCheck", "bin", "Release", "net10.0", "RedactionCheck.dll");
 }
 
 function apiDll(): string {

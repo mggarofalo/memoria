@@ -190,6 +190,22 @@ memoria sources sync notes --apply   # sends, and from now on a plain sync sends
 
 A document's identity is the source's name and the file's path within the folder. Renaming a source or moving a file stores it again under a new identity, and the old copy stays until you delete it. The file's modification time orders versions, so a file edited on another machine with an older time is refused unless this machine's cursor has seen it.
 
+## Plan a migration from QMD
+
+These commands look at a local QMD setup before moving it to a server. They only read, and only the paths you give them. They have no default location, need no key or server, and never open QMD's `index.sqlite`. Nothing is sent yet; the push comes later.
+
+```sh
+memoria migrate plan --qmd-config ~/.config/qmd/index.yml
+memoria migrate plan --qmd-config ~/.config/qmd/index.yml --target notes=archive-notes --codex-sessions ~/.codex/sessions
+
+dotnet build tools/RedactionCheck -c Release
+memoria migrate report --qmd-config ~/.config/qmd/index.yml --tool tools/RedactionCheck/bin/Release/net10.0/RedactionCheck.dll
+```
+
+**`plan`** counts what QMD would index in each collection: files, bytes, the largest file, and how many are over a server's default 2 MiB limit on a document. It selects files as QMD does, following no links, and reads no file's text. `--codex-sessions` also counts raw Codex transcripts, which can be rendered and sent. A collection that cannot be counted shows why, rather than a zero. A migration needs each target collection to be empty, so `--target` chooses another name, and two sources cannot share one.
+
+**`report`** runs the redaction rules over exactly those files, and reports how many replacements each rule made and in how many files. It reports counts and rule names, never a value, a path or a line. The rules live in the server's code, so this runs a tool from a checkout of this repository. Gitleaks then looks over the redacted copies for anything left, so it must be on `PATH`, or pass `--no-gitleaks`. The tool makes those copies in a temporary folder and deletes them on every exit path. It exits 1 if a document was refused or gitleaks found something.
+
 ## Exit codes
 
 | Code | Meaning |
