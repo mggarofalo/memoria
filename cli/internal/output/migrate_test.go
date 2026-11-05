@@ -74,3 +74,16 @@ func TestAReportCountsCredentialNamesAndCaveatsGitleaks(t *testing.T) {
 	unrun := []migrate.Report{{Name: "notes"}}
 	checkHolds(t, renderedBy(t, func(w io.Writer) error { return MigrateReportTable(w, unrun) }), "NOT RUN")
 }
+
+func TestAVerifySaysWhatItFoundAndWhatItDoesNotShow(t *testing.T) {
+	result := &migrate.VerifyResult{LocalMode: "search", ReportFile: "report.json", Collections: []migrate.VerifySummary{
+		{Name: "a", Target: "a", LocalFiles: 2, Confirmed: 1, NotHeld: 1, Sampled: 1, SampleRedacted: 1, Overlap: migrate.Overlap{Queries: 3, NoLocalResults: 1, Mean: 0.5, Lowest: 0.25}},
+		{Name: "b", Target: "b", Overlap: migrate.Overlap{Queries: 1, Failed: 1}},
+		{Name: "c", Target: "c"},
+	}}
+	wants := []string{"need a look", "report.json", "does not show every document", "mean 50%, lowest 25%", "no query could be compared", "not run, as no --queries", "the same apart from redaction", "local search"}
+	checkHolds(t, renderedBy(t, func(w io.Writer) error { return MigrateVerifyTable(w, result) }), append(wants, "SERVER DOCUMENTS")...)
+	checkHolds(t, renderedBy(t, func(w io.Writer) error { return MigrateVerifyMarkdown(w, result) }), "need a look", "does not show every document", "mean 50%, lowest 25%", "1 not held")
+	clean := &migrate.VerifyResult{LocalMode: "search", Collections: []migrate.VerifySummary{{Name: "a", Target: "a", Confirmed: 1}}}
+	checkHolds(t, renderedBy(t, func(w io.Writer) error { return MigrateVerifyTable(w, clean) }), "Nothing here needs a look, within the limits below")
+}

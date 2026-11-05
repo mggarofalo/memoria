@@ -28,13 +28,14 @@ func newMigrateCmd(a *app) *cobra.Command {
 		Short: "Move a local QMD setup to a Memoria server",
 		Long: `Move a local QMD setup to a Memoria server.
 
-These commands only read your files, and only the paths you give them. They have no
-default location, and never open QMD's index.sqlite. Only 'push --apply' needs a key
-or a server, and it is the only one that sends anything.`,
+The plan, report, push and verify commands only read your files, and only the paths you
+give them, and never open QMD's index.sqlite. Only 'push --apply' sends anything. Then
+'cutover' points your clients at the server, and 'rollback' puts them back. See
+docs/migration.md for the order.`,
 		Args: noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() },
 	}
-	cmd.AddCommand(newMigratePlanCmd(a), newMigrateReportCmd(a), newMigratePushCmd(a))
+	cmd.AddCommand(newMigratePlanCmd(a), newMigrateReportCmd(a), newMigratePushCmd(a), newMigrateVerifyCmd(a), newMigrateCutoverCmd(a), newMigrateRollbackCmd(a))
 	return cmd
 }
 

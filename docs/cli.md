@@ -224,6 +224,14 @@ Patterns and ignore rules may use names, which may hold `+ & @ # $ ~`, `*`, `?`,
 
 It never changes your files, and never opens QMD's `index.sqlite`.
 
+**`verify`** compares what was pushed with the local setup, and changes nothing on either side. Per collection it compares file and document counts, each path's state and its `updated` against the local file's time, and a sample of documents fetched and compared with the local text apart from redaction. With `--queries`, a file of one query a line, it reports how many of local QMD's top 10 results the server also returned. It exits 1 if a file is not held, is held at another version, or a sampled document differs. Overlap never fails it, as no threshold has been measured. It needs a key with both the `ingest` and `read` scopes.
+
+**`cutover`** points Claude Code and Codex at the server: it swaps the `qmd` MCP entry for `memoria`, installs the skill given by `--skill`, and adds the hook given by `--hook-command`. Without `--apply` it only shows the change. With it, it asks first, unless you pass `--yes`. It backs up each file under the CLI's config folder before changing any, shows no value from an entry's env or headers, and never touches local QMD. Running it again changes only what is left to change, and keeps the first backup.
+
+**`rollback`** puts those files back, and removes the files the cutover created, by their exact recorded paths. It works the same way, with `--apply` and `--yes`, and it stops if a file was edited since, unless you pass `--overwrite-edits`. Running it again does nothing.
+
+[migration.md](migration.md) has the order to run all of these in.
+
 Both `plan` and `report` exit 1 if anything could not be read: a denied folder, an unreadable file, or a name that is not valid text. These are counted, never named. Fix them, or pass `--accept-skips` to go on without them. `report` also exits 1 if a document was refused or gitleaks found something.
 
 ## Exit codes

@@ -499,37 +499,58 @@ func (c *pushCollection) settleOlder(name, state string, held *time.Time, sent t
 // serverStatus reads a path's ledger entry, riding out what a send would. False means the run stopped. A refusal that is not a
 // stop leaves nothing confirmed, so the document goes, and the send decides.
 func (r *pushRun) serverStatus(c *pushCollection, name string) (string, *time.Time, bool) {
+	var answer *api.GetRenderedIngestStatusResponse
+	_, answered := r.askServer(c, false, func() (*http.Response, []byte, error) {
+		got, err := r.getStatus(c, name)
+		if err != nil {
+			return nil, nil, err
+		}
+		answer = got
+		return got.HTTPResponse, got.Body, nil
+	})
+	if !answered {
+		return "", nil, false
+	}
+	if answer == nil || answer.JSON200 == nil {
+		return "", nil, true
+	}
+	return answer.JSON200.State, answer.JSON200.Updated, true
+}
+
+// askServer makes a read, riding out a limit, a busy server or a lost answer. False means the run stopped. Otherwise the status
+// is the last answer's, which the caller judges.
+func (r *pushRun) askServer(c *pushCollection, missingIsAnAnswer bool, call func() (*http.Response, []byte, error)) (int, bool) {
 	tries := retries{}
 	for {
 		if r.waitForPause() != nil {
-			return "", nil, false
+			return 0, false
 		}
-		answer, err := r.getStatus(c, name)
+		resp, body, err := call()
 		if err != nil {
 			if !r.retryAfterLoss(err, tries) {
-				return "", nil, false
+				return 0, false
 			}
 			continue
 		}
-		if answer.JSON200 != nil {
-			return answer.JSON200.State, answer.JSON200.Updated, true
+		if resp.StatusCode < http.StatusMultipleChoices || (missingIsAnAnswer && resp.StatusCode == http.StatusNotFound) {
+			return resp.StatusCode, true
 		}
-		again, answered := r.statusRefused(c, answer, tries)
+		again, answered := r.readRefused(c, resp, body, tries)
 		if !again {
-			return "", nil, answered
+			return resp.StatusCode, answered
 		}
 	}
 }
 
-func (r *pushRun) statusRefused(c *pushCollection, answer *api.GetRenderedIngestStatusResponse, tries retries) (again, answered bool) {
-	refused := apperr.FromResponse(answer.StatusCode(), answer.HTTPResponse.Header, answer.Body)
-	action := migrate.Classify(answer.StatusCode(), refused.Code)
+func (r *pushRun) readRefused(c *pushCollection, resp *http.Response, body []byte, tries retries) (again, answered bool) {
+	refused := apperr.FromResponse(resp.StatusCode, resp.Header, body)
+	action := migrate.Classify(resp.StatusCode, refused.Code)
 	switch action {
 	case migrate.ActionStop:
 		r.stop(stopFor(c.job.target, refused))
 		return false, false
 	case migrate.ActionHold, migrate.ActionPause, migrate.ActionResend, migrate.ActionResendThenReport:
-		outcome, retry := r.retryAnswer(pushed{action: action}, answer.HTTPResponse, tries)
+		outcome, retry := r.retryAnswer(pushed{action: action}, resp, tries)
 		return retry, outcome.action != migrate.ActionStop
 	}
 	return false, true

@@ -3,7 +3,8 @@
  * the API is a proxy that loses answers and stands in for a server having a bad moment. Nothing here points at a real setup.
  */
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { createServer, request, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
@@ -33,6 +34,16 @@ const ROUTE = "/v1/ingest/rendered";
 
 /** Each is what the proxy does with one POST to the route, in order. Past the list it forwards. */
 type Move = "forward" | "drop-answer" | "drop-request" | "502" | "busy" | "in-progress";
+
+interface VerifyRow {
+  localFiles: number;
+  serverDocuments: number;
+  confirmed: number;
+  sampled: number;
+  sampleSame: number;
+  sampleSameApartFromRedaction: number;
+  overlap: { queries: number; noLocalResults: number; mean: number };
+}
 
 interface Faults {
   plan: Move[];
@@ -177,7 +188,7 @@ async function status(h: Harness, key: string, target: string, relative: string)
   return (await response.json()) as { state?: string; updated?: string };
 }
 
-async function dryRunAndSend(h: Harness, key: string): Promise<void> {
+async function dryRunAndSend(h: Harness, key: string): Promise<Setup> {
   const token = h.remember("gh" + "p_" + randomBytes(27).toString("base64url").replace(/[-_]/g, "a").padEnd(36, "b").slice(0, 36));
   const s = setup(h, key, "first", TARGET, {
     "a.md": `---\nproject: "pushproject"\ndate: "2024-03-01"\n---\n\npushedword and ${token}\n`,
@@ -193,6 +204,7 @@ async function dryRunAndSend(h: Harness, key: string): Promise<void> {
   const reportFile = firstSend(h, s, token, before);
   await afterSend(h, key, s);
   report(h, s, reportFile);
+  return s;
 }
 
 function dryRun(h: Harness, s: Setup): void {
@@ -336,6 +348,34 @@ async function ownedNotTakenOver(h: Harness, key: string): Promise<void> {
   h.check("push: a path a session owns, with no takeover, stays a reported problem", owned === 202 && name !== "" && refused.code === 1 && rowOf(refused).refused?.["path_owned"] === 1, { owned, name, out: refused.out, err: refused.err });
 }
 
+/** A local QMD on the driver's private folders, run the way a person runs it, with no model loaded. */
+function localQMD(h: Harness, config: string): string {
+  const cli = path.join(repo, "sidecar", "node_modules", "@tobilu", "qmd", "dist", "cli", "qmd.js");
+  const shim = h.privatePath(process.platform === "win32" ? "local-qmd.cmd" : "local-qmd");
+  writeFileSync(shim, process.platform === "win32" ? `@"${process.execPath}" "${cli}" %*\r\n` : `#!/bin/sh\nexec "${process.execPath}" "${cli}" "$@"\n`, { mode: 0o755 });
+  const env = h.offlineEnvironment();
+  mkdirSync(path.join(env["XDG_CONFIG_HOME"] ?? "", "qmd"), { recursive: true });
+  copyFileSync(config, path.join(env["XDG_CONFIG_HOME"] ?? "", "qmd", "index.yml"));
+  const update = spawnSync(process.execPath, [cli, "update"], { env, encoding: "utf8", timeout: 120_000 });
+  h.check("verify: a local QMD on private folders was indexed", update.status === 0, update.stderr.slice(0, 400));
+  return shim;
+}
+
+/** Against what the first push stored, with its own key, as a real check needs the read scope too. */
+function verifyRuns(h: Harness, key: string, s: Setup): void {
+  const queries = h.privatePath("verify-queries.txt");
+  writeFileSync(queries, "spacedword\nnosuchwordanywhere\n");
+  const shim = localQMD(h, s.config);
+  const run = h.memoria(["migrate", "verify", "--qmd-config", s.config, "--api-url", h.apiUrl, "--queries", queries, "--qmd-command", shim, "--no-rerank", "--format", "json"], { key });
+  const row = ((JSON.parse(run.out || "{}") as { collections?: VerifyRow[] }).collections ?? [])[0];
+  h.check("verify: it confirms each path at its version, and counts what the server holds", run.code === 0 && row?.confirmed === 4 && row.localFiles === 4 && row.serverDocuments === 4, run.out + run.err);
+  h.check("verify: it fetches a sample and finds it the same, apart from redaction", row?.sampled === 4 && row.sampleSame + row.sampleSameApartFromRedaction === 4 && row.sampleSameApartFromRedaction >= 1, run.out);
+  h.check("verify: it compares top results with the real local QMD, and leaves out a query with no local results", row?.overlap.queries === 2 && row.overlap.noLocalResults === 1 && row.overlap.mean === 1, run.out + run.err);
+  h.check("verify: no query or file name reached its output", !(run.out + run.err).includes("spacedword") && !(run.out + run.err).includes("front.md"), run.out + run.err);
+  const narrow = h.memoria(["migrate", "verify", "--qmd-config", s.config, "--api-url", h.apiUrl, "--sample", "0"], { key: "mem_" + "0".repeat(16) + "_" + "0".repeat(64) });
+  h.check("verify: a key it cannot use stops it", narrow.code !== 0, narrow.out + narrow.err);
+}
+
 /** Saved progress is only a note: what the server no longer holds is not called stored. */
 async function trustNoNote(h: Harness, key: string): Promise<void> {
   const s = setup(h, key, "trust", TRUST_TARGET, { "kept.md": "---\ndate: \"2024-03-01\"\n---\n\nkept\n", "gone.md": "---\ndate: \"2024-03-01\"\n---\n\ngone\n" });
@@ -436,7 +476,9 @@ export async function migratePush(h: Harness, admin: string): Promise<void> {
   const collections = [TARGET, SECOND_TARGET, REFUSING_TARGET, KILLED_TARGET, RULES_TARGET, TAKEOVER_TARGET, TRUST_TARGET, SPELLING_TARGET, DECOMPOSED_TARGET, CREDENTIAL_TARGET, OLDER_TARGET, FILLED, CLOSED];
   // A key has a budget of requests a minute, and this should not spend its time waiting out a window. A real push does, and goes at that rate.
   const fresh = async (label: string): Promise<string> => (await issueKey(h, admin, { label, scopes: ["ingest", "read"], collections })).token;
-  await dryRunAndSend(h, await fresh("push"));
+  const pushKey = await fresh("push");
+  const first = await dryRunAndSend(h, pushKey);
+  verifyRuns(h, pushKey, first);
   await pathRules(h, await fresh("push-rules"));
   const other = await fresh("push-other");
   planCounts(h, other);

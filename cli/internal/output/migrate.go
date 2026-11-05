@@ -297,3 +297,73 @@ func MigratePushMarkdown(w io.Writer, result *migrate.PushResult) error {
 	}
 	return writeText(w, &b)
 }
+
+// verifyLimits is said on every run, so a clean result does not read as more than it is.
+var verifyLimits = []string{
+	"This shows each path's state and version, and that the sampled documents match apart from redaction.",
+	"It does not show every document's text is right: only the sample was fetched. A file gone from the server's disk behind its ledger shows only if sampled, and taken-over documents are counted on their state alone.",
+	"Overlap is a number to read, not a pass or fail. Local QMD ranks differently and may use another embedder, so 100% is not expected.",
+}
+
+func overlapText(o migrate.Overlap, mode string) string {
+	if o.Queries == 0 {
+		return "not run, as no --queries were given"
+	}
+	counted := o.Queries - o.NoLocalResults - o.Failed
+	if counted == 0 {
+		return fmt.Sprintf("no query could be compared, of %d (%d with no local results, %d failed)", o.Queries, o.NoLocalResults, o.Failed)
+	}
+	return fmt.Sprintf("mean %.0f%%, lowest %.0f%%, over %d of %d queries, local %s (%d with no local results, %d failed)", o.Mean*100, o.Lowest*100, counted, o.Queries, mode, o.NoLocalResults, o.Failed)
+}
+
+func verifyNotes(result *migrate.VerifyResult) []string {
+	problems := 0
+	for i := range result.Collections {
+		problems += result.Collections[i].Problems()
+	}
+	verdict := "Nothing here needs a look, within the limits below."
+	if problems > 0 {
+		verdict = fmt.Sprintf("%d thing(s) need a look. The local report names them, and these counts do not.", problems)
+	}
+	return append([]string{verdict}, append(verifyLimits, "Local report: "+result.ReportFile)...)
+}
+
+// MigrateVerifyTable renders a check. It names no file or query: only the local report does.
+func MigrateVerifyTable(w io.Writer, result *migrate.VerifyResult) error {
+	rows := make([]string, 0, len(result.Collections))
+	var b strings.Builder
+	for i := range result.Collections {
+		s := &result.Collections[i]
+		rows = append(rows, row(s.Name, s.Target, s.LocalFiles, s.ServerDocuments, s.Confirmed, s.TakenOver, s.VersionDiffers, s.NotHeld, s.SecondSpellings, s.LocalUnreadable+s.FoldersSkipped, s.NotChecked))
+		b.WriteString(row(s.Name+": sample: "+sampleText(s)) + "\n")
+		b.WriteString(row(s.Name+": overlap: "+overlapText(s.Overlap, result.LocalMode)) + "\n")
+	}
+	header := "COLLECTION\tTARGET\tLOCAL FILES\tSERVER DOCUMENTS\tCONFIRMED\tTAKEN OVER\tVERSION DIFFERS\tNOT HELD\tSECOND SPELLING\tNOT READ HERE\tNOT CHECKED"
+	if err := table(w, header, rows); err != nil {
+		return err
+	}
+	for _, note := range verifyNotes(result) {
+		b.WriteString(row(note) + "\n")
+	}
+	return writeText(w, &b)
+}
+
+func sampleText(s *migrate.VerifySummary) string {
+	return fmt.Sprintf("%d fetched: %d the same, %d the same apart from redaction, %d different, %d not fetched", s.Sampled, s.SampleSame, s.SampleRedacted, s.SampleDifferent, s.SampleFailed)
+}
+
+// MigrateVerifyMarkdown renders a check as a bullet list, naming no file or query.
+func MigrateVerifyMarkdown(w io.Writer, result *migrate.VerifyResult) error {
+	var b strings.Builder
+	for i := range result.Collections {
+		s := &result.Collections[i]
+		fmt.Fprintf(&b, "- **%s** to %s: %d local files, %d server documents, %d confirmed, %d taken over, %d at another version, %d not held, %d second spellings, %d not read here, %d not checked\n",
+			inlineText(s.Name), inlineText(s.Target), s.LocalFiles, s.ServerDocuments, s.Confirmed, s.TakenOver, s.VersionDiffers, s.NotHeld, s.SecondSpellings, s.LocalUnreadable+s.FoldersSkipped, s.NotChecked)
+		b.WriteString("  - sample: " + sampleText(s) + "\n")
+		b.WriteString("  - overlap: " + inlineText(overlapText(s.Overlap, result.LocalMode)) + "\n")
+	}
+	for _, note := range verifyNotes(result) {
+		b.WriteString("\n" + inlineText(note) + "\n")
+	}
+	return writeText(w, &b)
+}

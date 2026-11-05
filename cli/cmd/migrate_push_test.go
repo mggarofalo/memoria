@@ -44,6 +44,7 @@ type pushServer struct {
 	ledger      map[string]string
 	faultAnswer pushAnswer
 	faultsLeft  int
+	routes      func(http.ResponseWriter, *http.Request) bool
 	state       atomic.Value
 	t           *testing.T
 	mu          sync.Mutex
@@ -83,6 +84,9 @@ func (s *pushServer) begin(r *http.Request) (pushCall, pushAnswer) {
 }
 
 func (s *pushServer) serve(w http.ResponseWriter, r *http.Request) {
+	if s.routes != nil && s.routes(w, r) {
+		return
+	}
 	if r.Method == http.MethodGet {
 		s.serveStatus(w, r)
 		return
