@@ -5,7 +5,11 @@ using Memoria.Core.Redaction;
 
 namespace Memoria.Core.Tests.Redaction;
 
-/// <summary>Fail-closed behavior, idempotence, frontmatter, the public surface, and time budgets.</summary>
+/// <summary>
+/// Fail-closed behavior, idempotence, frontmatter, the public surface, and time budgets. The budgets count this process's CPU time, as wall-clock time on a busy machine says
+/// little about the redactor. That counts every thread in the process, so these tests run apart from the parallel ones.
+/// </summary>
+[Collection(nameof(RedactorBudgetCollection))]
 public sealed class RedactorSafetyTests
 {
 	private const string Secret = "THE-SECRET-VALUE-" + "12345";
@@ -61,7 +65,7 @@ public sealed class RedactorSafetyTests
 	[MemberData(nameof(Adversarial))]
 	public void Adversarial_input_finishes_within_budget_and_stays_stable(string input)
 	{
-		Stopwatch clock = Stopwatch.StartNew();
+		TimeSpan started = CpuTime();
 
 		// A crafted run may use up the rescan credit, which refuses the document rather than skipping anything.
 		try
@@ -74,7 +78,8 @@ public sealed class RedactorSafetyTests
 			Assert.Equal(RedactionFailure.ScanBudgetExhausted, exception.Failure);
 		}
 
-		Assert.True(clock.Elapsed < TimeSpan.FromSeconds(60), "Two passes over 2 MB exceeded the budget.");
+		TimeSpan spent = CpuTime() - started;
+		Assert.True(spent < TimeSpan.FromSeconds(60), $"Two passes over 2 MB took {spent.TotalSeconds:F1} s of CPU, over the budget.");
 	}
 
 	[Fact]
@@ -95,12 +100,12 @@ public sealed class RedactorSafetyTests
 		}
 
 		string input = builder.ToString();
-		Stopwatch clock = Stopwatch.StartNew();
+		TimeSpan started = CpuTime();
 
 		RedactionResult result = Redactor.Redact(input);
 
-		clock.Stop();
-		Assert.True(clock.Elapsed < TimeSpan.FromSeconds(120), "A 50 MB transcript took too long.");
+		TimeSpan spent = CpuTime() - started;
+		Assert.True(spent < TimeSpan.FromSeconds(120), $"A 50 MB transcript took {spent.TotalSeconds:F1} s of CPU, over the budget.");
 		Assert.Equal(blocks, result.CountsByRule["github-token"]);
 		Assert.DoesNotContain(token, result.Text, StringComparison.Ordinal);
 		Assert.Equal(new[] { "github-token" }, result.CountsByRule.Keys);
@@ -283,6 +288,12 @@ public sealed class RedactorSafetyTests
 		Assert.All(results, text => Assert.Equal(expected, text));
 	}
 
+	private static TimeSpan CpuTime()
+	{
+		using Process self = Process.GetCurrentProcess();
+		return self.TotalProcessorTime;
+	}
+
 	private static Regex Compile(string pattern) => new(pattern, RegexOptions.None, TimeSpan.FromSeconds(5));
 
 	private static string Repeat(string unit, int size)
@@ -297,3 +308,7 @@ public sealed class RedactorSafetyTests
 		Assert.Empty(exception.Data);
 	}
 }
+
+/// <summary>Runs <see cref="RedactorSafetyTests"/> after the parallel tests, so their CPU time is not counted against its budgets.</summary>
+[CollectionDefinition(nameof(RedactorBudgetCollection), DisableParallelization = true)]
+public sealed class RedactorBudgetCollection;
