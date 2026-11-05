@@ -96,7 +96,7 @@ The only version in this repository is a `vX.Y.Z` tag, computed from Conventiona
 |---|---|---|---|
 | Cyclomatic complexity, per function | CA1502, a build error. Limit in `CodeMetricsConfig.txt` | ESLint `complexity`. Limit in `eslint.config.mjs` | golangci-lint `gocyclo`. Limit in `cli/.golangci.yml` |
 | Coverage | **Branch**. `scripts/coverage-dotnet.sh` merges both test projects | **Branch and line**. `npm run test:coverage` in each package, limits in its `.c8rc.json` | **Statement**, not branch. `scripts/coverage-go.sh` |
-| Mutation (CI only) | Stryker.NET, `stryker/*.json` | StrykerJS, `stryker*.json` in each package | Gremlins, `cli/.gremlins.yaml` |
+| Mutation (CI only) | Stryker.NET, `stryker/*.json` | StrykerJS, `stryker.*` in each package | Gremlins, `cli/.gremlins.yaml` |
 
 - **Limits:** complexity 10 per function, and coverage 90 percent or better. Never loosen a limit; tighten it when the code allows.
 - **Generated code is excluded,** and nothing else: `cli/internal/api/client.gen.go`, and source-generated C# (`coverage.runsettings`). Do not add `CompilerGeneratedAttribute` to the coverage exclusions: async methods compile to state machines that carry it, so it silently removes real code.
@@ -113,6 +113,8 @@ Hooks work from PowerShell, cmd, and Git Bash: `scripts/run-sh.mjs` finds the `s
 ### Mutation testing
 
 `.github/workflows/mutation.yml` is not a required check. On a pull request it mutates only what changed: `--since` for Stryker.NET, and the changed files for StrykerJS and Gremlins. Nightly it mutates everything and uploads the reports as artifacts. Authentication, scoping, and redaction code has its own stricter config (`stryker/security.json`, `stryker/security-core.json`, and `stryker.security.json` in `sidecar/` and `worker/`). StrykerJS runs from the repository root, because sidecar tests read files elsewhere in it; `sidecar/test/install-scripts.test.ts` is left out of its sandbox because it checks the repository's own scripts. Run one by hand with `node scripts/run-sh.mjs scripts/mutation-js.sh sidecar`, and likewise `mutation-dotnet.sh` or `mutation-go.sh`. Stryker.NET on a pull request stops itself at 50 minutes and reports inconclusive; the nightly job has 240. Two local caveats: `--since` reads the main checkout's HEAD when run from a git worktree, and Gremlins v0.6.0 misreads coverage on Windows, so `scripts/mutation-go.sh` refuses to run there. Use CI or WSL for those.
+
+The nightly run mutates everything and holds every threshold. A pull request mutates the changed files, and Stryker tests every mutant in a file it touched, so a one-line fix can put a file's older survivors under test. Pull requests therefore only report for the general configs, and hold the bar for security configs, where the nightly keeps the code at it. Every run uploads its report, including one that fails.
 
 ### Other CI
 

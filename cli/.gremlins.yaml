@@ -2,7 +2,7 @@
 unleash:
   exclude-files:
     - "\\.gen\\.go$"
-  # Phase 1 ratchet: reporting only, because main has no mutants to score yet.
+  # Below the nightly score of 89.52 and 84.83. A pull request only reports.
   threshold:
-    efficacy: 0
-    mutant-coverage: 0
+    efficacy: 85
+    mutant-coverage: 80

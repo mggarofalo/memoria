@@ -1,7 +1,11 @@
 #!/bin/sh
 # StrykerJS for one package: scripts/mutation-js.sh <sidecar|worker>
-# With MUTATION_BASE set (pull requests), mutates only the changed files in src/.
-# Otherwise (nightly) mutates everything. Never run this from a git hook.
+# Never run this from a git hook.
+#
+# Nightly (no MUTATION_BASE) mutates everything and holds every threshold. On a pull
+# request it mutates the changed files, and the general config only reports, for the
+# reasons in mutation-dotnet.sh: stryker.config.mjs drops its break score when
+# MUTATION_BASE is set. The security config keeps its threshold either way.
 #
 # Runs from the repository root, because some sidecar tests read files elsewhere
 # in the repository, and those paths only resolve if the sandbox has the same shape.
@@ -14,7 +18,7 @@
 set -eu
 
 package=$1
-config="$package/stryker.config.json"
+config="$package/stryker.config.mjs"
 security="$package/stryker.security.json"
 started=$(date +%s)
 status=0
@@ -43,7 +47,7 @@ mutate() {
 }
 
 inconclusive() {
-  message="Mutation ($package) is inconclusive: the time limit ended before $1 finished. No score for it, and this is not a failure. The nightly run covers it."
+  message="Mutation ($package) is inconclusive: the time limit ended before $1 finished. No score for it, and this is not a failure."
   echo "$message"
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     echo "$message" >> "$GITHUB_STEP_SUMMARY"
