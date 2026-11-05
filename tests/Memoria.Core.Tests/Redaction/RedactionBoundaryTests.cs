@@ -292,13 +292,91 @@ public sealed class RedactionBoundaryTests
 	}
 
 	[Fact]
-	public void Word_only_slack_and_gitlab_values_survive_even_when_not_placeholders()
+	public void A_provider_prefix_at_length_is_redacted_even_if_the_rest_reads_as_words()
 	{
+		// The price of never storing a real token that happens to have no digit. A sample has to say it is one.
 		const string Slack = "xoxb-only-plain-words-in-this";
 		const string GitLab = "gl" + "pat-only-plain-words-in-this";
 
-		Assert.Equal(Slack, Redactor.Redact(Slack).Text);
-		Assert.Equal(GitLab, Redactor.Redact(GitLab).Text);
+		Assert.Equal("[REDACTED:slack-token]", Redactor.Redact(Slack).Text);
+		Assert.Equal("[REDACTED:gitlab-token]", Redactor.Redact(GitLab).Text);
+	}
+
+	[Theory]
+	[InlineData("your-token-goes-here-now")]
+	[InlineData("example-token-for-the-docs")]
+	[InlineData("placeholder-value-goes-in-here")]
+	public void A_provider_prefix_on_a_recognizable_sample_survives(string sample)
+	{
+		string text = "gl" + "pat-" + sample;
+
+		Assert.Equal(text, Redactor.Redact(text).Text);
+	}
+
+	[Fact]
+	public void A_marker_word_inside_a_random_token_does_not_make_it_a_sample()
+	{
+		string token = "gl" + "pat-" + "kWqZ-BaR-mXvT-pLdR-nHsY";
+
+		Assert.Equal("[REDACTED:gitlab-token]", Redactor.Redact(token).Text);
+	}
+
+	[Fact]
+	public void A_dotted_code_name_is_not_taken_for_a_token_with_no_prefix()
+	{
+		const string Name = "ModelContextProtocolServer.Server.AspNetCoreHttpTransportExtensions";
+
+		Assert.Equal(Name, Redactor.Redact(Name).Text);
+	}
+
+	[Fact]
+	public void Long_letters_as_a_bare_password_are_redacted()
+	{
+		string password = new string('q', 6) + "wfpgjluyarstdhneiozxcv";
+
+		Assert.Equal("app:[REDACTED:userinfo-password]@db.internal", Redactor.Redact("app:" + password + "@db.internal").Text);
+	}
+
+	[Theory]
+	[InlineData("--api-key", "KQWZMXVTPLDRNHSYBGFJCEAU")]
+	[InlineData("--api-key", "kWqZ_mXvT_pLdR_nHsY_bGfJ")]
+	public void An_upper_case_or_snake_run_that_reads_as_no_name_is_redacted(string flag, string value)
+	{
+		Assert.Equal($"tool {flag} [REDACTED:secret-flag]", Redactor.Redact($"tool {flag} {value}").Text);
+	}
+
+	[Theory]
+	[InlineData("tool --api-key MY_DEPLOY_TOKEN")]
+	[InlineData("tool --api-key deploy_token_name")]
+	[InlineData("tool --api-key DEPLOYTOKEN")]
+	public void A_constant_or_a_snake_case_name_is_still_a_name(string text)
+	{
+		Assert.Equal(text, Redactor.Redact(text).Text);
+	}
+
+	[Theory]
+	[InlineData("sk-" + "proj-" + "only-plain-words-in-this-key")]
+	[InlineData("sk-" + "svcacct-" + "only-plain-words-in-this-key")]
+	[InlineData("sk-" + "admin-" + "only-plain-words-in-this-key")]
+	public void A_named_openai_prefix_is_redacted_even_if_the_rest_reads_as_words(string key)
+	{
+		Assert.Equal("[REDACTED:openai-key]", Redactor.Redact(key).Text);
+	}
+
+	[Fact]
+	public void A_bare_sk_name_with_plain_words_still_survives()
+	{
+		const string Name = "sk-learn-intelex-2024-01-extras";
+
+		Assert.Equal(Name, Redactor.Redact(Name).Text);
+	}
+
+	[Fact]
+	public void A_discord_webhook_is_redacted_whatever_its_token_reads_as()
+	{
+		string text = "https://discord.com/api/webhooks/123/" + "only-plain-words-in-this-webhook-path";
+
+		Assert.Equal("https://discord.com/api/webhooks/123/[REDACTED:discord-webhook]", Redactor.Redact(text).Text);
 	}
 
 	private static Regex Compile(string pattern) => new(pattern, RegexOptions.None, TimeSpan.FromSeconds(5));

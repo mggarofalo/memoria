@@ -238,7 +238,9 @@ Writing needs the `ingest` scope and the target collection in the key's allowlis
 
 ### What redaction cannot catch
 
-Rules read text and decode nothing, so a credential that is base64, URL-encoded as a whole, written as literal `\uXXXX` text, or reversed is stored as it came. JSON escapes in the request itself, control characters and unusual spaces inside a token, and a token split by line breaks, content blocks or messages are all caught when the token starts with a recognized prefix.
+A value carrying a provider's own prefix at that provider's length is replaced unless it is recognizably a sample, such as `your-token-goes-here`, or a mask. So a name that happens to start with one of those prefixes is replaced too, which costs little. A value with no prefix, known only from what surrounds it, also has to read as generated: after `token:` or `?key=`, lower-case letters split by dashes cannot be told from a name, and they stay.
+
+A credential in base64 or percent-encoded form is decoded once to check it, so it is replaced, up to 16 KiB of encoded text. One written as literal `\uXXXX` text, encrypted, or reversed is stored as it came. Some values cannot be told from ordinary text without a name beside them, so they stay. **A bare 40- or 64-digit hex value stays,** because commit hashes and lockfile hashes look exactly the same. That includes the secret half of a Memoria key on its own, though a whole key is always replaced. **A 40-character value with no name stays** unless it comes soon after an AWS access key id. JSON escapes in the request itself, control characters and unusual spaces inside a token, and a token split by line breaks, content blocks or messages are all caught when the token starts with a recognized prefix.
 
 ### Turning redaction off for a collection
 
