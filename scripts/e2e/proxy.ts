@@ -11,7 +11,12 @@ import http from "node:http";
 import { once } from "node:events";
 
 /** How the next `POST /docs:multiGet` is answered, instead of asking the sidecar. */
-export type Plan = { kind: "canned"; body: string } | { kind: "oversize"; bytes: number };
+export type BatchPlan = { kind: "canned"; body: string } | { kind: "oversize"; bytes: number };
+
+/** The sidecar accepts this many more documents, then fails until told otherwise. `null` ends it. */
+export type DocumentPlan = { kind: "failDocuments"; after: number | null };
+
+export type Plan = BatchPlan | DocumentPlan;
 
 export interface ProxyRecord {
   method?: string;
@@ -22,11 +27,13 @@ export interface ProxyRecord {
 
 const CONTROL_PATH = "/__e2e/plan";
 const BATCH_PATH = "/docs:multiGet";
+const DOCUMENTS_PATH = "/documents";
 const MAX_RECORDED_BODY = 4096;
 const CHUNK = Buffer.alloc(1024 * 1024, "x");
 
 const [listenPort, sidecarPort, recordFile] = process.argv.slice(2) as [string, string, string];
-let plan: Plan | null = null;
+let plan: BatchPlan | null = null;
+let documentsLeft: number | null = null;
 
 function record(entry: ProxyRecord): void {
   appendFileSync(recordFile, JSON.stringify(entry) + "\n");
@@ -63,7 +70,22 @@ async function sendOversized(response: http.ServerResponse, offered: number): Pr
   record({ oversize: { offered, sent, closedEarly } });
 }
 
-async function answerFromPlan(response: http.ServerResponse, current: Plan): Promise<void> {
+function setPlan(next: Plan): void {
+  if (next.kind === "failDocuments") documentsLeft = next.after;
+  else plan = next;
+}
+
+/** True when this write should be refused. */
+function refuseDocument(request: http.IncomingMessage): boolean {
+  if (documentsLeft === null || request.method !== "POST" || request.url !== DOCUMENTS_PATH) return false;
+  if (documentsLeft > 0) {
+    documentsLeft--;
+    return false;
+  }
+  return true;
+}
+
+async function answerFromPlan(response: http.ServerResponse, current: BatchPlan): Promise<void> {
   if (current.kind === "oversize") return sendOversized(response, current.bytes);
   response.writeHead(200, { "content-type": "application/json" });
   response.end(current.body);
@@ -72,12 +94,17 @@ async function answerFromPlan(response: http.ServerResponse, current: Plan): Pro
 async function handle(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
   const body = await readBody(request);
   if (request.url === CONTROL_PATH) {
-    plan = JSON.parse(body.toString("utf8")) as Plan;
+    setPlan(JSON.parse(body.toString("utf8")) as Plan);
     response.end("ok");
     return;
   }
   // Recorded before anything else happens, so a check that has its answer can read it.
   record({ method: request.method ?? "", url: request.url ?? "", body: body.toString("utf8").slice(0, MAX_RECORDED_BODY) });
+  if (refuseDocument(request)) {
+    response.writeHead(502, { "content-type": "application/json" });
+    response.end(JSON.stringify({ error: "unavailable", message: "The proxy is standing in for a sidecar that went away." }));
+    return;
+  }
   const current = request.url === BATCH_PATH ? plan : null;
   if (current) {
     plan = null;

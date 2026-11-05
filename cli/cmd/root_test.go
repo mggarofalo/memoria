@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mggarofalo/memoria/cli/internal/apperr"
 	"github.com/mggarofalo/memoria/cli/internal/auth"
@@ -74,6 +75,8 @@ type harness struct {
 	updater       releaseUpdater
 	updateOptions selfupdate.Options
 	config        string
+	slept         []time.Duration
+	sleepErr      error
 }
 
 func newHarness(t *testing.T) *harness {
@@ -108,6 +111,10 @@ func (h *harness) app() *app {
 		return h.updater
 	}
 	a.selfUpdate.executable = func() (string, error) { return "memoria-test-exe", nil }
+	a.sleep = func(_ context.Context, wait time.Duration) error {
+		h.slept = append(h.slept, wait)
+		return h.sleepErr
+	}
 	return a
 }
 
