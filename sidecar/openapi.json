@@ -2029,7 +2029,7 @@
         "tags": [
           "collections"
         ],
-        "description": "Reads the directory and keeps no record. The API asks this once, before opening a collection to ingest.",
+        "description": "Reads the directory and keeps no record. The API asks this once, before opening a collection to ingest. A directory that does not exist is not empty.",
         "parameters": [
           {
             "schema": {

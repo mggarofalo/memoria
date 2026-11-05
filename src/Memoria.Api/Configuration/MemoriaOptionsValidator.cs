@@ -70,6 +70,7 @@ public sealed class MemoriaOptionsValidator : IValidateOptions<MemoriaOptions>
 		Require(ingest.MaxDocumentBytes >= MinDocumentBytes, $"Memoria:Ingest:MaxDocumentBytes must be at least {MinDocumentBytes}, as frontmatter alone can take 8 KiB.", failures);
 		Require(ingest.MaxSessionBytes >= 1024, "Memoria:Ingest:MaxSessionBytes must be at least 1024.", failures);
 		Require(ingest.MaxConcurrentLargeUploads >= 1, "Memoria:Ingest:MaxConcurrentLargeUploads must be at least 1.", failures);
+		Require(ingest.MaxConcurrentLargeDocuments >= 1, "Memoria:Ingest:MaxConcurrentLargeDocuments must be at least 1.", failures);
 		Require(ingest.MaxConcurrentRenders >= 1, "Memoria:Ingest:MaxConcurrentRenders must be at least 1.", failures);
 		Require(ingest.MinUploadBytesPerSecond >= 1, "Memoria:Ingest:MinUploadBytesPerSecond must be at least 1.", failures);
 		Require(ingest.SessionUploadDeadline > TimeSpan.Zero, "Memoria:Ingest:SessionUploadDeadline must be positive.", failures);

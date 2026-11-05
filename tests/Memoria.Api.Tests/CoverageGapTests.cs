@@ -43,6 +43,8 @@ public sealed class MemoriaOptionsValidatorTests
 		{ "Auth:RateLimit:PermitLimit", static o => o.Auth.RateLimit.PermitLimit = 0 },
 		{ "Auth:RateLimit:Window", static o => o.Auth.RateLimit.Window = TimeSpan.Zero },
 		{ "Auth:Audit:MaxRowsPerKey", static o => o.Auth.Audit.MaxRowsPerKey = 0 },
+		{ "Ingest:MaxConcurrentLargeDocuments", static o => o.Ingest.MaxConcurrentLargeDocuments = 0 },
+		{ "Ingest:MaxConcurrentLargeUploads", static o => o.Ingest.MaxConcurrentLargeUploads = 0 },
 	};
 
 	public static TheoryData<Action<MemoriaOptions>> Acceptable => new()

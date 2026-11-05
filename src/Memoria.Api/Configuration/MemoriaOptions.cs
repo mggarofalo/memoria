@@ -35,6 +35,9 @@ public sealed class IngestOptions
 	/// <summary>Transcripts over 8 MiB handled at once. It keeps the API inside its memory limit. Past it, an upload gets 503 with <c>Retry-After</c>. A slow large upload holds its place until it ends.</summary>
 	public int MaxConcurrentLargeUploads { get; set; } = 2;
 
+	/// <summary>Documents over 256 KiB handled at once, from the bytes that cross that line until the request ends. Past it, one gets 503 with <c>Retry-After</c>. Their text waits in memory for a render slot, so without this a burst can run the process out of memory.</summary>
+	public int MaxConcurrentLargeDocuments { get; set; } = 8;
+
 	/// <summary>Redactions and renders run at once, for documents and transcripts together. This is what bounds CPU and most of the memory. Reading a body does not take one.</summary>
 	public int MaxConcurrentRenders { get; set; } = 2;
 

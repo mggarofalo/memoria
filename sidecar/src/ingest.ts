@@ -407,10 +407,10 @@ export async function writeDocument(target: ResolvedTarget, content: string, hoo
   return { bytes: Buffer.byteLength(content, "utf8"), created: existing === undefined };
 }
 
-/** Whether a collection's directory holds anything but our own leftover temp files. A missing directory holds nothing. */
+/** Whether a collection's directory exists and holds nothing but our own leftover temp files. A missing one is not empty: it may be a volume not mounted yet, with real files to come. */
 export async function isRootEmpty(root: string): Promise<boolean> {
   const names = await namesIn(root);
-  return names === undefined || names.every((name) => SCRATCH_NAME.test(name));
+  return names !== undefined && names.every((name) => SCRATCH_NAME.test(name));
 }
 
 /**

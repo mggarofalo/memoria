@@ -807,7 +807,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       schema: {
         tags: ["collections"],
         summary: "Whether a collection's directory is empty",
-        description: "Reads the directory and keeps no record. The API asks this once, before opening a collection to ingest.",
+        description: "Reads the directory and keeps no record. The API asks this once, before opening a collection to ingest. A directory that does not exist is not empty.",
         params: { type: "object", required: ["name"], properties: { name: { type: "string", minLength: 1 } } },
         response: {
           200: {

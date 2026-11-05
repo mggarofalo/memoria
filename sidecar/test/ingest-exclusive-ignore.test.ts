@@ -6,7 +6,7 @@ import path from "node:path";
 import { test } from "node:test";
 import fastGlob from "fast-glob";
 import { HttpError } from "../src/errors.ts";
-import { resolveTarget, writeDocument } from "../src/ingest.ts";
+import { isRootEmpty, resolveTarget, writeDocument } from "../src/ingest.ts";
 import { matchesIgnorePattern, unsupportedIgnorePattern } from "../src/path-rules.ts";
 import { authHeaders, makeApp, tempDir } from "./helpers.ts";
 
@@ -155,6 +155,7 @@ test("a collection's emptiness: temp files do not count, and anything else does"
     await writeFile(path.join(roots.claude, "foreign.md"), "someone else's");
     assert.equal((await ask()).empty, false);
     assert.equal((await app.inject({ method: "GET", url: "/collections/nope/empty", headers: authHeaders })).statusCode, 404);
+    assert.equal(await isRootEmpty(path.join(roots.claude, "not-here")), false, "a missing directory may be a volume not mounted yet");
   } finally {
     await app.close();
   }

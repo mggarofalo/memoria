@@ -46,8 +46,8 @@ public sealed record AuditIngest(
 public sealed record AuditRead(string Reference, bool Found);
 
 /// <summary>
-/// Keeps the API alive under its memory limit with a plain count: past <see cref="LargeBytes"/> a transcript holds a slot until it ends, and past the
-/// limit it gets an honest 503. Documents and small transcripts never get this far, so a large upload turns none of them away.
+/// Keeps the API alive under its memory limit with plain counts: past a size, a request holds a place until it ends, and past the limit it gets an honest 503, as a
+/// runtime out of memory can kill the process outright. Transcripts and documents count separately, and small ones never get this far, so neither turns them away.
 /// </summary>
 public sealed class LargeUploads(IOptions<MemoriaOptions> options)
 {
@@ -55,25 +55,31 @@ public sealed class LargeUploads(IOptions<MemoriaOptions> options)
 
 	private const int RetryAfterSeconds = 30;
 
-	private readonly SemaphoreSlim _slots = new(options.Value.Ingest.MaxConcurrentLargeUploads, options.Value.Ingest.MaxConcurrentLargeUploads);
+	public const long LargeDocumentBytes = 256L * 1024;
 
-	/// <summary>One request's body: a declared length over the line takes the slot before anything is read, and otherwise the byte that crosses it does.</summary>
+	private readonly SemaphoreSlim _transcripts = new(options.Value.Ingest.MaxConcurrentLargeUploads, options.Value.Ingest.MaxConcurrentLargeUploads);
+	private readonly SemaphoreSlim _documents = new(options.Value.Ingest.MaxConcurrentLargeDocuments, options.Value.Ingest.MaxConcurrentLargeDocuments);
+
+	/// <summary>A transcript's body: a declared length over the line takes the place before anything is read, and otherwise the byte that crosses it does.</summary>
 	public Stream Watch(Stream body, long? declaredLength)
 	{
-		WatchedBody watched = new(body, this);
+		return Watched(body, declaredLength, _transcripts, LargeBytes);
+	}
+
+	/// <summary>The same for a document. Hold it until the request ends, as a document's text stays in memory while it waits to be redacted and written.</summary>
+	public Stream WatchDocument(Stream body, long? declaredLength)
+	{
+		return Watched(body, declaredLength, _documents, LargeDocumentBytes);
+	}
+
+	private static WatchedBody Watched(Stream body, long? declaredLength, SemaphoreSlim places, long line)
+	{
+		WatchedBody watched = new(body, places, line);
 		watched.Note(declaredLength ?? 0);
 		return watched;
 	}
 
-	private void Take()
-	{
-		if (!_slots.Wait(0))
-		{
-			throw new IngestRefusedException(StatusCodes.Status503ServiceUnavailable, "ingest_busy", "Too many large uploads are running. Try again shortly.", RetryAfterSeconds);
-		}
-	}
-
-	private sealed class WatchedBody(Stream inner, LargeUploads uploads) : Stream
+	private sealed class WatchedBody(Stream inner, SemaphoreSlim places, long line) : Stream
 	{
 		private long _seen;
 		private bool _holding;
@@ -81,10 +87,9 @@ public sealed class LargeUploads(IOptions<MemoriaOptions> options)
 		public void Note(long total)
 		{
 			_seen = Math.Max(_seen, total);
-			if (_seen > LargeBytes && !_holding)
+			if (_seen > line && !_holding)
 			{
-				uploads.Take();
-				_holding = true;
+				_holding = places.Wait(0) ? true : throw new IngestRefusedException(StatusCodes.Status503ServiceUnavailable, "ingest_busy", "Too many large uploads are running. Try again shortly.", RetryAfterSeconds);
 			}
 		}
 
@@ -132,7 +137,7 @@ public sealed class LargeUploads(IOptions<MemoriaOptions> options)
 			if (disposing && _holding)
 			{
 				_holding = false;
-				uploads._slots.Release();
+				places.Release();
 			}
 
 			base.Dispose(disposing);
@@ -243,7 +248,7 @@ public sealed class IngestCollections(IIngestLedger ledger, IOptions<MemoriaOpti
 		SidecarCollectionEmptyResponse answer = await sidecar.IsCollectionEmptyAsync(collection, cancellationToken);
 		if (!answer.Empty)
 		{
-			throw new IngestRefusedException(StatusCodes.Status409Conflict, "collection_not_empty", $"Collection {collection} has files in its directory, so it cannot be opened to ingest. Ingest owns everything in a collection it writes to, so it must start empty.");
+			throw new IngestRefusedException(StatusCodes.Status409Conflict, "collection_not_empty", $"Collection {collection} has files in its directory, or its directory does not exist, so it cannot be opened to ingest. Ingest owns everything in a collection it writes to, so it must start empty, and its volume must be mounted.");
 		}
 
 		await ledger.OpenCollectionAsync(collection, timeProvider.GetUtcNow(), cancellationToken);

@@ -889,6 +889,42 @@ public sealed class IngestFairnessTests(AuthApiFactory factory) : IClassFixture<
 	}
 
 	[Fact]
+	public async Task A_large_document_holds_its_place_until_its_request_ends_and_a_small_one_needs_none()
+	{
+		await using WebApplicationFactory<Program> app = factory.WithWebHostBuilder(static builder => builder.UseSetting("Memoria:Ingest:MaxConcurrentLargeDocuments", "1"));
+		FakeCorpus corpus = new(factory.Sidecar);
+		using ManualResetEventSlim entered = new();
+		using ManualResetEventSlim release = new();
+		corpus.OnWrite = _ =>
+		{
+			entered.Set();
+			release.Wait(TimeSpan.FromSeconds(30));
+			return null;
+		};
+		(_, string key) = await factory.IssueAsync([MemoriaScopes.Ingest], ["c"]);
+		HttpClient client = AuthApiFactory.Authorized(app.CreateClient(), key);
+		string large = new('w', (int)LargeUploads.LargeDocumentBytes + 1);
+
+		// Still in the sidecar, so long past reading its body.
+		Task<HttpResponseMessage> first = PostDocumentAsync(client, sourceId: Guid.NewGuid().ToString("N"), body: large);
+		Assert.True(entered.Wait(TimeSpan.FromSeconds(30)));
+		corpus.OnWrite = static _ => null;
+		HttpResponseMessage refused = await PostDocumentAsync(client, sourceId: Guid.NewGuid().ToString("N"), body: large);
+		HttpResponseMessage small = await PostDocumentAsync(client, sourceId: Guid.NewGuid().ToString("N"), body: new string('w', 1024));
+		release.Set();
+		HttpResponseMessage held = await first;
+		HttpResponseMessage after = await PostDocumentAsync(client, sourceId: Guid.NewGuid().ToString("N"), body: large);
+
+		Assert.Equal(HttpStatusCode.ServiceUnavailable, refused.StatusCode);
+		Assert.Equal("ingest_busy", (await ReadAsync(refused)).GetProperty("code").GetString());
+		Assert.True(refused.Headers.Contains("Retry-After"));
+		Assert.True(refused.Headers.ConnectionClose, "draining the body of a refused request is what runs a burst of retries out of memory");
+		Assert.Equal(HttpStatusCode.Accepted, small.StatusCode);
+		Assert.Equal(HttpStatusCode.Accepted, held.StatusCode);
+		Assert.Equal(HttpStatusCode.Accepted, after.StatusCode);
+	}
+
+	[Fact]
 	public async Task Small_uploads_are_served_while_the_large_places_are_full()
 	{
 		await using WebApplicationFactory<Program> app = factory.WithWebHostBuilder(static builder => builder.UseSetting("Memoria:Ingest:MaxConcurrentLargeUploads", "1"));

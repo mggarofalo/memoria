@@ -107,6 +107,7 @@ public static class IngestEndpoints
 		[FromQuery(Name = "restoreDeleted")][Description("Stores this even though it was deleted, including the same content. Needs a key with the `admin` scope as well.")] bool? restoreDeleted,
 		HttpContext context,
 		DocumentIngestor ingestor,
+		LargeUploads large,
 		IOptions<MemoriaOptions> options,
 		TimeProvider timeProvider,
 		CancellationToken cancellationToken)
@@ -116,9 +117,10 @@ public static class IngestEndpoints
 		RequestBody.AllowUpTo(context, limit);
 		RequestBody.RequireRate(context, options.Value.Ingest.MinUploadBytesPerSecond);
 		RequireRestoreRight(context, restoreDeleted);
+		await using Stream body = large.WatchDocument(RequestBody.Open(context, limit), context.Request.ContentLength);
 		DocumentIngestRequest? request = await IngestRules.WithinDeadlineAsync(
 			options.Value.Ingest.DocumentUploadDeadline,
-			token => ReadDocumentAsync(context, limit, token),
+			token => ReadDocumentAsync(body, token),
 			cancellationToken);
 		Dictionary<string, string[]> errors = IngestValidation.Document(request, timeProvider.GetUtcNow());
 		if (errors.Count > 0)
@@ -138,9 +140,8 @@ public static class IngestEndpoints
 		}
 	}
 
-	private static async Task<DocumentIngestRequest?> ReadDocumentAsync(HttpContext context, long limit, CancellationToken cancellationToken)
+	private static async Task<DocumentIngestRequest?> ReadDocumentAsync(Stream body, CancellationToken cancellationToken)
 	{
-		await using Stream body = RequestBody.Open(context, limit);
 		try
 		{
 			return await JsonSerializer.DeserializeAsync<DocumentIngestRequest>(body, Json, cancellationToken);
