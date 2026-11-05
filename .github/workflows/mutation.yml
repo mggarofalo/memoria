@@ -2,7 +2,7 @@ name: Mutation
 
 # Slow, so it is not a required check. Pull requests mutate only what changed;
 # the nightly run mutates everything and uploads the reports. Thresholds live
-# in stryker/*.json, sidecar/stryker*.json, worker/stryker*.json, and
+# in stryker/*.json, sidecar/stryker.*, worker/stryker.*, and
 # cli/.gremlins.yaml.
 on:
   pull_request:
@@ -16,10 +16,10 @@ on:
       - tests/**
       - sidecar/src/**
       - sidecar/test/**
-      - sidecar/stryker*.json
+      - sidecar/stryker*
       - worker/src/**
       - worker/test/**
-      - worker/stryker*.json
+      - worker/stryker*
       - cli/**
   schedule:
     - cron: "17 3 * * *"
@@ -39,11 +39,15 @@ env:
 
 jobs:
   dotnet:
-    name: Mutation (.NET)
+    name: Mutation (.NET, ${{ matrix.config }})
     runs-on: ubuntu-latest
-    # A full run of a large change can take hours. A pull request stops itself at 50
-    # minutes and reports inconclusive; see scripts/mutation-dotnet.sh.
-    timeout-minutes: ${{ github.event_name == 'pull_request' && 60 || 240 }}
+    # A full run takes hours, so each config has its own job. Both limits stop short of
+    # the job's own, so the report still uploads; see scripts/mutation-dotnet.sh.
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 60 || 350 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        config: [core, api, security, security-core]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -55,23 +59,23 @@ jobs:
           cache: true
           cache-dependency-path: "**/*.csproj"
       - name: Mutate
-        run: sh scripts/mutation-dotnet.sh
+        run: sh scripts/mutation-dotnet.sh ${{ matrix.config }}
         env:
-          MUTATION_LIMIT_MINUTES: ${{ github.event_name == 'pull_request' && '50' || '' }}
+          MUTATION_LIMIT_MINUTES: ${{ github.event_name == 'pull_request' && '50' || '340' }}
       - name: Upload report
-        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+        if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: mutation-dotnet
+          name: mutation-dotnet-${{ matrix.config }}
           path: StrykerOutput/*/reports/
           retention-days: 30
 
   node:
     name: Mutation (${{ matrix.package }})
     runs-on: ubuntu-latest
-    # A full run takes hours on a hosted runner. A pull request stops itself at 50
-    # minutes and reports inconclusive; see scripts/mutation-js.sh.
-    timeout-minutes: ${{ github.event_name == 'pull_request' && 60 || 240 }}
+    # A full run takes hours. Both limits stop short of the job's own, so the report
+    # still uploads; see scripts/mutation-js.sh.
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 60 || 350 }}
     strategy:
       fail-fast: false
       matrix:
@@ -93,11 +97,14 @@ jobs:
           npm ci --no-fund --no-audit
           npm ci --no-fund --no-audit --prefix ${{ matrix.package }}
       - name: Mutate
-        run: sh scripts/mutation-js.sh ${{ matrix.package }}
+        # The memory log is temporary: the worker's full run is being killed on the runner.
+        run: |
+          (while sleep 60; do echo "memlog $(date +%H:%M) $(free -m | awk '/Mem:/ {print "used="$3" available="$7}') node=$(pgrep -c node) fake-servers=$(pgrep -fc fake-llama-server) top=$(ps -eo rss=,args= --sort=-rss | head -1 | cut -c1-90)"; done) &
+          sh scripts/mutation-js.sh ${{ matrix.package }}
         env:
-          MUTATION_LIMIT_MINUTES: ${{ github.event_name == 'pull_request' && '50' || '' }}
+          MUTATION_LIMIT_MINUTES: ${{ github.event_name == 'pull_request' && '50' || '340' }}
       - name: Upload report
-        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+        if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: mutation-${{ matrix.package }}
@@ -120,7 +127,7 @@ jobs:
       - name: Mutate
         run: sh scripts/mutation-go.sh
       - name: Upload report
-        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+        if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: mutation-cli

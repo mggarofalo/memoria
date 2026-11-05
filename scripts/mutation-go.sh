@@ -1,7 +1,8 @@
 #!/bin/sh
 # Gremlins for cli/. Thresholds live in cli/.gremlins.yaml.
-# With MUTATION_BASE set (pull requests), mutates only the changed files.
-# Otherwise (nightly) mutates everything. Never run this from a git hook.
+# With MUTATION_BASE set (pull requests), mutates only the changed files and reports,
+# as in mutation-dotnet.sh. Otherwise (nightly) mutates everything and holds the
+# thresholds. Never run this from a git hook.
 #
 # Gremlins' own --diff is not used: with the module in a subdirectory its paths
 # never match the diff's, so it skips every mutant and reports success.
@@ -32,7 +33,7 @@ if [ -n "${MUTATION_BASE:-}" ]; then
     fi
   done
   # shellcheck disable=SC2086 # word splitting of the command is intended
-  $gremlins unleash "$@"
+  $gremlins unleash --threshold-efficacy 0 --threshold-mcover 0 "$@"
 else
   mkdir -p reports
   # shellcheck disable=SC2086
