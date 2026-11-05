@@ -216,7 +216,6 @@ public sealed class SidecarContractTests
 			.GetProperties(BindingFlags.Public | BindingFlags.Instance)
 			.Where(p => p.GetCustomAttribute<System.Text.Json.Serialization.JsonIgnoreAttribute>() is null)
 			.Where(p => p.CanWrite || p.GetMethod?.IsPublic == true)
-			.Where(p => !IsComputed(p))
 			.ToDictionary(p => JsonNamingPolicy.CamelCase.ConvertName(p.Name), p => p, StringComparer.Ordinal);
 
 		foreach (string name in required)
@@ -229,12 +228,6 @@ public sealed class SidecarContractTests
 			Assert.True(schemaProperties.TryGetValue(name, out JsonElement propertySchema), $"{where}: {type.Name}.{property.Name} ('{name}') is not in the schema");
 			AssertMatches(propertySchema, property.PropertyType, $"{where}.{name}");
 		}
-	}
-
-	/// <summary>Convenience members on records (e.g. <see cref="SidecarSearchFilters.IsEmpty"/>) that are not serialized.</summary>
-	private static bool IsComputed(PropertyInfo property)
-	{
-		return property.Name == nameof(SidecarSearchFilters.IsEmpty) && property.DeclaringType == typeof(SidecarSearchFilters);
 	}
 
 	private static JsonElement Resolve(JsonElement schema)

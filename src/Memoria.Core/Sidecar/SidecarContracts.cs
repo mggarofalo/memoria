@@ -86,6 +86,8 @@ public sealed record SidecarSearchFilters(
 	string? Until = null,
 	IReadOnlyList<string>? Tags = null)
 {
+	/// <summary>Not part of the request: the sidecar refuses a field it does not know.</summary>
+	[JsonIgnore]
 	public bool IsEmpty =>
 		(Project is null || Project.Count == 0)
 		&& (Branch is null || Branch.Count == 0)
