@@ -7,6 +7,7 @@ import { forwardedHeaders, limits } from "./auth-limits.ts";
 import { issueScopeKeys, mcpScope, multiGetLimits, scopeMatrix, secretsAbsent, sendCanaries } from "./auth-reads.ts";
 import { bootstrap, keyManagement, login, mcp, noModels, rateLimits, scopedReads, scopeErrors, traversal, type Keys } from "./checks.ts";
 import { Harness } from "./harness.ts";
+import { skillMatchesTheServer } from "./skill.ts";
 import { ingest, INGEST_SERVER } from "./ingest.ts";
 import { sourcesSync } from "./sources.ts";
 
@@ -22,6 +23,7 @@ async function runAll(h: Harness): Promise<void> {
   scopedReads(h, keys);
   await traversal(h, keys);
   mcp(h, keys);
+  skillMatchesTheServer(h, keys.reader);
   login(h, keys);
   await authChecks(h, keys);
   await rateLimits(h, keys);
