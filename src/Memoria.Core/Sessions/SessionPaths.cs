@@ -57,6 +57,15 @@ public static partial class SessionPaths
 		return string.Equals(encoded, projectDirectory, StringComparison.OrdinalIgnoreCase) ? "" : "-" + Digest(projectDirectory);
 	}
 
+	/// <summary>
+	/// Whether a copy can show it is the one in its own project folder: it needs a first cwd and a folder to compare, and they must match. Anything else, a copy
+	/// that does not match or one that cannot tell, may be another fork of the session, so it must not replace the exports of the session.
+	/// </summary>
+	internal static bool IsKnownOriginal(string firstCwd, string? projectDirectory)
+	{
+		return firstCwd.Length > 0 && !string.IsNullOrEmpty(projectDirectory) && RelocatedCopySuffix(firstCwd, projectDirectory).Length == 0;
+	}
+
 	internal static string ClaudePart(string date, string shortId, int part)
 	{
 		return part == 1 ? $"{date}_{shortId}.md" : $"{date}_{shortId}_part-{part:D3}.md";

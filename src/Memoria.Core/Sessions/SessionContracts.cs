@@ -199,6 +199,11 @@ public sealed class RedactedSession
 
 	internal MessageChain MessageChain { get; init; } = MessageChain.Empty;
 
+	/// <summary>
+	/// Whether this session may replace documents exported under its id. False unless it is known to be the same copy: exports may be the only record of a fork, so a double is better than a loss.
+	/// </summary>
+	public bool TakesOverExports { get; init; }
+
 	/// <summary>True when the transcript names a different session from the one the caller said. Its parts would land on the other session's files, so refuse it.</summary>
 	public bool NamesAnotherSession => _pathing.NamesAnotherSession;
 
@@ -239,7 +244,7 @@ public sealed class RedactedSession
 		}
 
 		RedactedSessionDocument[] documents = [.. Documents.Select(document => document with { Path = SessionPaths.ReplaceStem(document.Path, _pathing.Stem, distinct.Stem) })];
-		return new RedactedSession(Format, SessionId, documents, Report, CountsByRule, Refusals, distinct.IsFamily, distinct) { MessageChain = MessageChain };
+		return new RedactedSession(Format, SessionId, documents, Report, CountsByRule, Refusals, distinct.IsFamily, distinct) { MessageChain = MessageChain, TakesOverExports = TakesOverExports };
 	}
 }
 

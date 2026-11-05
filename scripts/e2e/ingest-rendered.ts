@@ -12,6 +12,8 @@ const VERSION = "2026-02-01T00:00:00Z";
 const LATER = "2026-02-01T01:00:00Z";
 const LATEST = "2026-02-01T02:00:00Z";
 const MAX_DOCUMENT_BYTES = 2 * 1024 * 1024;
+/** What the first cwd of a line encodes to, so a session shows it is the copy in its own folder. */
+const OWN_FOLDER = "-srv-demo";
 
 function post(h: Harness, key: string, relative: string, text: string, collection = SAFE): Promise<Answer> {
   const query = new URLSearchParams({ collection, path: relative, updated: VERSION });
@@ -34,7 +36,7 @@ async function sessionTakesOver(h: Harness, key: string): Promise<void> {
   const old = (word: string, end: number): string => `---\nsession_id: "${id}"\nmessage_end: ${end}\n---\n\n## User\n\n${word}\n`;
   await post(h, key, same, old("takeoverold", 0));
   await post(h, key, other, old("takeoverother", 1));
-  const session = (extra: Record<string, string>, ...lines: string[]): Promise<Answer> => send(`${h.apiUrl}/v1/ingest/session?${new URLSearchParams({ collection: SAFE, format: "claude", sessionId: id, updated: LATER, ...extra })}`, { method: "POST", headers: headers(key, "application/x-ndjson"), body: lines.join("") });
+  const session = (extra: Record<string, string>, ...lines: string[]): Promise<Answer> => send(`${h.apiUrl}/v1/ingest/session?${new URLSearchParams({ collection: SAFE, format: "claude", sessionId: id, updated: LATER, projectDirectory: OWN_FOLDER, ...extra })}`, { method: "POST", headers: headers(key, "application/x-ndjson"), body: lines.join("") });
   const cut = await session({}, line("user", "takeovernew"));
   h.check("rendered: a cut copy of a session cannot replace its migrated documents", cut.status === 409 && code(cut) === "session_shrank" && readFileSync(path.join(folder(h), same), "utf8").includes("takeoverold"), cut.text);
 
@@ -53,12 +55,12 @@ async function aDeletedPathStaysDeleted(h: Harness, key: string): Promise<void> 
   const name = "2026-01-15_cecececc.md";
   await post(h, key, name, `---\nsession_id: "${id}"\nmessage_end: 0\n---\n\nsecretish\n`);
   await send(`${h.apiUrl}/v1/documents?${new URLSearchParams({ collection: SAFE, path: name })}`, { method: "DELETE", headers: headers(key) });
-  const session = await send(`${h.apiUrl}/v1/ingest/session?${new URLSearchParams({ collection: SAFE, format: "claude", sessionId: id, updated: new Date(Date.now() + 60_000).toISOString() })}`, { method: "POST", headers: headers(key, "application/x-ndjson"), body: line("user", "secretish") });
+  const session = await send(`${h.apiUrl}/v1/ingest/session?${new URLSearchParams({ collection: SAFE, format: "claude", sessionId: id, projectDirectory: OWN_FOLDER, updated: new Date(Date.now() + 60_000).toISOString() })}`, { method: "POST", headers: headers(key, "application/x-ndjson"), body: line("user", "secretish") });
   h.check("rendered: a deleted path stays deleted when its session arrives", !existsSync(path.join(folder(h), name)) && session.text.includes("part_deleted"), session.text);
 }
 
-function uploadSession(h: Harness, key: string, id: string, updated: string, body: string, format = "claude"): Promise<Answer> {
-  return send(`${h.apiUrl}/v1/ingest/session?${new URLSearchParams({ collection: SAFE, format, sessionId: id, updated })}`, { method: "POST", headers: headers(key, "application/x-ndjson"), body });
+function uploadSession(h: Harness, key: string, id: string, updated: string, body: string, format = "claude", projectDirectory = OWN_FOLDER): Promise<Answer> {
+  return send(`${h.apiUrl}/v1/ingest/session?${new URLSearchParams({ collection: SAFE, format, sessionId: id, updated, projectDirectory })}`, { method: "POST", headers: headers(key, "application/x-ndjson"), body });
 }
 
 function exported(id: string, word: string, end: number): string {
@@ -117,6 +119,29 @@ async function otherFoldersStay(h: Harness, key: string): Promise<void> {
   h.check("rendered: and leaves those in another", (await hits(h, key, "codexforkword")) === 1, session.text);
 }
 
+function partPaths(answer: Answer): string[] {
+  return (JSON.parse(answer.text) as { parts: { path: string }[] }).parts.map((part) => part.path);
+}
+
+async function aResumedCopyKeepsBoth(h: Harness, key: string): Promise<void> {
+  const id = "c3c3c3c3-1111-2222-3333-444444444444";
+  const original = "2026-01-15_c3c3c3c3.md";
+  const export_ = exported(id, "resumeoriginalword", 50);
+  await post(h, key, original, export_);
+  const resumed = await uploadSession(h, key, id, LATER, line("user", "resumeforkword"), "claude", "-other-place");
+  await forceIndex({ h });
+  const own = partPaths(resumed)[0] ?? "";
+  const originalFile = path.join(folder(h), original);
+  h.check("rendered: a session resumed from another directory leaves the original export whole", resumed.status === 202 && readFileSync(originalFile, "utf8") === export_, resumed.text);
+  h.check("rendered: and stores beside it under its own name", own !== original && readFileSync(path.join(folder(h), own), "utf8").includes("resumeforkword"), resumed.text);
+  h.check("rendered: with both searchable, so no text is lost", (await hits(h, key, "resumeoriginalword")) === 1 && (await hits(h, key, "resumeforkword")) === 1);
+
+  const later = await uploadSession(h, key, id, LATEST, line("user", "resumeforkword") + line("assistant", "resumelaterword", 1), "claude", "-other-place");
+  await forceIndex({ h });
+  h.check("rendered: a later upload from that copy stays on its own path", later.status === 202 && partPaths(later).length === 1 && partPaths(later)[0] === own && (await hits(h, key, "resumelaterword")) === 1, later.text);
+  h.check("rendered: and the original export is still whole", readFileSync(originalFile, "utf8") === export_ && (await hits(h, key, "resumeoriginalword")) === 1);
+}
+
 async function refusals(h: Harness, key: string, token: string): Promise<void> {
   const over = await post(h, key, "old-export/too-big.md", "x".repeat(MAX_DOCUMENT_BYTES + 1));
   h.check("rendered: over the cap gets 413, and nothing is written", over.status === 413 && !existsSync(path.join(folder(h), "old-export", "too-big.md")), over.status);
@@ -162,4 +187,5 @@ export async function ingestRendered(h: Harness, keys: ApiKeyMaker): Promise<voi
   await aTakeoverIsFinal(h, key);
   await aNewNameLandsBeside(h, key);
   await otherFoldersStay(h, key);
+  await aResumedCopyKeepsBoth(h, key);
 }

@@ -21,6 +21,9 @@ public sealed class RenderedIngestTests(AuthApiFactory factory) : IClassFixture<
 		return factory.ClientWithScopesAsync([MemoriaScopes.Ingest], collections.Length == 0 ? ["c"] : collections);
 	}
 
+	/// <summary>What the first cwd of <see cref="ClaudeLine"/> encodes to, so these sessions show they are the copy in their own folder.</summary>
+	private const string OwnFolder = "-srv-demo";
+
 	private static string UniquePath()
 	{
 		return $"2024/{Guid.NewGuid():N}.md";
@@ -243,7 +246,7 @@ public sealed class RenderedIngestTests(AuthApiFactory factory) : IClassFixture<
 		await PostAsync(client, same, RenderedPart(id, "oldfirst", 0));
 		await PostAsync(client, other, RenderedPart(id, "oldsecond", 1));
 
-		HttpResponseMessage session = await PostSessionAsync(client, ClaudeLine("user", "newfirst") + ClaudeLine("assistant", "newsecond", 1), sessionId: id, updated: Stamp.AddHours(1));
+		HttpResponseMessage session = await PostSessionAsync(client, ClaudeLine("user", "newfirst") + ClaudeLine("assistant", "newsecond", 1), projectDirectory: OwnFolder, sessionId: id, updated: Stamp.AddHours(1));
 
 		Assert.Equal(HttpStatusCode.Accepted, session.StatusCode);
 		Assert.Contains(other, (await ReadAsync(session)).GetProperty("superseded").GetProperty("deleted").EnumerateArray().Select(static path => path.GetString()));
@@ -263,12 +266,12 @@ public sealed class RenderedIngestTests(AuthApiFactory factory) : IClassFixture<
 		await PostAsync(client, other, RenderedPart(id, "oldsecond", 0));
 		corpus.OnWrite = static _ => Busy();
 
-		HttpResponseMessage failed = await PostSessionAsync(client, ClaudeLine("user", "x"), sessionId: id, updated: Stamp.AddHours(1));
+		HttpResponseMessage failed = await PostSessionAsync(client, ClaudeLine("user", "x"), projectDirectory: OwnFolder, sessionId: id, updated: Stamp.AddHours(1));
 
 		Assert.Equal((HttpStatusCode)207, failed.StatusCode);
 		Assert.True(corpus.Files.ContainsKey(other), "the old document stays until every part has arrived");
 		corpus.OnWrite = static _ => null;
-		Assert.Equal(HttpStatusCode.Accepted, (await PostSessionAsync(client, ClaudeLine("user", "x"), sessionId: id, updated: Stamp.AddHours(1))).StatusCode);
+		Assert.Equal(HttpStatusCode.Accepted, (await PostSessionAsync(client, ClaudeLine("user", "x"), projectDirectory: OwnFolder, sessionId: id, updated: Stamp.AddHours(1))).StatusCode);
 		Assert.False(corpus.Files.ContainsKey(other));
 	}
 
@@ -281,8 +284,8 @@ public sealed class RenderedIngestTests(AuthApiFactory factory) : IClassFixture<
 		string path = $"2026-01-15_{id[..8]}.md";
 		await PostAsync(client, path, RenderedPart(id, "themigratedtext", 5));
 
-		HttpResponseMessage cut = await PostSessionAsync(client, ClaudeLine("user", "only one"), sessionId: id, updated: Stamp.AddHours(1));
-		HttpResponseMessage whole = await PostSessionAsync(client, string.Concat(Enumerable.Range(0, 6).Select(static n => ClaudeLine(n % 2 == 0 ? "user" : "assistant", $"m{n}", n))), sessionId: id, updated: Stamp.AddHours(1));
+		HttpResponseMessage cut = await PostSessionAsync(client, ClaudeLine("user", "only one"), projectDirectory: OwnFolder, sessionId: id, updated: Stamp.AddHours(1));
+		HttpResponseMessage whole = await PostSessionAsync(client, string.Concat(Enumerable.Range(0, 6).Select(static n => ClaudeLine(n % 2 == 0 ? "user" : "assistant", $"m{n}", n))), projectDirectory: OwnFolder, sessionId: id, updated: Stamp.AddHours(1));
 
 		Assert.Equal("session_shrank", (await ReadAsync(cut)).GetProperty("code").GetString());
 		Assert.Equal(HttpStatusCode.Accepted, whole.StatusCode);
@@ -297,7 +300,7 @@ public sealed class RenderedIngestTests(AuthApiFactory factory) : IClassFixture<
 		string id = Guid.NewGuid().ToString();
 		await PostAsync(client, $"2026-01-15_{id[..8]}.md", RenderedPart(id, "x", 0));
 
-		HttpResponseMessage older = await PostSessionAsync(client, ClaudeLine("user", "x"), sessionId: id, updated: Stamp.AddDays(-1));
+		HttpResponseMessage older = await PostSessionAsync(client, ClaudeLine("user", "x"), projectDirectory: OwnFolder, sessionId: id, updated: Stamp.AddDays(-1));
 
 		Assert.Equal("stale_version", (await ReadAsync(older)).GetProperty("code").GetString());
 	}
@@ -312,13 +315,13 @@ public sealed class RenderedIngestTests(AuthApiFactory factory) : IClassFixture<
 		await PostAsync(client, path, RenderedPart(id, "holds a credential", 0));
 		await client.DeleteAsync($"/v1/documents?collection=c&path={path}");
 
-		JsonElement session = await ReadAsync(await PostSessionAsync(client, ClaudeLine("user", "holds a credential"), sessionId: id, updated: DateTimeOffset.UtcNow.AddMinutes(30)));
+		JsonElement session = await ReadAsync(await PostSessionAsync(client, ClaudeLine("user", "holds a credential"), projectDirectory: OwnFolder, sessionId: id, updated: DateTimeOffset.UtcNow.AddMinutes(30)));
 
 		Assert.Equal([SessionPartState.Deleted], States(session));
 		Assert.Empty(corpus.Files);
 
 		// Still a tombstone, so the next upload gets the same answer.
-		JsonElement resumed = await ReadAsync(await PostSessionAsync(client, ClaudeLine("user", "holds a credential") + ClaudeLine("assistant", "more", 1), sessionId: id, updated: DateTimeOffset.UtcNow.AddMinutes(40)));
+		JsonElement resumed = await ReadAsync(await PostSessionAsync(client, ClaudeLine("user", "holds a credential") + ClaudeLine("assistant", "more", 1), projectDirectory: OwnFolder, sessionId: id, updated: DateTimeOffset.UtcNow.AddMinutes(40)));
 		Assert.Equal([SessionPartState.Deleted], States(resumed));
 		Assert.Empty(corpus.Files);
 
@@ -340,7 +343,7 @@ public sealed class RenderedIngestTests(AuthApiFactory factory) : IClassFixture<
 		await PostAsync(client, third, RenderedPart(id, "three", 0));
 		await client.DeleteAsync($"/v1/documents?collection=c&path={first}");
 
-		JsonElement session = await ReadAsync(await PostSessionAsync(client, ClaudeLine("user", "one"), sessionId: id, updated: DateTimeOffset.UtcNow.AddMinutes(30)));
+		JsonElement session = await ReadAsync(await PostSessionAsync(client, ClaudeLine("user", "one"), projectDirectory: OwnFolder, sessionId: id, updated: DateTimeOffset.UtcNow.AddMinutes(30)));
 
 		Assert.Equal([SessionPartState.Deleted], States(session));
 		Assert.False(session.GetProperty("complete").GetBoolean());
@@ -356,8 +359,8 @@ public sealed class RenderedIngestTests(AuthApiFactory factory) : IClassFixture<
 		string path = $"2026-01-15_{id[..8]}.md";
 		await PostAsync(client, path, $"---\nsession_id: \"{id}\"\n---\n\nmigrated\n");
 
-		HttpResponseMessage refused = await PostSessionAsync(client, ClaudeLine("user", "x"), sessionId: id, updated: Stamp.AddHours(1));
-		HttpResponseMessage allowed = await PostSessionAsync(client, ClaudeLine("user", "x"), sessionId: id, updated: Stamp.AddHours(1), allowShrink: true);
+		HttpResponseMessage refused = await PostSessionAsync(client, ClaudeLine("user", "x"), projectDirectory: OwnFolder, sessionId: id, updated: Stamp.AddHours(1));
+		HttpResponseMessage allowed = await PostSessionAsync(client, ClaudeLine("user", "x"), projectDirectory: OwnFolder, sessionId: id, updated: Stamp.AddHours(1), allowShrink: true);
 
 		Assert.Equal("session_shrank", (await ReadAsync(refused)).GetProperty("code").GetString());
 		Assert.Equal(HttpStatusCode.Accepted, allowed.StatusCode);
@@ -431,7 +434,7 @@ public sealed class RenderedIngestTests(AuthApiFactory factory) : IClassFixture<
 		string text = namesAnother ? RenderedPart(Guid.NewGuid().ToString(), "someone else", 0) : "---\ntitle: \"none\"\n---\n\nsomeone else\n";
 		await PostAsync(client, path, text);
 
-		HttpResponseMessage session = await PostSessionAsync(client, ClaudeLine("user", "x"), sessionId: id, updated: Stamp.AddHours(1));
+		HttpResponseMessage session = await PostSessionAsync(client, ClaudeLine("user", "x"), projectDirectory: OwnFolder, sessionId: id, updated: Stamp.AddHours(1));
 
 		Assert.Equal("path_owned", (await ReadAsync(session)).GetProperty("code").GetString());
 		Assert.Equal(text, corpus.Files[path]);
@@ -445,11 +448,11 @@ public sealed class RenderedIngestTests(AuthApiFactory factory) : IClassFixture<
 		string id = Guid.NewGuid().ToString();
 		string path = $"2026-01-15_{id[..8]}.md";
 		await PostAsync(client, path, RenderedPart(id, "oldword", 0));
-		await PostSessionAsync(client, ClaudeLine("user", "newword"), sessionId: id, updated: Stamp.AddHours(1));
+		await PostSessionAsync(client, ClaudeLine("user", "newword"), projectDirectory: OwnFolder, sessionId: id, updated: Stamp.AddHours(1));
 
 		HttpResponseMessage again = await PostAsync(client, path, RenderedPart(id, "oldword", 0), updated: Stamp.AddHours(2));
 		JsonElement status = await ReadAsync(await client.GetAsync($"/v1/ingest/rendered?collection=c&path={path}"));
-		HttpResponseMessage resumed = await PostSessionAsync(client, ClaudeLine("user", "newword") + ClaudeLine("assistant", "resumed", 1), sessionId: id, updated: Stamp.AddHours(3));
+		HttpResponseMessage resumed = await PostSessionAsync(client, ClaudeLine("user", "newword") + ClaudeLine("assistant", "resumed", 1), projectDirectory: OwnFolder, sessionId: id, updated: Stamp.AddHours(3));
 
 		Assert.Equal("path_owned", (await ReadAsync(again)).GetProperty("code").GetString());
 		Assert.Equal(IngestStateName.TakenOver, status.GetProperty("state").GetString());
@@ -465,7 +468,7 @@ public sealed class RenderedIngestTests(AuthApiFactory factory) : IClassFixture<
 		string id = Guid.NewGuid().ToString();
 		string path = $"2026-01-15_{id[..8]}.md";
 		await PostAsync(client, path, RenderedPart(id, "oldword", 0));
-		await PostSessionAsync(client, ClaudeLine("user", "newword"), sessionId: id, updated: Stamp.AddHours(1));
+		await PostSessionAsync(client, ClaudeLine("user", "newword"), projectDirectory: OwnFolder, sessionId: id, updated: Stamp.AddHours(1));
 		await client.DeleteAsync($"/v1/documents?collection=c&path={path}");
 
 		HttpResponseMessage again = await PostAsync(client, path, RenderedPart(id, "oldword", 0), updated: DateTimeOffset.UtcNow.AddMinutes(30));
@@ -484,7 +487,7 @@ public sealed class RenderedIngestTests(AuthApiFactory factory) : IClassFixture<
 		string id = Guid.NewGuid().ToString();
 		string other = $"2026-01-15_{id[..8]}_part-009.md";
 		await PostAsync(client, other, RenderedPart(id, "oldword", 0));
-		await PostSessionAsync(client, ClaudeLine("user", "newword"), sessionId: id, updated: Stamp.AddHours(1));
+		await PostSessionAsync(client, ClaudeLine("user", "newword"), projectDirectory: OwnFolder, sessionId: id, updated: Stamp.AddHours(1));
 
 		HttpResponseMessage again = await PostAsync(client, other, RenderedPart(id, "oldword", 0), updated: Stamp.AddHours(2));
 
@@ -499,13 +502,13 @@ public sealed class RenderedIngestTests(AuthApiFactory factory) : IClassFixture<
 		HttpClient client = await WriterAsync();
 		string id = Guid.NewGuid().ToString();
 		string fresh = $"2026-01-15_{id[..8]}_part-007.md";
-		await PostSessionAsync(client, ClaudeLine("user", "newword"), sessionId: id, updated: Stamp.AddHours(1));
+		await PostSessionAsync(client, ClaudeLine("user", "newword"), projectDirectory: OwnFolder, sessionId: id, updated: Stamp.AddHours(1));
 
 		HttpResponseMessage landed = await PostAsync(client, fresh, RenderedPart(id, "freshword", 0));
 
 		Assert.Equal(HttpStatusCode.Accepted, landed.StatusCode);
 		Assert.Contains("freshword", corpus.Files[fresh], StringComparison.Ordinal);
-		HttpResponseMessage next = await PostSessionAsync(client, ClaudeLine("user", "newword") + ClaudeLine("assistant", "more", 1), sessionId: id, updated: Stamp.AddHours(2));
+		HttpResponseMessage next = await PostSessionAsync(client, ClaudeLine("user", "newword") + ClaudeLine("assistant", "more", 1), projectDirectory: OwnFolder, sessionId: id, updated: Stamp.AddHours(2));
 		Assert.Equal(HttpStatusCode.Accepted, next.StatusCode);
 		Assert.False(corpus.Files.ContainsKey(fresh));
 	}
@@ -521,7 +524,7 @@ public sealed class RenderedIngestTests(AuthApiFactory factory) : IClassFixture<
 		string fork = RenderedPart(id, "onlyinthefork", 50);
 		await PostAsync(client, elsewhere, fork);
 
-		HttpResponseMessage session = await PostSessionAsync(client, ClaudeLine("user", "newword"), sessionId: id, updated: Stamp.AddHours(1));
+		HttpResponseMessage session = await PostSessionAsync(client, ClaudeLine("user", "newword"), projectDirectory: OwnFolder, sessionId: id, updated: Stamp.AddHours(1));
 
 		Assert.Equal(HttpStatusCode.Accepted, session.StatusCode);
 		Assert.Contains("newword", corpus.Files[root], StringComparison.Ordinal);
@@ -557,7 +560,7 @@ public sealed class RenderedIngestTests(AuthApiFactory factory) : IClassFixture<
 		string id = Guid.NewGuid().ToString();
 		await PostAsync(client, $"2026-01-15_{id[..8]}.md", "---\nsession_id: \"" + id + "\"\n---\n\nsays no count\n");
 
-		string body = await (await PostSessionAsync(client, ClaudeLine("user", "cutcopytext"), sessionId: id, updated: Stamp.AddHours(1))).Content.ReadAsStringAsync();
+		string body = await (await PostSessionAsync(client, ClaudeLine("user", "cutcopytext"), projectDirectory: OwnFolder, sessionId: id, updated: Stamp.AddHours(1))).Content.ReadAsStringAsync();
 
 		Assert.Contains("session_shrank", body, StringComparison.Ordinal);
 		Assert.Contains("does not say how many", body, StringComparison.Ordinal);
@@ -590,6 +593,76 @@ public sealed class RenderedIngestTests(AuthApiFactory factory) : IClassFixture<
 	}
 
 	[Fact]
+	public async Task A_session_resumed_from_another_directory_takes_nothing_over_and_stays_on_its_own_name()
+	{
+		FakeCorpus corpus = new(factory.Sidecar);
+		HttpClient client = await WriterAsync();
+		string id = Guid.NewGuid().ToString();
+		string original = $"2026-01-15_{id[..8]}.md";
+		string export = RenderedPart(id, "onlyintheoriginal", 50);
+		await PostAsync(client, original, export);
+
+		JsonElement first = await ReadAsync(await PostSessionAsync(client, ClaudeLine("user", "forkword"), projectDirectory: "-other-place", sessionId: id, updated: Stamp.AddHours(1)));
+		string own = Assert.Single(first.GetProperty("parts").EnumerateArray()).GetProperty("path").GetString()!;
+		JsonElement later = await ReadAsync(await PostSessionAsync(client, ClaudeLine("user", "forkword") + ClaudeLine("assistant", "forkmore", 1), projectDirectory: "-other-place", sessionId: id, updated: Stamp.AddHours(2)));
+
+		Assert.Equal(export, corpus.Files[original]);
+		Assert.NotEqual(original, own);
+		Assert.Equal(own, Assert.Single(later.GetProperty("parts").EnumerateArray()).GetProperty("path").GetString());
+		Assert.Contains("forkmore", corpus.Files[own], StringComparison.Ordinal);
+		Assert.Equal(2, corpus.Files.Count);
+
+		// The copy in its own folder still takes the export over, and leaves the other copy alone.
+		HttpResponseMessage continuing = await PostSessionAsync(client, string.Concat(Enumerable.Range(0, 51).Select(static n => ClaudeLine("user", $"m{n}", n))), projectDirectory: OwnFolder, sessionId: id, updated: Stamp.AddHours(3));
+		Assert.Equal(HttpStatusCode.Accepted, continuing.StatusCode);
+		Assert.DoesNotContain("onlyintheoriginal", corpus.Files[original], StringComparison.Ordinal);
+		Assert.Contains("forkmore", corpus.Files[own], StringComparison.Ordinal);
+	}
+
+	[Theory]
+	[InlineData(null, "/srv/demo")]
+	[InlineData("-srv-demo", "")]
+	public async Task A_session_that_cannot_show_which_copy_it_is_replaces_no_export(string? projectDirectory, string cwd)
+	{
+		FakeCorpus corpus = new(factory.Sidecar);
+		HttpClient client = await WriterAsync();
+		string id = Guid.NewGuid().ToString();
+		string same = $"2026-01-15_{id[..8]}.md", elsewhere = $"2026-01-20_{id[..8]}.md";
+		string atSame = RenderedPart(id, "samename", 0), atOther = RenderedPart(id, "othername", 0);
+		await PostAsync(client, same, atSame);
+		await PostAsync(client, elsewhere, atOther);
+
+		HttpResponseMessage refused = await PostSessionAsync(client, ClaudeLine("user", "x", cwd: cwd), projectDirectory: projectDirectory, sessionId: id, updated: Stamp.AddHours(1));
+
+		Assert.Equal("path_owned", (await ReadAsync(refused)).GetProperty("code").GetString());
+		Assert.Contains("projectDirectory", await refused.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+		Assert.Equal(atSame, corpus.Files[same]);
+
+		// Under a name no export holds, it lands beside them.
+		HttpResponseMessage beside = await PostSessionAsync(client, ClaudeLine("user", "x", day: "2026-01-16", cwd: cwd), projectDirectory: projectDirectory, sessionId: id, updated: Stamp.AddHours(1));
+		Assert.Equal(HttpStatusCode.Accepted, beside.StatusCode);
+		Assert.Equal(atOther, corpus.Files[elsewhere]);
+		Assert.Equal(atSame, corpus.Files[same]);
+		Assert.Equal(3, corpus.Files.Count);
+	}
+
+	[Fact]
+	public async Task A_session_that_cannot_show_which_copy_it_is_still_cannot_bring_back_a_deleted_path()
+	{
+		FakeCorpus corpus = new(factory.Sidecar);
+		HttpClient client = await WriterAsync();
+		string id = Guid.NewGuid().ToString();
+		string path = $"2026-01-15_{id[..8]}.md";
+		await PostAsync(client, path, RenderedPart(id, "holds a credential", 0));
+		await client.DeleteAsync($"/v1/documents?collection=c&path={path}");
+
+		JsonElement session = await ReadAsync(await PostSessionAsync(client, ClaudeLine("user", "holds a credential"), sessionId: id, updated: DateTimeOffset.UtcNow.AddMinutes(30)));
+
+		Assert.Equal([SessionPartState.Deleted], States(session));
+		Assert.Empty(corpus.Files);
+	}
+
+	[Fact]
 	public async Task A_session_waits_for_a_rendered_write_still_running()
 	{
 		_ = new FakeCorpus(factory.Sidecar);
@@ -598,7 +671,7 @@ public sealed class RenderedIngestTests(AuthApiFactory factory) : IClassFixture<
 		IngestClaimRequest running = new(DocumentIngestor.IdentityOf("c", path), "c", Stamp, DateTimeOffset.UtcNow, [path], Lookup: IngestIdentity.ForRenderedSession("c", id, path));
 		await factory.Services.GetRequiredService<IIngestLedger>().ClaimAsync(running, default);
 
-		HttpResponseMessage session = await PostSessionAsync(await WriterAsync(), ClaudeLine("user", "x"), sessionId: id, updated: Stamp.AddHours(1));
+		HttpResponseMessage session = await PostSessionAsync(await WriterAsync(), ClaudeLine("user", "x"), projectDirectory: OwnFolder, sessionId: id, updated: Stamp.AddHours(1));
 
 		Assert.Equal("ingest_in_progress", (await ReadAsync(session)).GetProperty("code").GetString());
 	}

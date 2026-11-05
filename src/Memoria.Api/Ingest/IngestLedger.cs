@@ -62,6 +62,9 @@ public sealed record IngestClaimRequest(
 {
 	/// <summary>For a session: the lookup its rendered documents in its own folder were recorded under. Those it takes over, as the same text under the session's own rules.</summary>
 	public string? RenderedLookup { get; init; }
+
+	/// <summary>For a session that may be another fork: it leaves its rendered documents where they are, and only a path someone deleted still applies to it.</summary>
+	public bool LeavesRendered { get; init; }
 }
 
 /// <summary>The answer to a claim. <see cref="PreviousPaths"/> is what earlier uploads wrote, which the index may not have seen yet.</summary>
@@ -303,7 +306,7 @@ public sealed class SqliteIngestLedger(ControlDatabase database) : IIngestLedger
 			rows.Add(new RenderedRow(reader.GetString(9), Map(reader)));
 		}
 
-		return rows;
+		return request.LeavesRendered ? [.. rows.Where(static found => !found.IsLive)] : rows;
 	}
 
 	/// <summary>

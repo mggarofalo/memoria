@@ -360,6 +360,11 @@ internal static class IngestRules
 		return new IngestRefusedException(StatusCodes.Status409Conflict, "session_shrank", "This upload has fewer messages than what is stored, or a migrated document it would replace does not say how many it holds, so it may be a cut copy. Nothing was changed. If this copy really is the whole session, send it again with allowShrink=true, and it replaces what is stored.");
 	}
 
+	public static IngestRefusedException PathOwnedUntilFolderIsKnown()
+	{
+		return new IngestRefusedException(StatusCodes.Status409Conflict, "path_owned", "A file this would write belongs to another document or session, and this upload did not show it is the copy in its own project folder, so it replaces no export. Nothing was changed. If that file is this session's export, send projectDirectory, and the transcript's first cwd must match it.");
+	}
+
 	public static IngestRefusedException RenderedShrank()
 	{
 		return new IngestRefusedException(StatusCodes.Status409Conflict, "session_shrank", "This document says it holds fewer messages than the copy stored at its path, so it may be a cut copy. Nothing was changed. If it really is shorter, delete the path and send it again dated after the delete.");

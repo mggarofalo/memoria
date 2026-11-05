@@ -112,6 +112,11 @@ public sealed partial class SessionIngestor(
 			LogLooksCut(logger, input.Collection, identity, claim.Outcome);
 		}
 
+		if (claim.Outcome == IngestClaimOutcome.PathConflict && !session.TakesOverExports)
+		{
+			throw IngestRules.PathOwnedUntilFolderIsKnown();
+		}
+
 		IngestRules.RequireClaim(claim);
 		return (session, claim);
 	}
@@ -134,6 +139,7 @@ public sealed partial class SessionIngestor(
 			StartsWithStored: (count, stored) => session.MessageDigestAt(count) is { } chain && digests.Matches(stored, chain))
 		{
 			RenderedLookup = IngestIdentity.ForRenderedSession(input.Collection, input.SessionId, session.Documents[0].Path),
+			LeavesRendered = !session.TakesOverExports,
 		};
 	}
 
