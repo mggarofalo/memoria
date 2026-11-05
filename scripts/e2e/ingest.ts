@@ -152,9 +152,26 @@ async function createKey(h: Harness, admin: string, label: string, scopes: strin
   return h.remember((JSON.parse(answer.text) as { key: string }).key);
 }
 
-async function mcpCall(c: Context, name: string, args: Record<string, unknown>): Promise<string> {
-  const headers = { ...headersFor(c.reader), accept: "application/json, text/event-stream" };
-  const url = `${c.h.apiUrl}/mcp`;
+function mcpCall(c: Context, name: string, args: Record<string, unknown>): Promise<string> {
+  return mcpTool(c.h, c.reader, name, args);
+}
+
+export interface FilterArguments {
+  project?: string[];
+  branch?: string[];
+  since?: string;
+  until?: string;
+  tags?: string[];
+}
+
+/** The text of a `search` tool call, as a client of the MCP server gets it. */
+export function mcpSearch(h: Harness, key: string, args: { query: string; collections: string[]; rerank: boolean } & FilterArguments): Promise<string> {
+  return mcpTool(h, key, "search", args);
+}
+
+async function mcpTool(h: Harness, key: string, name: string, args: Record<string, unknown>): Promise<string> {
+  const headers = { ...headersFor(key), accept: "application/json, text/event-stream" };
+  const url = `${h.apiUrl}/mcp`;
   const opened = await fetch(url, { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "e2e", version: "1" } } }) });
   await opened.text();
   const session = opened.headers.get("mcp-session-id");
