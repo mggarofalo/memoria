@@ -69,8 +69,8 @@ func TestAReportCountsCredentialNamesAndCaveatsGitleaks(t *testing.T) {
 	reports := []migrate.Report{{Name: "notes", CheckResult: migrate.CheckResult{
 		Files: 1, CredentialNames: 1, Unscanned: 1, GitleaksRan: true, GitleaksResults: map[string]int{"rule": 2}, Replacements: map[string]int{"r": 1}, FilesByRule: map[string]int{"r": 1},
 	}}}
-	checkHolds(t, renderedBy(t, func(w io.Writer) error { return MigrateReportTable(w, reports) }), "1 file name(s) look like a credential", "best effort", "UNSCANNED", "rule: 2 left")
-	checkHolds(t, renderedBy(t, func(w io.Writer) error { return MigrateReportMarkdown(w, reports) }), "1 file name(s) look like a credential", "best effort", "1 not scanned")
+	checkHolds(t, renderedBy(t, func(w io.Writer) error { return MigrateReportTable(w, reports) }), "1 file name(s) look like a credential", "best effort", "UNSCANNED", "rule: 2 left", "Redaction keeps what follows a secret")
+	checkHolds(t, renderedBy(t, func(w io.Writer) error { return MigrateReportMarkdown(w, reports) }), "1 file name(s) look like a credential", "best effort", "1 not scanned", "Redaction keeps what follows a secret")
 	unrun := []migrate.Report{{Name: "notes"}}
 	checkHolds(t, renderedBy(t, func(w io.Writer) error { return MigrateReportTable(w, unrun) }), "NOT RUN")
 }

@@ -69,6 +69,9 @@ func MigratePlanMarkdown(w io.Writer, plans []migrate.Plan, raw *migrate.RawSess
 // gitleaksCaveat keeps a count of 0 from reading as proof.
 const gitleaksCaveat = "Gitleaks is best effort: it can miss a token at a chunk boundary, so 0 findings is not proof that nothing is left."
 
+// wrappedCaveat says what redaction gives up to keep the text after a secret, and what it still removes more of than the secret.
+const wrappedCaveat = "Redaction keeps what follows a secret. So a token wrapped across lines, whose last piece reads as an ordinary word or number, can keep that piece, up to about 12 characters, with the rest removed. A Cookie header's whole line goes, as any cookie in it may be live."
+
 func anyGitleaks(reports []migrate.Report) bool {
 	for i := range reports {
 		if reports[i].GitleaksRan {
@@ -124,6 +127,7 @@ func MigrateReportTable(w io.Writer, reports []migrate.Report) error {
 	if anyGitleaks(reports) {
 		b.WriteString(gitleaksCaveat + "\n")
 	}
+	b.WriteString(wrappedCaveat + "\n")
 	return writeText(w, &b)
 }
 
@@ -146,6 +150,7 @@ func MigrateReportMarkdown(w io.Writer, reports []migrate.Report) error {
 	if anyGitleaks(reports) {
 		b.WriteString("\n" + gitleaksCaveat + "\n")
 	}
+	b.WriteString("\n" + wrappedCaveat + "\n")
 	return writeText(w, &b)
 }
 
