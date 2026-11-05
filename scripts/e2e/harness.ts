@@ -5,11 +5,13 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import type { Plan, ProxyRecord } from "./proxy.ts";
 
 export const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -21,7 +23,45 @@ export const KEY_RATE_LIMIT = 100;
 export const FAILED_AUTH_LIMIT = 20;
 const LIMIT_WINDOW = "00:30:00";
 
+/** The one peer whose X-Forwarded-For the API believes. Other 127.0.0.x peers are not trusted. */
+export const TRUSTED_PEER = "127.0.0.9";
+
+/** All document bodies in one batch response, set low so a few fixture documents reach it. */
+export const BATCH_BUDGET = 100_000;
+export const BULK_DOCUMENTS = 5;
+export const BULK_DOCUMENT_BYTES = 30_000;
+/** One past what a batch may select from globs. */
+export const MANY_DOCUMENTS = 1001;
+export const TOTAL_DOCUMENTS = 2 + BULK_DOCUMENTS + MANY_DOCUMENTS;
+
 const KEY_PATTERN = /mem_[0-9a-f]+_[0-9a-f]+/g;
+
+const REFUSAL_TIMEOUT_MS = 30_000;
+
+export interface RequestOptions {
+  path: string;
+  method?: string;
+  key?: string;
+  /** The local address to connect from, which is the peer address the API sees. */
+  from?: string;
+  headers?: Record<string, string>;
+  body?: unknown;
+  /** This answer carries a new key by design, so the scan of responses leaves it out. */
+  issuing?: boolean;
+  /** Another host, instead of the main API. */
+  baseUrl?: string;
+}
+
+export interface ApiResponse {
+  status: number;
+  body: string;
+  headers: http.IncomingHttpHeaders;
+}
+
+export interface ExtraHost {
+  url: string;
+  log(): string;
+}
 
 export interface CliResult {
   code: number;
@@ -40,8 +80,12 @@ export class Harness {
   readonly dir = mkdtempSync(path.join(os.tmpdir(), "memoria-e2e-"));
   readonly secrets: string[] = [];
   readonly results: Array<{ name: string; ok: boolean }> = [];
+  /** Every answer that does not carry a new key by design, for the final scan. */
+  readonly responses: ApiResponse[] = [];
   apiUrl = "";
   sidecarPort = 0;
+  private proxyPort = 0;
+  private controlReader: DatabaseSync | undefined;
   private readonly children: ChildProcess[] = [];
   private readonly fds: number[] = [];
   private readonly cli = path.join(this.dir, process.platform === "win32" ? "memoria.exe" : "memoria");
@@ -78,6 +122,11 @@ export class Harness {
     }
   }
 
+  /** The whole key and its secret part alone, plus the sidecar's secret: none may be stored or logged. */
+  sensitiveValues(): string[] {
+    return [...this.secrets, ...this.secrets.map((key) => key.split("_")[2] ?? key), this.sidecarSecret];
+  }
+
   /** Remembers a key, so nothing printed from here on can repeat it. */
   remember(key: string): string {
     this.secrets.push(key);
@@ -111,15 +160,14 @@ export class Harness {
     for (const [collection, file, text] of [
       ["notes", "hello.md", "# Hello\n\nThe zebrafish protocol lives here.\n\x1b]52;c;ZXZpbA==\x07 stored escape\n"],
       ["secret", "hidden.md", "# Hidden\n\nThe zebrafish hidden ledger.\n"],
+      ...bulkFixtures(),
+      ...manyFixtures(),
     ] as const) {
       const folder = path.join(this.dir, "corpus", collection);
       mkdirSync(folder, { recursive: true });
       writeFileSync(path.join(folder, file), text);
     }
-    const collections = {
-      notes: { path: path.join(this.dir, "corpus", "notes"), pattern: "**/*.md" },
-      secret: { path: path.join(this.dir, "corpus", "secret"), pattern: "**/*.md" },
-    };
+    const collections = Object.fromEntries(["notes", "secret", "bulk", "many"].map((name) => [name, { path: path.join(this.dir, "corpus", name), pattern: "**/*.md" }]));
     const code = `const qmd = await import("@tobilu/qmd");
 const store = await qmd.createStore({ dbPath: ${JSON.stringify(path.join(this.dir, "index.sqlite"))}, config: { collections: ${JSON.stringify(collections)} } });
 await store.update();
@@ -163,17 +211,107 @@ await store.close();`;
 
   /** Runs a command against the same control database as the API, with no host started. */
   bootstrap(label: string): { code: number; out: string; err: string } {
-    const result = spawnSync("dotnet", [apiDll(), "--bootstrap-admin-key", label], { env: this.apiEnvironment(), encoding: "utf8", timeout: 120_000 });
+    const result = spawnSync("dotnet", [apiDll(), "--bootstrap-admin-key", label], { cwd: apiDirectory(), env: this.apiEnvironment(), encoding: "utf8", timeout: 120_000 });
     return { code: result.status ?? -1, out: result.stdout ?? "", err: result.stderr ?? "" };
   }
 
   async startApi(): Promise<void> {
-    this.launch("dotnet", [apiDll()], repo, this.apiEnvironment(), "api.log");
+    this.launch("dotnet", [apiDll()], apiDirectory(), this.apiEnvironment(), "api.log");
     this.check("API answers", await waitForHttp(`${this.apiUrl}/health`), this.log("api"));
   }
 
   async choosePorts(): Promise<void> {
     this.apiUrl = `http://127.0.0.1:${await freePort()}`;
+    this.proxyPort = await freePort();
+  }
+
+  /** Between the API and the sidecar from here on. See proxy.ts. */
+  async startProxy(): Promise<void> {
+    this.launch(process.execPath, [path.join(repo, "scripts", "e2e", "proxy.ts"), String(this.proxyPort), String(this.sidecarPort), this.proxyRecordFile()], repo, this.isolated, "proxy.log");
+    this.check("recording proxy answers", await waitForHttp(`http://127.0.0.1:${this.proxyPort}/health`));
+  }
+
+  private proxyRecordFile(): string {
+    return path.join(this.dir, "proxy-records.jsonl");
+  }
+
+  /** How many calls the proxy has recorded, to pass to `proxied` later. */
+  proxiedCount(): number {
+    return this.proxied().length;
+  }
+
+  /** What the sidecar was asked, in order, from a count `proxiedCount` returned. */
+  proxied(from = 0): ProxyRecord[] {
+    const lines = readFileSync(this.proxyRecordFile(), "utf8").split("\n").filter((line) => line !== "");
+    return lines.slice(from).map((line) => JSON.parse(line) as ProxyRecord);
+  }
+
+  async planProxy(plan: Plan): Promise<void> {
+    await fetch(`http://127.0.0.1:${this.proxyPort}/__e2e/plan`, { method: "POST", body: JSON.stringify(plan) });
+  }
+
+  /**
+   * Runs a host that should refuse to start. A host that starts instead is killed, which is not a refusal.
+   * One that stops itself on Linux has no exit code, since an unhandled .NET exception ends in SIGABRT.
+   */
+  refusedHost(overrides: NodeJS.ProcessEnv): Promise<{ refused: boolean; output: string }> {
+    return new Promise((resolve) => {
+      const child = spawn("dotnet", [apiDll()], { cwd: apiDirectory(), env: this.extraHostEnvironment(overrides, `http://127.0.0.1:0`) });
+      let output = "";
+      child.stdout.on("data", (chunk: Buffer) => (output += chunk.toString("utf8")));
+      child.stderr.on("data", (chunk: Buffer) => (output += chunk.toString("utf8")));
+      let started = false;
+      const timer = setTimeout(() => {
+        started = true;
+        child.kill("SIGKILL");
+      }, REFUSAL_TIMEOUT_MS);
+      child.on("close", (code) => {
+        clearTimeout(timer);
+        resolve({ refused: !started && code !== 0, output });
+      });
+    });
+  }
+
+  /** A second host with its own settings, for as long as the run lasts. */
+  async startExtraHost(name: string, overrides: NodeJS.ProcessEnv, cwd = apiDirectory()): Promise<ExtraHost> {
+    const url = `http://127.0.0.1:${await freePort()}`;
+    const logName = `${name}.log`;
+    this.launch("dotnet", [apiDll()], cwd, this.extraHostEnvironment(overrides, url), logName);
+    this.check(`${name} host answers`, await waitForHttp(`${url}/health`));
+    return { url, log: () => readFileSync(path.join(this.dir, logName), "utf8") };
+  }
+
+  /** The main API's settings with these on top. An undefined value removes a setting. */
+  private extraHostEnvironment(overrides: NodeJS.ProcessEnv, url: string): NodeJS.ProcessEnv {
+    return { ...this.apiEnvironment(), ASPNETCORE_URLS: url, ...overrides };
+  }
+
+  /** A path for a control database the main API does not use. */
+  privatePath(name: string): string {
+    return path.join(this.dir, name);
+  }
+
+  /** Runs a read-only query on the live control database. */
+  control<T>(sql: string, ...parameters: SQLInputValue[]): T[] {
+    this.controlReader ??= new DatabaseSync(this.controlPath(), { readOnly: true });
+    return this.controlReader.prepare(sql).all(...parameters) as T[];
+  }
+
+  private controlPath(): string {
+    return path.join(this.dir, "control.sqlite");
+  }
+
+  /** Moves the write-ahead log into the main file, which otherwise may not yet hold what a scan of it looks for. */
+  checkpointControl(): void {
+    const writer = new DatabaseSync(this.controlPath());
+    writer.exec("PRAGMA wal_checkpoint(FULL)");
+    writer.close();
+  }
+
+  /** The raw bytes of the control database and of its write-ahead log, as text that preserves every byte. */
+  controlFiles(): { main: string; wal: string } {
+    const read = (file: string): string => (existsSync(file) ? readFileSync(file).toString("latin1") : "");
+    return { main: read(this.controlPath()), wal: read(`${this.controlPath()}-wal`) };
   }
 
   private apiEnvironment(): NodeJS.ProcessEnv {
@@ -183,10 +321,13 @@ await store.close();`;
       ASPNETCORE_URLS: this.apiUrl,
       ASPNETCORE_ENVIRONMENT: "Production",
       DOTNET_NOLOGO: "1",
-      Memoria__Sidecar__BaseUrl: `http://127.0.0.1:${this.sidecarPort}`,
+      Memoria__Sidecar__BaseUrl: `http://127.0.0.1:${this.proxyPort}`,
       Memoria__Sidecar__Secret: this.sidecarSecret,
       Memoria__Sidecar__ReadyRequiresModels: "false",
-      Memoria__Auth__DatabasePath: path.join(this.dir, "control.sqlite"),
+      Memoria__Search__MaxMultiGetBytes: String(BATCH_BUDGET),
+      Memoria__Auth__Mode: "ApiKey",
+      Memoria__Auth__DatabasePath: this.controlPath(),
+      Memoria__Auth__TrustedProxies__0: TRUSTED_PEER,
       Memoria__Auth__RateLimit__PermitLimit: String(KEY_RATE_LIMIT),
       Memoria__Auth__RateLimit__Window: LIMIT_WINDOW,
       Memoria__Auth__FailedAuth__PermitLimit: String(FAILED_AUTH_LIMIT),
@@ -204,23 +345,34 @@ await store.close();`;
     this.children.push(spawn(command, args, { cwd, env, stdio: ["ignore", fd, fd] }));
   }
 
-  /** Sends exactly these path bytes, which fetch and URL would normalize. */
-  rawGet(rawPath: string, key: string): Promise<{ status: number; body: string; headers: http.IncomingHttpHeaders }> {
-    const { hostname, port } = new URL(this.apiUrl);
+  rawGet(rawPath: string, key: string): Promise<ApiResponse> {
+    return this.request({ path: rawPath, key });
+  }
+
+  /** Sends exactly these path bytes, which fetch and URL would normalize, and keeps the answer for the final scan. */
+  request(options: RequestOptions): Promise<ApiResponse> {
+    const { hostname, port } = new URL(options.baseUrl ?? this.apiUrl);
+    const payload = options.body === undefined ? undefined : JSON.stringify(options.body);
+    const headers = { ...options.headers, ...(options.key ? { Authorization: `Bearer ${options.key}` } : {}), ...(payload ? { "Content-Type": "application/json" } : {}) };
     return new Promise((resolve, reject) => {
-      const request = http.request({ hostname, port, path: rawPath, method: "GET", headers: { Authorization: `Bearer ${key}` } }, (response) => {
+      const request = http.request({ hostname, port, path: options.path, method: options.method ?? "GET", headers, localAddress: options.from }, (response) => {
         let body = "";
         response.setEncoding("utf8");
         response.on("data", (chunk: string) => (body += chunk));
-        response.on("end", () => resolve({ status: response.statusCode ?? 0, body, headers: response.headers }));
+        response.on("end", () => {
+          const answer = { status: response.statusCode ?? 0, body, headers: response.headers };
+          if (!options.issuing) this.responses.push(answer);
+          resolve(answer);
+        });
       });
       request.on("error", reject);
-      request.end();
+      request.end(payload);
     });
   }
 
   /** Stops everything and removes the private directory, with every key and index in it. */
   async cleanUp(): Promise<void> {
+    this.controlReader?.close();
     await Promise.all(this.children.map(stop));
     for (const fd of this.fds) closeSync(fd);
     rmSync(this.dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
@@ -236,8 +388,25 @@ function stop(child: ChildProcess): Promise<void> {
   });
 }
 
+/** Exactly `BULK_DOCUMENT_BYTES` each, and different, so each is its own document. */
+function bulkFixtures(): Array<readonly [string, string, string]> {
+  return Array.from({ length: BULK_DOCUMENTS }, (_, index) => {
+    const head = `# Bulk ${index}\n\n`;
+    return ["bulk", `doc-${index}.md`, head + "x".repeat(BULK_DOCUMENT_BYTES - head.length)] as const;
+  });
+}
+
+function manyFixtures(): Array<readonly [string, string, string]> {
+  return Array.from({ length: MANY_DOCUMENTS }, (_, index) => ["many", `doc-${index}.md`, `# Many ${index}\n`] as const);
+}
+
+/** A host's content root is its working directory, so this is what makes it read the shipped appsettings.json. */
+function apiDirectory(): string {
+  return path.join(repo, "src", "Memoria.Api", "bin", "Release", "net10.0");
+}
+
 function apiDll(): string {
-  return path.join(repo, "src", "Memoria.Api", "bin", "Release", "net10.0", "Memoria.Api.dll");
+  return path.join(apiDirectory(), "Memoria.Api.dll");
 }
 
 function run(command: string, args: string[], cwd: string): void {

@@ -2,13 +2,17 @@
  * Entry point: `node scripts/e2e/run.ts [--no-build]`. Needs Node 22.18+, Go, the
  * .NET SDK, and `npm ci` in sidecar/. See README.md.
  */
-import { bootstrap, keyManagement, login, mcp, noLeaks, noModels, rateLimits, scopedReads, scopeErrors, traversal } from "./checks.ts";
+import { auditTrail, authModes, finishExpiry, knownGood, revocation, rotation, startExpiry } from "./auth-keys.ts";
+import { forwardedHeaders, limits } from "./auth-limits.ts";
+import { issueScopeKeys, mcpScope, multiGetLimits, scopeMatrix, secretsAbsent, sendCanaries } from "./auth-reads.ts";
+import { bootstrap, keyManagement, login, mcp, noModels, rateLimits, scopedReads, scopeErrors, traversal, type Keys } from "./checks.ts";
 import { Harness } from "./harness.ts";
 
 async function runAll(h: Harness): Promise<void> {
   h.seedIndex();
   await h.choosePorts();
   await h.startSidecar();
+  await h.startProxy();
   const admin = bootstrap(h);
   await h.startApi();
   const keys = keyManagement(h, admin);
@@ -17,9 +21,27 @@ async function runAll(h: Harness): Promise<void> {
   await traversal(h, keys);
   mcp(h, keys);
   login(h, keys);
+  await authChecks(h, keys);
   await rateLimits(h, keys);
   noModels(h);
-  noLeaks(h);
+  secretsAbsent(h, keys.reader);
+}
+
+async function authChecks(h: Harness, { admin, reader }: Keys): Promise<void> {
+  const expiring = await startExpiry(h, admin);
+  await authModes(h, admin);
+  await rotation(h, admin);
+  await revocation(h, admin);
+  await knownGood(h, admin);
+  await auditTrail(h, admin, reader);
+  await limits(h, admin);
+  await forwardedHeaders(h, admin);
+  const scopeKeys = await issueScopeKeys(h, admin);
+  await multiGetLimits(h, { wide: scopeKeys.wide.token, reader });
+  await scopeMatrix(h, scopeKeys);
+  await mcpScope(h, scopeKeys);
+  await sendCanaries(h, reader);
+  await finishExpiry(h, admin, expiring);
 }
 
 const started = Date.now();
