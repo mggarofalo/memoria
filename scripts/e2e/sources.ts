@@ -11,6 +11,8 @@ import { forceIndex, SAFE } from "./ingest.ts";
 const SOURCE = "notes-e2e";
 const DOCUMENTS = "/documents";
 const OLD_TIME = new Date("2020-01-01T00:00:00Z");
+/** Inside the hour the server allows ahead of its clock. */
+const NEWER_BY_MS = 30 * 60 * 1000;
 
 interface Context {
   h: Harness;
@@ -124,15 +126,16 @@ async function neverDeletes(c: Context): Promise<void> {
   c.h.check("sources sync: that document is still searchable", (await hits(c, "betaword")) === 1);
 }
 
+/** Another writer's version, ahead of anything this run can reach, so the refusal does not depend on how fast the machine is. */
 async function perFileRefusal(c: Context): Promise<void> {
-  const del = await c.h.request({ method: "DELETE", path: `/v1/documents?collection=${SAFE}&source=${SOURCE}&sourceId=first.md`, key: c.writer });
-  const edited = write(c, "first.md", "# First\n\nthetaword after the delete\n");
-  utimesSync(edited, OLD_TIME, OLD_TIME);
+  const newer = new Date(Date.now() + NEWER_BY_MS).toISOString();
+  const other = await c.h.request({ method: "POST", path: "/v1/documents", key: c.writer, body: { collection: SAFE, source: SOURCE, sourceId: "first.md", updated: newer, body: "from another machine" } });
+  write(c, "first.md", "# First\n\nthetaword from this machine\n");
   write(c, "fourth.md", "# Fourth\n\niotaword\n");
   const from = c.h.proxiedCount();
   const mixed = sync(c);
-  c.h.check("sources sync: a document deleted on the server is refused as stale, and named", del.status === 202 && mixed.code === 1 && mixed.err.includes("first.md was not sent") && mixed.err.includes("1 file(s) were not sent"), mixed.out + mixed.err);
-  c.h.check("sources sync: a refused file does not stop the others", stored(c, from, "iotaword"), bodies(c, from).length);
+  c.h.check("sources sync: a file older than the server's version is refused, and named", other.status === 202 && mixed.code === 1 && mixed.err.includes("first.md was not sent") && mixed.err.includes("1 file(s) were not sent"), mixed.out + mixed.err);
+  c.h.check("sources sync: the refused file stored nothing, and did not stop the others", stored(c, from, "iotaword") && !stored(c, from, "thetaword"), bodies(c, from).length);
 }
 
 async function needsTheScope(c: Context): Promise<void> {
