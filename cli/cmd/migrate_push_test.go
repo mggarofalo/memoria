@@ -1254,7 +1254,7 @@ func checkEditAfterTakeover(t *testing.T, f *pushFixture, server *pushServer) {
 		t.Fatalf("code = %d, summary = %+v", code, summary)
 	}
 	checkOneProblem(t, report, "a.md", migrate.ProblemLocalEdits, "")
-	if code := f.push(server); code != 0 || !strings.Contains(f.h.stdout.String(), "local changes that were not sent") {
+	if code := f.push(server); code != 0 || !strings.Contains(f.h.stdout.String(), "but 1 taken over by their session have local changes") {
 		t.Fatalf("code = %d, stdout = %q", code, f.h.stdout.String())
 	}
 }
@@ -1274,4 +1274,19 @@ func (s *pushServer) takeStatusFault() (pushAnswer, bool) {
 	}
 	s.faultsLeft--
 	return s.faultAnswer, true
+}
+
+func TestAnOlderCopyGoesWhenTheServerHoldsNothing(t *testing.T) {
+	f := newPushFixture(t)
+	server := newPushServer(t, nil)
+	summary, code, _ := f.result(t, server)
+	checkPush(t, summary, code, 0, 3, 0)
+	older := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(filepath.Join(f.notes, "a.md"), older, older); err != nil {
+		t.Fatal(err)
+	}
+	server.forget()
+	summary, code, _ = f.result(t, server)
+	checkPush(t, summary, code, 0, 3, 0)
+	checkCalls(t, server, "a.md", 2)
 }
