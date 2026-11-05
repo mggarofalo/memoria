@@ -4,7 +4,7 @@
  * cannot affect the other checks. Every token is built at run time from random bytes, so no
  * scanner mistakes this file for a leak, and none is ever printed.
  */
-import { randomBytes } from "node:crypto";
+import { randomInt } from "node:crypto";
 import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { pause, type Harness, type HarnessOptions } from "./harness.ts";
@@ -32,7 +32,7 @@ export const INGEST_SERVER: HarnessOptions = {
 };
 
 function randomText(length: number): string {
-  return [...randomBytes(length)].map((byte) => ALPHABET[byte % ALPHABET.length]).join("");
+  return Array.from({ length }, () => ALPHABET[randomInt(ALPHABET.length)]).join("");
 }
 
 function randomUpper(length: number): string {
