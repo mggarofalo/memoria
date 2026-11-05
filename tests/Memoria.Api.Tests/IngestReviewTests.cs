@@ -894,39 +894,191 @@ public sealed class IngestLoadTests(AuthApiFactory factory) : IClassFixture<Auth
 	[Fact]
 	public async Task A_burst_of_deletes_shares_one_more_update_and_a_delete_of_nothing_costs_none()
 	{
-		string collection = "burst-" + Guid.NewGuid().ToString("N");
-		await using WebApplicationFactory<Program> app = factory.WithWebHostBuilder(builder =>
+		ManualClock clock = new();
+		(WebApplicationFactory<Program> app, HttpClient client, string collection) = await BurstAsync(clock);
+		await using (app)
 		{
-			builder.UseSetting("Memoria:Ingest:MinReindexInterval", "00:00:00.5");
+			await client.DeleteAsync($"/v1/documents?collection={collection}&path=never.md");
+			Assert.Equal(0, Reindexes());
+
+			JsonElement first = await ReadAsync(await client.DeleteAsync($"/v1/documents?collection={collection}&path=f0.md"));
+			JsonElement second = await ReadAsync(await client.DeleteAsync($"/v1/documents?collection={collection}&path=f1.md"));
+			JsonElement third = await ReadAsync(await client.DeleteAsync($"/v1/documents?collection={collection}&path=f2.md"));
+
+			Assert.Equal(ReindexState.Started, first.GetProperty("reindexState").GetString());
+			Assert.Equal(ReindexState.Scheduled, second.GetProperty("reindexState").GetString());
+			Assert.Equal(ReindexState.Scheduled, third.GetProperty("reindexState").GetString());
+			Assert.Equal(10, second.GetProperty("reindexInSeconds").GetInt32());
+			Assert.Equal(1, Reindexes());
+
+			await clock.UntilATimerIsSetAsync();
+			clock.Advance(BurstInterval);
+			await UntilAsync(static count => count == 2);
+			Assert.Equal(2, Reindexes());
+		}
+	}
+
+	[Fact]
+	public async Task A_delete_arriving_when_the_scheduled_update_is_due_shares_it_rather_than_starting_another()
+	{
+		ManualClock clock = new();
+		(WebApplicationFactory<Program> app, HttpClient client, string collection) = await BurstAsync(clock);
+		await using (app)
+		{
+			await client.DeleteAsync($"/v1/documents?collection={collection}&path=f0.md");
+			await client.DeleteAsync($"/v1/documents?collection={collection}&path=f1.md");
+
+			// The interval has ended, and the timer has not had its turn yet, as on a busy machine.
+			await clock.UntilATimerIsSetAsync();
+			clock.MoveWithoutFiring(BurstInterval);
+			JsonElement late = await ReadAsync(await client.DeleteAsync($"/v1/documents?collection={collection}&path=f2.md"));
+
+			Assert.Equal(ReindexState.Scheduled, late.GetProperty("reindexState").GetString());
+			Assert.Equal(1, Reindexes());
+
+			clock.FireDue();
+			await UntilAsync(static count => count == 2);
+			Assert.Equal(2, Reindexes());
+		}
+	}
+
+	private static readonly TimeSpan BurstInterval = TimeSpan.FromSeconds(10);
+
+	private int Reindexes()
+	{
+		return factory.Sidecar.Requests.Count(static r => r.Uri.AbsolutePath == "/reindex");
+	}
+
+	/// <summary>A scheduled update starts on another thread once its timer fires, so this waits for that, however long the machine takes. Time in the test does not move by itself.</summary>
+	private async Task UntilAsync(Func<int, bool> reached)
+	{
+		for (int i = 0; i < 3000 && !reached(Reindexes()); i++)
+		{
+			await Task.Delay(10);
+		}
+	}
+
+	private async Task<(WebApplicationFactory<Program> App, HttpClient Client, string Collection)> BurstAsync(ManualClock clock)
+	{
+		string collection = "burst-" + Guid.NewGuid().ToString("N");
+		WebApplicationFactory<Program> app = factory.WithWebHostBuilder(builder =>
+		{
+			builder.UseSetting("Memoria:Ingest:MinReindexInterval", "00:00:10");
 			builder.UseSetting($"Memoria:Ingest:Collections:{collection}:Enabled", "true");
+			builder.ConfigureTestServices(services => services.AddSingleton<TimeProvider>(clock));
 		});
 		FakeCorpus corpus = new(factory.Sidecar);
 		(_, string key) = await factory.IssueAsync([MemoriaScopes.Ingest], [collection]);
-		HttpClient client = AuthApiFactory.Authorized(app.CreateClient(), key);
 		foreach (int i in Enumerable.Range(0, 3))
 		{
 			corpus.Files[$"f{i}.md"] = "x";
 		}
 
-		await client.DeleteAsync($"/v1/documents?collection={collection}&path=never.md");
-		Assert.DoesNotContain(factory.Sidecar.Requests, static r => r.Uri.AbsolutePath == "/reindex");
+		return (app, AuthApiFactory.Authorized(app.CreateClient(), key), collection);
+	}
 
-		JsonElement first = await ReadAsync(await client.DeleteAsync($"/v1/documents?collection={collection}&path=f0.md"));
-		JsonElement second = await ReadAsync(await client.DeleteAsync($"/v1/documents?collection={collection}&path=f1.md"));
-		JsonElement third = await ReadAsync(await client.DeleteAsync($"/v1/documents?collection={collection}&path=f2.md"));
+	/// <summary>Time that moves only when told, with timers that fire only when told, so a test never races the machine it runs on.</summary>
+	private sealed class ManualClock : TimeProvider
+	{
+		private readonly List<ManualTimer> _timers = [];
+		private DateTimeOffset _now = DateTimeOffset.UtcNow;
 
-		Assert.Equal(ReindexState.Started, first.GetProperty("reindexState").GetString());
-		Assert.Equal(ReindexState.Scheduled, second.GetProperty("reindexState").GetString());
-		Assert.Equal(ReindexState.Scheduled, third.GetProperty("reindexState").GetString());
-		Assert.Equal(1, second.GetProperty("reindexInSeconds").GetInt32());
-		Assert.Single(factory.Sidecar.Requests, static r => r.Uri.AbsolutePath == "/reindex");
-
-		for (int i = 0; i < 300 && factory.Sidecar.Requests.Count(static r => r.Uri.AbsolutePath == "/reindex") < 2; i++)
+		public override DateTimeOffset GetUtcNow()
 		{
-			await Task.Delay(20);
+			lock (_timers)
+			{
+				return _now;
+			}
 		}
 
-		Assert.Equal(2, factory.Sidecar.Requests.Count(static r => r.Uri.AbsolutePath == "/reindex"));
+		/// <summary>The update is scheduled on another thread, and moving the clock before its timer exists would leave it waiting from the new time.</summary>
+		public async Task UntilATimerIsSetAsync()
+		{
+			for (int i = 0; i < 3000 && !HasTimer(); i++)
+			{
+				await Task.Delay(10);
+			}
+		}
+
+		private bool HasTimer()
+		{
+			lock (_timers)
+			{
+				return _timers.Count > 0;
+			}
+		}
+
+		public void Advance(TimeSpan by)
+		{
+			MoveWithoutFiring(by);
+			FireDue();
+		}
+
+		public void MoveWithoutFiring(TimeSpan by)
+		{
+			lock (_timers)
+			{
+				_now += by;
+			}
+		}
+
+		public void FireDue()
+		{
+			ManualTimer[] due;
+			lock (_timers)
+			{
+				due = [.. _timers.Where(timer => timer.Due <= _now)];
+				_timers.RemoveAll(due.Contains);
+			}
+
+			foreach (ManualTimer timer in due)
+			{
+				timer.Fire();
+			}
+		}
+
+		public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+		{
+			ManualTimer timer = new(this, callback, state);
+			timer.Change(dueTime, period);
+			return timer;
+		}
+
+		private sealed class ManualTimer(ManualClock clock, TimerCallback callback, object? state) : ITimer
+		{
+			public DateTimeOffset Due { get; private set; }
+
+			public void Fire()
+			{
+				callback(state);
+			}
+
+			public bool Change(TimeSpan dueTime, TimeSpan period)
+			{
+				lock (clock._timers)
+				{
+					clock._timers.Remove(this);
+					if (dueTime != Timeout.InfiniteTimeSpan)
+					{
+						Due = clock._now + dueTime;
+						clock._timers.Add(this);
+					}
+				}
+
+				return true;
+			}
+
+			public void Dispose()
+			{
+				Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+			}
+
+			public ValueTask DisposeAsync()
+			{
+				Dispose();
+				return ValueTask.CompletedTask;
+			}
+		}
 	}
 
 	private sealed class CountingRedactor : IRedactor
