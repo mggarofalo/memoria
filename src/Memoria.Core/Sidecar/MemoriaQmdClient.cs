@@ -57,8 +57,9 @@ public sealed class MemoriaQmdClient(HttpClient http) : IMemoriaQmdClient
 		ArgumentException.ThrowIfNullOrWhiteSpace(reference);
 
 		// Dot segments survive percent-encoding and HttpClient would normalize them,
-		// turning `x/../../status` into a call to a different sidecar route.
-		if (reference.Split('/').Any(static segment => segment is "." or ".."))
+		// turning `x/../../status` into a call to a different sidecar route. A backslash
+		// counts as a separator too, since some layers along the way treat it as one.
+		if (reference.Split('/', '\\').Any(static segment => segment is "." or ".."))
 		{
 			throw new SidecarException("not_found", $"Document not found: {reference}", HttpStatusCode.NotFound);
 		}

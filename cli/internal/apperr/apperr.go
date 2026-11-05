@@ -100,6 +100,7 @@ func ExitCode(err error) int {
 type problem struct {
 	Title   string              `json:"title"`
 	Detail  string              `json:"detail"`
+	Code    string              `json:"code"`
 	TraceID string              `json:"traceId"`
 	Errors  map[string][]string `json:"errors"`
 }
@@ -117,6 +118,9 @@ func FromResponse(status int, header http.Header, body []byte) *Error {
 	e := &Error{Kind: class.kind, Status: status, TraceID: firstNonEmpty(p.TraceID, header.Get("X-Trace-Id"))}
 
 	hint := class.hint
+	if status == http.StatusForbidden {
+		hint = forbiddenHint(p, hint)
+	}
 	if status == http.StatusTooManyRequests {
 		e.RetryAfter = ParseRetryAfter(header.Get("Retry-After"), time.Now())
 		if e.RetryAfter > 0 {
@@ -142,6 +146,23 @@ var statusClasses = map[int]statusClass{
 	http.StatusBadGateway:          {kind: KindUnavailable, message: "server unavailable"},
 	http.StatusServiceUnavailable:  {kind: KindUnavailable, message: "server unavailable"},
 	http.StatusGatewayTimeout:      {kind: KindUnavailable, message: "server unavailable"},
+}
+
+// forbiddenHint says what to do about a missing scope. The server names the scope in
+// its detail. Scopes do not imply one another, so an admin key that cannot read is
+// working as designed, which nobody guesses.
+func forbiddenHint(p problem, fallback string) string {
+	switch {
+	case p.Code != "insufficient_scope":
+		return fallback
+	case strings.Contains(p.Detail, "'read'"):
+		return "scopes do not imply one another, so an admin key cannot read, by design. " +
+			"Issue a key to search with: memoria keys create --label <name> --scope read --collection <name>, " +
+			"then use it with memoria auth login --profile <name>"
+	case strings.Contains(p.Detail, "'admin'"):
+		return "managing keys needs a key with the admin scope. The first one comes from running the server with --bootstrap-admin-key"
+	}
+	return fallback
 }
 
 func composeMessage(summary string, p problem, hint, traceID string) string {

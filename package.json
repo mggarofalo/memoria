@@ -7,7 +7,7 @@
     "node": ">=22.18.0"
   },
   "scripts": {
-    "lint": "eslint sidecar worker scripts/release"
+    "lint": "eslint sidecar worker scripts/release scripts/e2e"
   },
   "allowScripts": {
     "lefthook": true

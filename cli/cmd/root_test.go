@@ -149,6 +149,15 @@ func (h *harness) login(url string) {
 	}
 }
 
+func (h *harness) configContent() string {
+	h.t.Helper()
+	data, err := os.ReadFile(filepath.Join(h.config, "config.json"))
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	return string(data)
+}
+
 // entryFor is what the store holds for the test key, bound to a server.
 func (h *harness) entryFor(raw string) string {
 	h.t.Helper()
@@ -248,6 +257,7 @@ func TestCommandTree(t *testing.T) {
 	root := h.app().rootCmd()
 	for _, path := range [][]string{
 		{"auth", "login"}, {"auth", "logout"}, {"auth", "status"},
+		{"keys", "create"}, {"keys", "list"}, {"keys", "rotate"}, {"keys", "revoke"},
 		{"query"}, {"get"}, {"multi-get"}, {"collections"}, {"status"}, {"mcp"}, {"self-update"}, {"version"},
 	} {
 		if found, _, err := root.Find(path); err != nil || found.Name() != path[len(path)-1] {

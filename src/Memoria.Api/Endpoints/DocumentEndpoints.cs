@@ -51,7 +51,7 @@ public static class DocumentEndpoints
 		}
 
 		Document? document = await corpus.GetDocumentAsync(
-			id,
+			WithLiteralSlashes(id),
 			new SidecarDocumentQuery(fromLine, maxLines, lineNumbers, body),
 			cancellationToken);
 
@@ -82,6 +82,18 @@ public static class DocumentEndpoints
 			LineNumbers = request.LineNumbers,
 			IncludeBody = request.IncludeBody,
 		}, cancellationToken));
+	}
+
+	/// <summary>
+	/// A catch-all route decodes everything except <c>%2F</c>. The spec declares
+	/// <c>id</c> as one path parameter, so a generated client encodes the slash in
+	/// <c>collection/path.md</c>, and the reference would otherwise reach the sidecar
+	/// as a name no document has. Scope is checked on the document that comes back, so
+	/// the spelling of the reference cannot widen what a key can read.
+	/// </summary>
+	private static string WithLiteralSlashes(string id)
+	{
+		return id.Replace("%2F", "/", StringComparison.OrdinalIgnoreCase);
 	}
 
 	private static ProblemHttpResult NotFound()
