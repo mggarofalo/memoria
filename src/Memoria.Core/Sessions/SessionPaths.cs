@@ -67,6 +67,23 @@ public static partial class SessionPaths
 		return $"{date}_codex_{safeId}_chunk-{part:D5}.md";
 	}
 
+	/// <summary>Changes the stem in a path this class built, leaving its date and part number alone.</summary>
+	internal static string ReplaceStem(string path, string stem, string replacement)
+	{
+		int at = path.IndexOf(stem, DatePrefixChars, StringComparison.Ordinal);
+		return string.Concat(path.AsSpan(0, at), replacement, path.AsSpan(at + stem.Length));
+	}
+
+	internal static string ClaudeGlob(string shortId)
+	{
+		return $"????-??-??_{shortId}*.md";
+	}
+
+	internal static string CodexGlob(string safeId)
+	{
+		return $"????-??-??_codex_{safeId}_chunk-*.md";
+	}
+
 	internal static bool IsClaudeFamily(string path, string shortId)
 	{
 		return IsFamily(path, shortId, ClaudeSuffix());

@@ -63,15 +63,15 @@ public static partial class AdminKeyEndpoints
 		return app;
 	}
 
-	private static async ValueTask<object?> RequireApiKeyModeAsync(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
+	internal static async ValueTask<object?> RequireApiKeyModeAsync(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
 	{
 		IOptions<MemoriaOptions> options = context.HttpContext.RequestServices.GetRequiredService<IOptions<MemoriaOptions>>();
 		if (options.Value.Auth.IsDisabled)
 		{
 			return TypedResults.Problem(
 				statusCode: StatusCodes.Status404NotFound,
-				title: "Key management is unavailable",
-				detail: "Memoria:Auth:Mode is Disabled, so there are no API keys to manage.",
+				title: "Unavailable without API keys",
+				detail: "Memoria:Auth:Mode is Disabled. Key management and writing to the corpus need API keys.",
 				extensions: new Dictionary<string, object?> { ["code"] = "auth_disabled" });
 		}
 

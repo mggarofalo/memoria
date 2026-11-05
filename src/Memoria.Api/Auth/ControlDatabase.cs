@@ -10,7 +10,35 @@ namespace Memoria.Api.Auth;
 /// </summary>
 public sealed class ControlDatabase(string? path)
 {
-	private const int SchemaVersion = 1;
+	private const int SchemaVersion = 2;
+
+	private const string SchemaV2 = """
+		CREATE TABLE ingest_state (
+			identity TEXT PRIMARY KEY NOT NULL,
+			lookup TEXT NULL,
+			version_ticks INTEGER NOT NULL,
+			state TEXT NOT NULL,
+			lease_until_ticks INTEGER NOT NULL,
+			lease_owner TEXT NULL,
+			deleted_version_ticks INTEGER NULL,
+			message_count INTEGER NULL,
+			paths TEXT NOT NULL
+		);
+		CREATE INDEX ingest_state_lookup ON ingest_state (lookup);
+		CREATE TABLE ingest_paths (
+			collection TEXT NOT NULL,
+			path TEXT NOT NULL,
+			owner TEXT NOT NULL,
+			PRIMARY KEY (collection, path)
+		);
+		CREATE INDEX ingest_paths_owner ON ingest_paths (owner);
+		CREATE TABLE ingest_stems (
+			collection TEXT NOT NULL,
+			stem TEXT NOT NULL,
+			owner TEXT NOT NULL,
+			PRIMARY KEY (collection, stem)
+		);
+		""";
 
 	private const string SchemaV1 = """
 		CREATE TABLE api_keys (
@@ -70,10 +98,11 @@ public sealed class ControlDatabase(string? path)
 			throw new InvalidOperationException($"The control database at {fullPath} has schema version {current}; this build understands up to {SchemaVersion}.");
 		}
 
-		if (current < 1)
+		if (current < SchemaVersion)
 		{
 			await using SqliteTransaction transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
-			await ExecuteAsync(connection, SchemaV1, cancellationToken, transaction);
+			string migration = current < 1 ? SchemaV1 + SchemaV2 : SchemaV2;
+			await ExecuteAsync(connection, migration, cancellationToken, transaction);
 			await ExecuteAsync(connection, $"PRAGMA user_version = {SchemaVersion};", cancellationToken, transaction);
 			await transaction.CommitAsync(cancellationToken);
 		}

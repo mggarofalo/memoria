@@ -63,6 +63,7 @@ public sealed class HealthEndpointTests(MemoriaApiFactory factory) : IClassFixtu
 		Assert.Null(report.Reason);
 		Assert.Equal(1502, report.Sidecar!.Index.TotalDocuments);
 		Assert.True(report.Sidecar.Models.Resident);
+		Assert.True(report.Sidecar.Sdk!.Patched);
 
 		FakeSidecar.RecordedRequest probe = factory.Sidecar.Single();
 		Assert.Equal("/ready", probe.Uri.AbsolutePath);

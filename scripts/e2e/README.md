@@ -22,6 +22,12 @@ It needs Node 22.18+, Go and the .NET SDK. It exits non-zero if any check fails.
 
 With no worker, there is no query expansion, reranking or vector search, so queries are the sidecar's degraded BM25 search and match one document. It runs plain http, not TLS, and does not exercise a prompt in a real terminal.
 
+## The secret proof
+
+`ingest.ts` is the most important check here. On a server of its own, a document and a session holding credentials go in through the real routes. Each token is built at run time from random bytes, so the source holds none and none can be printed. Then every route that can read returns only redacted text: REST search, `GET /v1/docs` by id and by path, multi-get, and MCP search and get. Searching for each token finds nothing, no file of the run holds one in its raw bytes, including the index, the control database, their write-ahead logs, and the logs, and no write reaching the sidecar holds one.
+
+The same file then proves the operator's off switch against the collection next door, deletes against a 10-minute debounce, scope, shrinking, and who owns a file. Long-running proofs of limits and memory are not here, because they would take the run past its time limit.
+
 ## Adding checks
 
 Add a function to `checks.ts`, and call it from `run.ts`, before `rateLimits`. That section must stay last, because it uses up the failed-auth limit for the address.

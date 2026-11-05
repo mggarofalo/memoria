@@ -155,7 +155,8 @@ public sealed class MemoriaTools(ScopedCorpus corpus, ICallerScope scope, IReque
 		{
 			audit.SetOutcome(MemoriaExceptionHandler.Map(ex).Status);
 			SidecarFailureView view = SidecarDisclosure.For(ex, scope);
-			throw new McpException($"{view.Code}: {view.Message}", ex);
+			string retry = MemoriaExceptionHandler.RetryAfterSeconds(ex) is int seconds ? $" Try again in {seconds} seconds." : "";
+			throw new McpException($"{view.Code}: {view.Message}{retry}", ex);
 		}
 		catch (CollectionForbiddenException ex)
 		{

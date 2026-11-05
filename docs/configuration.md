@@ -211,6 +211,49 @@ reverse proxy. The `RemoteIp` in the log line and the failed-authentication limi
 use the client address: the socket peer, or the forwarded client when the peer is a
 configured `TrustedProxies` entry.
 
+## `Memoria:Ingest` — writing to the corpus
+
+| Key | Default | Purpose |
+|---|---|---|
+| `MaxDocumentBytes` | `2097152` | The largest stored document, in UTF-8 bytes, at least 64 KiB. Set it to the sidecar's `MEMORIA_QMD_MAX_DOCUMENT_BYTES`. Over it, `POST /v1/documents` answers 413 and a session part fails on its own. The renderer splits a long message to fit. |
+| `MaxSessionBytes` | `268435456` | The largest raw transcript one request may send. It is read as a stream, and past this the request gets 413 or, if the upload has no declared length and the client is still sending, a closed connection. A transcript under this limit whose text passes the renderer's 32 million character budget is stored as far as the budget goes and answered with 207: it stays `partial`, and `read.messagesOverLimit` says how much was left out. |
+| `MaxConcurrentSessions` | `4` | Transcripts handled at once, from the first byte read to the last part written. Past it a caller gets 503 with `Retry-After`. |
+| `MaxConcurrentSessionsPerKey` | `2` | The most of those one key can hold. |
+| `MaxConcurrentDocuments` | `8` | Documents handled at once. |
+| `MaxConcurrentDocumentsPerKey` | `4` | The most of those one key can hold. |
+| `MaxConcurrentRenders` | `2` | Redactions and renders run at once, for documents and transcripts together. Reading a body does not take one. A transcript that filled the text budget took the API to about 600 MiB of peak working set under a 512 MiB GC limit (`DOTNET_GCHeapHardLimit`), which it survived, so allow for that much memory or set such a limit. |
+| `SessionUploadDeadline` | `00:10:00` | How long a transcript's body may take to arrive. Past it the request gets 408 and nothing changes. |
+| `DocumentUploadDeadline` | `00:01:00` | The same for a document. |
+| `MinReindexInterval` | `00:00:10` | The least time between index updates a delete starts in one collection. A delete with none recently starts one at once, so removing a leaked secret stays immediate. A burst shares one more when the interval ends, so no delete waits longer than this. |
+| `Collections:<name>:Redaction` | not set | Exactly `Disabled` turns redaction off for that collection. See below. |
+
+Writing needs the `ingest` scope and the target collection in the key's allowlist, and is not available when `Memoria:Auth:Mode` is `Disabled`.
+
+### What a session upload promises
+
+- **`202` and `complete` mean all of it.** The transcript had messages and lost none, every part was written, and every old part was dealt with. Anything less answers `207`, stays `partial` in `GET /v1/ingest/session`, and `read` and `parts` say why. A live transcript whose last line is still being written reads as `partial` until it is sent whole.
+- **Fewer messages than the stored copy is refused** with 409 `session_shrank`, whatever its version, because a cut copy looks just like that. Send `allowShrink=true` if the session really did shrink.
+- **A session owns its files.** The ledger records which session owns each path, and a file belonging to another gets 409 `path_owned`. A session whose short id is already taken gets a digest in its file names. A Codex transcript whose `session_meta.id` differs from `sessionId` gets 400.
+- **Old parts are deleted only when they are provably this session's:** the ledger says so, or, for a file from before there was a ledger, the full `session_id` in its frontmatter does. A file that says otherwise is left alone, and one that cannot be read leaves the session `partial`.
+
+### What redaction cannot catch
+
+Rules read text and decode nothing, so a credential that is base64, URL-encoded as a whole, written as literal `\uXXXX` text, or reversed is stored as it came. JSON escapes in the request itself, control characters and unusual spaces inside a token, and a token split by line breaks, content blocks or messages are all caught when the token starts with a recognized prefix.
+
+### Turning redaction off for a collection
+
+Every collection is redacted unless an operator names it here:
+
+```jsonc
+{ "Memoria": { "Ingest": { "Collections": { "family-notes": { "Redaction": "Disabled" } } } } }
+```
+
+- **Only this setting can do it.** No request parameter, key attribute, header or envelope field has any effect, so a caller cannot turn redaction off.
+- **The value and the name are exact.** `disabled`, `off`, `false` and ` Disabled ` all leave redaction on, and the server warns at startup about a value it did not recognize. A differently cased collection name is a different collection, and is redacted.
+- **Search results from an unredacted collection can reach cloud models.** They go wherever the caller sends them, along with any credential the text holds. Treat every credential ingested into the collection as exposed to those models.
+- **A switch changes future ingest only.** Turning redaction back on does not clean what is already stored. Older documents stay as they were written until they are ingested again or deleted, so re-ingest or delete them, and rotate any credential they held. Turning redaction off does not change older documents either.
+- **It is visible.** Startup logs a warning naming each unredacted collection. The ingest response and the audit record say `redaction: "disabled"`, and `GET /v1/status` lists `unredactedCollections` for a key that has `admin` as well as `read`. The per-rule counts, refusals and the check on finished parts do not apply to such a collection, so they are empty.
+
 ## Host settings outside `Memoria`
 
 | Key | Default | Purpose |

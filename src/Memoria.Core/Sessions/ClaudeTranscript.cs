@@ -45,7 +45,9 @@ internal sealed class ClaudeTranscript(SessionSource source, SessionRenderOption
 	public override RedactedSession Render()
 	{
 		RedactMessages();
-		string shortId = SessionPaths.ClaudeShortId(PathId(Source.SessionId)) + SessionPaths.RelocatedCopySuffix(_rawCwd, Source.ProjectDirectory);
+		string relocated = SessionPaths.RelocatedCopySuffix(_rawCwd, Source.ProjectDirectory);
+		string shortId = SessionPaths.ClaudeShortId(PathId(Source.SessionId)) + relocated;
+		SessionPathing pathing = Pathing($"claude\0{Source.SessionId}\0{relocated}", shortId);
 		string sessionId = Clip(Source.SessionId);
 		string project = Clip(_cwd.Length > 0
 			? SessionProject.FromClaudeCwd(_cwd, Source.HomeDirectory)
@@ -63,7 +65,13 @@ internal sealed class ClaudeTranscript(SessionSource source, SessionRenderOption
 			Report,
 			CountsByRule,
 			Refusals,
-			path => SessionPaths.IsClaudeFamily(path, shortId));
+			pathing.IsFamily,
+			pathing);
+	}
+
+	private SessionPathing Pathing(string identity, string stem)
+	{
+		return new SessionPathing(identity, stem, SessionPaths.ClaudeGlob(stem), path => SessionPaths.IsClaudeFamily(path, stem), next => Pathing(identity, next), Source.SessionId);
 	}
 
 	/// <summary>Keeps the raw first cwd too, only to compare with the project folder. It is never written out.</summary>
@@ -142,6 +150,14 @@ internal sealed class ClaudeTranscript(SessionSource source, SessionRenderOption
 		if (text.Length > 0 && text != InterruptedMarker)
 		{
 			AddMessage(role, text, time);
+		}
+	}
+
+	protected override void MessagesRenumbered(int[] firstPiece)
+	{
+		foreach (string path in _files.Keys.ToArray())
+		{
+			_files[path] = firstPiece[_files[path]];
 		}
 	}
 

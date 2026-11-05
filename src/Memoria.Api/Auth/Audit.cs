@@ -2,6 +2,8 @@ using System.Collections.Concurrent;
 using System.Text.Json;
 using Memoria.Api.Configuration;
 using Memoria.Api.Http;
+using Memoria.Api.Ingest;
+using Memoria.Core.Redaction;
 using Memoria.Core.Sidecar;
 using Microsoft.AspNetCore.Http.Metadata;
 using Microsoft.AspNetCore.Routing;
@@ -31,7 +33,7 @@ public sealed record AuditRecord(
 	int? ResultCount,
 	int Status,
 	string TraceId,
-	AuditTarget? Target,
+	object? Target,
 	string? Query);
 
 public interface IAuditLog
@@ -76,7 +78,7 @@ public sealed partial class SqliteAuditLog(
 		ArgumentNullException.ThrowIfNull(record);
 		string? collections = record.Collections is null ? null : JsonSerializer.Serialize(record.Collections);
 		string? attempted = record.AttemptedCollections is null ? null : JsonSerializer.Serialize(record.AttemptedCollections);
-		string? target = record.Target is null ? null : JsonSerializer.Serialize(record.Target);
+		string? target = record.Target is null ? null : JsonSerializer.Serialize(record.Target, record.Target.GetType());
 		LogAudit(logger, record.AuditId, record.KeyId, record.Operation, collections, attempted, record.ResultCount, record.Status, record.TraceId, target);
 
 		try
@@ -169,8 +171,8 @@ public interface IRequestAudit
 	/// <summary>How the operation ended, when the HTTP status does not say, and which collections a denied caller asked for.</summary>
 	void SetOutcome(int status, IEnumerable<string>? attemptedCollections = null);
 
-	/// <summary>The key an admin operation acted on.</summary>
-	void SetTarget(AuditTarget target);
+	/// <summary>What an operation acted on: an <see cref="AuditTarget"/> or an <c>AuditIngest</c>. Never content or a secret.</summary>
+	void SetTarget(object target);
 }
 
 /// <summary>Reaches the entry through the request itself, so it works from any DI scope serving that request.</summary>
@@ -204,7 +206,7 @@ public sealed class HttpRequestAudit(IHttpContextAccessor accessor) : IRequestAu
 		}
 	}
 
-	public void SetTarget(AuditTarget target)
+	public void SetTarget(object target)
 	{
 		Entry?.Target = target;
 	}
@@ -227,7 +229,7 @@ public sealed class AuditEntry
 
 	public int? Status { get; set; }
 
-	public AuditTarget? Target { get; set; }
+	public object? Target { get; set; }
 }
 
 /// <summary>
@@ -261,6 +263,9 @@ public sealed class AuditMiddleware(RequestDelegate next, IAuditLog auditLog, IO
 			{
 				SidecarException sidecar => MemoriaExceptionHandler.Map(sidecar).Status,
 				CollectionForbiddenException => StatusCodes.Status403Forbidden,
+				IngestRefusedException refused => refused.Status,
+				RedactionException => StatusCodes.Status422UnprocessableEntity,
+				BadHttpRequestException bad => bad.StatusCode,
 				_ => StatusCodes.Status500InternalServerError,
 			};
 			if (ex is CollectionForbiddenException forbidden)

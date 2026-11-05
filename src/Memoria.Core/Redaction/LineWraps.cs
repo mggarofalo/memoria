@@ -21,7 +21,7 @@ internal static class LineWraps
 	/// <summary>A run starting with one of these is a token at any column, so a line ending in one is cut however wide the terminal was.</summary>
 	private static readonly string[] s_tokenPrefixes =
 	[
-		"ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "sk-", "xox", "xapp-", "eyJ", "glpat-", "AIza", "ya29.", "hf_", "npm_", "hvs.", "SG.", "dop_v1_",
+		"AKIA", "ASIA", "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "sk-", "xox", "xapp-", "eyJ", "glpat-", "AIza", "ya29.", "hf_", "npm_", "hvs.", "SG.", "dop_v1_",
 		"vcp_", "sbp_", "pypi-", "dckr_pat_", "ATATT3", "ATCTT3", "gsk_", "xai-", "lsv2_", "ops_", "plane_api_", "lin_api_", "mem_", "sk_live_", "rk_live_", "sntrys_", "glsa_",
 	];
 
@@ -46,15 +46,59 @@ internal static class LineWraps
 	/// <summary>The length of the line break at the position when it wraps a token, otherwise 0.</summary>
 	public static int JoinLength(string input, int breakStart)
 	{
-		int breakEnd = SkipBreak(input, breakStart);
 		int lineStart = LineStartBefore(input, breakStart);
-		int indent = SkipIndent(input, breakEnd);
-		if (breakStart == lineStart || indent >= input.Length || !IsTokenChar(input[indent]))
+		if (breakStart == lineStart)
+		{
+			return 0;
+		}
+
+		int run = TrailingRunLength(input, lineStart, breakStart);
+		if (run > 0 && StartsWithTokenPrefix(input, breakStart - run))
+		{
+			return PrefixedJoinLength(input, breakStart, run);
+		}
+
+		int indent = SkipIndent(input, SkipBreak(input, breakStart));
+		if (indent >= input.Length || !IsTokenChar(input[indent]))
 		{
 			return 0;
 		}
 
 		return IsWrap(input, lineStart, breakStart, indent) ? indent - breakStart : 0;
+	}
+
+	/// <summary>
+	/// A run that opens with a token prefix is a token however short the piece before the break, and the break may be a blank
+	/// line or a message boundary, which is how a token split across content blocks or messages looks. The next piece must still
+	/// look like a tail, so a whole token at the end of a line does not swallow the word after it.
+	/// </summary>
+	private static int PrefixedJoinLength(string input, int breakStart, int run)
+	{
+		int next = SkipBreaksAndBoundaries(input, breakStart);
+		if (next >= input.Length || !IsTokenChar(input[next]) || StartsAlike(input, breakStart - run, next))
+		{
+			return 0;
+		}
+
+		int tail = LeadingRunLength(input, next);
+		return LooksRandom(input, next, tail) || IsAwsTail(input, breakStart - run, next, tail) ? next - breakStart : 0;
+	}
+
+	/// <summary>An AWS key is only capitals and digits, so half of one can be all capitals. Its fixed length means a word cannot be swallowed by accident.</summary>
+	private static bool IsAwsTail(string input, int runStart, int next, int tail)
+	{
+		return input.AsSpan(runStart, 4) is "AKIA" or "ASIA"
+			&& input.AsSpan(next, tail).IndexOfAnyExceptInRange('A', 'Z') < 0;
+	}
+
+	private static int SkipBreaksAndBoundaries(string input, int position)
+	{
+		while (position < input.Length && (input[position] is '\n' or '\r' or ' ' or '\t' || (input[position] == Redactor.MessageBoundary && DetectionView.IsSeparatorBoundary(input, position))))
+		{
+			position++;
+		}
+
+		return position;
 	}
 
 	private static bool IsWrap(string input, int lineStart, int lineEnd, int nextStart)

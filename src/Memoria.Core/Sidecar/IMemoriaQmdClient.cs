@@ -34,6 +34,9 @@ public interface IMemoriaQmdClient
 	Task<SidecarIngestResponse> IngestAsync(SidecarIngestRequest request, CancellationToken cancellationToken = default);
 
 	/// <summary>Queue an update (and optionally embed) job for some or all collections.</summary>
+	/// <summary>Removes a document's file and queues a debounced update. Follow with <see cref="ReindexAsync"/> when the document must stop being searchable now.</summary>
+	Task<SidecarDeleteResponse> DeleteDocumentAsync(string collection, string path, CancellationToken cancellationToken = default);
+
 	Task<SidecarJob> ReindexAsync(SidecarReindexRequest request, CancellationToken cancellationToken = default);
 
 	/// <summary>Jobs this sidecar process has seen.</summary>

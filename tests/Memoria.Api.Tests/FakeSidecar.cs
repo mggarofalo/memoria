@@ -12,6 +12,8 @@ public sealed class FakeSidecar : HttpMessageHandler
 {
 	private readonly ConcurrentDictionary<string, Func<HttpRequestMessage, string?, HttpResponseMessage>> _routes = new(StringComparer.Ordinal);
 
+	private readonly ConcurrentDictionary<string, Func<HttpRequestMessage, string?, HttpResponseMessage>> _prefixes = new(StringComparer.Ordinal);
+
 	public ConcurrentQueue<RecordedRequest> Requests { get; } = new();
 
 	/// <summary>Scripts a JSON response for <c>METHOD /path</c> (path without query string).</summary>
@@ -27,6 +29,13 @@ public sealed class FakeSidecar : HttpMessageHandler
 	{
 		_routes.TryRemove("*", out _);
 		_routes[Key(method, path)] = responder;
+		return this;
+	}
+
+	/// <summary>Scripts a responder for every <c>METHOD /path/...</c> with no exact route.</summary>
+	public FakeSidecar OnPrefix(string method, string prefix, Func<HttpRequestMessage, string?, HttpResponseMessage> responder)
+	{
+		_prefixes[Key(method, prefix)] = responder;
 		return this;
 	}
 
@@ -79,6 +88,15 @@ public sealed class FakeSidecar : HttpMessageHandler
 		if (_routes.TryGetValue(Key(request.Method.Method, request.RequestUri!.AbsolutePath), out Func<HttpRequestMessage, string?, HttpResponseMessage>? responder))
 		{
 			return responder(request, body);
+		}
+
+		string key = Key(request.Method.Method, request.RequestUri!.AbsolutePath);
+		foreach ((string prefix, Func<HttpRequestMessage, string?, HttpResponseMessage> match) in _prefixes)
+		{
+			if (key.StartsWith(prefix, StringComparison.Ordinal))
+			{
+				return match(request, body);
+			}
 		}
 
 		return Json(HttpStatusCode.NotFound, $$"""{"error":"not_found","message":"fake sidecar has no route {{request.Method}} {{request.RequestUri.AbsolutePath}}"}""");

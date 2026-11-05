@@ -5,7 +5,7 @@ namespace Memoria.Core.Redaction;
 
 /// <summary>
 /// What the rules read when the text carries noise that would split a credential or its name:
-/// terminal escapes, invisible format characters, variation selectors, HTML entities, percent-encoded
+/// terminal escapes, control characters, no-break and thin spaces, invisible format characters, variation selectors, HTML entities, percent-encoded
 /// letters, and curly quotes. Only detection reads this. Hits are mapped back, so everything outside a
 /// replaced span stays byte for byte what it was.
 /// </summary>
@@ -113,7 +113,21 @@ internal sealed class DetectionView
 	private static bool IsInvisible(char c)
 	{
 		return c is >= '︀' and <= '️' or '͏' or '᠋' or '᠌' or '᠍' or '᠎'
-			|| CharUnicodeInfo.GetUnicodeCategory(c) == UnicodeCategory.Format;
+			|| CharUnicodeInfo.GetUnicodeCategory(c) == UnicodeCategory.Format
+			|| IsStrayControl(c)
+			|| IsOtherSpace(c);
+	}
+
+	/// <summary>C0, DEL and C1 controls. Not line structure, which the rules read, and not what opens a terminal escape, which has its own handling.</summary>
+	private static bool IsStrayControl(char c)
+	{
+		return char.IsControl(c) && c is not ('\t' or '\n' or '\r' or Escape or ControlSequenceIntroducer);
+	}
+
+	/// <summary>Every space but the plain one, which really does end a token: NBSP, thin and hair spaces and the rest of the category.</summary>
+	private static bool IsOtherSpace(char c)
+	{
+		return c != ' ' && CharUnicodeInfo.GetUnicodeCategory(c) == UnicodeCategory.SpaceSeparator;
 	}
 
 	/// <summary>The length of a terminal escape at the position, raw or printed, or 0.</summary>
@@ -353,7 +367,7 @@ internal sealed class DetectionView
 				return IsSeparatorBoundary(input, position) ? 0 : 1;
 			}
 
-			int invisible = c >= '­' ? InvisibleLength(input, position) : 0;
+			int invisible = c is < ' ' or >= '\u007f' ? InvisibleLength(input, position) : 0;
 			if (invisible > 0)
 			{
 				return invisible;

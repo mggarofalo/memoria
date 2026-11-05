@@ -636,7 +636,7 @@
           "Collections"
         ],
         "summary": "Index status",
-        "description": "Totals for the collections the caller may read, whether a vector index exists, and per-collection counts. `needsEmbedding` is the backlog for the whole index, so it is null for a collection-scoped key. Requires the `read` scope.",
+        "description": "Totals for the collections the caller may read, whether a vector index exists, and per-collection counts. `needsEmbedding` is the backlog for the whole index, so it is null for a collection-scoped key. `unredactedCollections` lists what an operator stored unredacted. Only a key with the `admin` scope as well sees it; it is null for anyone else. Requires the `read` scope.",
         "operationId": "getStatus",
         "responses": {
           "401": {
@@ -1005,6 +1005,617 @@
           }
         ]
       }
+    },
+    "/v1/documents": {
+      "post": {
+        "tags": [
+          "Ingest"
+        ],
+        "summary": "Store a document",
+        "description": "Renders the envelope to frontmatter, redacts the whole document, and stores it. No caller can turn redaction off: only an operator can, for a named collection, and `redaction` in the response says which applied. A document redaction cannot finish is refused with 422. `source` and `sourceId` are its identity: sending them again overwrites, and `updated` orders versions, so an older version gets 409. The response counts what was replaced, by rule, with no values. The document becomes searchable when the job finishes. Requires the `ingest` scope.",
+        "operationId": "ingestDocument",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DocumentIngestRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Bad Gateway",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Gateway Timeout",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentIngestResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpValidationProblemDetails"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Payload Too Large",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Entity",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "Ingest"
+        ],
+        "summary": "Delete a document",
+        "description": "Names a document by `source` and `sourceId`, or by `path` within the collection, and removes it. A deleted document stays searchable until the index changes, so an update starts at once, or within `reindexInSeconds` when one just ran in this collection: `reindexState` says which. It also stops an older copy being stored again. Safe to repeat: a missing document answers `deleted: false` and costs no update. When `reindexState` is `failed`, repeat the request. Requires the `ingest` scope.",
+        "operationId": "deleteDocument",
+        "parameters": [
+          {
+            "name": "collection",
+            "in": "query",
+            "description": "The collection the document is in.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "source",
+            "in": "query",
+            "description": "The source it was stored under. Use with `sourceId`.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "sourceId",
+            "in": "query",
+            "description": "Its identity within that source.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "description": "Its path within the collection, instead of `source` and `sourceId`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Bad Gateway",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Gateway Timeout",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentDeleteResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpValidationProblemDetails"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          }
+        ]
+      }
+    },
+    "/v1/ingest/session": {
+      "post": {
+        "tags": [
+          "Ingest"
+        ],
+        "summary": "Store a raw session transcript",
+        "description": "The body is the raw JSONL of a Claude Code or Codex session, read as a stream. It is rendered and redacted here into one or more parts. 202 means every part arrived. 207 means not all of it is stored: `parts` and `read` say why, the session stays `partial`, and when `retryable` is true sending the same upload again finishes it. A transcript with no messages, or that lost any, is never 202. An older version than the one stored gets 409, as does a second upload of the session while one is running, a file belonging to another session, and fewer messages than the one stored unless `allowShrink` is set. Parts a shrunken session no longer has are deleted last, and only when they are provably this session's. Requires the `ingest` scope.",
+        "operationId": "ingestSession",
+        "parameters": [
+          {
+            "name": "collection",
+            "in": "query",
+            "description": "The collection to write to.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "description": "`claude` or `codex`.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "sessionId",
+            "in": "query",
+            "description": "The session's id, normally the transcript's file name without its extension.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "projectDirectory",
+            "in": "query",
+            "description": "The Claude Code project folder the transcript was in. Tells apart two copies of one session.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "allowShrink",
+            "in": "query",
+            "description": "Set when the session really did lose messages. Without it, an upload with fewer messages than the stored one is refused, as it looks just like a cut copy.",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "updated",
+            "in": "query",
+            "description": "When this copy of the transcript last changed, as an ISO timestamp. Orders uploads, so an older one is refused.",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/x-ndjson": {
+              "schema": {
+                "$ref": "#/components/schemas/Stream"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Bad Gateway",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Gateway Timeout",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionIngestResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpValidationProblemDetails"
+                }
+              }
+            }
+          },
+          "207": {
+            "description": "Multi-Status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionIngestResult"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Payload Too Large",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Entity",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          }
+        ]
+      },
+      "get": {
+        "tags": [
+          "Ingest"
+        ],
+        "summary": "How a session's upload ended",
+        "description": "Only `complete` means all of it arrived. `partial` means some parts may be searchable, and the upload should be sent again. Requires the `ingest` scope.",
+        "operationId": "getSessionIngestStatus",
+        "parameters": [
+          {
+            "name": "collection",
+            "in": "query",
+            "description": "The collection to write to.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "description": "`claude` or `codex`.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "sessionId",
+            "in": "query",
+            "description": "The session's id, normally the transcript's file name without its extension.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "projectDirectory",
+            "in": "query",
+            "description": "The Claude Code project folder the transcript was in. Tells apart two copies of one session.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "allowShrink",
+            "in": "query",
+            "description": "Set when the session really did lose messages. Without it, an upload with fewer messages than the stored one is refused, as it looks just like a cut copy.",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Bad Gateway",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Gateway Timeout",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionIngestStatus"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpValidationProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          }
+        ]
+      }
     }
   },
   "components": {
@@ -1229,6 +1840,141 @@
           }
         }
       },
+      "DocumentDeleteResult": {
+        "required": [
+          "collection",
+          "path",
+          "deleted",
+          "reindexState"
+        ],
+        "type": "object",
+        "properties": {
+          "collection": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "deleted": {
+            "type": "boolean"
+          },
+          "reindexState": {
+            "type": "string"
+          },
+          "reindexJobId": {
+            "type": "string",
+            "nullable": true
+          },
+          "reindexInSeconds": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          }
+        }
+      },
+      "DocumentIngestRequest": {
+        "required": [
+          "collection",
+          "source",
+          "sourceId",
+          "body",
+          "updated"
+        ],
+        "type": "object",
+        "properties": {
+          "collection": {
+            "type": "string",
+            "nullable": true
+          },
+          "source": {
+            "type": "string",
+            "nullable": true
+          },
+          "sourceId": {
+            "type": "string",
+            "nullable": true
+          },
+          "body": {
+            "type": "string",
+            "nullable": true
+          },
+          "updated": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "url": {
+            "type": "string",
+            "nullable": true
+          },
+          "title": {
+            "type": "string",
+            "nullable": true
+          },
+          "project": {
+            "type": "string",
+            "nullable": true
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "nullable": true
+          }
+        }
+      },
+      "DocumentIngestResult": {
+        "required": [
+          "collection",
+          "path",
+          "file",
+          "bytes",
+          "created",
+          "redaction",
+          "redactions",
+          "refusals",
+          "jobId"
+        ],
+        "type": "object",
+        "properties": {
+          "collection": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "file": {
+            "type": "string"
+          },
+          "bytes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "created": {
+            "type": "boolean"
+          },
+          "redaction": {
+            "type": "string"
+          },
+          "redactions": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          "refusals": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IngestRefusal"
+            }
+          },
+          "jobId": {
+            "type": "string"
+          }
+        }
+      },
       "DocumentMetadata": {
         "required": [
           "project",
@@ -1380,6 +2126,33 @@
             "type": "integer",
             "format": "int32",
             "nullable": true
+          },
+          "unredactedCollections": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "nullable": true
+          }
+        }
+      },
+      "IngestRefusal": {
+        "required": [
+          "part",
+          "field",
+          "rule"
+        ],
+        "type": "object",
+        "properties": {
+          "part": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "field": {
+            "type": "string"
+          },
+          "rule": {
+            "type": "string"
           }
         }
       },
@@ -1653,6 +2426,229 @@
           }
         }
       },
+      "SessionIngestResult": {
+        "required": [
+          "collection",
+          "sessionId",
+          "format",
+          "complete",
+          "retryable",
+          "parts",
+          "superseded",
+          "redaction",
+          "redactions",
+          "refusals",
+          "refusalCount",
+          "read",
+          "jobId",
+          "reindexJobId",
+          "reindexState"
+        ],
+        "type": "object",
+        "properties": {
+          "collection": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "format": {
+            "type": "string"
+          },
+          "complete": {
+            "type": "boolean"
+          },
+          "retryable": {
+            "type": "boolean"
+          },
+          "parts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SessionPartResult"
+            }
+          },
+          "superseded": {
+            "$ref": "#/components/schemas/SessionSupersededResult"
+          },
+          "redaction": {
+            "type": "string"
+          },
+          "redactions": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          "refusals": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IngestRefusal"
+            }
+          },
+          "refusalCount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "read": {
+            "$ref": "#/components/schemas/SessionReadSummary"
+          },
+          "jobId": {
+            "type": "string",
+            "nullable": true
+          },
+          "reindexJobId": {
+            "type": "string",
+            "nullable": true
+          },
+          "reindexState": {
+            "type": "string"
+          }
+        }
+      },
+      "SessionIngestStatus": {
+        "required": [
+          "collection",
+          "sessionId",
+          "state",
+          "updated",
+          "paths"
+        ],
+        "type": "object",
+        "properties": {
+          "collection": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "updated": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "SessionPartResult": {
+        "required": [
+          "part",
+          "path",
+          "state"
+        ],
+        "type": "object",
+        "properties": {
+          "part": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "path": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string",
+            "nullable": true
+          },
+          "message": {
+            "type": "string",
+            "nullable": true
+          },
+          "retryable": {
+            "type": "boolean",
+            "default": false
+          },
+          "retryAfterSeconds": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          }
+        }
+      },
+      "SessionReadSummary": {
+        "required": [
+          "bytesRead",
+          "lines",
+          "messages",
+          "malformedLines",
+          "oversizedLines",
+          "unterminatedLines",
+          "messagesOverLimit",
+          "skippedContent"
+        ],
+        "type": "object",
+        "properties": {
+          "bytesRead": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "lines": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "messages": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "malformedLines": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "oversizedLines": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "unterminatedLines": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "messagesOverLimit": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "skippedContent": {
+            "type": "boolean"
+          }
+        }
+      },
+      "SessionSupersededResult": {
+        "required": [
+          "deleted",
+          "failed",
+          "kept"
+        ],
+        "type": "object",
+        "properties": {
+          "deleted": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "failed": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "kept": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
       "SidecarIndexInfo": {
         "required": [
           "dbPath",
@@ -1854,6 +2850,25 @@
               }
             ],
             "nullable": true
+          },
+          "sdk": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SidecarSdkInfo"
+              }
+            ],
+            "nullable": true
+          }
+        }
+      },
+      "SidecarSdkInfo": {
+        "required": [
+          "patched"
+        ],
+        "type": "object",
+        "properties": {
+          "patched": {
+            "type": "boolean"
           }
         }
       },
@@ -1913,6 +2928,10 @@
             "type": "string"
           }
         }
+      },
+      "Stream": {
+        "type": "string",
+        "format": "binary"
       }
     },
     "securitySchemes": {
@@ -1939,6 +2958,9 @@
     },
     {
       "name": "Admin"
+    },
+    {
+      "name": "Ingest"
     }
   ]
 }

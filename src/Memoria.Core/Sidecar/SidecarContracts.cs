@@ -24,7 +24,11 @@ public sealed record SidecarReadiness(
 	SidecarWarmupInfo Warmup,
 	SidecarMetadataIndexInfo Metadata,
 	SidecarJobsInfo Jobs,
-	SidecarLlmInfo? Llm = null);
+	SidecarLlmInfo? Llm = null,
+	SidecarSdkInfo? Sdk = null);
+
+/// <summary>Whether the QMD SDK carries the patches this sidecar needs. A sidecar on an unpatched SDK refuses to start, so this says so rather than gates anything.</summary>
+public sealed record SidecarSdkInfo(bool Patched);
 
 public sealed record SidecarIndexInfo(string DbPath, int TotalDocuments, int NeedsEmbedding, bool HasVectorIndex);
 
@@ -213,6 +217,14 @@ public sealed record SidecarIngestResponse(
 	DocumentMetadata? Metadata,
 	SidecarJob Job);
 
+/// <summary>Result of <c>DELETE /documents</c>. <see cref="Deleted"/> is false when no file existed at the path.</summary>
+public sealed record SidecarDeleteResponse(
+	string Collection,
+	string Path,
+	string File,
+	bool Deleted,
+	SidecarJob Job);
+
 /// <summary>Body of <c>POST /reindex</c>.</summary>
 public sealed record SidecarReindexRequest(
 	IReadOnlyList<string>? Collections = null,
@@ -269,6 +281,7 @@ public sealed record SidecarMetadataSummary(int Documents, int WithMetadata);
 [JsonSerializable(typeof(SidecarCollectionsResponse))]
 [JsonSerializable(typeof(SidecarIngestRequest))]
 [JsonSerializable(typeof(SidecarIngestResponse))]
+[JsonSerializable(typeof(SidecarDeleteResponse))]
 [JsonSerializable(typeof(SidecarReindexRequest))]
 [JsonSerializable(typeof(SidecarJobResponse))]
 [JsonSerializable(typeof(SidecarJobsResponse))]

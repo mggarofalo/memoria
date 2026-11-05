@@ -19,6 +19,55 @@ public sealed class MemoriaOptions
 	public McpOptions Mcp { get; set; } = new();
 
 	public AuthOptions Auth { get; set; } = new();
+
+	public IngestOptions Ingest { get; set; } = new();
+}
+
+/// <summary>Limits on writing into the corpus.</summary>
+public sealed class IngestOptions
+{
+	/// <summary>The largest stored document, in UTF-8 bytes. Matches the sidecar's <c>MEMORIA_QMD_MAX_DOCUMENT_BYTES</c>.</summary>
+	public int MaxDocumentBytes { get; set; } = 2 * 1024 * 1024;
+
+	/// <summary>The largest raw transcript one request may send. It is read as a stream, so this limits work, not memory.</summary>
+	public long MaxSessionBytes { get; set; } = 256L * 1024 * 1024;
+
+	/// <summary>Transcripts handled at once, from the first byte read to the last part written. Past it, callers get 503 and <c>Retry-After</c>.</summary>
+	public int MaxConcurrentSessions { get; set; } = 4;
+
+	/// <summary>The most of <see cref="MaxConcurrentSessions"/> one key can hold, so one key's slow uploads leave room for the others.</summary>
+	public int MaxConcurrentSessionsPerKey { get; set; } = 2;
+
+	/// <summary>Documents handled at once, from the first byte read to the sidecar's answer.</summary>
+	public int MaxConcurrentDocuments { get; set; } = 8;
+
+	public int MaxConcurrentDocumentsPerKey { get; set; } = 4;
+
+	/// <summary>Redactions and renders run at once, for documents and transcripts together. This is what bounds CPU and most of the memory. Reading a body does not take one.</summary>
+	public int MaxConcurrentRenders { get; set; } = 2;
+
+	/// <summary>How long a transcript's body may take to arrive. Past it, the request gets 408 and nothing changes.</summary>
+	public TimeSpan SessionUploadDeadline { get; set; } = TimeSpan.FromMinutes(10);
+
+	/// <summary>How long a document's body may take to arrive.</summary>
+	public TimeSpan DocumentUploadDeadline { get; set; } = TimeSpan.FromMinutes(1);
+
+	/// <summary>The least time between index updates a delete starts in one collection. A delete with none recently starts one at once; a burst shares one when this ends.</summary>
+	public TimeSpan MinReindexInterval { get; set; } = TimeSpan.FromSeconds(10);
+
+	/// <summary>Per-collection settings, by exact collection name. A collection not listed here is redacted.</summary>
+	public Dictionary<string, IngestCollectionOptions> Collections { get; set; } = new(StringComparer.Ordinal);
+}
+
+/// <summary>One collection's ingest settings.</summary>
+public sealed class IngestCollectionOptions
+{
+	/// <summary>
+	/// Exactly <c>Disabled</c> stores this collection's text unredacted. Anything else, including <c>disabled</c>, <c>off</c>
+	/// and a stray space, leaves redaction on, and the server warns at startup about a value it did not recognize.
+	/// A string for the same reason as <see cref="AuthOptions.Mode"/>: an enum would accept values nobody meant as this.
+	/// </summary>
+	public string? Redaction { get; set; }
 }
 
 /// <summary>How callers authenticate.</summary>

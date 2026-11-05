@@ -15,6 +15,9 @@ internal sealed class JsonlReader : IDisposable
 
 	private static ReadOnlySpan<byte> ByteOrderMark => [0xEF, 0xBB, 0xBF];
 
+	/// <summary>Far above any real record, which holds a few content blocks however long their text.</summary>
+	private const int MaxTokensPerLine = 500_000;
+
 	private static readonly JsonDocumentOptions s_jsonOptions = new() { MaxDepth = 128 };
 
 	private readonly int _maxLineBytes;
@@ -145,6 +148,12 @@ internal sealed class JsonlReader : IDisposable
 			_report.BlankLines++;
 			return;
 		}
+		if (HasTooManyTokens(line.Span))
+		{
+			_report.OversizedLines++;
+			return;
+		}
+
 		using JsonDocument? document = TryParse(line);
 		if (document is null)
 		{
@@ -159,6 +168,32 @@ internal sealed class JsonlReader : IDisposable
 			_report.Records++;
 			_onRecord(document.RootElement);
 		}
+	}
+
+	/// <summary>
+	/// A parsed document costs memory per token, not per byte, so a line under the size limit made of tiny values costs many
+	/// times its size. Counting first allocates nothing. A line this reader cannot walk falls through to be reported as malformed.
+	/// </summary>
+	private static bool HasTooManyTokens(ReadOnlySpan<byte> line)
+	{
+		Utf8JsonReader reader = new(line, new JsonReaderOptions { MaxDepth = s_jsonOptions.MaxDepth });
+		int tokens = 0;
+		try
+		{
+			while (reader.Read())
+			{
+				if (++tokens > MaxTokensPerLine)
+				{
+					return true;
+				}
+			}
+		}
+		catch (JsonException)
+		{
+			return false;
+		}
+
+		return false;
 	}
 
 	private static JsonDocument? TryParse(ReadOnlyMemory<byte> line)
