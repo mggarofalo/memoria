@@ -176,7 +176,8 @@ function readCount(value: unknown, fallback: number, name: string, min: number, 
 /** Text from examples and templates, which someone may well have pasted in as it stood. */
 const PLACEHOLDERS = ["a-long-random", "at-least-16", "changeme", "change-me", "replace-me", "replaceme", "placeholder", "your-secret", "yoursecret", "example", "password"];
 const MIN_SECRET_LENGTH = 16;
-const MIN_DISTINCT_CHARACTERS = 8;
+// Of the secret as written. Folding case first, with 8, refused about 1 random 16-character secret in 100,000.
+const MIN_DISTINCT_CHARACTERS = 6;
 const KEYBOARD_ROWS = ["1234567890", "qwertyuiop", "asdfghjkl", "zxcvbnm"];
 const MIN_RUN = 4;
 const MAX_SHARE_IN_RUNS = 0.75;
@@ -205,7 +206,7 @@ function shareInRuns(lower: string): number {
 function checkSecretStrength(secret: string, setting: string): void {
   if (secret.length < MIN_SECRET_LENGTH) throw new Error(`${setting} must be at least ${MIN_SECRET_LENGTH} characters`);
   const lower = secret.toLowerCase();
-  const weak = new Set(lower).size < MIN_DISTINCT_CHARACTERS || PLACEHOLDERS.some((p) => lower.includes(p)) || shareInRuns(lower) >= MAX_SHARE_IN_RUNS;
+  const weak = new Set(secret).size < MIN_DISTINCT_CHARACTERS || PLACEHOLDERS.some((p) => lower.includes(p)) || shareInRuns(lower) >= MAX_SHARE_IN_RUNS;
   if (weak) throw new Error(`${setting} is too weak: it looks like a placeholder or repeats itself. Generate one: node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"`);
 }
 

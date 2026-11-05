@@ -120,7 +120,7 @@ function shareInRuns(lower: string): number {
 function checkTokenStrength(token: string): void {
   if (token.length < 16) throw new Error("MEMORIA_WORKER_TOKEN must be at least 16 characters");
   const lower = token.toLowerCase();
-  if (new Set(lower).size < 8 || PLACEHOLDERS.some((p) => lower.includes(p)) || shareInRuns(lower) >= 0.75) {
+  if (new Set(token).size < 6 || PLACEHOLDERS.some((p) => lower.includes(p)) || shareInRuns(lower) >= 0.75) {
     throw new Error("MEMORIA_WORKER_TOKEN is too weak: it looks like a placeholder or repeats itself. Generate one with a random source.");
   }
 }
