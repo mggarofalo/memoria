@@ -9,6 +9,7 @@ import { bootstrap, keyManagement, login, mcp, noModels, rateLimits, scopedReads
 import { Harness } from "./harness.ts";
 import { skillMatchesTheServer } from "./skill.ts";
 import { ingest, INGEST_SERVER } from "./ingest.ts";
+import { migrate } from "./migrate.ts";
 import { sourcesSync } from "./sources.ts";
 
 async function runAll(h: Harness): Promise<void> {
@@ -59,6 +60,7 @@ async function runIngest(h: Harness): Promise<void> {
   await h.startApi();
   await ingest(h, admin);
   await sourcesSync(h, admin);
+  await migrate(h);
   noModels(h);
 }
 

@@ -77,6 +77,11 @@ type harness struct {
 	config        string
 	slept         []time.Duration
 	sleepErr      error
+	checkOutput   string
+	checkErr      error
+	checkLists    *[][]string
+	checkArgs     []string
+	checkDuring   func()
 }
 
 func newHarness(t *testing.T) *harness {
@@ -111,11 +116,26 @@ func (h *harness) app() *app {
 		return h.updater
 	}
 	a.selfUpdate.executable = func() (string, error) { return "memoria-test-exe", nil }
+	a.redactionCheck = h.fakeRedactionCheck
 	a.sleep = func(_ context.Context, wait time.Duration) error {
 		h.slept = append(h.slept, wait)
 		return h.sleepErr
 	}
 	return a
+}
+
+// fakeRedactionCheck reads the lists of files it was given on its standard input.
+func (h *harness) fakeRedactionCheck(_ context.Context, args []string, stdin []byte) ([]byte, error) {
+	h.checkArgs = args
+	if h.checkDuring != nil {
+		h.checkDuring()
+	}
+	if h.checkLists != nil {
+		if err := json.Unmarshal(stdin, h.checkLists); err != nil {
+			return nil, err
+		}
+	}
+	return []byte(h.checkOutput), h.checkErr
 }
 
 // run executes a command. Every test using it also asserts the key is absent

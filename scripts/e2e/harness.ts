@@ -148,6 +148,11 @@ export class Harness {
     return this.secrets.reduce((all, key) => all.split(key).join("[KEY]"), text).replace(KEY_PATTERN, "[KEY]");
   }
 
+  /** Runs the CLI without waiting, for a check that watches it while it works. */
+  startMemoria(args: string[], env: NodeJS.ProcessEnv): ChildProcess {
+    return spawn(this.cli, args, { stdio: "ignore", env: { ...this.isolated, ...env } });
+  }
+
   memoria(args: string[], options: CliOptions = {}): CliResult {
     const env: NodeJS.ProcessEnv = { ...this.isolated };
     if (!options.noUrl) env["MEMORIA_URL"] = this.apiUrl;
@@ -163,6 +168,7 @@ export class Harness {
 
   buildServers(): void {
     run("dotnet", ["build", "src/Memoria.Api", "-c", "Release", "-v", "quiet", "-nologo"], repo);
+    run("dotnet", ["build", "tools/RedactionCheck", "-c", "Release", "-v", "quiet", "-nologo"], repo);
     run("npm", ["run", "build", "--silent"], path.join(repo, "sidecar"));
   }
 
@@ -197,6 +203,11 @@ await store.close();`;
   modelFiles(): string[] {
     const cache = path.join(this.isolated["XDG_CACHE_HOME"] ?? "", "qmd", "models");
     return existsSync(cache) ? readdirSync(cache, { recursive: true, encoding: "utf8" }) : [];
+  }
+
+  /** For a child that must touch nothing outside the private directory and reach no network. */
+  offlineEnvironment(): NodeJS.ProcessEnv {
+    return this.offline();
   }
 
   /** Every proxy goes nowhere, as a second line behind the sidecar's remote mode. */
@@ -431,6 +442,11 @@ function manyFixtures(): Array<readonly [string, string, string]> {
 /** A host's content root is its working directory, so this is what makes it read the shipped appsettings.json. */
 function apiDirectory(): string {
   return path.join(repo, "src", "Memoria.Api", "bin", "Release", "net10.0");
+}
+
+/** The local redaction report's tool. It is not part of the solution, so it builds on its own. */
+export function redactionCheckDll(): string {
+  return path.join(repo, "tools", "RedactionCheck", "bin", "Release", "net10.0", "RedactionCheck.dll");
 }
 
 function apiDll(): string {

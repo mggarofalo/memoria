@@ -190,6 +190,26 @@ memoria sources sync notes --apply   # sends, and from now on a plain sync sends
 
 A document's identity is the source's name and the file's path within the folder. Renaming a source or moving a file stores it again under a new identity, and the old copy stays until you delete it. The file's modification time orders versions, so a file edited on another machine with an older time is refused unless this machine's cursor has seen it.
 
+## Plan a migration from QMD
+
+These commands look at a local QMD setup before moving it to a server. They only read, and only the paths you give them. They have no default location, need no key or server, and never open QMD's `index.sqlite`. Nothing is sent yet; the push comes later.
+
+```sh
+memoria migrate plan --qmd-config ~/.config/qmd/index.yml
+memoria migrate plan --qmd-config ~/.config/qmd/index.yml --target notes=archive-notes --codex-sessions ~/.codex/sessions
+
+dotnet build tools/RedactionCheck -c Release
+memoria migrate report --qmd-config ~/.config/qmd/index.yml --tool tools/RedactionCheck/bin/Release/net10.0/RedactionCheck.dll
+```
+
+**`plan`** counts what QMD would index in each collection: files, bytes, the largest file, and how many are over a server's default 2 MiB limit on a document. It selects files as QMD does, following no links, and reads no file's text. `--codex-sessions` also counts raw Codex transcripts, which can be rendered and sent. A collection that cannot be counted shows why, rather than a zero, and the command exits 1. A migration needs each target collection to be empty, so `--target` chooses another name, and two sources cannot share one.
+
+Patterns and ignore rules may use names, which may hold `+ & @ # $ ~`, `*`, `?`, a whole-segment `**`, `{a,b}`, a leading `./`, and commas between patterns, as QMD reads them. An ignore rule ending in a name or `/**` also covers what is inside a folder it matches. Any other ignore rule is tested against files alone, so `s*` leaves everything inside `sub`. Anything else is refused rather than guessed at, because a wrong guess is silent: extglobs and other parentheses such as `@(a|b)`, negation with `!`, brackets, escapes, ranges such as `{1..3}`, `{x}` with no comma, `..`, and a last segment ending in `*` before `/**`, such as `s*/**`. A config with no collections is an error, and a folder with no matching file gets a warning.
+
+**`report`** runs the redaction rules over exactly those files, and reports how many replacements each rule made and in how many files. It reports counts and rule names, never a value, a path or a line. The rules live in the server's code, so this runs a tool from a checkout of this repository. Gitleaks then looks over the redacted text for anything left, so it must be on `PATH`. It is best effort: it can miss a token at a chunk boundary, so 0 findings is not proof that nothing is left, and a document it could not read is counted as unscanned and exits 1. `--no-gitleaks` goes without that, which is a weaker check: it says what the rules replaced and nothing about what they missed, and the report says so. The text goes to gitleaks on its standard input, and the list of files goes to the tool on its own, so neither reaches the disk and a killed run leaves nothing behind.
+
+Both commands exit 1 if anything could not be read: a denied folder, an unreadable file, or a name that is not valid text. These are counted, never named. Fix them, or pass `--accept-skips` to go on without them. `report` also exits 1 if a document was refused or gitleaks found something.
+
 ## Exit codes
 
 | Code | Meaning |

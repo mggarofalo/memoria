@@ -62,6 +62,8 @@ jobs:
               - coverage.runsettings
               - dotnet-tools.json
               - scripts/coverage-dotnet.sh
+              - tools/**
+              - scripts/redaction-report.sh
             cli:
               - .github/workflows/ci.yml
               - cli/**
@@ -106,6 +108,9 @@ jobs:
       # CA1502 (cyclomatic complexity) is an error, so this is the complexity gate.
       - name: Build
         run: dotnet build Memoria.slnx --no-restore -p:TreatWarningsAsErrors=true
+      # Not in the solution, so nothing else would notice this breaking.
+      - name: Build the redaction check
+        run: dotnet build tools/RedactionCheck -c Release -p:TreatWarningsAsErrors=true
       - name: Test and branch coverage
         run: sh scripts/coverage-dotnet.sh
       # The served document is pinned to src/Memoria.Api/openapi.json by
@@ -256,6 +261,14 @@ jobs:
       - name: Install
         run: npm ci --no-fund --no-audit
         working-directory: sidecar
+      # The redaction report's second look. A real one, so the flags the tool passes it are really tried.
+      - name: Install gitleaks
+        run: |
+          curl -fsSL -o gitleaks.tar.gz https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz -C "$RUNNER_TEMP" gitleaks
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+          rm gitleaks.tar.gz
       - name: Run the checks
         run: node scripts/e2e/run.ts
 

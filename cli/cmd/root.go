@@ -51,6 +51,7 @@ type app struct {
 	openKeyring     func() (auth.SecretStore, error)
 	selfUpdate      selfUpdateDeps
 	sleep           func(context.Context, time.Duration) error
+	redactionCheck  func(context.Context, []string, []byte) ([]byte, error)
 
 	flags rootFlags
 }
@@ -70,6 +71,7 @@ var commandFactories = []func(*app) *cobra.Command{
 	newAuthCmd,
 	newKeysCmd,
 	newSourcesCmd,
+	newMigrateCmd,
 	newQueryCmd,
 	newGetCmd,
 	newMultiGetCmd,
@@ -228,6 +230,7 @@ func newApp(stdin io.Reader, stdout, stderr io.Writer) *app {
 		openKeyring:     auth.NewKeyringStore,
 		selfUpdate:      defaultSelfUpdateDeps(),
 		sleep:           sleepUntilDone,
+		redactionCheck:  runDotnet,
 	}
 }
 
