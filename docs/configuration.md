@@ -246,6 +246,17 @@ Each path has one lock, in the API process. A write holds it until the sidecar a
 
 If the API dies or gives up on a write, its connection closes. The sidecar writes to a temporary file and checks the connection immediately before the atomic rename, so that write does not land. On one Linux host, a killed process's close was seen within 5 ms, and the rename followed the check by under 1 ms. A write past its check when the API dies still lands, and if a delete has been answered by then, the file is back. A restart takes far longer than that window, so this needs the sidecar to stall in that exact place, and repeating the delete clears it.
 
+### Moving an old corpus
+
+`POST /v1/ingest/rendered?collection=&path=&updated=` takes markdown that was already rendered, as `text/markdown`, with its frontmatter, and stores it at `path`. All of it goes through the collection's redaction decision and is reported the same way. Otherwise it is kept as it came. It needs an opened collection, and it cannot delete.
+
+- **Sending it again is safe.** The path is the identity, so an equal `updated` overwrites with the same result. Send the same `updated` each time, such as the file's modification time. An older one gets 409 `stale_version`, and something deleted stays out as usual.
+- **`frontmatter` says what became of the metadata.** `read` means filters work. `past_window` means the block does not close within the sidecar's first 8192 characters, as with an old export's long `files_touched`. `missing` means there is none, and `unparsable` means it is not a YAML mapping. In all three the document is stored and searchable, but matches no date, project or tag filter. Nothing is trimmed to make it fit.
+- **Over `MaxDocumentBytes` gets 413,** for that document alone. It is not split: a part needs a new path, so it would stop matching by path, and a rendered document cannot be cut safely at a message. Re-render it from its raw transcript through `POST /v1/ingest/session`, which splits, or raise `MaxDocumentBytes` and the sidecar's `MEMORIA_QMD_MAX_DOCUMENT_BYTES` together for the migration.
+- **A document over 256 KiB counts against `MaxConcurrentLargeDocuments`,** so use few workers and pause on 503.
+- **`GET /v1/ingest/rendered?collection=&path=`** says what the ledger holds for a path: `state` is `complete` once a write of it landed, and `none` if nothing is recorded.
+- **A migrated session document keeps its path as a document.** A later `POST /v1/ingest/session` that would write the same file name gets 409 `path_owned`, until that path is deleted.
+
 ### What a session upload promises
 
 - **`202` and `complete` mean all of it.** The transcript had messages and lost none, every part was written, and every old part was dealt with. Anything less answers `207`, stays `partial` in `GET /v1/ingest/session`, and `read` and `parts` say why. A live transcript whose last line is still being written reads as `partial` until it is sent whole.

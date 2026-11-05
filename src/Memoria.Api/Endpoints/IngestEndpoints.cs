@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Text;
 using System.Text.Json;
 using Memoria.Api.Auth;
 using Memoria.Api.Configuration;
@@ -37,6 +38,7 @@ public static class IngestEndpoints
 
 		MapDocumentRoutes(group);
 		MapSessionRoutes(group);
+		MapRenderedRoutes(group);
 		return app;
 	}
 
@@ -77,6 +79,28 @@ public static class IngestEndpoints
 				+ "a missing document answers `deleted: false` and costs no update. When `reindexState` is `failed`, repeat the request.")
 			.ProducesValidationProblem()
 			.ProducesProblem(StatusCodes.Status409Conflict);
+	}
+
+	private static void MapRenderedRoutes(RouteGroupBuilder group)
+	{
+		group.MapPost("/ingest/rendered", IngestRenderedAsync)
+			.WithName("ingestRendered")
+			.WithSummary("Store an already rendered document")
+			.WithDescription(
+				"For moving an old corpus. The body is the markdown as it is, frontmatter included, and it is stored at `path` as it came, except that all of it goes through the collection's redaction decision. `frontmatter` in the answer says whether "
+				+ "the sidecar could read the frontmatter: anything but `read` means the document is searchable but matches no date, project or tag filter. Safe to send again: the path is the identity, an equal `updated` overwrites with the same result, and an older one gets 409. "
+				+ "Past the size limit it gets 413, and past the limit on large documents at once it gets 503 with `Retry-After`, so pause before sending again. It cannot delete.")
+			.Accepts<string>("text/markdown")
+			.ProducesValidationProblem()
+			.ProducesProblem(StatusCodes.Status409Conflict)
+			.ProducesProblem(StatusCodes.Status413PayloadTooLarge)
+			.ProducesProblem(StatusCodes.Status422UnprocessableEntity);
+
+		group.MapGet("/ingest/rendered", GetRenderedStatusAsync)
+			.WithName("getRenderedIngestStatus")
+			.WithSummary("What is recorded for a rendered document's path")
+			.WithDescription("Says what the ledger holds for a path, so a migration can check what arrived. `none` means nothing is recorded. `complete` means a write of it landed.")
+			.ProducesValidationProblem();
 	}
 
 	private static void MapSessionRoutes(RouteGroupBuilder group)
@@ -199,6 +223,69 @@ public static class IngestEndpoints
 			: TypedResults.Json(result, statusCode: StatusCodes.Status207MultiStatus);
 	}
 
+	private static async Task<Results<Accepted<RenderedDocumentResult>, ValidationProblem>> IngestRenderedAsync(
+		[FromQuery(Name = "collection")][Description("The collection to write to, which must be open to ingest.")] string? collection,
+		[FromQuery(Name = "path")][Description("Where it goes, relative to the collection. Its existing path, which identifies it.")] string? path,
+		[FromQuery(Name = "updated")][Description("When this copy last changed, as an ISO timestamp. Orders versions, so send the same value when sending it again.")] DateTimeOffset? updated,
+		HttpContext context,
+		DocumentIngestor ingestor,
+		LargeUploads large,
+		IOptions<MemoriaOptions> options,
+		TimeProvider timeProvider,
+		CancellationToken cancellationToken)
+	{
+		long limit = options.Value.Ingest.MaxDocumentBytes;
+		RequestBody.AllowUpTo(context, limit);
+		RequestBody.RequireRate(context, options.Value.Ingest.MinUploadBytesPerSecond);
+		Dictionary<string, string[]> errors = IngestValidation.Rendered(collection, path, updated, timeProvider.GetUtcNow());
+		if (errors.Count > 0)
+		{
+			return TypedResults.ValidationProblem(errors);
+		}
+
+		await ingestor.RequireWritableAsync(collection!, cancellationToken);
+		await using Stream body = large.WatchDocument(RequestBody.Open(context, limit), context.Request.ContentLength);
+		string? text = await IngestRules.WithinDeadlineAsync(options.Value.Ingest.DocumentUploadDeadline, token => ReadMarkdownAsync(body, token), cancellationToken);
+		if (text is null)
+		{
+			return TypedResults.ValidationProblem(new Dictionary<string, string[]> { ["body"] = ["The body must be UTF-8."] });
+		}
+
+		return TypedResults.Accepted((string?)null, await ingestor.StoreRenderedAsync(collection!, path!, text, updated!.Value, cancellationToken));
+	}
+
+	private static async Task<string?> ReadMarkdownAsync(Stream body, CancellationToken cancellationToken)
+	{
+		using MemoryStream bytes = new();
+		await body.CopyToAsync(bytes, cancellationToken);
+		try
+		{
+			return StrictUtf8.GetString(bytes.GetBuffer(), 0, (int)bytes.Length);
+		}
+		catch (DecoderFallbackException)
+		{
+			return null;
+		}
+	}
+
+	private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+
+	private static async Task<Results<Ok<RenderedDocumentStatus>, ValidationProblem>> GetRenderedStatusAsync(
+		[FromQuery(Name = "collection")][Description("The collection it is in.")] string? collection,
+		[FromQuery(Name = "path")][Description("Its path within the collection.")] string? path,
+		DocumentIngestor ingestor,
+		TimeProvider timeProvider,
+		CancellationToken cancellationToken)
+	{
+		Dictionary<string, string[]> errors = IngestValidation.Rendered(collection, path, timeProvider.GetUtcNow(), timeProvider.GetUtcNow());
+		if (errors.Count > 0)
+		{
+			return TypedResults.ValidationProblem(errors);
+		}
+
+		return TypedResults.Ok(await ingestor.RenderedStatusAsync(collection!, path!, cancellationToken));
+	}
+
 	private static async Task<Results<Ok<SessionIngestStatus>, ValidationProblem>> GetSessionStatusAsync(
 		[AsParameters] SessionQuery query,
 		SessionIngestor ingestor,
@@ -268,6 +355,23 @@ internal static class IngestValidation
 		}
 
 		RequireVersion(errors, request.Updated, now);
+		return errors;
+	}
+
+	public static Dictionary<string, string[]> Rendered(string? collection, string? path, DateTimeOffset? updated, DateTimeOffset now)
+	{
+		Dictionary<string, string[]> errors = [];
+		RequireCollectionName(errors, collection);
+		if (string.IsNullOrWhiteSpace(path))
+		{
+			errors["path"] = ["path is required: it identifies the document."];
+		}
+		else
+		{
+			RequireRelativePath(errors, path);
+		}
+
+		RequireVersion(errors, updated, now);
 		return errors;
 	}
 
@@ -348,7 +452,7 @@ internal static class IngestValidation
 		}
 		else if (updated > now + IngestRules.MaxFutureSkew)
 		{
-			errors["updated"] = ["updated may not be more than a day ahead of the server's clock."];
+			errors["updated"] = ["updated may not be more than an hour ahead of the server's clock."];
 		}
 	}
 

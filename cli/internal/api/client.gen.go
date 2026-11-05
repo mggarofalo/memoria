@@ -204,6 +204,27 @@ type ReadinessReport struct {
 	Status  string            `json:"status"`
 }
 
+// RenderedDocumentResult defines model for RenderedDocumentResult.
+type RenderedDocumentResult struct {
+	Bytes       int64            `json:"bytes"`
+	Collection  string           `json:"collection"`
+	Created     bool             `json:"created"`
+	File        string           `json:"file"`
+	Frontmatter string           `json:"frontmatter"`
+	JobId       string           `json:"jobId"`
+	Path        string           `json:"path"`
+	Redaction   string           `json:"redaction"`
+	Redactions  map[string]int32 `json:"redactions"`
+}
+
+// RenderedDocumentStatus defines model for RenderedDocumentStatus.
+type RenderedDocumentStatus struct {
+	Collection string     `json:"collection"`
+	Path       string     `json:"path"`
+	State      string     `json:"state"`
+	Updated    *time.Time `json:"updated"`
+}
+
 // SearchHit defines model for SearchHit.
 type SearchHit struct {
 	Collection string            `json:"collection"`
@@ -425,6 +446,27 @@ type DeleteDocumentParams struct {
 type IngestDocumentParams struct {
 	// RestoreDeleted Stores this even though it was deleted, including the same content. Needs a key with the `admin` scope as well.
 	RestoreDeleted *bool `form:"restoreDeleted,omitempty" json:"restoreDeleted,omitempty"`
+}
+
+// GetRenderedIngestStatusParams defines parameters for GetRenderedIngestStatus.
+type GetRenderedIngestStatusParams struct {
+	// Collection The collection it is in.
+	Collection *string `form:"collection,omitempty" json:"collection,omitempty"`
+
+	// Path Its path within the collection.
+	Path *string `form:"path,omitempty" json:"path,omitempty"`
+}
+
+// IngestRenderedParams defines parameters for IngestRendered.
+type IngestRenderedParams struct {
+	// Collection The collection to write to, which must be open to ingest.
+	Collection *string `form:"collection,omitempty" json:"collection,omitempty"`
+
+	// Path Where it goes, relative to the collection. Its existing path, which identifies it.
+	Path *string `form:"path,omitempty" json:"path,omitempty"`
+
+	// Updated When this copy last changed, as an ISO timestamp. Orders versions, so send the same value when sending it again.
+	Updated *time.Time `form:"updated,omitempty" json:"updated,omitempty"`
 }
 
 // GetSessionIngestStatusParams defines parameters for GetSessionIngestStatus.
@@ -704,6 +746,22 @@ type ClientInterface interface {
 	// Corresponds with POST /v1/documents (the `IngestDocument` operationId).
 	IngestDocument(ctx context.Context, params *IngestDocumentParams, body IngestDocumentJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetRenderedIngestStatus What is recorded for a rendered document's path
+	//
+	// Says what the ledger holds for a path, so a migration can check what arrived. `none` means nothing is recorded. `complete` means a write of it landed. Requires the `ingest` scope.
+	//
+	// Corresponds with GET /v1/ingest/rendered (the `GetRenderedIngestStatus` operationId).
+	GetRenderedIngestStatus(ctx context.Context, params *GetRenderedIngestStatusParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// IngestRenderedWithBody Store an already rendered document
+	//
+	// For moving an old corpus. The body is the markdown as it is, frontmatter included, and it is stored at `path` as it came, except that all of it goes through the collection's redaction decision. `frontmatter` in the answer says whether the sidecar could read the frontmatter: anything but `read` means the document is searchable but matches no date, project or tag filter. Safe to send again: the path is the identity, an equal `updated` overwrites with the same result, and an older one gets 409. Past the size limit it gets 413, and past the limit on large documents at once it gets 503 with `Retry-After`, so pause before sending again. It cannot delete. Requires the `ingest` scope.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with POST /v1/ingest/rendered (the `IngestRendered` operationId).
+	IngestRenderedWithBody(ctx context.Context, params *IngestRenderedParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetSessionIngestStatus How a session's upload ended
 	//
 	// Only `complete` means all of it arrived. `partial` means some parts may be searchable, and the upload should be sent again. Requires the `ingest` scope.
@@ -975,6 +1033,42 @@ func (c *Client) IngestDocumentWithBody(ctx context.Context, params *IngestDocum
 // Corresponds with POST /v1/documents (the `IngestDocument` operationId).
 func (c *Client) IngestDocument(ctx context.Context, params *IngestDocumentParams, body IngestDocumentJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewIngestDocumentRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// GetRenderedIngestStatus What is recorded for a rendered document's path
+//
+// Says what the ledger holds for a path, so a migration can check what arrived. `none` means nothing is recorded. `complete` means a write of it landed. Requires the `ingest` scope.
+//
+// Corresponds with GET /v1/ingest/rendered (the `GetRenderedIngestStatus` operationId).
+func (c *Client) GetRenderedIngestStatus(ctx context.Context, params *GetRenderedIngestStatusParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetRenderedIngestStatusRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// IngestRenderedWithBody Store an already rendered document
+//
+// For moving an old corpus. The body is the markdown as it is, frontmatter included, and it is stored at `path` as it came, except that all of it goes through the collection's redaction decision. `frontmatter` in the answer says whether the sidecar could read the frontmatter: anything but `read` means the document is searchable but matches no date, project or tag filter. Safe to send again: the path is the identity, an equal `updated` overwrites with the same result, and an older one gets 409. Past the size limit it gets 413, and past the limit on large documents at once it gets 503 with `Retry-After`, so pause before sending again. It cannot delete. Requires the `ingest` scope.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with POST /v1/ingest/rendered (the `IngestRendered` operationId).
+func (c *Client) IngestRenderedWithBody(ctx context.Context, params *IngestRenderedParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewIngestRenderedRequestWithBody(c.Server, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -1567,6 +1661,152 @@ func NewIngestDocumentRequestWithBody(server string, params *IngestDocumentParam
 		if params.RestoreDeleted != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "restoreDeleted", *params.RestoreDeleted, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if encoded := queryValues.Encode(); encoded != "" {
+			rawQueryFragments = append(rawQueryFragments, encoded)
+		}
+		queryURL.RawQuery = strings.Join(rawQueryFragments, "&")
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewGetRenderedIngestStatusRequest constructs an http.Request for the GetRenderedIngestStatus method
+func NewGetRenderedIngestStatusRequest(server string, params *GetRenderedIngestStatusParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v1/ingest/rendered")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		// queryValues collects non-styled parameters (passthrough, JSON)
+		// that are safe to round-trip through url.Values.Encode().
+		queryValues := queryURL.Query()
+		// rawQueryFragments collects pre-encoded query fragments from
+		// styled parameters, preserving literal commas as delimiters
+		// per the OpenAPI spec (e.g. "color=blue,black,brown").
+		var rawQueryFragments []string
+
+		if params.Collection != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "collection", *params.Collection, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.Path != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "path", *params.Path, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if encoded := queryValues.Encode(); encoded != "" {
+			rawQueryFragments = append(rawQueryFragments, encoded)
+		}
+		queryURL.RawQuery = strings.Join(rawQueryFragments, "&")
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewIngestRenderedRequestWithBody constructs an http.Request for the IngestRendered method, with any body, and a specified content type
+func NewIngestRenderedRequestWithBody(server string, params *IngestRenderedParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v1/ingest/rendered")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		// queryValues collects non-styled parameters (passthrough, JSON)
+		// that are safe to round-trip through url.Values.Encode().
+		queryValues := queryURL.Query()
+		// rawQueryFragments collects pre-encoded query fragments from
+		// styled parameters, preserving literal commas as delimiters
+		// per the OpenAPI spec (e.g. "color=blue,black,brown").
+		var rawQueryFragments []string
+
+		if params.Collection != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "collection", *params.Collection, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.Path != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "path", *params.Path, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.Updated != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "updated", *params.Updated, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: "date-time"}); err != nil {
 				return nil, err
 			} else {
 				for _, qp := range strings.Split(queryFrag, "&") {
@@ -2216,6 +2456,24 @@ type ClientWithResponsesInterface interface {
 	//
 	// Corresponds with POST /v1/documents (the `IngestDocument` operationId).
 	IngestDocumentWithResponse(ctx context.Context, params *IngestDocumentParams, body IngestDocumentJSONRequestBody, reqEditors ...RequestEditorFn) (*IngestDocumentResponse, error)
+
+	// GetRenderedIngestStatusWithResponse What is recorded for a rendered document's path
+	//
+	// Says what the ledger holds for a path, so a migration can check what arrived. `none` means nothing is recorded. `complete` means a write of it landed. Requires the `ingest` scope.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /v1/ingest/rendered (the `GetRenderedIngestStatus` operationId).
+	GetRenderedIngestStatusWithResponse(ctx context.Context, params *GetRenderedIngestStatusParams, reqEditors ...RequestEditorFn) (*GetRenderedIngestStatusResponse, error)
+
+	// IngestRenderedWithBodyWithResponse Store an already rendered document
+	//
+	// For moving an old corpus. The body is the markdown as it is, frontmatter included, and it is stored at `path` as it came, except that all of it goes through the collection's redaction decision. `frontmatter` in the answer says whether the sidecar could read the frontmatter: anything but `read` means the document is searchable but matches no date, project or tag filter. Safe to send again: the path is the identity, an equal `updated` overwrites with the same result, and an older one gets 409. Past the size limit it gets 413, and past the limit on large documents at once it gets 503 with `Retry-After`, so pause before sending again. It cannot delete. Requires the `ingest` scope.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /v1/ingest/rendered (the `IngestRendered` operationId).
+	IngestRenderedWithBodyWithResponse(ctx context.Context, params *IngestRenderedParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*IngestRenderedResponse, error)
 
 	// GetSessionIngestStatusWithResponse How a session's upload ended
 	//
@@ -3083,6 +3341,207 @@ func (r IngestDocumentResponse) ContentType() string {
 	return ""
 }
 
+type GetRenderedIngestStatusResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *RenderedDocumentStatus
+	// ApplicationproblemJSON400 the response for an HTTP 400 `application/problem+json` response
+	ApplicationproblemJSON400 *HttpValidationProblemDetails
+	// ApplicationproblemJSON401 the response for an HTTP 401 `application/problem+json` response
+	ApplicationproblemJSON401 *ProblemDetails
+	// ApplicationproblemJSON403 the response for an HTTP 403 `application/problem+json` response
+	ApplicationproblemJSON403 *ProblemDetails
+	// ApplicationproblemJSON429 the response for an HTTP 429 `application/problem+json` response
+	ApplicationproblemJSON429 *ProblemDetails
+	// ApplicationproblemJSON502 the response for an HTTP 502 `application/problem+json` response
+	ApplicationproblemJSON502 *ProblemDetails
+	// ApplicationproblemJSON503 the response for an HTTP 503 `application/problem+json` response
+	ApplicationproblemJSON503 *ProblemDetails
+	// ApplicationproblemJSON504 the response for an HTTP 504 `application/problem+json` response
+	ApplicationproblemJSON504 *ProblemDetails
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r GetRenderedIngestStatusResponse) GetJSON200() *RenderedDocumentStatus {
+	return r.JSON200
+}
+
+// GetApplicationproblemJSON400 returns the response for an HTTP 400 `application/problem+json` response
+func (r GetRenderedIngestStatusResponse) GetApplicationproblemJSON400() *HttpValidationProblemDetails {
+	return r.ApplicationproblemJSON400
+}
+
+// GetApplicationproblemJSON401 returns the response for an HTTP 401 `application/problem+json` response
+func (r GetRenderedIngestStatusResponse) GetApplicationproblemJSON401() *ProblemDetails {
+	return r.ApplicationproblemJSON401
+}
+
+// GetApplicationproblemJSON403 returns the response for an HTTP 403 `application/problem+json` response
+func (r GetRenderedIngestStatusResponse) GetApplicationproblemJSON403() *ProblemDetails {
+	return r.ApplicationproblemJSON403
+}
+
+// GetApplicationproblemJSON429 returns the response for an HTTP 429 `application/problem+json` response
+func (r GetRenderedIngestStatusResponse) GetApplicationproblemJSON429() *ProblemDetails {
+	return r.ApplicationproblemJSON429
+}
+
+// GetApplicationproblemJSON502 returns the response for an HTTP 502 `application/problem+json` response
+func (r GetRenderedIngestStatusResponse) GetApplicationproblemJSON502() *ProblemDetails {
+	return r.ApplicationproblemJSON502
+}
+
+// GetApplicationproblemJSON503 returns the response for an HTTP 503 `application/problem+json` response
+func (r GetRenderedIngestStatusResponse) GetApplicationproblemJSON503() *ProblemDetails {
+	return r.ApplicationproblemJSON503
+}
+
+// GetApplicationproblemJSON504 returns the response for an HTTP 504 `application/problem+json` response
+func (r GetRenderedIngestStatusResponse) GetApplicationproblemJSON504() *ProblemDetails {
+	return r.ApplicationproblemJSON504
+}
+
+// GetBody returns the raw response body bytes
+func (r GetRenderedIngestStatusResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r GetRenderedIngestStatusResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetRenderedIngestStatusResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r GetRenderedIngestStatusResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type IngestRenderedResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON202 the response for an HTTP 202 `application/json` response
+	JSON202 *RenderedDocumentResult
+	// ApplicationproblemJSON400 the response for an HTTP 400 `application/problem+json` response
+	ApplicationproblemJSON400 *HttpValidationProblemDetails
+	// ApplicationproblemJSON401 the response for an HTTP 401 `application/problem+json` response
+	ApplicationproblemJSON401 *ProblemDetails
+	// ApplicationproblemJSON403 the response for an HTTP 403 `application/problem+json` response
+	ApplicationproblemJSON403 *ProblemDetails
+	// ApplicationproblemJSON409 the response for an HTTP 409 `application/problem+json` response
+	ApplicationproblemJSON409 *ProblemDetails
+	// ApplicationproblemJSON413 the response for an HTTP 413 `application/problem+json` response
+	ApplicationproblemJSON413 *ProblemDetails
+	// ApplicationproblemJSON422 the response for an HTTP 422 `application/problem+json` response
+	ApplicationproblemJSON422 *ProblemDetails
+	// ApplicationproblemJSON429 the response for an HTTP 429 `application/problem+json` response
+	ApplicationproblemJSON429 *ProblemDetails
+	// ApplicationproblemJSON502 the response for an HTTP 502 `application/problem+json` response
+	ApplicationproblemJSON502 *ProblemDetails
+	// ApplicationproblemJSON503 the response for an HTTP 503 `application/problem+json` response
+	ApplicationproblemJSON503 *ProblemDetails
+	// ApplicationproblemJSON504 the response for an HTTP 504 `application/problem+json` response
+	ApplicationproblemJSON504 *ProblemDetails
+}
+
+// GetJSON202 returns the response for an HTTP 202 `application/json` response
+func (r IngestRenderedResponse) GetJSON202() *RenderedDocumentResult {
+	return r.JSON202
+}
+
+// GetApplicationproblemJSON400 returns the response for an HTTP 400 `application/problem+json` response
+func (r IngestRenderedResponse) GetApplicationproblemJSON400() *HttpValidationProblemDetails {
+	return r.ApplicationproblemJSON400
+}
+
+// GetApplicationproblemJSON401 returns the response for an HTTP 401 `application/problem+json` response
+func (r IngestRenderedResponse) GetApplicationproblemJSON401() *ProblemDetails {
+	return r.ApplicationproblemJSON401
+}
+
+// GetApplicationproblemJSON403 returns the response for an HTTP 403 `application/problem+json` response
+func (r IngestRenderedResponse) GetApplicationproblemJSON403() *ProblemDetails {
+	return r.ApplicationproblemJSON403
+}
+
+// GetApplicationproblemJSON409 returns the response for an HTTP 409 `application/problem+json` response
+func (r IngestRenderedResponse) GetApplicationproblemJSON409() *ProblemDetails {
+	return r.ApplicationproblemJSON409
+}
+
+// GetApplicationproblemJSON413 returns the response for an HTTP 413 `application/problem+json` response
+func (r IngestRenderedResponse) GetApplicationproblemJSON413() *ProblemDetails {
+	return r.ApplicationproblemJSON413
+}
+
+// GetApplicationproblemJSON422 returns the response for an HTTP 422 `application/problem+json` response
+func (r IngestRenderedResponse) GetApplicationproblemJSON422() *ProblemDetails {
+	return r.ApplicationproblemJSON422
+}
+
+// GetApplicationproblemJSON429 returns the response for an HTTP 429 `application/problem+json` response
+func (r IngestRenderedResponse) GetApplicationproblemJSON429() *ProblemDetails {
+	return r.ApplicationproblemJSON429
+}
+
+// GetApplicationproblemJSON502 returns the response for an HTTP 502 `application/problem+json` response
+func (r IngestRenderedResponse) GetApplicationproblemJSON502() *ProblemDetails {
+	return r.ApplicationproblemJSON502
+}
+
+// GetApplicationproblemJSON503 returns the response for an HTTP 503 `application/problem+json` response
+func (r IngestRenderedResponse) GetApplicationproblemJSON503() *ProblemDetails {
+	return r.ApplicationproblemJSON503
+}
+
+// GetApplicationproblemJSON504 returns the response for an HTTP 504 `application/problem+json` response
+func (r IngestRenderedResponse) GetApplicationproblemJSON504() *ProblemDetails {
+	return r.ApplicationproblemJSON504
+}
+
+// GetBody returns the raw response body bytes
+func (r IngestRenderedResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r IngestRenderedResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r IngestRenderedResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r IngestRenderedResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 type GetSessionIngestStatusResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -3672,6 +4131,36 @@ func (c *ClientWithResponses) IngestDocumentWithResponse(ctx context.Context, pa
 		return nil, err
 	}
 	return ParseIngestDocumentResponse(rsp)
+}
+
+// GetRenderedIngestStatusWithResponse What is recorded for a rendered document's path
+//
+// Says what the ledger holds for a path, so a migration can check what arrived. `none` means nothing is recorded. `complete` means a write of it landed. Requires the `ingest` scope.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /v1/ingest/rendered (the `GetRenderedIngestStatus` operationId).
+func (c *ClientWithResponses) GetRenderedIngestStatusWithResponse(ctx context.Context, params *GetRenderedIngestStatusParams, reqEditors ...RequestEditorFn) (*GetRenderedIngestStatusResponse, error) {
+	rsp, err := c.GetRenderedIngestStatus(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetRenderedIngestStatusResponse(rsp)
+}
+
+// IngestRenderedWithBodyWithResponse Store an already rendered document
+//
+// For moving an old corpus. The body is the markdown as it is, frontmatter included, and it is stored at `path` as it came, except that all of it goes through the collection's redaction decision. `frontmatter` in the answer says whether the sidecar could read the frontmatter: anything but `read` means the document is searchable but matches no date, project or tag filter. Safe to send again: the path is the identity, an equal `updated` overwrites with the same result, and an older one gets 409. Past the size limit it gets 413, and past the limit on large documents at once it gets 503 with `Retry-After`, so pause before sending again. It cannot delete. Requires the `ingest` scope.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /v1/ingest/rendered (the `IngestRendered` operationId).
+func (c *ClientWithResponses) IngestRenderedWithBodyWithResponse(ctx context.Context, params *IngestRenderedParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*IngestRenderedResponse, error) {
+	rsp, err := c.IngestRenderedWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseIngestRenderedResponse(rsp)
 }
 
 // GetSessionIngestStatusWithResponse How a session's upload ended
@@ -4321,6 +4810,177 @@ func ParseIngestDocumentResponse(rsp *http.Response) (*IngestDocumentResponse, e
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
 		var dest DocumentIngestResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest HttpValidationProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON400 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 413:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON413 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 429:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON429 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 502:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON502 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 504:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON504 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetRenderedIngestStatusResponse parses an HTTP response from a GetRenderedIngestStatusWithResponse call
+func ParseGetRenderedIngestStatusResponse(rsp *http.Response) (*GetRenderedIngestStatusResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetRenderedIngestStatusResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RenderedDocumentStatus
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest HttpValidationProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON400 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 429:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON429 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 502:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON502 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 504:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON504 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseIngestRenderedResponse parses an HTTP response from a IngestRenderedWithResponse call
+func ParseIngestRenderedResponse(rsp *http.Response) (*IngestRenderedResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &IngestRenderedResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest RenderedDocumentResult
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
