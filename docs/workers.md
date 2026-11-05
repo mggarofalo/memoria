@@ -261,7 +261,7 @@ Across-sides agreement now sits between the two within-side figures, so the remo
 
 **A search can allocate over 4 GB of JavaScript heap.** QMD's vector lookup reads a document's whole body once per matching chunk, and this corpus has documents up to 21 MB. One query reached 4.1 GB and, at Node's default limit, the benchmark died of it. That is QMD's behaviour, in-process or remote. `bench:parity` now raises the limit to 6 GiB. The sidecar service does not yet, and it needs to.
 
-**The benchmark can leave index copies behind.** It deletes them on any normal exit, but a fatal crash skips that. The copies hold real transcripts, so after a crash delete the `memoria-parity-*` directory from the temporary directory.
+**The benchmark cleans up its index copies.** They hold real transcripts. A normal exit and Ctrl-C remove them. A fatal crash runs no code at all, so the next run removes what a dead run left, recognising its own directories by a marker holding the owner's process ID. `--out` is rewritten after each query and marked `partial` until the run ends, so a crash keeps the results so far.
 
 **llama-server's prompt cache is off.** It defaults to 8 GiB of system memory and reached that on the rerank server, starving the machine until allocations failed. It also held real documents, for no benefit, because these requests do not repeat.
 
@@ -285,7 +285,13 @@ Across-sides agreement now sits between the two within-side figures, so the remo
 | Text | A string under a size limit. |
 | Any | Must be JSON, and is cut off while reading past 64 MiB. Redirects are refused, so the token is not resent. |
 
-**The bearer token stays in one header.** Error messages are built from fixed text and validated codes, never from a response body or a caught error's message, because they reach job records and `/ready`. Per-call log lines hold only worker host and port, operation, batch size, duration, status and an error code. On the worker, the token is not passed to llama-server's environment.
+**The worker does not take llama-server's word for who it is.** Another local user could bind a child's port during a restart and be sent transcript text. So each start gets a random API key and a random nonce, passed in the environment because a command line is visible to other users. A server is ready only once an authenticated `/props` returns the nonce as its model alias, and that check repeats on every health poll. `llama-server` listed as an external URL cannot be checked this way, so it is the operator's responsibility; its address must be a literal loopback or private one, and `MEMORIA_WORKER_<ROLE>_API_KEY` supplies its key.
+
+**Nothing from llama-server reaches a log.** Its output can hold prompt text. The worker keeps the last 2,000 characters in memory only to report a fixed `reason` when a server exits: `port_in_use`, `model_load_failed`, `out_of_memory` or `bad_arguments`. The sidecar's YAML parser also keeps its warnings, which quote frontmatter, off stderr.
+
+**What the worker takes in is bounded.** A full queue refuses before reading a body. All bodies held at once are capped by `MEMORIA_WORKER_MAX_BUFFERED_BYTES`, because the old defaults allowed about 24 GiB. Responses from llama-server stop being read at 64 MiB, and calls refuse redirects, since one would carry transcript text elsewhere. Grammars are capped at 16 KiB. On the real server recursive grammars such as `root ::= root root` get an immediate 400, but a half-megabyte one held the generate slot for over 45 seconds; 11 KB took under 2 seconds.
+
+**The bearer token stays in one header.** Error messages are built from fixed text and validated codes, never from a response body or a caught error's message, because they reach job records and `/ready`. Per-call log lines hold only worker host and port, operation, batch size, duration, status and an error code. On the worker, neither the token nor any other `MEMORIA_` or `LLAMA_` variable passes to llama-server's environment, whatever the case of its name.
 
 ## The parity benchmark
 

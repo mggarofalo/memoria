@@ -61,12 +61,14 @@ MEMORIA_WORKER_TOKEN=... ./scripts/install-launchd.sh --host 192.168.1.30 --llam
 | `MEMORIA_WORKER_MODEL_DIR` | `~/.cache/qmd/models` | Where to find models. Honors `XDG_CACHE_HOME`. |
 | `MEMORIA_WORKER_ROLES` | `embed,rerank,generate` | Which models this machine serves. |
 | `MEMORIA_WORKER_<ROLE>_MODEL` | unset | Explicit model path for `EMBED`, `RERANK` or `GENERATE`. The sidecar rejects an embedding file with a different name from its index's. |
-| `MEMORIA_WORKER_<ROLE>_URL` | unset | Use an already-running `llama-server` instead of launching one. |
+| `MEMORIA_WORKER_<ROLE>_URL` | unset | Use an already-running `llama-server` instead of launching one. Must be a literal loopback or private address. |
+| `MEMORIA_WORKER_<ROLE>_API_KEY` | unset | The key for that server, if it has one. Launched servers get a new random key at every start. |
 | `MEMORIA_WORKER_<ROLE>_PARALLEL` | `4`, `2`, `1` | Slots for embed, rerank and generate. Also the worker's concurrency limit for that role. |
 | `MEMORIA_WORKER_LLAMA_BASE_PORT` | `8384` | First of three loopback ports for the children. |
 | `MEMORIA_WORKER_GPU_LAYERS` | `999` | `--n-gpu-layers`. `0` runs on CPU. |
 | `MEMORIA_WORKER_WARMUP` | `1` | One small request per model after they load. |
-| `MEMORIA_WORKER_MAX_QUEUE` | `256` | Requests that may wait per role before new ones get a 503. |
+| `MEMORIA_WORKER_MAX_QUEUE` | `256` | Requests that may wait per role before new ones get a 503, without their bodies being read. |
+| `MEMORIA_WORKER_MAX_BUFFERED_BYTES` | `268435456` | Request bodies held in memory at once, across all requests. Past it, new ones get a 503. |
 | `MEMORIA_WORKER_BODY_LIMIT_BYTES` | `33554432` | Largest request body. |
 | `MEMORIA_WORKER_REQUEST_TIMEOUT_MS` | `120000` | Deadline for one call to `llama-server`. |
 | `MEMORIA_WORKER_BUSY_LOAD_PER_CORE` | `0.9` | Report `busy` above this one-minute load per core. `0` disables. Windows has no load average, so this does nothing there. |
