@@ -50,10 +50,14 @@ export function keyManagement(h: Harness, admin: string): Keys {
   const wide = createKey(h, admin, ["--label", "wide", "--scope", "read", "--all-collections"]);
 
   const keys = listKeys(h, admin);
-  const wideId = keys.get("wide")?.id ?? "";
-  const adminId = keys.get("e2e-admin")?.id ?? "";
   h.check("keys list shows the real shapes", keys.get("wide")?.allCollections === true && keys.get("reader")?.collections[0] === "notes", [...keys.values()]);
+  const wideId = keys.get("wide")?.id ?? "";
+  rotateAndRevoke(h, admin, wide, wideId);
+  refuseBadKeyOperations(h, admin, wideId, keys.get("e2e-admin")?.id ?? "");
+  return { admin, reader };
+}
 
+function rotateAndRevoke(h: Harness, admin: string, wide: string, wideId: string): void {
   const rotated = h.remember(h.memoria(["keys", "rotate", wideId], { key: admin }).out.trim());
   h.check("keys rotate returns a new key", FULL_KEY.test(rotated) && rotated !== wide);
   h.check("the rotated-away key gets a real 401, exit 3", h.memoria(["collections"], { key: wide }).code === 3);
@@ -64,12 +68,14 @@ export function keyManagement(h: Harness, admin: string): Keys {
   h.check("keys revoke", revoked.code === 0 && revoked.err.includes("Revoked"), revoked.out + revoked.err);
   h.check("the revoked key gets a real 401, exit 3", h.memoria(["collections"], { key: rotated }).code === 3);
   h.check("revoking twice succeeds", h.memoria(["keys", "revoke", wideId], { key: admin }).code === 0);
-  const conflict = h.memoria(["keys", "rotate", wideId], { key: admin });
+}
+
+function refuseBadKeyOperations(h: Harness, admin: string, revokedId: string, adminId: string): void {
+  const conflict = h.memoria(["keys", "rotate", revokedId], { key: admin });
   h.check("rotating a revoked key: real 409, exit 1", conflict.code === 1 && conflict.err.includes("409"), conflict.out + conflict.err);
   h.check("revoking an unknown id: real 404, exit 4", h.memoria(["keys", "revoke", "0".repeat(16)], { key: admin }).code === 4);
   const own = h.memoria(["keys", "revoke", adminId], { key: admin });
   h.check("revoking the key in use needs --force", own.code === 2 && own.err.includes("--force"), own.out + own.err);
-  return { admin, reader };
 }
 
 export function scopeErrors(h: Harness, { admin, reader }: Keys): void {
@@ -123,7 +129,7 @@ export const TRAVERSALS = [
 function sidecarUrls(h: Harness, from: number): string[] {
   const seen: string[] = [];
   for (const line of h.log("sidecar").slice(from).split("\n")) {
-    const match = /"url":"([^"]+)"/.exec(line);
+    const match = /"path":"([^"]+)"/.exec(line);
     if (match?.[1]) seen.push(match[1]);
   }
   return seen;
@@ -152,7 +158,9 @@ export async function traversal(h: Harness, { reader }: Keys): Promise<void> {
     await h.rawGet("/v1/docs/notes%2Fmarker.md", reader);
     const urls = await loggedSince(h, before, "marker.md");
     const stray = urls.filter((url) => !url.startsWith("/docs/"));
-    h.check(`${reference}: 404 or 400, and only document lookups at the sidecar`, [400, 404].includes(response.status) && !response.body.includes("totalDocuments") && stray.length === 0, { status: response.status, urls });
+    // Without the marker in the log, "no stray call" would prove nothing.
+    const sawMarker = urls.some((url) => url.includes("marker.md"));
+    h.check(`${reference}: 404 or 400, and only document lookups at the sidecar`, [400, 404].includes(response.status) && !response.body.includes("totalDocuments") && sawMarker && stray.length === 0, { status: response.status, urls });
   }
 }
 
@@ -182,7 +190,13 @@ function toolCall(id: number, name: string, args: object): object {
   return { jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } };
 }
 
-export function mcp(h: Harness, { admin, reader }: Keys): void {
+export function mcp(h: Harness, keys: Keys): void {
+  mcpSession(h, keys.reader);
+  mcpRefused(h, "an admin key", keys.admin, 403, "by design");
+  mcpRefused(h, "a bad key", BAD_KEY, 401, "authentication failed");
+}
+
+function mcpSession(h: Harness, reader: string): void {
   const frames = [
     INITIALIZE,
     { jsonrpc: "2.0", method: "notifications/initialized" },
@@ -201,12 +215,12 @@ export function mcp(h: Harness, { admin, reader }: Keys): void {
   h.check("mcp: a document outside the scope is refused", !text(4).includes("ledger"), text(4));
   h.check("mcp: a document in scope comes back", text(5).includes("zebrafish protocol"), text(5));
   h.check("mcp: an unknown method gets a JSON-RPC error", replies.get(6)?.error, text(6));
+}
 
-  for (const [label, key, status, phrase] of [["an admin key", admin, 403, "by design"], ["a bad key", BAD_KEY, 401, "authentication failed"]] as const) {
-    const refused = h.memoria(["mcp"], { key, stdin: JSON.stringify(INITIALIZE) + "\n" });
-    const error = mcpFrames(refused.out).replies.get(1)?.error;
-    h.check(`mcp with ${label}: real ${status} as a JSON-RPC error`, refused.code === 0 && error?.data?.status === status && error.message?.includes(phrase), refused.out + refused.err);
-  }
+function mcpRefused(h: Harness, label: string, key: string, status: number, phrase: string): void {
+  const refused = h.memoria(["mcp"], { key, stdin: JSON.stringify(INITIALIZE) + "\n" });
+  const error = mcpFrames(refused.out).replies.get(1)?.error;
+  h.check(`mcp with ${label}: real ${status} as a JSON-RPC error`, refused.code === 0 && error?.data?.status === status && error.message?.includes(phrase), refused.out + refused.err);
 }
 
 /** The file backend, so the driver needs no keyring. See README.md for the one keyring touch. */
