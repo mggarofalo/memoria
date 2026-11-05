@@ -39,8 +39,9 @@ public sealed partial class CollectionReindexer(
 				return new ReindexOutcome(ReindexState.NotNeeded);
 			}
 
+			// A scheduled update that is due but has not started yet is still the one this delete shares, or the two would start back to back.
 			wait = state.LastStarted + interval - timeProvider.GetUtcNow();
-			if (wait > TimeSpan.Zero)
+			if (wait > TimeSpan.Zero || state.Scheduled)
 			{
 				ScheduleOnce(collection, state, wait);
 				return new ReindexOutcome(ReindexState.Scheduled, null, Math.Max(1, (int)Math.Ceiling(wait.TotalSeconds)));
