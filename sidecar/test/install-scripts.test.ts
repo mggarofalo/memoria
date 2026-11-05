@@ -81,9 +81,13 @@ test("the sidecar's dry run keeps the secret out of the plan and out of the regi
 });
 
 test("the worker's dry run keeps the token out, and grants read on models and llama-server", { skip: needsPowerShell }, () => {
-  const run = workerDryRun(["-BindHost", "192.168.1.20"], { MEMORIA_WORKER_TOKEN: SECRET_CANARY });
+  const refused = workerDryRun(["-BindHost", "192.168.1.20"], { MEMORIA_WORKER_TOKEN: SECRET_CANARY });
+  assert.notEqual(refused.status, 0);
+  assert.match(refused.stdout + refused.stderr, /AllowPlaintextLan/);
+  const run = workerDryRun(["-BindHost", "192.168.1.20", "-AllowPlaintextLan"], { MEMORIA_WORKER_TOKEN: SECRET_CANARY });
   assert.equal(run.status, 0, run.stdout + run.stderr);
   assert.ok(!(run.stdout + run.stderr).includes(SECRET_CANARY));
+  assert.match(run.stdout, /MEMORIA_WORKER_ALLOW_PLAINTEXT_LAN=1/);
   assert.match(run.stdout, /MEMORIA_WORKER_TOKEN_FILE=/);
   assert.doesNotMatch(run.stdout, /MEMORIA_WORKER_TOKEN=/);
   assert.match(run.stdout, /NT SERVICE\\memoria-worker/);

@@ -1,6 +1,7 @@
+import { SearchBusy, SearchGate } from "./search-gate.ts";
 import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
-import { loggablePath, refuseAtBoundary, validRequestId } from "./boundary.ts";
+import { limitConnectionsPerSource, loggablePath, refuseAtBoundary, validRequestId } from "./boundary.ts";
 import Fastify, { type FastifyError, type FastifyInstance, type FastifyServerOptions, LogController } from "fastify";
 import swagger from "@fastify/swagger";
 import { bearerMatches } from "./auth.ts";
@@ -29,6 +30,7 @@ export interface WarmupState {
 }
 
 export interface AppContext {
+  searchGate: SearchGate;
   backend: QmdBackend;
   config: SidecarConfig;
   metadata: MetadataIndex;
@@ -61,7 +63,7 @@ export async function buildApp(options: BuildAppOptions): Promise<App> {
   metadata.refresh();
 
   const embedRequested = async (request: ReindexRequest, context: JobRunContext): Promise<EmbedSummary> => {
-    const run = { force: request.force, forceSince: context.jobCreatedAt, signal: context.signal, onWorker: context.noteWorker, onProgress: context.noteProgress };
+    const run = { force: request.force, ...(context.firstAttempt ? {} : { forceSince: context.jobCreatedAt }), signal: context.signal, onWorker: context.noteWorker, onProgress: context.noteProgress };
     if (request.collections === null) return backend.embed(run);
     // The SDK embeds one collection per call; keep the job scoped to
     // exactly the collections that were updated.
@@ -108,6 +110,7 @@ export async function buildApp(options: BuildAppOptions): Promise<App> {
       onStoreError: (message) => logStoreError(message),
       onDeferred: (job, reason) => logDeferred(job, reason),
     }),
+    searchGate: new SearchGate({ running: config.searchConcurrency, queued: config.searchQueue, maxWaitMs: config.searchMaxWaitMs }),
     startedAt: Date.now(),
     warmup: { requested: config.warmup, done: false, error: null, durationMs: null },
   };
@@ -124,8 +127,10 @@ export async function buildApp(options: BuildAppOptions): Promise<App> {
     genReqId: (request) => validRequestId(request.headers["request-id"]) ?? randomUUID(),
     requestTimeout: config.requestTimeoutMs,
     serverFactory: (handler) => {
-      const server = createServer({ headersTimeout: config.headersTimeoutMs, requestTimeout: config.requestTimeoutMs, connectionsCheckingInterval: Math.min(config.headersTimeoutMs, 5_000) }, handler);
+      // Fastify's own 72 s keep-alive: Node's 5 s would close sockets a pooled client is about to reuse.
+      const server = createServer({ headersTimeout: config.headersTimeoutMs, requestTimeout: config.requestTimeoutMs, keepAliveTimeout: 72_000, connectionsCheckingInterval: Math.min(config.headersTimeoutMs, 5_000) }, handler);
       server.maxConnections = config.maxConnections;
+      limitConnectionsPerSource(server, config.maxConnectionsPerSource, { addresses: config.apiAddresses, limit: config.maxConnectionsPerApiAddress });
       return server;
     },
     ajv: { customOptions: { removeAdditional: false, useDefaults: true, coerceTypes: "array", allErrors: false } },
@@ -211,6 +216,7 @@ export async function buildApp(options: BuildAppOptions): Promise<App> {
 
   app.setErrorHandler(async (error: FastifyError | Error, request, reply) => {
     if (error instanceof HttpError) {
+      if (error instanceof SearchBusy) reply.header("Retry-After", "2");
       await reply.code(error.statusCode).send({ error: error.code, message: error.message });
       return;
     }

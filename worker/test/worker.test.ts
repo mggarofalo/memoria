@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { connect } from "node:net";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -186,14 +189,16 @@ test("a worker reports and refuses roles it does not serve", () =>
   ));
 
 test("while models load the worker says so and refuses work", async () => {
-  const worker = await startWorker({ env: { ...process.env, FAKE_LOAD_MS: "1500" } });
+  const gate = path.join(await mkdtemp(path.join(tmpdir(), "memoria-load-")), "loaded");
+  const worker = await startWorker({ env: { ...process.env, FAKE_LOAD_UNTIL_FILE: gate } });
   try {
     const health = await json(fetch(`${worker.url}/health`, { headers: auth }));
     assert.equal(health.status, "starting");
     const r = await post(worker, "/v1/embed", { texts: ["x"] });
     assert.equal(r.status, 503);
     assert.equal((await json(r)).error, "model_not_ready");
-    assert.equal(await worker.supervisor.waitReady(10_000), true);
+    await writeFile(gate, "");
+    assert.equal(await worker.supervisor.waitReady(30_000), true);
     assert.equal((await post(worker, "/v1/embed", { texts: ["x"] })).status, 200);
   } finally {
     await worker.stop();
@@ -362,4 +367,22 @@ test("a body that is not declared JSON is refused, as a browser can send text/pl
     }
     assert.equal((await send({ "content-type": "application/json; charset=utf-8" })).status, 200);
     assert.equal((await send({ "content-type": "APPLICATION/JSON" })).status, 200);
+  }));
+
+test("a browser cannot reach the worker: any Origin is refused, and so is a hostile Host name", () =>
+  withWorker(async (w) => {
+    const raw = (headers: Record<string, string>) =>
+      new Promise<string>((resolve, reject) => {
+        const { port } = new URL(w.url);
+        const lines = Object.entries(headers).map(([k, v]) => `${k}: ${v}\r\n`).join("");
+        const socket = connect(Number(port), "127.0.0.1", () => socket.write(`GET /health HTTP/1.1\r\n${lines}Authorization: Bearer ${TOKEN}\r\nConnection: close\r\n\r\n`));
+        let received = "";
+        socket.on("data", (chunk) => (received += chunk.toString("utf8")));
+        socket.on("end", () => resolve(received));
+        socket.on("error", reject);
+      });
+    assert.match(await raw({ Host: "evil.example.com" }), /^HTTP\/1\.1 421 /);
+    assert.match(await raw({ Host: "127.0.0.1:8383", Origin: "https://evil.example.com" }), /^HTTP\/1\.1 403 /);
+    assert.match(await raw({ Host: "localhost:8383" }), /^HTTP\/1\.1 200 /);
+    assert.match(await raw({ Host: "192.168.1.30:8383" }), /^HTTP\/1\.1 200 /);
   }));

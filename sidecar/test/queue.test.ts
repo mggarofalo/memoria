@@ -693,3 +693,33 @@ test("purging the cache while another process holds the index says busy, with a 
     await app.close();
   }
 });
+
+test("a force job's first attempt redoes everything; only a retry resumes from when it was accepted", async () => {
+  const { app, backend } = await makeApp();
+  try {
+    const since: Array<string | undefined> = [];
+    backend.embedImpl = async (options) => {
+      since.push(options.forceSince);
+      return { docsProcessed: 0, chunksEmbedded: 0, errors: 0, durationMs: 1 };
+    };
+    const { job } = (await app.inject({ method: "POST", url: "/reindex", headers: authHeaders, payload: { force: true } })).json();
+    await app.ctx.jobs.idle();
+    assert.ok(since.length > 0);
+    assert.ok(since.every((s) => s === undefined), "no clock to go wrong");
+    const original = backend.update.bind(backend);
+    backend.update = async () => {
+      throw new Error("scan failed");
+    };
+    const failing = (await app.inject({ method: "POST", url: "/reindex", headers: authHeaders, payload: { force: true } })).json().job;
+    await app.ctx.jobs.idle();
+    backend.update = original;
+    since.length = 0;
+    await app.inject({ method: "POST", url: `/queue/jobs/${failing.id}:retry`, headers: authHeaders });
+    await app.ctx.jobs.idle();
+    assert.ok(since.length > 0);
+    assert.ok(since.every((s) => s === failing.createdAt));
+    assert.ok(job.id !== failing.id);
+  } finally {
+    await app.close();
+  }
+});

@@ -33,6 +33,8 @@
 param(
     [string]$ServiceName = "memoria-worker",
     [string]$BindHost = "127.0.0.1",
+    # The worker serves plain http. For binding beyond loopback on a private link such as WireGuard.
+    [switch]$AllowPlaintextLan,
     [int]$Port = 8383,
     [string]$TokenFile = "",
     [Parameter(Mandatory = $true)][string]$LlamaServer,
@@ -76,6 +78,9 @@ $token = Get-MemoriaSecretValue -SourceFile $TokenFile -EnvValue $env:MEMORIA_WO
 if (-not (Test-MemoriaLoopback -BindHost $BindHost) -and $null -eq $token) {
     throw "A token is required when binding $BindHost. Pass -TokenFile or set MEMORIA_WORKER_TOKEN."
 }
+if (-not (Test-MemoriaLoopback -BindHost $BindHost) -and -not $AllowPlaintextLan) {
+    throw "The worker serves plain http, so its token and every text it embeds would cross the network in clear. Use a private link such as WireGuard and pass -AllowPlaintextLan to say so. See docs/deployment.md."
+}
 
 if ([string]::IsNullOrWhiteSpace($InstallDir)) { $InstallDir = Join-Path $env:ProgramFiles "Memoria\$ServiceName" }
 if ([string]::IsNullOrWhiteSpace($StateDir)) { $StateDir = Join-Path $env:ProgramData $ServiceName }
@@ -85,6 +90,7 @@ $secretPath = Join-Path $StateDir "secret\token.txt"
 
 $environment = @(
     "MEMORIA_WORKER_HOST=$BindHost",
+    "MEMORIA_WORKER_ALLOW_PLAINTEXT_LAN=$(if ($AllowPlaintextLan) { '1' } else { '0' })",
     "MEMORIA_WORKER_PORT=$Port",
     "MEMORIA_WORKER_LLAMA_SERVER=$LlamaServer",
     "MEMORIA_WORKER_MODEL_DIR=$ModelDir"

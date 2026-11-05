@@ -7,7 +7,7 @@ import { readSecretFile, resolveSecret } from "../src/secret-file.ts";
 import { loadConfig as loadWorkerConfig } from "../../worker/src/config.ts";
 import { tempDir } from "./helpers.ts";
 
-const SECRET = "0123456789abcdefXYZ";
+const SECRET = "Xk29vQmB7fLp3ZtRw";
 const VAR = "MEMORIA_QMD_SECRET_FILE";
 
 async function secretFile(content: string | Buffer, mode = 0o600): Promise<string> {
@@ -113,7 +113,7 @@ test("the sidecar's secret and worker token can come from files", async () => {
 
 test("the worker's token can come from a file", async () => {
   const file = await secretFile(`${SECRET}\n`);
-  const lan = { MEMORIA_WORKER_HOST: "192.168.1.20" };
+  const lan = { MEMORIA_WORKER_HOST: "192.168.1.20", MEMORIA_WORKER_ALLOW_PLAINTEXT_LAN: "1" };
   assert.equal(loadWorkerConfig({ ...lan, MEMORIA_WORKER_TOKEN_FILE: file }).token, SECRET);
   assert.equal(loadWorkerConfig({ ...lan, MEMORIA_WORKER_TOKEN: SECRET }).token, SECRET);
   assert.throws(() => loadWorkerConfig({ ...lan, MEMORIA_WORKER_TOKEN_FILE: file, MEMORIA_WORKER_TOKEN: SECRET }), /Set only one/);

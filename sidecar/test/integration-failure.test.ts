@@ -592,7 +592,7 @@ test("a corrupt queue file does not stop the sidecar from starting", { skip }, a
   const { dbPath } = await fixture();
   await writeFile(queueDbPathFor(dbPath), "not a database ".repeat(500));
   const child = spawn(process.execPath, [mainEntry], {
-    env: { ...process.env, MEMORIA_QMD_DB_PATH: dbPath, MEMORIA_QMD_PORT: String(await freePort()), MEMORIA_QMD_WARMUP: "0", MEMORIA_QMD_SECRET: "0123456789abcdefXYZ" },
+    env: { ...process.env, MEMORIA_QMD_DB_PATH: dbPath, MEMORIA_QMD_PORT: String(await freePort()), MEMORIA_QMD_WARMUP: "0", MEMORIA_QMD_SECRET: "Xk29vQmB7fLp3ZtRw" },
     stdio: ["ignore", "pipe", "ignore"],
   });
   const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
@@ -1504,5 +1504,86 @@ test("a search of only quotes is a 400 on the real SDK, and ordinary quoting sti
   } finally {
     await app.close();
     await o.done();
+  }
+});
+
+// --- a force must redo what it says, whatever the clock did -------------------------------------------------
+
+test("a resuming force job redoes a document last written in the very millisecond it was accepted", { skip }, async () => {
+  const o = await opened();
+  try {
+    await o.backend.embed({ force: false });
+    const since = new Date(Date.now() - 1000).toISOString();
+    const { DatabaseSync } = await import("node:sqlite");
+    const raw = new DatabaseSync(o.dbPath);
+    raw.prepare("UPDATE content_vectors SET embedded_at = ?").run(since);
+    raw.close();
+    assert.equal((await o.backend.embed({ force: true, forceSince: since })).docsProcessed, 4);
+    assert.equal((await o.backend.embed({ force: true, forceSince: since })).docsProcessed, 0, "and skips what it has redone since");
+  } finally {
+    await o.done();
+  }
+});
+
+test("through the queue, a first attempt redoes everything and a retry resumes", { skip }, async () => {
+  const o = await opened();
+  const app = await buildApp({ backend: o.backend, config: testConfig(), logger: false });
+  try {
+    await o.backend.embed({ force: false });
+    const force = async () => {
+      const { id } = (await app.inject({ method: "POST", url: "/reindex", headers: authHeaders, payload: { force: true } })).json().job;
+      await app.ctx.jobs.idle();
+      return (await app.inject({ method: "GET", url: `/reindex/jobs/${id}`, headers: authHeaders })).json().job;
+    };
+    const healthy = o.mock.handlers.get("POST /v1/embed")!;
+    refuseText(o.mock, 502, "Nested document");
+    const first = await force();
+    assert.equal(first.result.embed.docsProcessed, 4);
+    assert.equal(first.result.embed.docsPending, 1);
+    o.mock.on("POST /v1/embed", healthy);
+    await app.inject({ method: "POST", url: `/queue/jobs/${first.id}:retry`, headers: authHeaders });
+    await app.ctx.jobs.idle();
+    const retried = (await app.inject({ method: "GET", url: `/reindex/jobs/${first.id}`, headers: authHeaders })).json().job;
+    assert.equal(retried.state, "succeeded");
+    assert.equal(retried.result.embed.docsProcessed, 1, "only what was left");
+  } finally {
+    await app.close();
+    await o.done();
+  }
+});
+
+// --- lexical input the SDK refuses ---------------------------------------------------------------------------
+
+test("lexical input the SDK or search engine refuses is a 400 on the real SDK", { skip }, async () => {
+  const o = await opened();
+  const app = await buildApp({ backend: o.backend, config: testConfig(), logger: false });
+  try {
+    const search = (query: string) => app.inject({ method: "POST", url: "/search", headers: authHeaders, payload: { searches: [{ type: "lex", query }], rerank: false } });
+    const negated = `word ${Array.from({ length: 600 }, (_, i) => `-w${i}`).join(" ")}`;
+    for (const query of ['"unterminated', 'a"', '"a', negated]) {
+      const reply = await search(query);
+      assert.equal(reply.statusCode, 400, query.slice(0, 20));
+      assert.ok(!reply.body.includes("w599"), "and does not echo it");
+    }
+    assert.equal((await search('"AuthenticationHandler"')).statusCode, 200);
+  } finally {
+    await app.close();
+    await o.done();
+  }
+});
+
+test("one stored file too large for the old chunker fails nothing: searches reaching it still answer", { skip, timeout: 120_000 }, async () => {
+  const { dbPath } = await fixture({ "blank.md": `# Blank\n\nMatchword\n${"\n".repeat(17 * 1024 * 1024)}x\n`, "ok.md": "# Ok\n\nMatchword too.\n" });
+  const mock = await new MockWorker(8).start();
+  const backend = await openBackend({ dbPath, keepWarm: false, llm: remoteOptions([worker("w", mock)]) });
+  const app = await buildApp({ backend, config: testConfig(), logger: false });
+  try {
+    const reply = await app.inject({ method: "POST", url: "/search", headers: authHeaders, payload: { searches: [{ type: "lex", query: "Matchword" }], rerank: false } });
+    assert.equal(reply.statusCode, 200, reply.body.slice(0, 200));
+    assert.equal(reply.json().total, 2);
+  } finally {
+    await app.close();
+    await backend.close();
+    await mock.stop();
   }
 });

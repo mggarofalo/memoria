@@ -89,6 +89,8 @@ export interface JobRunContext {
   noteProgress(): void;
   /** When this job was first accepted. A resumed force job skips what it already redid. */
   jobCreatedAt: string;
+  /** Nothing has run for this job before, so there is nothing to resume. */
+  firstAttempt: boolean;
 }
 
 export type JobRunner = (request: ReindexRequest, context: JobRunContext) => Promise<JobResult>;
@@ -557,6 +559,7 @@ export class JobQueue {
     return {
       signal,
       jobCreatedAt: job.createdAt,
+      firstAttempt: job.attempts === 1,
       noteWorker: (name) => {
         workers.add(name);
         job.worker = [...workers].join(",");

@@ -1,3 +1,4 @@
+import { refuseAtBoundary } from "./boundary.ts";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Role } from "./config.ts";
@@ -22,6 +23,8 @@ const MAX_DETOKENIZE_TOKENS = 1_000_000;
 
 export interface WorkerServerOptions {
   token: string | undefined;
+  /** DNS names a request may arrive under. An IP address is always fine. */
+  allowedHosts?: ReadonlySet<string>;
   bodyLimitBytes: number;
   maxQueue: number;
   /** Concurrent requests per role; set to llama-server's slot count. */
@@ -154,6 +157,8 @@ const OPERATIONS_BY_ROLE: Record<Role, string[]> = {
   generate: ["complete"],
 };
 
+const LOCALHOST_ONLY: ReadonlySet<string> = new Set(["localhost"]);
+
 export function createWorkerServer(options: WorkerServerOptions): { server: Server; gates: Map<Role, Gate> } {
   const { inference, log } = options;
   const gates = new Map<Role, Gate>();
@@ -268,6 +273,12 @@ export function createWorkerServer(options: WorkerServerOptions): { server: Serv
       send(response, status, body);
       log.info({ method: request.method, path, status, durationMs: Date.now() - started, ...(errorCode ? { errorCode } : {}) }, "request");
     };
+    const refusal = refuseAtBoundary({ host: request.headers.host, origin: request.headers.origin }, options.allowedHosts ?? LOCALHOST_ONLY);
+    if (refusal) {
+      request.resume();
+      finish(refusal.status, { error: refusal.error, message: refusal.message }, refusal.error);
+      return;
+    }
     if (options.token !== undefined && !tokenMatches(request.headers.authorization, options.token)) {
       // Drain the body so the client gets the response rather than a reset.
       request.resume();

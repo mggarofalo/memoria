@@ -1,3 +1,4 @@
+import type { SearchGate } from "./search-gate.ts";
 import { isBusy } from "./sqlite-busy.ts";
 import type { FastifyInstance } from "fastify";
 import type { AppContext } from "./app.ts";
@@ -82,6 +83,18 @@ function checkedSearchInput(body: SearchBody): string | null {
   if ((text !== "") === hasSearches) throw new HttpError(400, "validation", "Provide exactly one of `query` or `searches`");
   checkSearchable(text, body.searches);
   return text === "" ? null : text;
+}
+
+/** The SDK's own checks on a query, and the search engine's limits, are the caller's to fix. */
+const BAD_QUERY = /^Structured search \(|^fts5 /;
+
+async function searchRefusingBadInput<T>(gate: SearchGate, search: () => Promise<T>): Promise<T> {
+  try {
+    return await gate.run(search);
+  } catch (err) {
+    if (err instanceof Error && BAD_QUERY.test(err.message)) throw new HttpError(400, "validation", "The search engine cannot run this query. Check its quotes, and use fewer terms.");
+    throw err;
+  }
 }
 
 /** Quotes or punctuation alone are a syntax error in the search engine, and that is the caller's to fix. */
@@ -331,6 +344,12 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         required: ["documents", "refreshedAt"],
         properties: { documents: { type: "integer" }, refreshedAt: { type: "string", nullable: true } },
       },
+      sdk: {
+        type: "object",
+        required: ["patched"],
+        description: "This sidecar's fixes to the QMD SDK are in the code it is running. It refuses to start otherwise.",
+        properties: { patched: { type: "boolean" } },
+      },
       jobs: {
         type: "object",
         required: ["pending"],
@@ -390,6 +409,8 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         models,
         warmup: warmupState,
         metadata: { documents: ctx.metadata.size, refreshedAt: ctx.metadata.refreshedAt?.toISOString() ?? null },
+        // Always true: a sidecar on an unpatched SDK refuses to start. Stated so a caller can see it.
+        sdk: { patched: true },
         jobs: { pending: ctx.jobs.pending, persistent: ctx.jobs.persistence().healthy, stuck },
       };
       if (request.query.requireModels && !models.resident) {
@@ -508,6 +529,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
             },
           },
           ...errorResponses,
+          503: { $ref: "Error#", description: "Too many searches are running. Retry after `Retry-After` seconds." },
         },
       },
     },
@@ -520,7 +542,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       const { fetchLimit, candidateLimit } = searchWindow(body, filtered, config);
 
       const started = Date.now();
-      const { hits, degradedReasons } = await backend.searchDetailed({
+      const { hits, degradedReasons } = await searchRefusingBadInput(ctx.searchGate, () => backend.searchDetailed({
         ...(text !== null ? { query: text } : { queries: body.searches!.map((s) => ({ type: s.type, query: s.query })) }),
         ...(body.intent ? { intent: body.intent } : {}),
         ...(candidateLimit !== undefined ? { candidateLimit } : {}),
@@ -528,7 +550,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         limit: fetchLimit,
         minScore: body.minScore,
         rerank: body.rerank,
-      });
+      }));
 
       const primaryQuery = text ?? primarySearch(body.searches!);
       const results = [];

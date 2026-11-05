@@ -598,6 +598,18 @@
                         }
                       }
                     },
+                    "sdk": {
+                      "type": "object",
+                      "required": [
+                        "patched"
+                      ],
+                      "description": "This sidecar's fixes to the QMD SDK are in the code it is running. It refuses to start otherwise.",
+                      "properties": {
+                        "patched": {
+                          "type": "boolean"
+                        }
+                      }
+                    },
                     "jobs": {
                       "type": "object",
                       "required": [
@@ -882,6 +894,18 @@
                             "string",
                             "null"
                           ]
+                        }
+                      }
+                    },
+                    "sdk": {
+                      "type": "object",
+                      "required": [
+                        "patched"
+                      ],
+                      "description": "This sidecar's fixes to the QMD SDK are in the code it is running. It refuses to start otherwise.",
+                      "properties": {
+                        "patched": {
+                          "type": "boolean"
                         }
                       }
                     },
@@ -1387,6 +1411,16 @@
           },
           "500": {
             "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Too many searches are running. Retry after `Retry-After` seconds.",
             "content": {
               "application/json": {
                 "schema": {

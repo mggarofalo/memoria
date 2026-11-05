@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { connect, type Socket } from "node:net";
 import path from "node:path";
@@ -10,7 +11,9 @@ import { loggablePath, refuseAtBoundary, validRequestId } from "../src/boundary.
 import { loadConfig } from "../src/config.ts";
 import { parseLineRange } from "../src/line-range.ts";
 import { DEFAULT_HEAD_BYTES, MetadataIndex, parseBound, parseFrontmatter } from "../src/metadata.ts";
-import { PATCH_MARKER, patchedStore } from "../scripts/patch-qmd.ts";
+import { patchedStore } from "../scripts/patch-qmd.ts";
+import { missingSdkFixes, requireSdkFixes, type SdkStoreFunctions } from "../src/sdk-check.ts";
+import { SearchBusy, SearchGate } from "../src/search-gate.ts";
 import { FakeBackend } from "./fake-backend.ts";
 import { authHeaders, makeApp, testConfig } from "./helpers.ts";
 
@@ -28,11 +31,14 @@ const sdk = (await import(sdkUrl)) as {
 const installedStore = fileURLToPath(sdkUrl);
 
 test("installing applied the SDK patch", () => {
-  assert.ok(readFileSync(installedStore, "utf8").includes(PATCH_MARKER));
+  assert.deepEqual(missingSdkFixes(sdk as unknown as SdkStoreFunctions), []);
 });
 
 test("the patch refuses an SDK whose text has moved, and running it twice changes nothing", () => {
-  assert.throws(() => patchedStore("export function somethingElse() {}"), /The QMD SDK has changed/);
+  assert.throws(() => patchedStore("export function somethingElse() {}"), /The QMD SDK has changed.*patch-qmd\.ts/);
+  assert.throws(() => patchedStore("// memoria-patched\nexport function somethingElse() {}"), /The QMD SDK has changed/, "a marker alone proves nothing");
+  const dropped = readFileSync(installedStore, "utf8").replace("const bodyOf = db.prepare", "const bodyWas = db.prepare");
+  assert.throws(() => patchedStore(dropped), /The QMD SDK has changed/, "each edit is checked");
   const once = readFileSync(installedStore, "utf8");
   assert.equal(patchedStore(once), once);
   assert.equal(patchedStore(once.replace(/\n/g, "\r\n")), once, "whatever the line endings");
@@ -184,7 +190,7 @@ function opened(port: number, send: string): Promise<Socket> {
 }
 
 test("clients that never finish their headers are dropped, and others still get an answer", { timeout: 30_000 }, async () => {
-  const { app, port } = await listening({ headersTimeoutMs: 200 });
+  const { app, port } = await listening({ headersTimeoutMs: 200, maxConnectionsPerSource: 1000 });
   const sockets: Socket[] = [];
   try {
     for (let i = 0; i < 100; i++) sockets.push(await opened(port, "GET /health HTTP/1.1\r\nHost: localhost\r\nX-Slow: "));
@@ -198,7 +204,7 @@ test("clients that never finish their headers are dropped, and others still get 
 });
 
 test("connections past the limit are turned away", { timeout: 30_000 }, async () => {
-  const { app, port } = await listening({ maxConnections: 5 });
+  const { app, port } = await listening({ maxConnections: 5, maxConnectionsPerSource: 1000 });
   const sockets: Socket[] = [];
   try {
     for (let i = 0; i < 5; i++) sockets.push(await opened(port, "GET /health HTTP/1.1\r\nHost: localhost\r\nX-Slow: "));
@@ -339,7 +345,7 @@ test("with no secret set, a run makes its own, so there is no open mode", async 
   assert.equal(a.secretGenerated, true);
   assert.ok(a.secret.length >= 32);
   assert.notEqual(a.secret, b.secret);
-  assert.equal(loadConfig({ MEMORIA_QMD_SECRET: "0123456789abcdefXYZ" }).secretGenerated, false);
+  assert.equal(loadConfig({ MEMORIA_QMD_SECRET: "Xk29vQmB7fLp3ZtRw" }).secretGenerated, false);
   const app = await buildApp({ backend: new FakeBackend({ collections: [], docs: [] }), config: { ...a, warmup: false }, logger: false });
   try {
     assert.equal((await app.inject({ method: "GET", url: "/status" })).statusCode, 401);
@@ -359,7 +365,7 @@ test("weak or placeholder secrets are refused, without repeating them", () => {
 });
 
 test("plain http beyond loopback needs an explicit opt-in, with a message that says what to do", () => {
-  const secret = { MEMORIA_QMD_SECRET: "0123456789abcdefXYZ" };
+  const secret = { MEMORIA_QMD_SECRET: "Xk29vQmB7fLp3ZtRw" };
   const lan = { ...secret, MEMORIA_QMD_HOST: "192.168.1.20" };
   assert.throws(() => loadConfig(lan), /in clear.*MEMORIA_QMD_ALLOW_PLAINTEXT_LAN=1/);
   assert.equal(loadConfig({ ...lan, MEMORIA_QMD_ALLOW_PLAINTEXT_LAN: "1" }).host, "192.168.1.20");
@@ -423,4 +429,215 @@ test("a search of only quotes is a 400", async () => {
   } finally {
     await app.close();
   }
+});
+
+// --- an unpatched SDK --------------------------------------------------------------------------------
+
+const pristine = (): SdkStoreFunctions => ({
+  isInsideCodeFence: originalInside,
+  findBestCutoff: originalCutoff as never,
+  scanBreakPoints: () => [],
+  searchVec: (() => `content.doc as body
+    FROM content_vectors cv`) as never,
+  hybridQuery: (() => {}) as never,
+  structuredSearch: (() => {}) as never,
+});
+
+test("the start-up check names each fix an unpatched SDK lacks, with no marker and no clock", () => {
+  assert.equal(missingSdkFixes(pristine()).length, 6);
+  assert.throws(() => requireSdkFixes(pristine()), /not patched.*findBestCutoff.*scripts\/patch-qmd\.ts/);
+  const real = sdk as unknown as SdkStoreFunctions;
+  assert.doesNotThrow(() => requireSdkFixes(real));
+  for (const key of Object.keys(pristine()) as Array<keyof SdkStoreFunctions>) {
+    assert.equal(missingSdkFixes({ ...real, [key]: pristine()[key] }).length, 1, key);
+  }
+});
+
+test("a sidecar on an unpatched SDK refuses to start", { timeout: 60_000 }, () => {
+  const fixture = fileURLToPath(new URL("./fixtures/unpatched-sdk.ts", import.meta.url));
+  const run = spawnSync(process.execPath, [fixture], { encoding: "utf8", timeout: 50_000 });
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(run.stdout, /refused: .*not patched.*isInsideCodeFence/);
+});
+
+test("/ready says the SDK is patched", async () => {
+  const { app } = await makeApp();
+  try {
+    assert.deepEqual((await app.inject({ method: "GET", url: "/ready", headers: authHeaders })).json().sdk, { patched: true });
+  } finally {
+    await app.close();
+  }
+});
+
+// --- a stored file too large for the chunker's table -------------------------------------------------
+
+test("17 MiB of blank lines chunks without overflowing, and within the cap nothing changed", { timeout: 60_000 }, () => {
+  assert.ok(chunkInChild(`"\\n".repeat(17 * 1024 * 1024)`, 40_000).chunks > 1000);
+  const twoMiB = "\n".repeat(2 * 1024 * 1024);
+  const chunks = sdk.chunkDocument(twoMiB);
+  // Every cut at the plain size minus the overlap would mean break points had been dropped.
+  assert.ok(chunks.length > 100);
+  assert.ok(chunks.every((c) => c.text.length <= 3600));
+});
+
+// --- connections per source --------------------------------------------------------------------------
+
+function from(port: number, localAddress: string, send = "GET /health HTTP/1.1\r\nHost: localhost\r\nX-Slow: "): Promise<Socket> {
+  return new Promise((resolve) => {
+    const socket = connect({ port, host: "127.0.0.1", localAddress }, () => {
+      socket.write(send);
+      resolve(socket);
+    });
+    socket.on("error", () => {});
+    socket.on("data", () => {});
+  });
+}
+
+test("one source cannot hold the connections: past its share it is dropped, and others still get in", { timeout: 30_000 }, async () => {
+  const { app, port } = await listening({ maxConnections: 50, maxConnectionsPerSource: 8 });
+  const sockets: Socket[] = [];
+  try {
+    for (let i = 0; i < 100; i++) sockets.push(await from(port, "127.0.0.1"));
+    const closed = await Promise.all(sockets.map((s) => closedOrNot(s, 2_000)));
+    assert.equal(closed.filter((c) => !c).length, 8, "it keeps its share and no more");
+    // 100 tries would have used up the total of 50. Another address is untouched.
+    const other = await from(port, "127.0.0.2", "GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    sockets.push(other);
+    const reply = await new Promise<string>((resolve) => {
+      let text = "";
+      other.on("data", (chunk) => (text += String(chunk)));
+      other.on("close", () => resolve(text));
+    });
+    assert.match(reply, /^HTTP\/1\.1 200 /);
+    // A dropped share comes back once its connections have gone.
+    for (const s of sockets) s.destroy();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const again = await from(port, "127.0.0.1");
+    sockets.push(again);
+    assert.equal(await closedOrNot(again, 500), false);
+  } finally {
+    for (const s of sockets) s.destroy();
+    await app.close();
+  }
+});
+
+test("Memoria.Api's address gets more, and the settings have defaults", { timeout: 30_000 }, async () => {
+  const { app, port } = await listening({ maxConnectionsPerSource: 2, apiAddresses: new Set(["127.0.0.1"]), maxConnectionsPerApiAddress: 6 });
+  const sockets: Socket[] = [];
+  try {
+    for (let i = 0; i < 9; i++) sockets.push(await from(port, "127.0.0.1"));
+    const closed = await Promise.all(sockets.map((s) => closedOrNot(s, 1_000)));
+    assert.equal(closed.filter((c) => !c).length, 6);
+  } finally {
+    for (const s of sockets) s.destroy();
+    await app.close();
+  }
+  const config = testConfig();
+  assert.equal(config.maxConnectionsPerSource, 64);
+  assert.equal(config.maxConnectionsPerApiAddress, 512);
+  assert.deepEqual([...loadConfig({ MEMORIA_QMD_API_ADDRESSES: "10.0.0.5, 10.0.0.6" }).apiAddresses], ["10.0.0.5", "10.0.0.6"]);
+});
+
+test("keep-alive stays at Fastify's 72 s, so a pooled client does not meet a closed socket", async () => {
+  const { app } = await listening({});
+  try {
+    assert.equal(app.server.keepAliveTimeout, 72_000);
+  } finally {
+    await app.close();
+  }
+});
+
+// --- concurrent searches -------------------------------------------------------------------------------
+
+test("the gate holds to its limit, queues in order, and turns the rest away", async () => {
+  const gate = new SearchGate({ running: 2, queued: 1, maxWaitMs: 60_000 });
+  const releases: Array<() => void> = [];
+  let running = 0;
+  let most = 0;
+  const order: number[] = [];
+  const search = (id: number) =>
+    gate.run(async () => {
+      order.push(id);
+      most = Math.max(most, ++running);
+      await new Promise<void>((resolve) => releases.push(resolve));
+      running--;
+      return id;
+    });
+  const a = search(1);
+  const b = search(2);
+  const c = search(3);
+  await assert.rejects(search(4), SearchBusy);
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(order, [1, 2]);
+  releases.shift()!();
+  assert.equal(await a, 1);
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(order, [1, 2, 3]);
+  releases.shift()!();
+  releases.shift()!();
+  await Promise.all([b, c]);
+  assert.equal(most, 2);
+  assert.equal(await gate.run(async () => 5), 5, "the gate is open again");
+});
+
+test("a search that fails gives up its turn, and one that waits too long is turned away", async () => {
+  const gate = new SearchGate({ running: 1, queued: 4, maxWaitMs: 20 });
+  await assert.rejects(gate.run(() => Promise.reject(new Error("boom"))), /boom/);
+  assert.equal(await gate.run(async () => "free"), "free");
+  let release = (): void => {};
+  const held = gate.run(() => new Promise<void>((resolve) => (release = resolve)));
+  await assert.rejects(gate.run(async () => {}), SearchBusy);
+  release();
+  await held;
+  assert.equal(await gate.run(async () => "free again"), "free again", "the waiter that left took no slot");
+});
+
+test("past the queue, /search answers 503 with Retry-After, and other routes still answer", async () => {
+  const { app, backend } = await makeApp({ config: { searchConcurrency: 1, searchQueue: 0 } });
+  let release = (): void => {};
+  const original = backend.searchDetailed.bind(backend);
+  backend.searchDetailed = async (o) => {
+    await new Promise<void>((resolve) => (release = resolve));
+    return original(o);
+  };
+  try {
+    const search = () => app.inject({ method: "POST", url: "/search", headers: authHeaders, payload: { query: "api keys" } });
+    const first = search();
+    await new Promise((r) => setTimeout(r, 20));
+    const busy = await search();
+    assert.equal(busy.statusCode, 503);
+    assert.equal(busy.json().error, "search_busy");
+    assert.equal(busy.headers["retry-after"], "2");
+    assert.equal((await app.inject({ method: "GET", url: "/health" })).statusCode, 200);
+    release();
+    assert.equal((await first).statusCode, 200);
+  } finally {
+    await app.close();
+  }
+  const config = testConfig();
+  assert.deepEqual([config.searchConcurrency, config.searchQueue, config.searchMaxWaitMs], [4, 16, 10_000]);
+});
+
+test("a search error that is not about the query is still a 500", async () => {
+  const { app, backend } = await makeApp();
+  backend.searchDetailed = async () => {
+    throw new Error("disk full");
+  };
+  try {
+    assert.equal((await app.inject({ method: "POST", url: "/search", headers: authHeaders, payload: { query: "x" } })).statusCode, 500);
+  } finally {
+    await app.close();
+  }
+});
+
+// --- weak secrets ------------------------------------------------------------------------------------------
+
+test("obvious sequences are refused, and random secrets are not", () => {
+  for (const secret of ["1234567890123456", "qwertyuiopasdfgh", "abcdefghabcdefgh", "0123456789abcdef", "ponmlkjihgfedcba"]) {
+    assert.throws(() => loadConfig({ MEMORIA_QMD_SECRET: secret }), /too weak/, secret);
+  }
+  for (let i = 0; i < 20_000; i++) {
+    assert.doesNotThrow(() => loadConfig({ MEMORIA_QMD_SECRET: randomBytes(12).toString("base64url") }));
+  }
+  assert.doesNotThrow(() => loadConfig({ MEMORIA_QMD_SECRET: "test-secret-0123456789abcdef" }), "some sequence in a longer secret is fine");
 });

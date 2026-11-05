@@ -259,11 +259,21 @@ The sidecar and worker speak plain http, so anything off loopback sends the shar
 
 Run the sidecar with `--max-old-space-size=4096`. The install script sets it; elsewhere use `node --max-old-space-size=4096 dist/main.js`. This is a ceiling, not a target. Node's default on a smaller host can be lower, and a search that reaches the limit kills the process.
 
-`sidecar/scripts/patch-qmd.ts` runs on install and fixes the SDK's scans. Without it, one search over six 21 MB documents froze for 35 s and needed over 1 GB of heap. With it, the same search took 2 to 3 s and fitted in 512 MiB, and other requests get a turn between documents, so the longest stall was about a second.
+`sidecar/scripts/patch-qmd.ts` runs on install and fixes the SDK's scans. Without it, one search over six 21 MB documents froze for 35 s and needed over 1 GB of heap. With it, the same search took 2 to 3 s and fitted in 512 MiB. The SDK's functions are checked at start, and a sidecar on an unpatched SDK refuses to start. `/ready` shows `sdk.patched`.
 
-`POST /documents` refuses anything over `MEMORIA_QMD_MAX_DOCUMENT_BYTES` (2 MiB) with a 413 `document_too_large`, and writes nothing. A file already on disk stays indexed and searchable at any size: the cap applies only at ingest, and the fixes above are what make those files safe. One limit remains: a file of over about 16 MiB that is nearly all blank lines overflows the chunker's break-point table, so a search reaching it fails with a 500. It cannot arrive through the API.
+`POST /documents` refuses anything over `MEMORIA_QMD_MAX_DOCUMENT_BYTES` (2 MiB) with a 413 `document_too_large`, and writes nothing. The rest of this section is about stalls, meaning time when the sidecar answers nothing else, including `/health`.
 
-**Why not a worker thread.** Running the SDK in one was evaluated and not adopted. With the scans fixed the longest stall is about a second. It would not reliably contain an out-of-memory error either: of four allocation patterns tried, three failed only the worker and one killed the whole process. It would also mean making about 25 backend methods asynchronous and copying 21 MB bodies between threads.
+- **Within the cap.** A single search stalls for under a second: 675 ms at worst with one sub-query over 2 MiB documents.
+- **Files already on disk, at any size.** The cap applies only at ingest, so these stay indexed and searchable, and their stalls are longer. Measured: 16 MiB of blank lines stalled for 6.0 s, and an update scan of a 170 MiB file for 5.8 s. A 21 MB ordinary transcript chunks in about 340 ms.
+- **Very large files of blank lines.** Past 2.2 million break points, about 2 MiB of nothing but newlines, the chunker stops collecting more and cuts the rest at its plain chunk size. So such a document searches and embeds, with cruder chunks. A document that still cannot be chunked is set aside, and costs only itself.
+
+**Concurrent searches.** Each search holds whole bodies while it runs, so memory grows with how many run at once. `MEMORIA_QMD_SEARCH_CONCURRENCY` (4) run together, `MEMORIA_QMD_SEARCH_QUEUE` (16) wait for up to `MEMORIA_QMD_SEARCH_MAX_WAIT_MS` (10 s), and the rest get a 503 `search_busy` with `Retry-After`. Memoria.Api passes that on as a 503. Four is chosen against the 4096 MiB heap: 20 searches of 10 sub-queries over 2 MiB documents peaked at 3.1 GB with 4 running, and the same load ran out of heap at 1024 MiB unless cut to 2 running. If you lower the heap, lower this with it.
+
+**Connections.** One address may hold `MEMORIA_QMD_MAX_CONNECTIONS_PER_SOURCE` (64) connections, so a peer with no secret cannot use up the `MEMORIA_QMD_MAX_CONNECTIONS` total (1,024). List Memoria.Api's address in `MEMORIA_QMD_API_ADDRESSES` to give it 512. Reaching the total takes 16 addresses.
+
+**Frontmatter.** When a key repeats, the last one wins, where it used to give no metadata. That spoofs nothing: filters read a document's own frontmatter, whoever can write that can write any value, and on a transcript the renderer writes those keys itself.
+
+**Why not a worker thread.** Running the SDK in one was evaluated and not adopted. With the scans fixed, a search within the cap stalls for under a second. It would not reliably contain an out-of-memory error either: of four allocation patterns tried, three failed only the worker and one killed the whole process. It would also mean making about 25 backend methods asynchronous and copying 21 MB bodies between threads.
 
 ## Reverse proxy and TLS
 

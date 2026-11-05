@@ -3,6 +3,7 @@
  * reproduces the request and response shapes the worker relies on, as documented
  * upstream. It says nothing about whether a real llama-server scores the same.
  */
+import { existsSync } from "node:fs";
 import { createServer } from "node:http";
 
 const args = process.argv.slice(2);
@@ -13,6 +14,9 @@ const flag = (name: string): string | undefined => {
 const port = Number(flag("--port"));
 const dimensions = Number(process.env.FAKE_EMBED_DIMENSIONS ?? "768");
 const loadUntil = Date.now() + Number(process.env.FAKE_LOAD_MS ?? "0");
+// Loads until this file exists, so a test decides when, whatever the machine's load.
+const loadGate = process.env.FAKE_LOAD_UNTIL_FILE;
+const loading = (): boolean => Date.now() < loadUntil || (loadGate !== undefined && !existsSync(loadGate));
 let hung = false;
 
 function vectorFor(text: string): number[] {
@@ -33,7 +37,7 @@ const server = createServer((request, response) => {
     const body = chunks.length > 0 ? (JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, any>) : {};
     switch (request.url) {
       case "/health":
-        return Date.now() < loadUntil ? send(503, { error: { message: "Loading model" } }) : send(200, { status: "ok" });
+        return loading() ? send(503, { error: { message: "Loading model" } }) : send(200, { status: "ok" });
       case "/tokenize": {
         // One token per code point, offset so a token is never just the char code.
         const tokens = Array.from(String(body.content), (ch) => ch.codePointAt(0)! + 1);

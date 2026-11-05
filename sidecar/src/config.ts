@@ -28,6 +28,16 @@ export interface SidecarConfig {
   requestTimeoutMs: number;
   /** Connections held at once. */
   maxConnections: number;
+  /** Connections any one address may hold, so one peer cannot use up the total. */
+  maxConnectionsPerSource: number;
+  /** Memoria.Api's address, which gets more. */
+  apiAddresses: ReadonlySet<string>;
+  maxConnectionsPerApiAddress: number;
+  /** Searches running at once. Each holds whole document bodies. */
+  searchConcurrency: number;
+  /** Searches that may wait for a turn. Past that, or `searchMaxWaitMs`, a 503. */
+  searchQueue: number;
+  searchMaxWaitMs: number;
   /** Disable the SDK's five-minute idle unload so models stay resident. */
   keepWarm: boolean;
   /** Run one reranked query at startup so the first real request hits the warm path. */
@@ -167,12 +177,35 @@ function readCount(value: unknown, fallback: number, name: string, min: number, 
 const PLACEHOLDERS = ["a-long-random", "at-least-16", "changeme", "change-me", "replace-me", "replaceme", "placeholder", "your-secret", "yoursecret", "example", "password"];
 const MIN_SECRET_LENGTH = 16;
 const MIN_DISTINCT_CHARACTERS = 8;
+const KEYBOARD_ROWS = ["1234567890", "qwertyuiop", "asdfghjkl", "zxcvbnm"];
+const MIN_RUN = 4;
+const MAX_SHARE_IN_RUNS = 0.75;
+
+function nextTo(a: string, b: string): boolean {
+  if (Math.abs(a.charCodeAt(0) - b.charCodeAt(0)) === 1) return true;
+  return KEYBOARD_ROWS.some((row) => row.includes(a + b) || row.includes(b + a));
+}
+
+/** How much of it is abcd, 4321 or qwer. A random secret has next to none of this. */
+function shareInRuns(lower: string): number {
+  let inRuns = 0;
+  let run = 1;
+  for (let i = 1; i <= lower.length; i++) {
+    if (i < lower.length && nextTo(lower[i - 1]!, lower[i]!)) {
+      run++;
+      continue;
+    }
+    if (run >= MIN_RUN) inRuns += run;
+    run = 1;
+  }
+  return inRuns / lower.length;
+}
 
 /** Only says what is wrong with a secret, never what the secret is. */
 function checkSecretStrength(secret: string, setting: string): void {
   if (secret.length < MIN_SECRET_LENGTH) throw new Error(`${setting} must be at least ${MIN_SECRET_LENGTH} characters`);
   const lower = secret.toLowerCase();
-  const weak = new Set(lower).size < MIN_DISTINCT_CHARACTERS || PLACEHOLDERS.some((p) => lower.includes(p));
+  const weak = new Set(lower).size < MIN_DISTINCT_CHARACTERS || PLACEHOLDERS.some((p) => lower.includes(p)) || shareInRuns(lower) >= MAX_SHARE_IN_RUNS;
   if (weak) throw new Error(`${setting} is too weak: it looks like a placeholder or repeats itself. Generate one: node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"`);
 }
 
@@ -275,9 +308,12 @@ function checkBindAddress(host: string, env: NodeJS.ProcessEnv): void {
   if (!isLoopbackHost(host)) requirePlaintextOptIn(env, `The sidecar serves plain http, and MEMORIA_QMD_HOST (${host}) is not loopback`);
 }
 
+function readList(value: string | undefined): ReadonlySet<string> {
+  return new Set((value ?? "").split(",").map((h) => h.trim().toLowerCase()).filter((h) => h !== ""));
+}
+
 function readAllowedHosts(env: NodeJS.ProcessEnv): ReadonlySet<string> {
-  const listed = (env.MEMORIA_QMD_ALLOWED_HOSTS ?? "").split(",").map((h) => h.trim().toLowerCase()).filter((h) => h !== "");
-  return new Set(["localhost", ...listed]);
+  return new Set(["localhost", ...readList(env.MEMORIA_QMD_ALLOWED_HOSTS)]);
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): SidecarConfig {
@@ -302,6 +338,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): SidecarConfig 
     headersTimeoutMs: readInt(env.MEMORIA_QMD_HEADERS_TIMEOUT_MS, 10_000, "MEMORIA_QMD_HEADERS_TIMEOUT_MS", 100, 120_000),
     requestTimeoutMs: readInt(env.MEMORIA_QMD_REQUEST_TIMEOUT_MS, 300_000, "MEMORIA_QMD_REQUEST_TIMEOUT_MS", 1_000, 3_600_000),
     maxConnections: readInt(env.MEMORIA_QMD_MAX_CONNECTIONS, 1024, "MEMORIA_QMD_MAX_CONNECTIONS", 1, 65_536),
+    maxConnectionsPerSource: readInt(env.MEMORIA_QMD_MAX_CONNECTIONS_PER_SOURCE, 64, "MEMORIA_QMD_MAX_CONNECTIONS_PER_SOURCE", 1, 65_536),
+    apiAddresses: readList(env.MEMORIA_QMD_API_ADDRESSES),
+    maxConnectionsPerApiAddress: readInt(env.MEMORIA_QMD_MAX_CONNECTIONS_PER_API_ADDRESS, 512, "MEMORIA_QMD_MAX_CONNECTIONS_PER_API_ADDRESS", 1, 65_536),
+    searchConcurrency: readInt(env.MEMORIA_QMD_SEARCH_CONCURRENCY, 4, "MEMORIA_QMD_SEARCH_CONCURRENCY", 1, 256),
+    searchQueue: readInt(env.MEMORIA_QMD_SEARCH_QUEUE, 16, "MEMORIA_QMD_SEARCH_QUEUE", 0, 4096),
+    searchMaxWaitMs: readInt(env.MEMORIA_QMD_SEARCH_MAX_WAIT_MS, 10_000, "MEMORIA_QMD_SEARCH_MAX_WAIT_MS", 1, 110_000),
     keepWarm: readBool(env.MEMORIA_QMD_KEEP_WARM, true),
     warmup: readBool(env.MEMORIA_QMD_WARMUP, true),
     logLevel: trimmed(env.MEMORIA_QMD_LOG_LEVEL) ?? "info",
