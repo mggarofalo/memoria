@@ -444,12 +444,14 @@ const pristine = (): SdkStoreFunctions => ({
 });
 
 test("the start-up check names each fix an unpatched SDK lacks, with no marker and no clock", () => {
-  assert.equal(missingSdkFixes(pristine()).length, 6);
+  assert.equal(missingSdkFixes(pristine()).length, 8);
   assert.throws(() => requireSdkFixes(pristine()), /not patched.*findBestCutoff.*scripts\/patch-qmd\.ts/);
   const real = sdk as unknown as SdkStoreFunctions;
   assert.doesNotThrow(() => requireSdkFixes(real));
   for (const key of Object.keys(pristine()) as Array<keyof SdkStoreFunctions>) {
-    assert.equal(missingSdkFixes({ ...real, [key]: pristine()[key] }).length, 1, key);
+    // These two carry the yield and the rerank blend.
+    const fixes = key === "hybridQuery" || key === "structuredSearch" ? 2 : 1;
+    assert.equal(missingSdkFixes({ ...real, [key]: pristine()[key] }).length, fixes, key);
   }
 });
 
