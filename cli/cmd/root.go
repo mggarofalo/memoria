@@ -51,7 +51,7 @@ type app struct {
 	openKeyring     func() (auth.SecretStore, error)
 	selfUpdate      selfUpdateDeps
 	sleep           func(context.Context, time.Duration) error
-	redactionCheck  func(context.Context, []string) ([]byte, error)
+	redactionCheck  func(context.Context, []string, []byte) ([]byte, error)
 
 	flags rootFlags
 }

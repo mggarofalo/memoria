@@ -142,7 +142,7 @@ clients (Claude Code / CLI / scripts)
 | `src/Memoria.Api/` | ASP.NET Core host: REST endpoints, outward MCP server, auth handler, ingest |
 | `src/Memoria.Core/` | Document envelope, search contracts, session rendering, redaction rules |
 | `skills/memoria/` | The agent skill for searching and reading the corpus. Installed at cutover, so it stays out of `.claude/skills`, where it would be live in this repository. `cli/cmd/skill_test.go` and `scripts/e2e/skill.ts` keep it true to the CLI and the MCP tools. These files are outside the Go module, so Go's test cache cannot see them change: run `go test -count=1 ./cmd -run Skill` |
-| `tools/RedactionCheck/` | Local report behind `scripts/redaction-report.sh` and `memoria migrate report`. Not part of the solution, and CI only builds it for `scripts/e2e`, where it runs on fixtures |
+| `tools/RedactionCheck/` | Local report behind `scripts/redaction-report.sh` and `memoria migrate report`. Not part of the solution. The required build job builds it, and `scripts/e2e` runs it on fixtures |
 | `tests/Memoria.Api.Tests/` | xUnit tests against `WebApplicationFactory<Program>` with a scripted `FakeSidecar` handler. `MemoriaApiFactory` opts in to disabled auth; `AuthApiFactory` enforces keys on a temp control database. |
 | `tests/Memoria.Core.Tests/` | Client unit tests and `SidecarContractTests`, which pins the C# wire types to `sidecar/openapi.json` |
 | `sidecar/` | `memoria-qmd`: TypeScript REST service over the QMD SDK; `openapi.json` is its contract |

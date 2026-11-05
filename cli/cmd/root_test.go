@@ -80,8 +80,8 @@ type harness struct {
 	checkOutput   string
 	checkErr      error
 	checkLists    *[][]string
-	checkFiles    []string
 	checkArgs     []string
+	checkDuring   func()
 }
 
 func newHarness(t *testing.T) *harness {
@@ -124,20 +124,15 @@ func (h *harness) app() *app {
 	return a
 }
 
-// fakeRedactionCheck reads the lists of files it was given, while they still exist.
-func (h *harness) fakeRedactionCheck(_ context.Context, args []string) ([]byte, error) {
+// fakeRedactionCheck reads the lists of files it was given on its standard input.
+func (h *harness) fakeRedactionCheck(_ context.Context, args []string, stdin []byte) ([]byte, error) {
 	h.checkArgs = args
-	for i, arg := range args {
-		if arg != "--manifest" {
-			continue
-		}
-		h.checkFiles = append(h.checkFiles, args[i+1])
-		data, err := os.ReadFile(args[i+1])
-		if err != nil {
+	if h.checkDuring != nil {
+		h.checkDuring()
+	}
+	if h.checkLists != nil {
+		if err := json.Unmarshal(stdin, h.checkLists); err != nil {
 			return nil, err
-		}
-		if h.checkLists != nil {
-			*h.checkLists = append(*h.checkLists, strings.Split(string(data), "\n"))
 		}
 	}
 	return []byte(h.checkOutput), h.checkErr

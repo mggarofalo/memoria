@@ -5,13 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 
@@ -23,8 +20,6 @@ import (
 
 const (
 	defaultCodexTarget = "codex-sessions"
-	listDirPrefix      = "memoria-migrate-"
-	staleListAge       = 24 * time.Hour
 )
 
 func newMigrateCmd(a *app) *cobra.Command {
@@ -297,50 +292,30 @@ func checkReportTools(o migrateReportOptions) error {
 	return nil
 }
 
-// sweepStaleLists removes what a killed run left: lists of paths, in a private folder. It is the only thing a
-// run writes to disk, since the redacted text goes to gitleaks on its standard input. A day leaves any live run alone.
-func sweepStaleLists(dir string) {
-	found, err := filepath.Glob(filepath.Join(dir, listDirPrefix+"*"))
-	if err != nil {
-		return
-	}
-	for _, path := range found {
-		if info, err := os.Stat(path); err == nil && time.Since(info.ModTime()) > staleListAge {
-			_ = os.RemoveAll(path)
-		}
-	}
-}
-
-// runRedactionCheck gives the tool a list of exactly the files the plan counts, so the two
-// always agree. Those lists hold paths, so they stay in a private folder, deleted after.
+// runRedactionCheck gives the tool a list of exactly the files the plan counts, so the two always agree.
+// The lists hold paths, so they go on its standard input: nothing is written, and a killed run leaves nothing.
 func (a *app) runRedactionCheck(ctx context.Context, o migrateReportOptions, collections []migrate.Collection) ([]migrate.Report, error) {
-	sweepStaleLists(os.TempDir())
-	work, err := os.MkdirTemp("", listDirPrefix+"*")
-	if err != nil {
-		return nil, apperr.Wrap(apperr.KindGeneric, err, "a temporary folder could not be made")
-	}
-	defer func() { _ = os.RemoveAll(work) }()
-
-	args := []string{o.tool, "--json"}
+	args := []string{o.tool, "--json", "--lists-on-stdin"}
 	if o.noGitleaks {
 		args = append(args, "--no-gitleaks")
 	}
 	reports := make([]migrate.Report, 0, len(collections))
 	unread := make([]int, 0, len(collections))
-	for i, collection := range collections {
+	lists := make([][]string, 0, len(collections))
+	for _, collection := range collections {
 		plan, files := migrate.Inventory(collection, collection.Name)
 		if plan.Problem != "" {
 			return nil, apperr.New(apperr.KindUsage, "collection %s: %s", collection.Name, plan.Problem)
 		}
 		unread = append(unread, plan.Unreadable)
-		list := filepath.Join(work, fmt.Sprintf("%d.txt", i))
-		if err := os.WriteFile(list, []byte(strings.Join(files, "\n")), 0o600); err != nil {
-			return nil, apperr.Wrap(apperr.KindGeneric, err, "a list of files could not be written")
-		}
-		args = append(args, "--manifest", list)
+		lists = append(lists, append([]string{}, files...))
 		reports = append(reports, migrate.Report{Name: collection.Name})
 	}
-	stdout, err := a.redactionCheck(ctx, args)
+	stdin, err := json.Marshal(lists)
+	if err != nil {
+		return nil, err
+	}
+	stdout, err := a.redactionCheck(ctx, args, stdin)
 	if err != nil {
 		return nil, err
 	}
@@ -362,8 +337,9 @@ func exitOneIsAResult(err error) bool {
 
 // runDotnet runs the tool. Its stderr is left behind, because a failure there could quote a
 // path or text. An exit of 1 only says the counts are not clean, and they are still the result.
-func runDotnet(ctx context.Context, args []string) ([]byte, error) {
+func runDotnet(ctx context.Context, args []string, stdin []byte) ([]byte, error) {
 	command := exec.CommandContext(ctx, "dotnet", args...)
+	command.Stdin = bytes.NewReader(stdin)
 	var stdout bytes.Buffer
 	command.Stdout = &stdout
 	err := command.Run()

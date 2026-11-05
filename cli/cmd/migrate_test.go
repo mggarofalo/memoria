@@ -11,7 +11,6 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/mggarofalo/memoria/cli/internal/apperr"
 	"github.com/mggarofalo/memoria/cli/internal/migrate"
@@ -276,51 +275,6 @@ func TestAReportWithoutGitleaksSaysItIsWeaker(t *testing.T) {
 	}
 }
 
-func TestStaleListsFromAKilledRunAreSwept(t *testing.T) {
-	dir := t.TempDir()
-	stale, fresh := filepath.Join(dir, listDirPrefix+"old"), filepath.Join(dir, listDirPrefix+"new")
-	other := filepath.Join(dir, "something-else")
-	writeFile(t, filepath.Join(stale, "0.txt"), "a path")
-	writeFile(t, filepath.Join(fresh, "0.txt"), "a path")
-	writeFile(t, filepath.Join(other, "0.txt"), "not ours")
-	old := time.Now().Add(-2 * staleListAge)
-	for _, path := range []string{stale, other} {
-		if err := os.Chtimes(path, old, old); err != nil {
-			t.Fatal(err)
-		}
-	}
-	sweepStaleLists(dir)
-	if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("a stale list stayed: %v", err)
-	}
-	for _, path := range []string{fresh, other} {
-		if _, err := os.Stat(path); err != nil {
-			t.Fatalf("%s was removed: %v", path, err)
-		}
-	}
-}
-
-func TestAReportSweepsWhatAKilledRunLeft(t *testing.T) {
-	f := newMigrateFixture(t)
-	f.fakeCheck("["+cleanCheck+","+cleanCheck+"]", nil)
-	temp := t.TempDir()
-	for _, name := range []string{"TMP", "TEMP", "TMPDIR"} {
-		t.Setenv(name, temp)
-	}
-	stale := filepath.Join(temp, listDirPrefix+"old")
-	writeFile(t, filepath.Join(stale, "0.txt"), "a path")
-	old := time.Now().Add(-2 * staleListAge)
-	if err := os.Chtimes(stale, old, old); err != nil {
-		t.Fatal(err)
-	}
-	if code := f.report(); code != 0 {
-		t.Fatalf("code = %d, stderr = %q", code, f.h.stderr.String())
-	}
-	if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("a stale list stayed: %v", err)
-	}
-}
-
 func TestTheRedactionToolIsBuiltByARequiredJob(t *testing.T) {
 	data, err := os.ReadFile("../../.github/workflows/ci.yml")
 	if err != nil {
@@ -383,19 +337,24 @@ func TestMigrateReportHoldsCountsAndNoPath(t *testing.T) {
 	}
 }
 
-func TestMigrateReportRemovesItsLists(t *testing.T) {
+func TestMigrateReportWritesNoListToDisk(t *testing.T) {
 	f := newMigrateFixture(t)
 	f.fakeCheck("["+cleanCheck+","+cleanCheck+"]", nil)
-	if code := f.report(); code != 0 {
-		t.Fatalf("code = %d", code)
+	temp := t.TempDir()
+	for _, name := range []string{"TMP", "TEMP", "TMPDIR"} {
+		t.Setenv(name, temp)
 	}
-	for _, list := range f.h.checkFiles {
-		if _, err := os.Stat(list); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("a list of paths was left at %s: %v", list, err)
+	f.h.checkDuring = func() {
+		entries, err := os.ReadDir(temp)
+		if err != nil || len(entries) != 0 {
+			t.Errorf("the temp folder held %v while the tool ran: %v", entries, err)
 		}
 	}
-	if len(f.h.checkFiles) != 2 {
-		t.Fatalf("lists = %v", f.h.checkFiles)
+	if code := f.report(); code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, f.h.stderr.String())
+	}
+	if args := strings.Join(f.h.checkArgs, " "); strings.Contains(args, f.notes) || strings.Contains(args, "a.md") {
+		t.Fatalf("a path reached the tool's arguments: %s", args)
 	}
 }
 
@@ -487,11 +446,11 @@ func TestRunDotnetClassifiesExits(t *testing.T) {
 	if _, err := exec.LookPath("dotnet"); err != nil {
 		t.Skip("no dotnet here")
 	}
-	if _, err := runDotnet(context.Background(), []string{"--version"}); err != nil {
+	if _, err := runDotnet(context.Background(), []string{"--version"}, nil); err != nil {
 		t.Fatalf("err = %v", err)
 	}
 	// dotnet exits 1 for a missing file, the same as the tool's "not clean". No result comes with it, so it is still refused.
-	stdout, err := runDotnet(context.Background(), []string{filepath.Join(t.TempDir(), "absent.dll")})
+	stdout, err := runDotnet(context.Background(), []string{filepath.Join(t.TempDir(), "absent.dll")}, nil)
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
@@ -502,7 +461,7 @@ func TestRunDotnetClassifiesExits(t *testing.T) {
 
 func TestRunDotnetWhenThereIsNoDotnet(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
-	if _, err := runDotnet(context.Background(), []string{"--version"}); err == nil {
+	if _, err := runDotnet(context.Background(), []string{"--version"}, nil); err == nil {
 		t.Fatal("no error with no dotnet")
 	}
 }

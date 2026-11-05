@@ -148,6 +148,11 @@ export class Harness {
     return this.secrets.reduce((all, key) => all.split(key).join("[KEY]"), text).replace(KEY_PATTERN, "[KEY]");
   }
 
+  /** Runs the CLI without waiting, for a check that watches it while it works. */
+  startMemoria(args: string[], env: NodeJS.ProcessEnv): ChildProcess {
+    return spawn(this.cli, args, { stdio: "ignore", env: { ...this.isolated, ...env } });
+  }
+
   memoria(args: string[], options: CliOptions = {}): CliResult {
     const env: NodeJS.ProcessEnv = { ...this.isolated };
     if (!options.noUrl) env["MEMORIA_URL"] = this.apiUrl;

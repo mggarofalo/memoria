@@ -95,19 +95,27 @@ function toolAlone(h: Harness, tool: string, notes: string, secret: string): voi
 
 /** A file gone by the time it is read is counted and not named, and does not end the report. */
 function missingFile(h: Harness, tool: string, notes: string): void {
-  const list = h.privatePath("migrate-missing.txt");
-  writeFileSync(list, `${path.join(notes, "gone-secretfilename.md")}\n${path.join(notes, "plain.md")}\n`);
-  const run = spawnSync("dotnet", [tool, "--json", "--no-gitleaks", "--manifest", list], { encoding: "utf8", timeout: 120_000 });
+  const input = JSON.stringify([[path.join(notes, "gone-secretfilename.md"), path.join(notes, "plain.md")]]);
+  const run = spawnSync("dotnet", [tool, "--json", "--no-gitleaks", "--lists-on-stdin"], { input, encoding: "utf8", timeout: 120_000 });
   const row = (JSON.parse(run.stdout || "[{}]") as Array<{ files?: number; skipped?: number }>)[0];
   h.check("redaction check: a file it cannot read is counted, the rest are read, and it exits 1", run.status === 1 && row?.files === 2 && row.skipped === 1, run.stdout + run.stderr);
   h.check("redaction check: that file is not named", !(run.stdout + run.stderr).includes("secretfilename"), run.stdout + run.stderr);
 }
 
+/** A name outside ASCII reaches the tool whole, whatever the console's code page. */
+function wideName(h: Harness, tool: string, secret: string): void {
+  const folder = h.privatePath("migrate-wide");
+  write(folder, "caf\u00e9-\u6587.md", `# Doc\n\nthe key is ${secret} here\n`);
+  const input = JSON.stringify([[path.join(folder, "caf\u00e9-\u6587.md")]]);
+  const run = spawnSync("dotnet", [tool, "--json", "--no-gitleaks", "--lists-on-stdin"], { input, encoding: "utf8", timeout: 120_000 });
+  const row = (JSON.parse(run.stdout || "[{}]") as Array<{ changed?: number; skipped?: number }>)[0];
+  h.check("redaction check: a file name outside ASCII is read, not skipped", row?.changed === 1 && row.skipped === 0, run.stdout + run.stderr);
+}
+
 /** Forces the unexpected: a NUL in a path. The Windows event log gets what an unhandled exception says. */
 function crash(h: Harness, tool: string): void {
-  const list = h.privatePath("migrate-crash.txt");
-  writeFileSync(list, "secretfilename\0.md\n");
-  const run = spawnSync("dotnet", [tool, "--no-gitleaks", "--manifest", list], { encoding: "utf8", timeout: 120_000 });
+  const input = JSON.stringify([["secretfilename\0.md"]]);
+  const run = spawnSync("dotnet", [tool, "--no-gitleaks", "--lists-on-stdin"], { input, encoding: "utf8", timeout: 120_000 });
   const all = run.stdout + run.stderr;
   h.check("redaction check: when it cannot finish it exits 3, with no stack and no file name", run.status === 3 && all.includes("could not finish") && !all.includes("secretfilename") && !all.includes("   at "), all.slice(0, 400));
 }
@@ -138,6 +146,22 @@ async function leavesNothing(h: Harness, tool: string, secret: string): Promise<
   await pause(100);
   seen += written(temp);
   h.check("redaction check: killed partway, it leaves no copy, and wrote none while running", seen === 0, seen);
+}
+
+/** A list of file names is itself worth keeping off disk, so the CLI's temp folder stays empty for the whole run. */
+async function writesNoList(h: Harness, config: string, tool: string): Promise<void> {
+  const temp = h.privatePath("migrate-cli-temp");
+  mkdirSync(temp);
+  const child = h.startMemoria(["migrate", "report", "--qmd-config", config, "--tool", tool, "--no-gitleaks"], { TMPDIR: temp, TEMP: temp, TMP: temp });
+  const exit: { code?: number | null } = {};
+  child.once("exit", (status) => (exit.code = status));
+  let seen = 0;
+  const started = Date.now();
+  while (exit.code === undefined && Date.now() - started < 120_000) {
+    seen += written(temp);
+    await pause(5);
+  }
+  h.check("migrate report: finished with its lists on stdin, and its temp folder stayed empty throughout", exit.code === 0 && seen === 0, { code: exit.code, seen });
 }
 
 /** Only where gitleaks is installed: CI has a pinned one. Without it, this says plainly that it did not run. */
@@ -262,6 +286,8 @@ export async function migrate(h: Harness): Promise<void> {
   plan(h, config, codex);
   report(h, config, notes, secret);
   await leavesNothing(h, redactionCheckDll(), secret);
+  await writesNoList(h, config, redactionCheckDll());
+  wideName(h, redactionCheckDll(), secret);
   realGitleaks(h, config, redactionCheckDll());
   conformance(h);
 }

@@ -5,8 +5,9 @@
 // scripts/redaction-report.sh or `memoria migrate report`, on a local machine: it reads real
 // content, so it does not belong in CI.
 //
-// Each list of files is a directory, or --manifest and a file naming one path per line. With
-// --json it prints one line, an array with one result per list, in the order given.
+// Each list of files is a directory, or with --lists-on-stdin a JSON array of arrays of paths on its standard
+// input, so a list of names is never on disk. With --json it prints one line, an array with one result per
+// list, in the order given.
 //
 // Exits 0 when clean, 1 when something was refused, found or skipped, 2 on bad usage, 3 when it could not finish.
 using System.Diagnostics;
@@ -37,7 +38,7 @@ internal static class RedactionReport
 		Options? options = Options.Parse(args);
 		if (options is null)
 		{
-			Console.Error.WriteLine("usage: RedactionCheck [--json] [--no-gitleaks] <directory of .md files | --manifest file> ...");
+			Console.Error.WriteLine("usage: RedactionCheck [--json] [--no-gitleaks] <directory of .md files> ... | --lists-on-stdin");
 			return 2;
 		}
 
@@ -201,13 +202,11 @@ internal sealed class Gitleaks : IDisposable
 	}
 }
 
-internal sealed record FileList(string? Directory, string? Manifest)
+internal sealed record FileList(string? Directory, IReadOnlyList<string>? Paths)
 {
 	public IEnumerable<string> Files()
 	{
-		return Manifest is null
-			? System.IO.Directory.EnumerateFiles(Directory!, "*.md", SearchOption.AllDirectories)
-			: File.ReadAllLines(Manifest).Where(static line => line.Length > 0);
+		return Paths ?? System.IO.Directory.EnumerateFiles(Directory!, "*.md", SearchOption.AllDirectories);
 	}
 }
 
@@ -227,8 +226,8 @@ internal sealed record Options(bool Json, bool Gitleaks, List<FileList> Lists)
 				case "--no-gitleaks":
 					gitleaks = false;
 					break;
-				case "--manifest" when i + 1 < args.Length && File.Exists(args[i + 1]):
-					lists.Add(new FileList(null, args[++i]));
+				case "--lists-on-stdin":
+					lists.AddRange(ReadLists());
 					break;
 				default:
 					if (!Directory.Exists(args[i]))
@@ -242,6 +241,14 @@ internal sealed record Options(bool Json, bool Gitleaks, List<FileList> Lists)
 		}
 
 		return lists.Count == 0 ? null : new Options(json, gitleaks, lists);
+	}
+
+	/// <summary>From the raw stream, as Console.In would decode by the console's code page rather than UTF-8.</summary>
+	private static IEnumerable<FileList> ReadLists()
+	{
+		using Stream input = Console.OpenStandardInput();
+		List<List<string>> lists = JsonSerializer.Deserialize<List<List<string>>>(input) ?? [];
+		return lists.Select(static paths => new FileList(null, paths));
 	}
 }
 
