@@ -15,7 +15,7 @@ namespace Memoria.Api.Ingest;
 /// from operator configuration: <see cref="SidecarIngestRequest"/> takes only a <see cref="RedactedMarkdown"/>, and nothing
 /// in a request can reach <see cref="IngestRedactionPolicy"/> except the collection name it looks up.
 /// </summary>
-public sealed class DocumentIngestor(
+public sealed partial class DocumentIngestor(
 	IMemoriaQmdClient sidecar,
 	IIngestLedger ledger,
 	IRedactor redactor,
@@ -28,7 +28,8 @@ public sealed class DocumentIngestor(
 	ICallerScope scope,
 	IRequestAudit audit,
 	IOptions<MemoriaOptions> options,
-	TimeProvider timeProvider)
+	TimeProvider timeProvider,
+	ILogger<DocumentIngestor> logger)
 {
 	/// <summary>The request has been validated: every field it needs is set.</summary>
 	public async Task<DocumentIngestResult> IngestAsync(DocumentIngestRequest request, bool restore, CancellationToken cancellationToken)
@@ -58,26 +59,70 @@ public sealed class DocumentIngestor(
 		IngestRules.RequireClaim(claim);
 		audit.SetTarget(new AuditIngest("document", redactionName, false, 0, 1, 0, counts.Values.Sum(), refusals.Length, [path], restore));
 
-		SidecarIngestResponse? response = null;
-		bool kept = false;
-		try
-		{
-			response = await WriteAsync(new SidecarIngestRequest(collection, path, decided), identity, claim.LeaseToken!, cancellationToken);
-		}
-		finally
-		{
-			kept = await ledger.FinishAsync(identity, claim.LeaseToken!, collection, response is null ? IngestStateName.Partial : IngestStateName.Complete, [path], response is null ? null : claiming);
-		}
-
-		// The write landed, and then a delete took the path before the upload finished, so the file is gone.
-		if (!kept)
-		{
-			throw IngestRules.DeletedDuringUpload();
-		}
-
+		SidecarIngestResponse response = await WriteAndFinishAsync(new SidecarIngestRequest(collection, path, decided), identity, claim.LeaseToken!, claiming, cancellationToken);
 		audit.SetResult([collection], 1);
 		audit.SetTarget(new AuditIngest("document", redactionName, true, 1, 0, 0, counts.Values.Sum(), refusals.Length, [path], restore));
-		return new DocumentIngestResult(collection, response!.Path, response.File, response.Bytes, response.Created, redactionName, counts, refusals, response.Job.Id);
+		return new DocumentIngestResult(collection, response.Path, response.File, response.Bytes, response.Created, redactionName, counts, refusals, response.Job.Id);
+	}
+
+	/// <summary>Checks a caller may write here, before a body is read.</summary>
+	public async Task RequireWritableAsync(string collection, CancellationToken cancellationToken)
+	{
+		IngestRules.RequireCollection(scope, collection);
+		audit.SetResult([collection], 0);
+		await collections.RequireOpenAsync(collection, sidecar, cancellationToken);
+	}
+
+	/// <summary>
+	/// Stores a document someone else rendered, at the path it already has, for moving an old corpus. Its whole text goes through the same redaction decision as any other, frontmatter
+	/// included, and it is otherwise kept as it came. Sending it again is safe: the path is the identity, and an equal version overwrites with the same result.
+	/// </summary>
+	public async Task<RenderedDocumentResult> StoreRenderedAsync(string collection, string path, string text, DateTimeOffset updated, CancellationToken cancellationToken)
+	{
+		RedactionDisabledCollection? disabled = redaction.For(collection);
+		string redactionName = IngestRedactionPolicy.NameOf(disabled);
+		RedactedMarkdown decided = await gates.WorkAsync(
+			Encoding.UTF8.GetByteCount(text),
+			() => disabled is null ? redactor.Redact(RenderedDocument.ForRedaction(text)) : RenderedDocument.WithoutRedactionForDisabledCollection(text, disabled),
+			cancellationToken);
+		int limit = options.Value.Ingest.MaxDocumentBytes;
+		if (Encoding.UTF8.GetByteCount(decided.Text) > limit)
+		{
+			throw IngestRules.TooLarge($"A document once redacted can be at most {limit} bytes.");
+		}
+
+		string identity = IdentityOf(collection, path);
+		IngestClaimRequest claiming = new(identity, collection, updated, timeProvider.GetUtcNow(), [path], Lookup: RenderedDocument.SessionIdOf(decided.Text) is { } sessionId ? IngestIdentity.ForRenderedSession(collection, sessionId, path) : null, MessageCount: RenderedDocument.MessagesThroughOf(decided.Text), ContentHash: digests.Of(decided.Text), IsSameContent: stored => digests.Matches(stored, decided.Text));
+		IngestClaim claim = await ledger.ClaimAsync(claiming, cancellationToken);
+		RequireRenderedClaim(claim, collection, identity);
+		int redactions = decided.CountsByRule.Values.Sum();
+		audit.SetTarget(new AuditIngest("rendered", redactionName, false, 0, 1, 0, redactions, 0, [path]));
+
+		SidecarIngestResponse response = await WriteAndFinishAsync(new SidecarIngestRequest(collection, path, decided), identity, claim.LeaseToken!, claiming, cancellationToken);
+		audit.SetResult([collection], 1);
+		audit.SetTarget(new AuditIngest("rendered", redactionName, true, 1, 0, 0, redactions, 0, [path]));
+		return new RenderedDocumentResult(collection, response.Path, response.File, response.Bytes, response.Created, redactionName, decided.CountsByRule, RenderedDocument.FrontmatterOf(decided.Text, response.Metadata is not null), response.Job.Id);
+	}
+
+	private void RequireRenderedClaim(IngestClaim claim, string collection, string identity)
+	{
+		if (claim.Outcome == IngestClaimOutcome.Shrunk)
+		{
+			LogRenderedLooksCut(logger, collection, identity);
+			throw IngestRules.RenderedShrank();
+		}
+
+		IngestRules.RequireClaim(claim);
+	}
+
+	/// <summary>What the ledger holds for a path, so a migration can check by path what arrived.</summary>
+	public async Task<RenderedDocumentStatus> RenderedStatusAsync(string collection, string path, CancellationToken cancellationToken)
+	{
+		IngestRules.RequireCollection(scope, collection);
+		IngestRecord? record = await ledger.FindAsync(IdentityOf(collection, path), cancellationToken);
+		return record is null
+			? new RenderedDocumentStatus(collection, path, IngestStateName.None, null)
+			: new RenderedDocumentStatus(collection, path, ledger.EffectiveState(record, timeProvider.GetUtcNow()), record.Version.UtcTicks == 0 ? null : record.Version);
 	}
 
 	/// <summary>
@@ -115,6 +160,23 @@ public sealed class DocumentIngestor(
 		{
 			throw IngestRules.DeleteUnconfirmed();
 		}
+	}
+
+	private async Task<SidecarIngestResponse> WriteAndFinishAsync(SidecarIngestRequest request, string identity, string leaseToken, IngestClaimRequest claiming, CancellationToken cancellationToken)
+	{
+		SidecarIngestResponse? response = null;
+		bool kept;
+		try
+		{
+			response = await WriteAsync(request, identity, leaseToken, cancellationToken);
+		}
+		finally
+		{
+			kept = await ledger.FinishAsync(identity, leaseToken, request.Collection, response is null ? IngestStateName.Partial : IngestStateName.Complete, [request.Path], response is null ? null : claiming);
+		}
+
+		// The write landed, and then a delete took the path before the upload finished, so the file is gone.
+		return kept ? response : throw IngestRules.DeletedDuringUpload();
 	}
 
 	/// <summary>
@@ -166,4 +228,7 @@ public sealed class DocumentIngestor(
 	{
 		return IngestIdentity.For("document", collection, path);
 	}
+
+	[LoggerMessage(EventId = 3312, Level = LogLevel.Warning, Message = "A rendered document for collection {Collection} was refused: it says it holds fewer messages than the copy at its path, and nothing was changed. The document is ingest_state identity {Identity}. If it really is shorter, delete the path and send it again dated after the delete.")]
+	private static partial void LogRenderedLooksCut(ILogger logger, string collection, string identity);
 }

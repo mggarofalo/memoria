@@ -34,6 +34,9 @@ internal sealed class FakeCorpus
 	/// <summary>Says the directory has files in it, as it would for a collection someone else filled.</summary>
 	public bool HoldsForeignFiles { get; set; }
 
+	/// <summary>Whether writes answer as though the frontmatter could be read.</summary>
+	public bool ReadsFrontmatter { get; set; }
+
 	/// <summary>Answers a write with something else: return null to let it through.</summary>
 	public Func<string, HttpResponseMessage?> OnWrite { get; set; } = static _ => null;
 
@@ -55,7 +58,7 @@ internal sealed class FakeCorpus
 		bool created = !Files.ContainsKey(path);
 		Files[path] = content;
 		return FakeSidecar.Json(HttpStatusCode.Accepted, $$"""
-			{"collection":"{{collection}}","path":{{JsonSerializer.Serialize(path)}},"file":{{JsonSerializer.Serialize(collection + "/" + path)}},"bytes":{{Encoding.UTF8.GetByteCount(content)}},"created":{{(created ? "true" : "false")}},"metadata":null,"job":{{Job()}}}
+			{"collection":"{{collection}}","path":{{JsonSerializer.Serialize(path)}},"file":{{JsonSerializer.Serialize(collection + "/" + path)}},"bytes":{{Encoding.UTF8.GetByteCount(content)}},"created":{{(created ? "true" : "false")}},"metadata":{{(ReadsFrontmatter ? """{"tags":[]}""" : "null")}},"job":{{Job()}}}
 			""");
 	}
 

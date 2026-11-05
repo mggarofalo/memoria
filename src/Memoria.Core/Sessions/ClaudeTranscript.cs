@@ -68,7 +68,7 @@ internal sealed class ClaudeTranscript(SessionSource source, SessionRenderOption
 			Refusals,
 			pathing.IsFamily,
 			pathing)
-		{ MessageChain = chain };
+		{ MessageChain = chain, TakesOverExports = SessionPaths.IsKnownOriginal(_rawCwd, Source.ProjectDirectory) };
 	}
 
 	private SessionPathing Pathing(string identity, string stem)

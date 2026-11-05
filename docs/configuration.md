@@ -246,6 +246,42 @@ Each path has one lock, in the API process. A write holds it until the sidecar a
 
 If the API dies or gives up on a write, its connection closes. The sidecar writes to a temporary file and checks the connection immediately before the atomic rename, so that write does not land. On one Linux host, a killed process's close was seen within 5 ms, and the rename followed the check by under 1 ms. A write past its check when the API dies still lands, and if a delete has been answered by then, the file is back. A restart takes far longer than that window, so this needs the sidecar to stall in that exact place, and repeating the delete clears it.
 
+### Moving an old corpus
+
+`POST /v1/ingest/rendered?collection=&path=&updated=` takes markdown that was already rendered, as `text/markdown`, with its frontmatter, and stores it at `path`. All of it goes through the collection's redaction decision and is reported the same way. Otherwise it is kept as it came. It needs an opened collection, and it cannot delete.
+
+- **Sending it again is safe.** The path is the identity, so an equal `updated` overwrites with the same result. Send the same `updated` each time, such as the file's modification time. An older one gets 409 `stale_version`, and something deleted stays out as usual. A path has one spelling: a backslash is refused, here and on `DELETE /v1/documents`.
+- **Compare `updated` as well as `state`, and finish sending the newest copy.** The ledger records a version only when it hears the answer. So after a lost answer `complete` can name an older copy than the file holds, and sending that older copy again answers 202 and replaces the newer one.
+- **`frontmatter` says what became of the metadata.** `read` means filters work. `past_window` means the block does not close within the sidecar's first 8192 characters, as with an old export's long `files_touched`. `missing` means there is none, and `unparsable` means it is not a YAML mapping. In all three the document is stored and searchable, but matches no date, project or tag filter. Nothing is trimmed to make it fit. Redaction can cause `unparsable`: a credential inside a flow map, like `m: {a: <token>}`, is replaced by text YAML cannot read there. The secret is gone and the answer says so.
+- **Over `MaxDocumentBytes` gets 413,** for that document alone. It is not split: a part needs a new path, so it would stop matching by path, and a rendered document cannot be cut safely at a message. Re-render it from its raw transcript through `POST /v1/ingest/session`, which splits, or raise `MaxDocumentBytes` and the sidecar's `MEMORIA_QMD_MAX_DOCUMENT_BYTES` together for the migration.
+- **A document over 256 KiB counts against `MaxConcurrentLargeDocuments`,** so use few workers and pause on 503.
+- **What each answer means:**
+
+| Answer | Meaning | What to do |
+|---|---|---|
+| 202 | Stored. | Sending it again is safe. |
+| 400 | The path, body or date is not acceptable. | Report it. Retrying gets the same answer. |
+| 403 | The key may not write to this collection. | Fix the key. |
+| 409 `stale_version`, `path_owned`, `case_conflict` | A newer copy or a deleted one, a path belonging to another session, or a name differing only in case. | Report it. Retrying gets the same answer. |
+| 409 `session_shrank` | The document says it holds fewer messages than the copy at its path. | If it really is shorter, delete the path and send it dated after the delete. |
+| 409 `ingest_not_enabled`, `collection_not_empty` | The collection is not open to ingest. | An operator has to act first. |
+| 409 `ingest_in_progress` | Another upload of this is running. | Retry after `Retry-After`. |
+| 409 `deleted_during_upload` | A delete took it. | Report it. |
+| 413 | Over the size limit. | Report it. Retrying gets the same answer. |
+| 422 | Redaction could not finish, so it was not stored. | Report it. |
+| 503 `ingest_busy`, `sidecar_unreachable` | Too much at once, or the sidecar is away. | Pause, then send it again. Safe. |
+| 504, or the connection is lost | The answer did not arrive, and the write may have landed. | Send it again. Safe. |
+- **`GET /v1/ingest/rendered?collection=&path=`** says what the ledger holds for a path: `state` is `complete` once a write of it landed, `taken_over` once its session owns it, and `none` if nothing is recorded.
+- **A session takes over its migrated documents in its own folder.** A document whose frontmatter names a `session_id` belongs to that session, as long as it sits in the same folder as the session's files, which are always in the collection root, and the session shows it is the copy in its own project folder: `projectDirectory` is sent, and the transcript's first `cwd`, encoded the way Claude Code names its folders, matches it. A Codex session needs neither. The first `POST /v1/ingest/session` for it replaces them: its parts overwrite the same file names, and documents under names it no longer writes are removed once every part has arrived, so no message stays twice once it finishes. From then on the session's normal rules apply.
+- **A copy in another folder stays where it is.** It is not replaced or removed, and it does not limit what the session may send, so searches can find the same text twice. This is deliberate: such a copy can be another fork of the session, and an export may be the only copy left. Two documents with one `session_id` in the root are not protected this way, so a session that takes over replaces both, and the one that is a fork goes too. A copy with no `session_id` stays beside the session as a double too.
+- **A session resumed from another directory takes nothing over.** Its first `cwd` does not match its folder, so it stores under its own suffixed name beside the export, and later uploads stay on that name. The same text can then turn up twice in search. An upload that cannot show which copy it is, because it has no `projectDirectory` or no `cwd`, takes nothing over either: under a name an export holds it gets 409 `path_owned`, and otherwise it lands beside the export. A path someone deleted still stays deleted for both.
+- **If the upload fails partway,** the old documents under other names stay, but a part that overwrites a document replaces it at once. When the part boundaries differ and the answer is lost, some old messages can be off disk until the upload is sent again, which restores them. Until then that text depends on the raw transcript.
+- **What refuses a takeover.** A copy with fewer messages than the documents reach, by their `message_start` and `message_count`, gets 409 `session_shrank`. So does any copy when a document does not say how many it holds, until it is sent with `allowShrink=true`. A copy older than them gets 409 `stale_version`.
+- **A different start at takeover replaces the migrated text.** A rendered document has no digest of its messages, so a copy whose start differs is caught only on uploads after the takeover.
+- **A `session_id` that did not come from the exporter still counts.** The session it names can remove that document, or be blocked by it with `session_shrank` or `stale_version`. A document naming another session stays out of it, as does one with no `session_id`, and a session wanting its file name gets 409 `path_owned`.
+- **A path someone deleted stays deleted.** The part answers `part_deleted`, and the rest of the old parts still go.
+- **A taken-over path stays the session's.** A rendered copy sent to it gets 409 `path_owned`, even after the part was deleted or the session stopped writing that name. A rendered copy under a name that was never used is stored as usual, beside the session and so doubled, and the session's next upload takes it over, which removes it unless the session writes that name. This is a way for deleted text to come back, as a delete is not a content ban.
+
 ### What a session upload promises
 
 - **`202` and `complete` mean all of it.** The transcript had messages and lost none, every part was written, and every old part was dealt with. Anything less answers `207`, stays `partial` in `GET /v1/ingest/session`, and `read` and `parts` say why. A live transcript whose last line is still being written reads as `partial` until it is sent whole.

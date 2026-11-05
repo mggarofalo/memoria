@@ -73,7 +73,7 @@ internal sealed partial class CodexTranscript : SessionTranscript
 			Refusals,
 			pathing.IsFamily,
 			pathing)
-		{ MessageChain = chain };
+		{ MessageChain = chain, TakesOverExports = true };
 	}
 
 	private SessionPathing Pathing(string stem)

@@ -12,6 +12,7 @@ import { ingest, INGEST_SERVER, keyMaker } from "./ingest.ts";
 import { migrate } from "./migrate.ts";
 import { ingestConnection } from "./ingest-connection.ts";
 import { filters } from "./filters.ts";
+import { ingestRendered } from "./ingest-rendered.ts";
 import { ingestRaces } from "./ingest-races.ts";
 import { sourcesSync } from "./sources.ts";
 
@@ -65,6 +66,7 @@ async function runIngest(h: Harness): Promise<void> {
   await filters(h, await keyMaker(h, admin)("filter-writer", ["ingest"]), await keyMaker(h, admin)("filter-reader", ["read"]));
   await ingestRaces(h, keyMaker(h, admin));
   await ingestConnection(h, keyMaker(h, admin));
+  await ingestRendered(h, keyMaker(h, admin));
   await sourcesSync(h, admin);
   await migrate(h);
   noModels(h);

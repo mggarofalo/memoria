@@ -20,7 +20,7 @@ public sealed record SessionIngestInput(string Collection, SessionFormat Format,
 /// deterministic, so sending the same upload again overwrites and finishes it. An upload whose messages do not start with the ones stored is refused,
 /// as a cut or damaged copy looks just like that. A path stops being part of a session only through the ledger, so an upload removes only what it wrote before.
 /// </summary>
-public sealed class SessionIngestor(
+public sealed partial class SessionIngestor(
 	IMemoriaQmdClient sidecar,
 	IIngestLedger ledger,
 	IngestRedactionPolicy redaction,
@@ -32,7 +32,8 @@ public sealed class SessionIngestor(
 	ICallerScope scope,
 	IRequestAudit audit,
 	IOptions<MemoriaOptions> options,
-	TimeProvider timeProvider)
+	TimeProvider timeProvider,
+	ILogger<SessionIngestor> logger)
 {
 	public async Task<SessionIngestResult> IngestAsync(SessionIngestInput input, Stream payload, CancellationToken cancellationToken)
 	{
@@ -106,6 +107,16 @@ public sealed class SessionIngestor(
 			claim = await ledger.ClaimAsync(ClaimRequest(input, session, identity), cancellationToken);
 		}
 
+		if (claim.Outcome is IngestClaimOutcome.Shrunk or IngestClaimOutcome.LostContent)
+		{
+			LogLooksCut(logger, input.Collection, identity, claim.Outcome);
+		}
+
+		if (claim.Outcome == IngestClaimOutcome.PathConflict && !session.TakesOverExports)
+		{
+			throw IngestRules.PathOwnedUntilFolderIsKnown();
+		}
+
 		IngestRules.RequireClaim(claim);
 		return (session, claim);
 	}
@@ -125,7 +136,11 @@ public sealed class SessionIngestor(
 			Restore: input.Restore,
 			// A copy that lost lines has a chain that is no later copy's start, so it records none, and only the count applies to what follows it.
 			MessagesDigest: session.Report.HasHoles ? null : digests.Of(session.MessageDigestAt(session.Report.Messages) ?? ""),
-			StartsWithStored: (count, stored) => session.MessageDigestAt(count) is { } chain && digests.Matches(stored, chain));
+			StartsWithStored: (count, stored) => session.MessageDigestAt(count) is { } chain && digests.Matches(stored, chain))
+		{
+			RenderedLookup = IngestIdentity.ForRenderedSession(input.Collection, input.SessionId, session.Documents[0].Path),
+			LeavesRendered = !session.TakesOverExports,
+		};
 	}
 
 	private async Task<SessionIngestResult> WriteAsync(SessionIngestInput input, RedactedSession session, string identity, IngestClaim claim, CancellationToken cancellationToken)
@@ -137,10 +152,11 @@ public sealed class SessionIngestor(
 		try
 		{
 			jobId = await WritePartsAsync(input.Collection, identity, claim, session, parts, cancellationToken);
-			if (AllWritten(parts))
+			// A part that stays deleted is settled too, so what the session no longer has still goes. The session is just not complete.
+			if (parts.TrueForAll(static part => part.State is SessionPartState.Written or SessionPartState.Deleted))
 			{
 				superseded = await RemoveSupersededAsync(input.Collection, session, claim.PreviousPaths, cancellationToken);
-				state = superseded.Finished ? IngestStateName.Complete : IngestStateName.Partial;
+				state = superseded.Finished && AllWritten(parts) ? IngestStateName.Complete : IngestStateName.Partial;
 			}
 		}
 		finally
@@ -370,6 +386,9 @@ public sealed class SessionIngestor(
 	{
 		public static readonly SupersededRun None = new([], [], [], null, Memoria.Core.Contracts.ReindexState.NotNeeded, false);
 	}
+
+	[LoggerMessage(EventId = 3311, Level = LogLevel.Warning, Message = "A session upload to collection {Collection} was refused as {Outcome}: it would replace stored text it does not hold, and nothing was changed. The session is ingest_state identity {Identity}. If the history really did change, or a migrated document does not say how many messages it holds, send the whole session again with allowShrink=true.")]
+	private static partial void LogLooksCut(ILogger logger, string collection, string identity, IngestClaimOutcome outcome);
 }
 
 /// <summary>The names the session route uses for formats.</summary>

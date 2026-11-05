@@ -34,6 +34,39 @@ public sealed record DocumentIngestResult(
 	IReadOnlyList<IngestRefusal> Refusals,
 	string JobId);
 
+/// <summary>
+/// Result of <c>POST /v1/ingest/rendered</c>. <see cref="Frontmatter"/> says whether the sidecar could read the document's frontmatter. Whatever it says, the document was
+/// stored and is searchable, but only with <see cref="RenderedFrontmatter.Read"/> does it match date, project or tag filters.
+/// </summary>
+public sealed record RenderedDocumentResult(
+	string Collection,
+	string Path,
+	string File,
+	long Bytes,
+	bool Created,
+	string Redaction,
+	IReadOnlyDictionary<string, int> Redactions,
+	string Frontmatter,
+	string JobId);
+
+/// <summary>Result of <c>GET /v1/ingest/rendered</c>: what the ledger holds for a path. <see cref="Updated"/> is null when nothing is recorded.</summary>
+public sealed record RenderedDocumentStatus(string Collection, string Path, string State, DateTimeOffset? Updated);
+
+/// <summary>What became of a rendered document's frontmatter.</summary>
+public static class RenderedFrontmatter
+{
+	public const string Read = "read";
+
+	/// <summary>The document does not start with a frontmatter block.</summary>
+	public const string Missing = "missing";
+
+	/// <summary>The block does not close within the first 8192 characters, which is all the sidecar reads.</summary>
+	public const string PastWindow = "past_window";
+
+	/// <summary>The block closes in time, but is not a YAML mapping.</summary>
+	public const string Unparsable = "unparsable";
+}
+
 /// <summary>Whether what was stored went through the redactor. Only an operator's configuration decides, per collection.</summary>
 public static class IngestRedaction
 {
@@ -155,6 +188,9 @@ public static class IngestStateName
 	public const string Partial = "partial";
 
 	public const string Complete = "complete";
+
+	/// <summary>A rendered document whose session has since been uploaded, and now owns its path.</summary>
+	public const string TakenOver = "taken_over";
 
 	/// <summary>Deleted. Only a newer version can bring it back.</summary>
 	public const string Deleted = "deleted";

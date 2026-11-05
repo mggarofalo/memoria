@@ -58,7 +58,14 @@ public sealed record IngestClaimRequest(
 	bool Restore = false,
 	string? MessagesDigest = null,
 	Func<long, string, bool>? StartsWithStored = null,
-	Func<string, bool>? IsSameContent = null);
+	Func<string, bool>? IsSameContent = null)
+{
+	/// <summary>For a session: the lookup its rendered documents in its own folder were recorded under. Those it takes over, as the same text under the session's own rules.</summary>
+	public string? RenderedLookup { get; init; }
+
+	/// <summary>For a session that may be another fork: it leaves its rendered documents where they are, and only a path someone deleted still applies to it.</summary>
+	public bool LeavesRendered { get; init; }
+}
 
 /// <summary>The answer to a claim. <see cref="PreviousPaths"/> is what earlier uploads wrote, which the index may not have seen yet.</summary>
 public sealed record IngestClaim(IngestClaimOutcome Outcome, IReadOnlyList<string> PreviousPaths, string? LeaseToken = null, int? RetryAfterSeconds = null)
@@ -119,6 +126,16 @@ public static class IngestIdentity
 	{
 		return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join('\0', parts))));
 	}
+
+	/// <summary>
+	/// Links a rendered document to the session it says it belongs to, whichever format that session is later sent in, and only within one folder. Exports may be the only copy of what they
+	/// hold, and one in another folder can be another fork of the session, so a session leaves it alone: a double in search is better than a loss.
+	/// </summary>
+	public static string ForRenderedSession(string collection, string sessionId, string path)
+	{
+		ArgumentNullException.ThrowIfNull(path);
+		return For("rendered-session", collection, path[..(path.LastIndexOf('/') + 1)], sessionId);
+	}
 }
 
 /// <summary>The ledger in the control database. One API process owns that database, so a lease from any other process is a dead one.</summary>
@@ -136,7 +153,8 @@ public sealed class SqliteIngestLedger(ControlDatabase database) : IIngestLedger
 		ArgumentNullException.ThrowIfNull(request);
 		await using SqliteConnection connection = await database.OpenAsync(cancellationToken);
 		await using SqliteTransaction transaction = connection.BeginTransaction(deferred: false);
-		IngestRecord? row = await ReadAsync(connection, transaction, request.Identity, cancellationToken);
+		IReadOnlyList<RenderedRow> rendered = await RenderedRowsAsync(connection, transaction, request, cancellationToken);
+		IngestRecord? row = TakingOver(await ReadAsync(connection, transaction, request.Identity, cancellationToken), rendered, request);
 		IReadOnlyList<string> previous = row?.Paths ?? [];
 		IngestClaimOutcome outcome = Decide(row, request);
 		if (outcome != IngestClaimOutcome.Acquired)
@@ -144,12 +162,13 @@ public sealed class SqliteIngestLedger(ControlDatabase database) : IIngestLedger
 			return new IngestClaim(outcome, previous, null, outcome == IngestClaimOutcome.Busy ? SecondsLeft(row!, request.Now) : null);
 		}
 
-		outcome = await CheckPathsAsync(connection, transaction, request, cancellationToken);
+		outcome = await CheckPathsAsync(connection, transaction, request, rendered, cancellationToken);
 		if (outcome != IngestClaimOutcome.Acquired)
 		{
 			return new IngestClaim(outcome, previous);
 		}
 
+		await TakeOverAsync(connection, transaction, request.Identity, rendered);
 		string token = $"{_instance}:{Guid.NewGuid():N}";
 		await UpsertAsync(connection, transaction, request.Identity, request.Lookup, Claimed(request, row, token), cancellationToken);
 		await TakeStemAsync(connection, transaction, request, cancellationToken);
@@ -264,6 +283,81 @@ public sealed class SqliteIngestLedger(ControlDatabase database) : IIngestLedger
 		return IsLeased(record, now) ? IngestStateName.Writing : record.State;
 	}
 
+	private sealed record RenderedRow(string Identity, IngestRecord Record)
+	{
+		public bool IsLive => Record.State != IngestStateName.Deleted;
+	}
+
+	private static async Task<IReadOnlyList<RenderedRow>> RenderedRowsAsync(SqliteConnection connection, SqliteTransaction transaction, IngestClaimRequest request, CancellationToken cancellationToken)
+	{
+		if (request.RenderedLookup is null)
+		{
+			return [];
+		}
+
+		await using SqliteCommand command = connection.CreateCommand();
+		command.Transaction = transaction;
+		command.CommandText = $"SELECT {Columns}, identity FROM ingest_state WHERE lookup = $lookup;";
+		command.Parameters.AddWithValue("$lookup", request.RenderedLookup);
+		await using SqliteDataReader reader = await command.ExecuteReaderAsync(cancellationToken);
+		List<RenderedRow> rows = [];
+		while (await reader.ReadAsync(cancellationToken))
+		{
+			rows.Add(new RenderedRow(reader.GetString(9), Map(reader)));
+		}
+
+		return request.LeavesRendered ? [.. rows.Where(static found => !found.IsLive)] : rows;
+	}
+
+	/// <summary>
+	/// What the session is compared with once its rendered documents count as its own: their paths are its to replace, a copy older or shorter than them is refused as usual, one still
+	/// being written holds it up, and a path someone deleted stays deleted. Only a document's own identity says which path a tombstone was for, as a delete clears its paths.
+	/// </summary>
+	private static IngestRecord? TakingOver(IngestRecord? row, IReadOnlyList<RenderedRow> rendered, IngestClaimRequest request)
+	{
+		if (rendered.Count == 0)
+		{
+			return row;
+		}
+
+		RenderedRow[] live = [.. rendered.Where(static found => found.IsLive)];
+		string[] deleted = [.. request.Paths.Where(path => rendered.Any(found => !found.IsLive && found.Identity == IngestIdentity.For("document", request.Collection, path)))];
+		IngestRecord merged = row ?? new IngestRecord(new DateTimeOffset(0, TimeSpan.Zero), IngestStateName.Partial, request.Now, []);
+		merged = live.Aggregate(merged, static (soFar, found) => Merged(soFar, found.Record));
+		return merged with { DeletedPaths = [.. (merged.DeletedPaths ?? []).Union(deleted, StringComparer.Ordinal)] };
+	}
+
+	private static IngestRecord Merged(IngestRecord soFar, IngestRecord record)
+	{
+		return soFar with
+		{
+			Version = record.Version > soFar.Version ? record.Version : soFar.Version,
+			// A document that does not say how many it holds refuses a takeover rather than guess: allowShrink is how someone says the session really is the whole of it.
+			MessageCount = (record.MessageCount ?? long.MaxValue) > (soFar.MessageCount ?? 0) ? record.MessageCount ?? long.MaxValue : soFar.MessageCount,
+			Paths = [.. soFar.Paths.Union(record.Paths, StringComparer.Ordinal)],
+			LeaseUntil = record.LeaseOwner is null ? soFar.LeaseUntil : record.LeaseUntil,
+			LeaseOwner = record.LeaseOwner ?? soFar.LeaseOwner,
+		};
+	}
+
+	/// <summary>The session owns these paths from here on, so its normal rules apply to them, and a rendered copy sent later is refused for the path it no longer owns.</summary>
+	private static async Task TakeOverAsync(SqliteConnection connection, SqliteTransaction transaction, string identity, IReadOnlyList<RenderedRow> rendered)
+	{
+		foreach (RenderedRow found in rendered.Where(static found => found.IsLive))
+		{
+			await using SqliteCommand command = connection.CreateCommand();
+			command.Transaction = transaction;
+			command.CommandText = """
+				UPDATE ingest_paths SET owner = $owner WHERE owner = $rendered;
+				UPDATE ingest_state SET lookup = NULL, state = $state, paths = '[]', lease_owner = NULL WHERE identity = $rendered;
+				""";
+			command.Parameters.AddWithValue("$owner", identity);
+			command.Parameters.AddWithValue("$rendered", found.Identity);
+			command.Parameters.AddWithValue("$state", IngestStateName.TakenOver);
+			await command.ExecuteNonQueryAsync();
+		}
+	}
+
 	/// <summary>A new row starts with no version and nothing stored, so an upload whose writes all fail leaves no mark on what later uploads are compared with.</summary>
 	private static IngestRecord Claimed(IngestClaimRequest request, IngestRecord? row, string token)
 	{
@@ -301,6 +395,12 @@ public sealed class SqliteIngestLedger(ControlDatabase database) : IIngestLedger
 		if (IsLeased(row, request.Now))
 		{
 			return IngestClaimOutcome.Busy;
+		}
+
+		// A session took this path over, so its text is the session's to write or delete, even once nothing owns the path because that session deleted or stopped writing it.
+		if (row.State == IngestStateName.TakenOver && !request.Restore)
+		{
+			return IngestClaimOutcome.PathConflict;
 		}
 
 		return IsStale(row, request) ? IngestClaimOutcome.Stale : WouldLoseStoredText(row, request);
@@ -358,7 +458,7 @@ public sealed class SqliteIngestLedger(ControlDatabase database) : IIngestLedger
 		return Math.Max(1, (int)Math.Ceiling((row.LeaseUntil - now).TotalSeconds));
 	}
 
-	private static async Task<IngestClaimOutcome> CheckPathsAsync(SqliteConnection connection, SqliteTransaction transaction, IngestClaimRequest request, CancellationToken cancellationToken)
+	private static async Task<IngestClaimOutcome> CheckPathsAsync(SqliteConnection connection, SqliteTransaction transaction, IngestClaimRequest request, IReadOnlyList<RenderedRow> rendered, CancellationToken cancellationToken)
 	{
 		if (request.Stem is { } stem && await StemHeldByAnotherAsync(connection, transaction, request, stem, cancellationToken))
 		{
@@ -367,7 +467,7 @@ public sealed class SqliteIngestLedger(ControlDatabase database) : IIngestLedger
 
 		foreach (string path in request.Paths)
 		{
-			if (await OwnerAsync(connection, transaction, request.Collection, path, cancellationToken) is { } owner && owner != request.Identity)
+			if (await OwnerAsync(connection, transaction, request.Collection, path, cancellationToken) is { } owner && owner != request.Identity && !rendered.Any(found => found.IsLive && found.Identity == owner))
 			{
 				return IngestClaimOutcome.PathConflict;
 			}
