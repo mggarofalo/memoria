@@ -2,13 +2,14 @@
   "$schema": "../node_modules/@stryker-mutator/core/schema/stryker-schema.json",
   "testRunner": "tap",
   "tap": {
-    "testFiles": ["test/**/*.test.ts"],
-    "nodeArgs": ["--test-reporter=tap", "-r", "{{hookFile}}", "{{testFile}}"]
+    "testFiles": ["sidecar/test/**/*.test.ts"],
+    "nodeArgs": ["--max-old-space-size=512", "--test-reporter=tap", "-r", "{{hookFile}}", "{{testFile}}"]
   },
   "coverageAnalysis": "perTest",
-  "mutate": ["src/auth.ts"],
+  "mutate": ["sidecar/src/auth.ts"],
+  "ignorePatterns": ["/cli", "/src", "/tests/Memoria.Api.Tests", "/docs", "/deploy", "/.claude", "/sidecar/test/install-scripts.test.ts", "**/bin", "**/obj"],
   "reporters": ["clear-text", "html", "json"],
-  "htmlReporter": { "fileName": "reports/mutation-security/mutation.html" },
-  "jsonReporter": { "fileName": "reports/mutation-security/mutation.json" },
-  "thresholds": { "high": 95, "low": 90, "break": null }
+  "htmlReporter": { "fileName": "sidecar/reports/mutation-security/mutation.html" },
+  "jsonReporter": { "fileName": "sidecar/reports/mutation-security/mutation.json" },
+  "thresholds": { "high": 100, "low": 95, "break": 95 }
 }

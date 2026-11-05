@@ -86,103 +86,122 @@ function ranked(result: RerankResult): string[] {
   return [...result.results].sort((a, b) => b.score - a.score || a.file.localeCompare(b.file)).map((r) => r.file);
 }
 
+/** Runs a measurement and times it. */
+type Timed = <T>(run: () => Promise<T>) => Promise<[T, number]>;
+/** Runs a step for one query. One bad query should not lose a long run, and a failure is a finding, so it is kept. */
+type Attempt = <T>(label: string, run: () => Promise<T>) => Promise<T | null>;
+
+function attemptInto(errors: string[]): Attempt {
+  return async (label, run) => {
+    try {
+      return await run();
+    } catch (err) {
+      errors.push(`${label}: ${err instanceof Error ? err.message : "failed"}`);
+      return null;
+    }
+  };
+}
+
+interface QueryRun {
+  query: BenchQuery;
+  local: ParitySide;
+  remote: ParitySide;
+  options: ParityOptions;
+  timed: Timed;
+  attempt: Attempt;
+}
+
+async function compareRerank(run: QueryRun, candidates: Parameters<ParitySide["rerank"]>[1]): Promise<QueryReport["rerank"]> {
+  const { query, local, remote, timed, attempt } = run;
+  if (candidates.length === 0) return null;
+  const rerankQuery = rerankQueryFor(query);
+  const localResult = await attempt("rerank local", () => timed(() => local.rerank(rerankQuery, candidates)));
+  const remoteResult = await attempt("rerank remote", () => timed(() => remote.rerank(rerankQuery, candidates)));
+  if (!localResult || !remoteResult) return null;
+  const l = scoresByFile(localResult[0]);
+  const r = scoresByFile(remoteResult[0]);
+  const files = candidates.map((c) => c.file).filter((f) => l.has(f) && r.has(f));
+  const a = files.map((f) => l.get(f)!);
+  const b = files.map((f) => r.get(f)!);
+  return {
+    delta: scoreDelta(a, b),
+    spearman: spearman(a, b),
+    top10Overlap: topKOverlap(ranked(localResult[0]), ranked(remoteResult[0]), 10),
+    localMs: localResult[1],
+    remoteMs: remoteResult[1],
+  };
+}
+
+async function compareEmbed({ query, local, remote, attempt }: QueryRun): Promise<number | null> {
+  const vectors = await attempt("embed", async () => {
+    const text = `task: search result | query: ${query.query}`;
+    return [await local.embed(text), await remote.embed(text)] as const;
+  });
+  return vectors?.[0] && vectors[1] ? cosine(vectors[0], vectors[1]) : null;
+}
+
+async function compareSearch({ query, local, remote, timed, attempt }: QueryRun): Promise<QueryReport["endToEnd"]> {
+  local.clearCache();
+  remote.clearCache();
+  const localSearch = await attempt("search local", () => timed(() => local.search(query, 10)));
+  const remoteSearch = await attempt("search remote", () => timed(() => remote.search(query, 10)));
+  if (!localSearch || !remoteSearch) return null;
+  const [l, localMs] = localSearch;
+  const [r, remoteMs] = remoteSearch;
+  const shared = l.files.filter((f) => r.files.includes(f));
+  const a = shared.map((f) => l.scores[l.files.indexOf(f)]!);
+  const b = shared.map((f) => r.scores[r.files.indexOf(f)]!);
+  return { top10Overlap: topKOverlap(l.files, r.files, 10), spearman: spearman(a, b), delta: scoreDelta(a, b), localMs, remoteMs, localHits: l.files.length, remoteHits: r.files.length };
+}
+
+async function expansionRuns({ query, options, attempt }: QueryRun, side: ParitySide, label: string): Promise<Array<Set<string>>> {
+  const runs: Array<Set<string>> = [];
+  for (let i = 0; i < options.expansionRuns; i++) {
+    const out = await attempt(`expand ${label}`, () => side.expand(query.query));
+    if (out) runs.push(new Set(out.map(expansionKey)));
+  }
+  return runs;
+}
+
+function exactMatchRate(localRuns: Array<Set<string>>, remoteRuns: Array<Set<string>>): number {
+  const pairs = localRuns.length * remoteRuns.length;
+  if (pairs === 0) return 0;
+  const exact = localRuns.flatMap((a) => remoteRuns.filter((b) => jaccard(a, b) === 1)).length;
+  return exact / pairs;
+}
+
+async function compareExpansion(run: QueryRun): Promise<QueryReport["expansion"]> {
+  const localRuns = await expansionRuns(run, run.local, "local");
+  const remoteRuns = await expansionRuns(run, run.remote, "remote");
+  return {
+    localVsLocal: meanPairwiseJaccard(localRuns),
+    localVsRemote: meanPairwiseJaccard(localRuns, remoteRuns),
+    remoteVsRemote: meanPairwiseJaccard(remoteRuns),
+    exactMatchRate: exactMatchRate(localRuns, remoteRuns),
+  };
+}
+
+async function reportQuery(query: BenchQuery, local: ParitySide, remote: ParitySide, options: ParityOptions, timed: Timed): Promise<QueryReport> {
+  const errors: string[] = [];
+  const run: QueryRun = { query, local, remote, options, timed, attempt: attemptInto(errors) };
+  const candidates = (await run.attempt("candidates", () => local.candidates(query, options.candidateLimit))) ?? [];
+  const rerank = await compareRerank(run, candidates);
+  const embedCosine = await compareEmbed(run);
+  const endToEnd = await compareSearch(run);
+  const expansion = await compareExpansion(run);
+  return { id: query.id, collection: query.collection, candidates: candidates.length, rerank, embedCosine, endToEnd, expansion, errors };
+}
+
 export async function runParity(queries: readonly BenchQuery[], local: ParitySide, remote: ParitySide, options: ParityOptions): Promise<ParityReport> {
   const now = options.now ?? (() => performance.now());
-  const timed = async <T>(run: () => Promise<T>): Promise<[T, number]> => {
+  const timed: Timed = async (run) => {
     const started = now();
     return [await run(), now() - started];
   };
   const reports: QueryReport[] = [];
 
   for (const [position, query] of queries.entries()) {
-    const errors: string[] = [];
-    const attempt = async <T>(label: string, run: () => Promise<T>): Promise<T | null> => {
-      try {
-        return await run();
-      } catch (err) {
-        // One bad query should not lose a long run. A failure is a finding, so it is kept.
-        errors.push(`${label}: ${err instanceof Error ? err.message : "failed"}`);
-        return null;
-      }
-    };
-
-    const candidates = (await attempt("candidates", () => local.candidates(query, options.candidateLimit))) ?? [];
-
-    let rerank: QueryReport["rerank"] = null;
-    if (candidates.length > 0) {
-      const rerankQuery = rerankQueryFor(query);
-      const localResult = await attempt("rerank local", () => timed(() => local.rerank(rerankQuery, candidates)));
-      const remoteResult = await attempt("rerank remote", () => timed(() => remote.rerank(rerankQuery, candidates)));
-      if (localResult && remoteResult) {
-        const l = scoresByFile(localResult[0]);
-        const r = scoresByFile(remoteResult[0]);
-        const files = candidates.map((c) => c.file).filter((f) => l.has(f) && r.has(f));
-        const a = files.map((f) => l.get(f)!);
-        const b = files.map((f) => r.get(f)!);
-        rerank = {
-          delta: scoreDelta(a, b),
-          spearman: spearman(a, b),
-          top10Overlap: topKOverlap(ranked(localResult[0]), ranked(remoteResult[0]), 10),
-          localMs: localResult[1],
-          remoteMs: remoteResult[1],
-        };
-      }
-    }
-
-    const vectors = await attempt("embed", async () => {
-      const text = `task: search result | query: ${query.query}`;
-      return [await local.embed(text), await remote.embed(text)] as const;
-    });
-    const embedCosine = vectors?.[0] && vectors[1] ? cosine(vectors[0], vectors[1]) : null;
-
-    local.clearCache();
-    remote.clearCache();
-    const localSearch = await attempt("search local", () => timed(() => local.search(query, 10)));
-    const remoteSearch = await attempt("search remote", () => timed(() => remote.search(query, 10)));
-    let endToEnd: QueryReport["endToEnd"] = null;
-    if (localSearch && remoteSearch) {
-      const [l, localMs] = localSearch;
-      const [r, remoteMs] = remoteSearch;
-      const shared = l.files.filter((f) => r.files.includes(f));
-      const a = shared.map((f) => l.scores[l.files.indexOf(f)]!);
-      const b = shared.map((f) => r.scores[r.files.indexOf(f)]!);
-      endToEnd = { top10Overlap: topKOverlap(l.files, r.files, 10), spearman: spearman(a, b), delta: scoreDelta(a, b), localMs, remoteMs, localHits: l.files.length, remoteHits: r.files.length };
-    }
-
-    const expansions = async (side: ParitySide, label: string): Promise<Array<Set<string>>> => {
-      const runs: Array<Set<string>> = [];
-      for (let i = 0; i < options.expansionRuns; i++) {
-        const out = await attempt(`expand ${label}`, () => side.expand(query.query));
-        if (out) runs.push(new Set(out.map(expansionKey)));
-      }
-      return runs;
-    };
-    const localRuns = await expansions(local, "local");
-    const remoteRuns = await expansions(remote, "remote");
-    let exact = 0;
-    let pairs = 0;
-    for (const a of localRuns) {
-      for (const b of remoteRuns) {
-        pairs++;
-        if (jaccard(a, b) === 1) exact++;
-      }
-    }
-
-    reports.push({
-      id: query.id,
-      collection: query.collection,
-      candidates: candidates.length,
-      rerank,
-      embedCosine,
-      endToEnd,
-      expansion: {
-        localVsLocal: meanPairwiseJaccard(localRuns),
-        localVsRemote: meanPairwiseJaccard(localRuns, remoteRuns),
-        remoteVsRemote: meanPairwiseJaccard(remoteRuns),
-        exactMatchRate: pairs === 0 ? 0 : exact / pairs,
-      },
-      errors,
-    });
+    reports.push(await reportQuery(query, local, remote, options, timed));
     options.onProgress?.(position + 1, queries.length, query.id);
   }
 
@@ -217,15 +236,23 @@ export function validateQuerySet(raw: unknown): BenchQuery[] {
   if (!Array.isArray(raw)) throw new Error("The query set must be a list");
   const ids = new Set<string>();
   for (const q of raw as BenchQuery[]) {
-    if (typeof q.id !== "string" || q.id === "" || ids.has(q.id)) throw new Error(`Bad or repeated query id: ${String(q.id)}`);
+    if (!isFilled(q.id) || ids.has(q.id)) throw new Error(`Bad or repeated query id: ${String(q.id)}`);
     ids.add(q.id);
-    if (typeof q.collection !== "string" || q.collection === "") throw new Error(`${q.id}: no collection`);
-    if (typeof q.query !== "string" || q.query === "") throw new Error(`${q.id}: no query`);
-    if (typeof q.intent !== "string" || q.intent === "") throw new Error(`${q.id}: no intent`);
-    if (!Array.isArray(q.searches) || q.searches.length === 0) throw new Error(`${q.id}: no searches`);
-    for (const s of q.searches) {
-      if (!["lex", "vec", "hyde"].includes(s.type) || typeof s.query !== "string" || s.query === "") throw new Error(`${q.id}: bad search`);
-    }
+    validateQuery(q);
   }
   return raw as BenchQuery[];
+}
+
+function isFilled(value: unknown): value is string {
+  return typeof value === "string" && value !== "";
+}
+
+function validateQuery(q: BenchQuery): void {
+  if (!isFilled(q.collection)) throw new Error(`${q.id}: no collection`);
+  if (!isFilled(q.query)) throw new Error(`${q.id}: no query`);
+  if (!isFilled(q.intent)) throw new Error(`${q.id}: no intent`);
+  if (!Array.isArray(q.searches) || q.searches.length === 0) throw new Error(`${q.id}: no searches`);
+  for (const s of q.searches) {
+    if (!["lex", "vec", "hyde"].includes(s.type) || !isFilled(s.query)) throw new Error(`${q.id}: bad search`);
+  }
 }

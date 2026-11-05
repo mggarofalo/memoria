@@ -121,29 +121,8 @@ public sealed class SidecarContractTests
 
 		if (schema.TryGetProperty("anyOf", out JsonElement anyOf))
 		{
-			// The sidecar uses anyOf for "T or null" and for "string or string[]";
-			// the client is right as long as one non-null branch matches.
-			List<string> reasons = [];
-			foreach (JsonElement option in anyOf.EnumerateArray())
-			{
-				JsonElement branch = Resolve(option);
-				if (branch.TryGetProperty("type", out JsonElement t) && t.ValueKind == JsonValueKind.String && t.GetString() == "null")
-				{
-					continue;
-				}
-
-				try
-				{
-					AssertMatches(branch, type, where);
-					return;
-				}
-				catch (Xunit.Sdk.XunitException ex)
-				{
-					reasons.Add(ex.Message);
-				}
-			}
-
-			Assert.Fail($"{where}: no anyOf branch matches {type.Name}: {string.Join(" | ", reasons)}");
+			AssertAnyBranchMatches(anyOf, type, where);
+			return;
 		}
 
 		if (Nullable.GetUnderlyingType(type) is Type underlying)
@@ -177,6 +156,40 @@ public sealed class SidecarContractTests
 			return;
 		}
 
+		AssertScalarMatches(schema, type, where);
+	}
+
+	/// <summary>
+	/// The sidecar uses anyOf for "T or null" and for "string or string[]"; the
+	/// client is right as long as one non-null branch matches.
+	/// </summary>
+	private static void AssertAnyBranchMatches(JsonElement anyOf, Type type, string where)
+	{
+		List<string> reasons = [];
+		foreach (JsonElement option in anyOf.EnumerateArray())
+		{
+			JsonElement branch = Resolve(option);
+			if (branch.TryGetProperty("type", out JsonElement t) && t.ValueKind == JsonValueKind.String && t.GetString() == "null")
+			{
+				continue;
+			}
+
+			try
+			{
+				AssertMatches(branch, type, where);
+				return;
+			}
+			catch (Xunit.Sdk.XunitException ex)
+			{
+				reasons.Add(ex.Message);
+			}
+		}
+
+		Assert.Fail($"{where}: no anyOf branch matches {type.Name}: {string.Join(" | ", reasons)}");
+	}
+
+	private static void AssertScalarMatches(JsonElement schema, Type type, string where)
+	{
 		string expected = type switch
 		{
 			_ when type == typeof(string) => "string",

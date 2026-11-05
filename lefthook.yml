@@ -15,7 +15,7 @@ pre-commit:
       run: >-
         dotnet format Memoria.slnx --verify-no-changes &&
         dotnet build Memoria.slnx -p:TreatWarningsAsErrors=true --nologo --verbosity quiet &&
-        sh scripts/coverage-dotnet.sh
+        node scripts/run-sh.mjs scripts/coverage-dotnet.sh
 
     - name: sidecar
       root: "sidecar/"
@@ -45,4 +45,4 @@ pre-commit:
     - name: cli
       root: "cli/"
       glob: "**/*.{go,mod,sum,yml,yaml}"
-      run: sh ../scripts/check-go.sh
+      run: node ../scripts/run-sh.mjs ../scripts/check-go.sh

@@ -440,21 +440,31 @@ export async function removeDocument(target: ResolvedTarget, hooks: IngestHooks 
 
   const scratch = scratchPath(target);
   await hooks.onStep?.("checked");
+  if (!(await moveAside(target, scratch))) return false;
+  await hooks.onStep?.("moved");
+  await unlinkMovedAside(target, scratch, stats.isSymbolicLink());
+  return true;
+}
+
+/** False when the file went away first, which is a delete that has already happened. */
+async function moveAside(target: ResolvedTarget, scratch: string): Promise<boolean> {
   try {
     await retryTransient(() => rename(target.absolute, scratch));
+    return true;
   } catch (err) {
     if (isMissing(err)) return false;
     throw err;
   }
-  await hooks.onStep?.("moved");
+}
+
+async function unlinkMovedAside(target: ResolvedTarget, scratch: string, isLink: boolean): Promise<void> {
   try {
     await assertContained(target);
     // A link's real path is wherever it points, which says nothing about where the link itself is.
-    await (stats.isSymbolicLink() ? lstat(scratch) : assertScratchInRoot(target, scratch));
+    await (isLink ? lstat(scratch) : assertScratchInRoot(target, scratch));
     await retryTransient(() => unlink(scratch));
   } catch (err) {
     await rename(scratch, target.absolute).catch(() => undefined);
     throw isMissing(err) ? pathChanged() : err;
   }
-  return true;
 }

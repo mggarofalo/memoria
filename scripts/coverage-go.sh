@@ -4,8 +4,7 @@
 # used. Extra arguments go to `go test`; CI passes -race.
 set -eu
 
-# Phase 1 ratchet: the value measured on main. The target is 90.
-MIN_STATEMENT=55
+MIN_STATEMENT=90
 
 cd "$(dirname "$0")/../cli"
 

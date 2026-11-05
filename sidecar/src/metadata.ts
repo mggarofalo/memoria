@@ -163,29 +163,33 @@ export function hasFilters(filters: SearchFilters | undefined): filters is Searc
 export function matchesFilters(meta: DocumentMetadata | undefined, filters: SearchFilters): boolean {
   if (!hasFilters(filters)) return true;
   if (!meta) return false;
+  return matchesAnyOf(meta.project, filters.project) && matchesAnyOf(meta.branch, filters.branch) && hasAllTags(meta.tags, filters.tags) && withinBounds(meta, filters);
+}
 
-  const projects = anyOf(filters.project);
-  if (projects && (!meta.project || !projects.includes(meta.project.toLowerCase()))) return false;
+/** True when the filter is inactive, or names this value. A missing value matches no active filter. */
+function matchesAnyOf(value: string | undefined, filter: string | string[] | undefined): boolean {
+  const wanted = anyOf(filter);
+  if (!wanted) return true;
+  return value !== undefined && value !== "" && wanted.includes(value.toLowerCase());
+}
 
-  const branches = anyOf(filters.branch);
-  if (branches && (!meta.branch || !branches.includes(meta.branch.toLowerCase()))) return false;
+function hasAllTags(tags: string[], wanted: string[] | undefined): boolean {
+  if (!wanted || wanted.length === 0) return true;
+  const have = new Set(tags.map((t) => t.toLowerCase()));
+  return wanted.every((want) => have.has(want.trim().toLowerCase()));
+}
 
-  if (filters.tags && filters.tags.length > 0) {
-    const have = new Set(meta.tags.map((t) => t.toLowerCase()));
-    for (const want of filters.tags) {
-      if (!have.has(want.trim().toLowerCase())) return false;
-    }
-  }
+function bound(value: string | undefined, edge: "since" | "until"): number | undefined {
+  return value?.trim() ? parseBound(value, edge) : undefined;
+}
 
-  const since = filters.since?.trim() ? parseBound(filters.since, "since") : undefined;
-  const until = filters.until?.trim() ? parseBound(filters.until, "until") : undefined;
-  if (since !== undefined || until !== undefined) {
-    const instant = documentInstant(meta);
-    if (instant === undefined) return false;
-    if (since !== undefined && instant < since) return false;
-    if (until !== undefined && instant > until) return false;
-  }
-  return true;
+function withinBounds(meta: DocumentMetadata, filters: SearchFilters): boolean {
+  const since = bound(filters.since, "since");
+  const until = bound(filters.until, "until");
+  if (since === undefined && until === undefined) return true;
+  const instant = documentInstant(meta);
+  if (instant === undefined) return false;
+  return (since === undefined || instant >= since) && (until === undefined || instant <= until);
 }
 
 // --- index -------------------------------------------------------------------

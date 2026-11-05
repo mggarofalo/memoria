@@ -134,48 +134,70 @@ function readAllowedHosts(env: NodeJS.ProcessEnv): ReadonlySet<string> {
   return new Set(["localhost", ...(env.MEMORIA_WORKER_ALLOWED_HOSTS ?? "").split(",").map((h) => h.trim().toLowerCase()).filter((h) => h !== "")]);
 }
 
-export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
+function readHost(env: NodeJS.ProcessEnv): string {
   const host = (env.MEMORIA_WORKER_HOST ?? "127.0.0.1").trim();
   if (!isLanAddress(host)) {
     throw new Error(`MEMORIA_WORKER_HOST must be a loopback or private LAN address, got "${host}". Wildcards and public addresses are refused.`);
   }
+  return host;
+}
+
+function readToken(env: NodeJS.ProcessEnv, host: string): string | undefined {
   const token = resolveSecret(env, "MEMORIA_WORKER_TOKEN");
   if (token === undefined && !isLoopback(host)) throw new Error("MEMORIA_WORKER_TOKEN is required when binding a LAN address");
   if (token !== undefined) checkTokenStrength(token);
-  checkPlaintextOptIn(host, env);
+  return token;
+}
 
+function readEnabledRoles(env: NodeJS.ProcessEnv): string[] {
   const enabled = (env.MEMORIA_WORKER_ROLES ?? ROLES.join(",")).split(",").map((r) => r.trim().toLowerCase()).filter(Boolean);
   for (const r of enabled) {
     if (!ROLES.includes(r as Role)) throw new Error(`MEMORIA_WORKER_ROLES has an unknown role "${r}"`);
   }
   if (enabled.length === 0) throw new Error("MEMORIA_WORKER_ROLES must name at least one role");
+  return enabled;
+}
 
+const DEFAULT_PARALLEL: Readonly<Record<Role, number>> = { embed: 4, rerank: 2, generate: 1 };
+
+function readRole(env: NodeJS.ProcessEnv, role: Role, port: number): RoleConfig {
+  const prefix = `MEMORIA_WORKER_${role.toUpperCase()}`;
+  const modelPath = env[`${prefix}_MODEL`]?.trim() || undefined;
+  const externalUrl = env[`${prefix}_URL`]?.trim() || undefined;
+  return {
+    role,
+    modelFile: modelPath ? path.basename(modelPath) : DEFAULT_MODEL_FILES[role],
+    modelPath,
+    externalUrl,
+    port,
+    parallel: readNumber(env[`${prefix}_PARALLEL`], DEFAULT_PARALLEL[role], `${prefix}_PARALLEL`, 1, 64),
+  };
+}
+
+function readRoles(env: NodeJS.ProcessEnv): RoleConfig[] {
+  const enabled = readEnabledRoles(env);
   const basePort = readNumber(env.MEMORIA_WORKER_LLAMA_BASE_PORT, 8384, "MEMORIA_WORKER_LLAMA_BASE_PORT", 1024, 65000);
-  const defaultParallel: Record<Role, number> = { embed: 4, rerank: 2, generate: 1 };
-  const roles: RoleConfig[] = [];
-  ROLES.forEach((role, i) => {
-    if (!enabled.includes(role)) return;
-    const prefix = `MEMORIA_WORKER_${role.toUpperCase()}`;
-    const modelPath = env[`${prefix}_MODEL`]?.trim() || undefined;
-    const externalUrl = env[`${prefix}_URL`]?.trim() || undefined;
-    roles.push({
-      role,
-      modelFile: modelPath ? path.basename(modelPath) : DEFAULT_MODEL_FILES[role],
-      modelPath,
-      externalUrl,
-      port: basePort + i,
-      parallel: readNumber(env[`${prefix}_PARALLEL`], defaultParallel[role], `${prefix}_PARALLEL`, 1, 64),
-    });
-  });
+  // A role keeps its port whichever others are enabled.
+  return ROLES.flatMap((role, i) => (enabled.includes(role) ? [readRole(env, role, basePort + i)] : []));
+}
 
+function defaultModelDir(env: NodeJS.ProcessEnv): string {
   const cacheDir = env.XDG_CACHE_HOME?.trim() || path.join(homedir(), ".cache");
+  return path.join(cacheDir, "qmd", "models");
+}
+
+export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
+  const host = readHost(env);
+  const token = readToken(env, host);
+  checkPlaintextOptIn(host, env);
+  const roles = readRoles(env);
   return {
     host,
     allowedHosts: readAllowedHosts(env),
     port: readNumber(env.MEMORIA_WORKER_PORT, 8383, "MEMORIA_WORKER_PORT", 1, 65535),
     token,
     llamaServer: env.MEMORIA_WORKER_LLAMA_SERVER?.trim() || "llama-server",
-    modelDir: env.MEMORIA_WORKER_MODEL_DIR?.trim() || path.join(cacheDir, "qmd", "models"),
+    modelDir: env.MEMORIA_WORKER_MODEL_DIR?.trim() || defaultModelDir(env),
     gpuLayers: readNumber(env.MEMORIA_WORKER_GPU_LAYERS, 999, "MEMORIA_WORKER_GPU_LAYERS", 0, 100000),
     roles,
     warmup: readBool(env.MEMORIA_WORKER_WARMUP, true, "MEMORIA_WORKER_WARMUP"),

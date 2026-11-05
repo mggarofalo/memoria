@@ -1,6 +1,6 @@
 import { refuseAtBoundary } from "./boundary.ts";
-import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { tokenMatches } from "./auth.ts";
 import type { Role } from "./config.ts";
 import { InvalidRequest, UpstreamError, type CompleteRequest, type Inference } from "./inference.ts";
 import type { Logger } from "./log.ts";
@@ -44,16 +44,6 @@ class HttpFailure extends Error {
     this.status = status;
     this.code = code;
   }
-}
-
-function tokenMatches(header: string | undefined, secret: string): boolean {
-  if (header === undefined) return false;
-  const match = /^bearer\s+(.+)$/i.exec(header.trim());
-  if (!match) return false;
-  // Hashing gives equal lengths, so comparison time reveals nothing about either.
-  const a = createHash("sha256").update(match[1]!).digest();
-  const b = createHash("sha256").update(secret).digest();
-  return timingSafeEqual(a, b);
 }
 
 /** Limits concurrent work on one llama-server and counts who is waiting. */
@@ -128,13 +118,19 @@ function optionalNumber(body: Record<string, unknown>, field: string, min: numbe
   return value;
 }
 
+function optionalString(body: Record<string, unknown>, field: string): string | undefined {
+  const value = body[field];
+  if (value !== undefined && typeof value !== "string") throw new HttpFailure(400, "invalid_body", `${field} must be a string`);
+  return value;
+}
+
 function parseComplete(body: Record<string, unknown>): CompleteRequest {
   if (typeof body.prompt !== "string" || body.prompt === "") throw new HttpFailure(400, "invalid_body", "prompt must be a non-empty string");
-  if (body.grammar !== undefined && typeof body.grammar !== "string") throw new HttpFailure(400, "invalid_body", "grammar must be a string");
-  if (body.system !== undefined && typeof body.system !== "string") throw new HttpFailure(400, "invalid_body", "system must be a string");
   const request: CompleteRequest = { prompt: body.prompt };
-  if (typeof body.system === "string") request.system = body.system;
-  if (typeof body.grammar === "string") request.grammar = body.grammar;
+  const grammar = optionalString(body, "grammar");
+  if (grammar !== undefined) request.grammar = grammar;
+  const system = optionalString(body, "system");
+  if (system !== undefined) request.system = system;
   const numbers: Array<[keyof CompleteRequest & string, number, number]> = [
     ["maxTokens", 1, 8192],
     ["temperature", 0, 5],

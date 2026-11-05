@@ -61,6 +61,16 @@ function docidFor(collection: string, path: string): string {
   return h.toString(16).padStart(6, "0").slice(-6);
 }
 
+async function markdownFiles(root: string): Promise<string[]> {
+  let files: string[] = [];
+  try {
+    files = (await readdir(root, { recursive: true, withFileTypes: false })) as string[];
+  } catch {
+    files = [];
+  }
+  return files.map((f) => f.replace(/\\/g, "/")).filter((f) => f.endsWith(".md"));
+}
+
 export class FakeBackend implements QmdBackend {
   readonly dbPath: string;
   readonly calls: RecordedCall[] = [];
@@ -253,47 +263,39 @@ export class FakeBackend implements QmdBackend {
     if (this.updateDelayMs > 0) await new Promise((r) => setTimeout(r, this.updateDelayMs));
     if (this.updateGate) await this.updateGate;
     const names = options.collections ?? this.collections.map((c) => c.name);
-    let indexed = 0;
-    let updated = 0;
-    let unchanged = 0;
-    let removed = 0;
+    const counts = { indexed: 0, updated: 0, unchanged: 0, removed: 0 };
     for (const name of names) {
       const col = this.collections.find((c) => c.name === name);
       if (!col) continue;
-      let files: string[] = [];
-      try {
-        files = (await readdir(col.root, { recursive: true, withFileTypes: false })) as string[];
-      } catch {
-        files = [];
-      }
-      const onDisk = files.map((f) => f.replace(/\\/g, "/")).filter((f) => f.endsWith(".md"));
-      for (const rel of onDisk) {
-        const body = await readFile(path.join(col.root, rel), "utf8");
-        const existing = this.docs.find((d) => d.collection === name && d.path === rel);
-        if (!existing) {
-          const doc: FakeDoc = { collection: name, path: rel, body };
-          this.docs.push(doc);
-          this.#scanned.add(doc);
-          indexed++;
-        } else {
-          this.#scanned.add(existing);
-          if (existing.body !== body) {
-            existing.body = body;
-            updated++;
-          } else {
-            unchanged++;
-          }
-        }
-      }
+      const onDisk = await markdownFiles(col.root);
+      for (const rel of onDisk) await this.#scanFile(name, rel, await readFile(path.join(col.root, rel), "utf8"), counts);
       for (const doc of [...this.#scanned]) {
         if (doc.collection === name && !onDisk.includes(doc.path)) {
           this.#scanned.delete(doc);
           this.docs.splice(this.docs.indexOf(doc), 1);
-          removed++;
+          counts.removed++;
         }
       }
     }
-    return { collections: names.length, indexed, updated, unchanged, removed, skipped: 0, needsEmbedding: indexed + updated };
+    return { collections: names.length, ...counts, skipped: 0, needsEmbedding: counts.indexed + counts.updated };
+  }
+
+  async #scanFile(collection: string, rel: string, body: string, counts: { indexed: number; updated: number; unchanged: number }): Promise<void> {
+    const existing = this.docs.find((d) => d.collection === collection && d.path === rel);
+    if (!existing) {
+      const doc: FakeDoc = { collection, path: rel, body };
+      this.docs.push(doc);
+      this.#scanned.add(doc);
+      counts.indexed++;
+      return;
+    }
+    this.#scanned.add(existing);
+    if (existing.body === body) {
+      counts.unchanged++;
+      return;
+    }
+    existing.body = body;
+    counts.updated++;
   }
 
   async embed(options: BackendEmbedOptions): Promise<EmbedSummary> {

@@ -129,14 +129,8 @@ func TestDegradedNoticeNamesReasons_AndCleansThem(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for name, out := range map[string]string{"table": tableOut.String(), "markdown": markdownOut.String()} {
-		if !strings.Contains(out, "Degraded search") || !strings.Contains(out, "no") || !strings.Contains(out, "expansion") {
-			t.Fatalf("%s = %q", name, out)
-		}
-		if strings.ContainsRune(out, 0x1b) {
-			t.Fatalf("%s kept an escape: %q", name, out)
-		}
-	}
+	assertCleanDegradedNotice(t, "table", tableOut.String())
+	assertCleanDegradedNotice(t, "markdown", markdownOut.String())
 	if strings.Contains(markdownOut.String(), "![x]") {
 		t.Fatalf("markdown kept live markup: %q", markdownOut.String())
 	}
@@ -145,6 +139,16 @@ func TestDegradedNoticeNamesReasons_AndCleansThem(t *testing.T) {
 	}
 	if !strings.HasPrefix(markdownOut.String(), "> ") {
 		t.Fatalf("markdown = %q", markdownOut.String())
+	}
+}
+
+func assertCleanDegradedNotice(t *testing.T, name, out string) {
+	t.Helper()
+	if !strings.Contains(out, "Degraded search") || !strings.Contains(out, "no") || !strings.Contains(out, "expansion") {
+		t.Fatalf("%s = %q", name, out)
+	}
+	if strings.ContainsRune(out, 0x1b) {
+		t.Fatalf("%s kept an escape: %q", name, out)
 	}
 }
 
