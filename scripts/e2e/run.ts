@@ -2,7 +2,7 @@
  * Entry point: `node scripts/e2e/run.ts [--no-build]`. Needs Node 22.18+, Go, the
  * .NET SDK, and `npm ci` in sidecar/. See README.md.
  */
-import { bootstrap, keyManagement, login, mcp, noLeaks, rateLimits, scopedReads, scopeErrors, traversal } from "./checks.ts";
+import { bootstrap, keyManagement, login, mcp, noLeaks, noModels, rateLimits, scopedReads, scopeErrors, traversal } from "./checks.ts";
 import { Harness } from "./harness.ts";
 
 async function runAll(h: Harness): Promise<void> {
@@ -18,6 +18,7 @@ async function runAll(h: Harness): Promise<void> {
   mcp(h, keys);
   login(h, keys);
   await rateLimits(h, keys);
+  noModels(h);
   noLeaks(h);
 }
 

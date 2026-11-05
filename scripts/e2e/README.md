@@ -13,14 +13,14 @@ It needs Node 22.18+, Go and the .NET SDK. It exits non-zero if any check fails.
 ## What it touches
 
 - **No real keys.** Every key comes from the throwaway server it starts, and printed output is scrubbed of them.
-- **No real index, and no models.** The real QMD SDK builds a small index from two fixture collections. Every proxy points nowhere, so nothing can download a model.
+- **No real index, and no models.** The real QMD SDK builds a small index from two fixture collections. The sidecar runs with `MEMORIA_QMD_LLM=remote`, `MEMORIA_QMD_LLM_FALLBACK=0`, and a worker address nothing listens on. Do not run it in local mode: a plain query can reach QMD's expansion step, which starts the LLM runtime and tries to fetch a model, and under `CI=true` it fails instead. The run ends by checking that the sidecar logged remote mode and that no model file reached its private cache.
 - **One private directory.** A new temp directory, mode 0700, holds the index, control database, logs and config. Home and config variables point inside it for every process, and it is deleted at the end, pass or fail.
 - **Loopback only**, on free ports.
 - **One exception, the OS keyring.** A file-backend login records its server in the keyring when one is available. This uses the profile `memoria-e2e-test`, holds no key, and is removed by the logout that follows. On a host with no keyring, such as CI, nothing happens.
 
 ## What it does not cover
 
-With no models, there is no reranking and no vector search: queries use `--no-rerank` and match one document. It runs plain http, not TLS, and does not exercise a prompt in a real terminal.
+With no worker, there is no query expansion, reranking or vector search, so queries are the sidecar's degraded BM25 search and match one document. It runs plain http, not TLS, and does not exercise a prompt in a real terminal.
 
 ## Adding checks
 

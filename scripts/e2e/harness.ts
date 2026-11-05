@@ -4,7 +4,7 @@
  */
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { chmodSync, closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import net from "node:net";
 import os from "node:os";
@@ -128,7 +128,13 @@ await store.close();`;
     this.check("seed a throwaway index with the real SDK", seeded.status === 0, seeded.stderr);
   }
 
-  /** Every proxy goes nowhere, so nothing here can download a model. */
+  /** Model files in the private cache, which has to stay empty of them. */
+  modelFiles(): string[] {
+    const cache = path.join(this.isolated["XDG_CACHE_HOME"] ?? "", "qmd", "models");
+    return existsSync(cache) ? readdirSync(cache, { recursive: true, encoding: "utf8" }) : [];
+  }
+
+  /** Every proxy goes nowhere, as a second line behind the sidecar's remote mode. */
   private offline(): NodeJS.ProcessEnv {
     const nowhere = "http://127.0.0.1:9";
     return { ...this.isolated, HTTP_PROXY: nowhere, HTTPS_PROXY: nowhere, http_proxy: nowhere, https_proxy: nowhere, NO_PROXY: "127.0.0.1", no_proxy: "127.0.0.1", NODE_LLAMA_CPP_SKIP_DOWNLOAD: "true" };
@@ -145,6 +151,11 @@ await store.close();`;
       MEMORIA_QMD_WARMUP: "0",
       MEMORIA_QMD_KEEP_WARM: "0",
       MEMORIA_QMD_LOG_LEVEL: "info",
+      // Local mode can load models for a plain query. Here the only worker is an
+      // address nothing listens on and there is no fallback, so nothing can.
+      MEMORIA_QMD_LLM: "remote",
+      MEMORIA_QMD_LLM_FALLBACK: "0",
+      MEMORIA_QMD_WORKER_URL: "http://127.0.0.1:9",
     };
     this.launch(process.execPath, ["dist/main.js"], path.join(repo, "sidecar"), env, "sidecar.log");
     this.check("sidecar answers", await waitForHttp(`http://127.0.0.1:${this.sidecarPort}/health`), this.log("sidecar"));

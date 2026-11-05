@@ -262,6 +262,12 @@ export async function rateLimits(h: Harness, { admin }: Keys): Promise<void> {
   h.check("failed-auth 429 after real 401s: exit 6, Retry-After", failed.code === 6 && /retry after \d+s/.test(failed.err), failed.out + failed.err);
 }
 
+export function noModels(h: Harness): void {
+  h.check("the sidecar ran in remote mode, so no local model could load", h.log("sidecar").includes('"llm":"remote"'));
+  const files = h.modelFiles();
+  h.check("no model file reached the private cache", files.length === 0, files);
+}
+
 export function noLeaks(h: Harness): void {
   const logs = h.log("api") + h.log("sidecar");
   h.check("no plaintext key in the API or sidecar logs", !h.secrets.some((key) => logs.includes(key)));
