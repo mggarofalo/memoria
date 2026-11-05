@@ -1,8 +1,9 @@
+using Memoria.Api.Configuration;
 using Memoria.Api.Http;
-using Memoria.Core.Contracts;
 using Memoria.Core.Redaction;
 using Memoria.Core.Sidecar;
 using Microsoft.AspNetCore.Http.Features;
+using Microsoft.Extensions.Options;
 
 namespace Memoria.Api.Ingest;
 
@@ -16,7 +17,10 @@ public sealed class IngestRefusedException(int status, string code, string messa
 	public int? RetryAfterSeconds { get; } = retryAfterSeconds;
 }
 
-/// <summary>What the audit log keeps about a write: counts and outcome, and never content, a source id, or a session id.</summary>
+/// <summary>
+/// What the audit log keeps about a write: counts, outcome, and which files, and never content, a source id, or a session id.
+/// A path is safe here: it is a digest for a document, and for a session it holds at most the id's first characters.
+/// </summary>
 public sealed record AuditIngest(
 	string Kind,
 	string Redaction,
@@ -25,43 +29,112 @@ public sealed record AuditIngest(
 	int Failed,
 	int Deleted,
 	int Redactions,
-	int Refusals);
+	int Refusals,
+	IReadOnlyList<string> Paths);
 
-/// <summary>Bounds how many transcripts are rendered at once, since each can hold about 100 MB. A caller past it is told to come back rather than queued.</summary>
-public sealed class IngestGate(int capacity)
+/// <summary>
+/// Bounds how many requests of one kind run at once, overall and per key, so one key's slow uploads leave room for everyone else's.
+/// A caller past either bound is told to come back rather than queued.
+/// </summary>
+public sealed class IngestGate(int capacity, int perKey, string busyMessage)
 {
 	private const int RetryAfterSeconds = 5;
 
-	private readonly SemaphoreSlim _slots = new(capacity, capacity);
+	private readonly Lock _lock = new();
+	private readonly Dictionary<string, int> _byKey = new(StringComparer.Ordinal);
+	private int _running;
 
-	public async Task<T> RunAsync<T>(Func<Task<T>> work)
+	public Slot Enter(string keyId)
 	{
-		if (!_slots.Wait(0))
+		lock (_lock)
 		{
-			throw new IngestRefusedException(StatusCodes.Status503ServiceUnavailable, "ingest_busy", "Too many transcripts are being processed. Try again shortly.", RetryAfterSeconds);
+			int mine = _byKey.GetValueOrDefault(keyId);
+			if (_running >= capacity || mine >= perKey)
+			{
+				throw new IngestRefusedException(StatusCodes.Status503ServiceUnavailable, "ingest_busy", busyMessage, RetryAfterSeconds);
+			}
+
+			_running++;
+			_byKey[keyId] = mine + 1;
+		}
+
+		return new Slot(this, keyId);
+	}
+
+	private void Leave(string keyId)
+	{
+		lock (_lock)
+		{
+			_running--;
+			int left = _byKey[keyId] - 1;
+			if (left == 0)
+			{
+				_byKey.Remove(keyId);
+			}
+			else
+			{
+				_byKey[keyId] = left;
+			}
+		}
+	}
+
+	public sealed class Slot(IngestGate gate, string keyId) : IDisposable
+	{
+		public void Dispose()
+		{
+			gate.Leave(keyId);
+		}
+	}
+}
+
+/// <summary>The gates ingest passes through. Reading a request and doing the expensive work have separate bounds, so a slow client never holds up the work.</summary>
+public sealed class IngestGates(IOptions<MemoriaOptions> options)
+{
+	private const int BusyRetrySeconds = 5;
+
+	private static readonly TimeSpan WorkWait = TimeSpan.FromSeconds(30);
+
+	private readonly SemaphoreSlim _work = new(options.Value.Ingest.MaxConcurrentRenders, options.Value.Ingest.MaxConcurrentRenders);
+
+	public IngestGate Sessions { get; } = new(
+		options.Value.Ingest.MaxConcurrentSessions,
+		options.Value.Ingest.MaxConcurrentSessionsPerKey,
+		"Too many transcripts are being processed. Try again shortly.");
+
+	public IngestGate Documents { get; } = new(
+		options.Value.Ingest.MaxConcurrentDocuments,
+		options.Value.Ingest.MaxConcurrentDocumentsPerKey,
+		"Too many documents are being processed. Try again shortly.");
+
+	/// <summary>Runs redaction and rendering, which is what takes the CPU and memory. Someone who already sent a whole body gets to wait a little rather than send it again.</summary>
+	public async Task<T> WorkAsync<T>(Func<T> work, CancellationToken cancellationToken)
+	{
+		if (!await _work.WaitAsync(WorkWait, cancellationToken))
+		{
+			throw new IngestRefusedException(StatusCodes.Status503ServiceUnavailable, "ingest_busy", "The server is busy redacting. Try again shortly.", BusyRetrySeconds);
 		}
 
 		try
 		{
-			return await work();
+			return work();
 		}
 		finally
 		{
-			_slots.Release();
+			_work.Release();
 		}
 	}
 }
 
 internal static class IngestRules
 {
-	/// <summary>How far ahead of the clock a version may be. A date far in the future would make a document unchangeable, and undeletable by a later retry.</summary>
-	public static readonly TimeSpan MaxFutureSkew = TimeSpan.FromDays(1);
+	/// <summary>How far ahead of the clock a version may be. A version in the future blocks every honest update until that time, so this allows for clock skew and no more.</summary>
+	public static readonly TimeSpan MaxFutureSkew = TimeSpan.FromHours(1);
 
 	public const int MaxIdentityChars = 1024;
 
 	public const int RefusalsReturned = 200;
 
-	public const int BusyRetrySeconds = 5;
+	public const int MaxAuditPaths = 64;
 
 	/// <summary>Scope comes first, so a caller learns nothing about a collection or document they may not write to.</summary>
 	public static void RequireCollection(ICallerScope scope, string collection)
@@ -74,20 +147,38 @@ internal static class IngestRules
 
 	public static void RequireClaim(IngestClaim claim)
 	{
-		if (claim.Outcome == IngestClaimOutcome.Stale)
+		IngestRefusedException? refusal = claim.Outcome switch
 		{
-			throw new IngestRefusedException(StatusCodes.Status409Conflict, "stale_version", "A newer version is already stored, or this was deleted after this version. Nothing was changed.");
-		}
-
-		if (claim.Outcome == IngestClaimOutcome.Busy)
+			IngestClaimOutcome.Stale => new IngestRefusedException(StatusCodes.Status409Conflict, "stale_version", "A newer version is already stored, or this was deleted after this version. Nothing was changed."),
+			IngestClaimOutcome.Busy => new IngestRefusedException(StatusCodes.Status409Conflict, "ingest_in_progress", "Another upload of this is running. Nothing was changed.", claim.RetryAfterSeconds),
+			IngestClaimOutcome.PathConflict or IngestClaimOutcome.StemClash => new IngestRefusedException(StatusCodes.Status409Conflict, "path_owned", "A file this would write belongs to another document or session. Nothing was changed."),
+			IngestClaimOutcome.Shrunk => new IngestRefusedException(StatusCodes.Status409Conflict, "session_shrank", "This upload has fewer messages than the one stored, so it may be a cut copy. Nothing was changed. Send allowShrink=true if the session really did shrink."),
+			_ => null,
+		};
+		if (refusal is not null)
 		{
-			throw new IngestRefusedException(StatusCodes.Status409Conflict, "ingest_in_progress", "Another upload of this is running. Nothing was changed.", BusyRetrySeconds);
+			throw refusal;
 		}
 	}
 
 	public static IngestRefusedException TooLarge(string detail)
 	{
 		return new IngestRefusedException(StatusCodes.Status413PayloadTooLarge, "document_too_large", detail);
+	}
+
+	/// <summary>Stops reading a body at a deadline, so a client sending a byte at a time cannot hold a slot for days.</summary>
+	public static async Task<T> WithinDeadlineAsync<T>(TimeSpan deadline, Func<CancellationToken, Task<T>> read, CancellationToken cancellationToken)
+	{
+		using CancellationTokenSource timer = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+		timer.CancelAfter(deadline);
+		try
+		{
+			return await read(timer.Token);
+		}
+		catch (OperationCanceledException) when (timer.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+		{
+			throw new IngestRefusedException(StatusCodes.Status408RequestTimeout, "upload_too_slow", "The request body did not arrive in time. Nothing was changed.");
+		}
 	}
 }
 
@@ -99,6 +190,7 @@ public static class RequestBody
 	/// </summary>
 	public static BoundedReadStream Open(HttpContext context, long limit)
 	{
+		ArgumentNullException.ThrowIfNull(context);
 		if (context.Request.ContentLength > limit)
 		{
 			throw TooLarge(limit);
@@ -114,6 +206,7 @@ public static class RequestBody
 	/// </summary>
 	public static void AllowUpTo(HttpContext context, long limit)
 	{
+		ArgumentNullException.ThrowIfNull(context);
 		if (context.Features.Get<IHttpMaxRequestBodySizeFeature>() is { IsReadOnly: false } feature)
 		{
 			feature.MaxRequestBodySize = limit;
@@ -143,6 +236,11 @@ public static partial class IngestHosting
 		{
 			LogRedactionSettingIgnored(logger, collection);
 		}
+
+		foreach (string collection in policy.AmbiguousSettings)
+		{
+			LogRedactionSettingAmbiguous(logger, collection);
+		}
 	}
 
 	[LoggerMessage(EventId = 3300, Level = LogLevel.Warning, Message = "REDACTION IS OFF for collection {Collection} (Memoria:Ingest:Collections:{Collection}:Redaction = Disabled). Text ingested into it is stored as it came, credentials included, and search results from it can reach cloud models.")]
@@ -151,12 +249,16 @@ public static partial class IngestHosting
 	[LoggerMessage(EventId = 3301, Level = LogLevel.Warning, Message = "Memoria:Ingest:Collections:{Collection}:Redaction is not exactly Disabled, so collection {Collection} stays redacted. Remove the setting if that is what you meant.")]
 	private static partial void LogRedactionSettingIgnored(ILogger logger, string collection);
 
+	[LoggerMessage(EventId = 3302, Level = LogLevel.Warning, Message = "Memoria:Ingest:Collections names {Collection} in more than one spelling of its case across configuration sources. Configuration keys ignore case, so which spelling a setting landed on is an accident. Every spelling stays redacted until only one remains.")]
+	private static partial void LogRedactionSettingAmbiguous(ILogger logger, string collection);
+
 	public static IServiceCollection AddMemoriaIngest(this IServiceCollection services)
 	{
 		services.AddSingleton<IIngestLedger, SqliteIngestLedger>();
-		services.AddSingleton(provider => new IngestGate(provider.GetRequiredService<Microsoft.Extensions.Options.IOptions<Configuration.MemoriaOptions>>().Value.Ingest.MaxConcurrentSessions));
+		services.AddSingleton<IngestGates>();
 		services.AddSingleton<IRedactor, Redactor>();
 		services.AddSingleton<IngestRedactionPolicy>();
+		services.AddSingleton<CollectionReindexer>();
 		services.AddScoped<DocumentIngestor>();
 		services.AddScoped<SessionIngestor>();
 		return services;

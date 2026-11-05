@@ -22,6 +22,7 @@ internal sealed class FakeCorpus
 		sidecar.On("DELETE", "/documents", Delete);
 		sidecar.On("POST", "/reindex", (_, _) => FakeSidecar.Json(HttpStatusCode.Accepted, $$"""{"job":{{Job()}}}"""));
 		sidecar.On("POST", "/docs:multiGet", List);
+		sidecar.OnPrefix("GET", "/docs/", Head);
 	}
 
 	/// <summary>Collection-relative path to stored content.</summary>
@@ -82,10 +83,32 @@ internal sealed class FakeCorpus
 			return scripted;
 		}
 
-		IEnumerable<string> docs = Files.Keys.Select(static path => $$"""
-			{"docid":"d","file":{{JsonSerializer.Serialize("c/" + path)}},"collection":"c","path":{{JsonSerializer.Serialize(path)}},"title":"t","context":null,"modifiedAt":"2026-01-01T00:00:00.000Z","bodyLength":0,"body":null,"metadata":null}
+		// As the real route does: a document over maxBytes is listed under skipped, even when no body was asked for.
+		using JsonDocument parsed = JsonDocument.Parse(body!);
+		string collection = parsed.RootElement.GetProperty("collections")[0].GetString()!;
+		int maxBytes = parsed.RootElement.TryGetProperty("maxBytes", out JsonElement max) ? max.GetInt32() : 65536;
+		ILookup<bool, KeyValuePair<string, string>> byFit = Files.ToLookup(file => Encoding.UTF8.GetByteCount(file.Value) <= maxBytes);
+		IEnumerable<string> docs = byFit[true].Select(file => $$"""
+			{"docid":{{JsonSerializer.Serialize(file.Key)}},"file":{{JsonSerializer.Serialize(collection + "/" + file.Key)}},"collection":{{JsonSerializer.Serialize(collection)}},"path":{{JsonSerializer.Serialize(file.Key)}},"title":"t","context":null,"modifiedAt":"2026-01-01T00:00:00.000Z","bodyLength":0,"body":null,"metadata":null}
 			""");
-		return FakeSidecar.Json(HttpStatusCode.OK, $$"""{"docs":[{{string.Join(',', docs)}}],"skipped":[],"errors":[]}""");
+		IEnumerable<string> skipped = byFit[false].Select(file => $$"""{"file":{{JsonSerializer.Serialize(collection + "/" + file.Key)}},"reason":"too large"}""");
+		return FakeSidecar.Json(HttpStatusCode.OK, $$"""{"docs":[{{string.Join(',', docs)}}],"skipped":[{{string.Join(',', skipped)}}],"errors":[]}""");
+	}
+
+	private HttpResponseMessage Head(HttpRequestMessage request, string? body)
+	{
+		Calls.Enqueue("head");
+		string reference = Uri.UnescapeDataString(request.RequestUri!.AbsolutePath["/docs/".Length..]);
+		string path = reference[(reference.IndexOf('/', StringComparison.Ordinal) + 1)..];
+		if (!Files.TryGetValue(path, out string? content))
+		{
+			return FakeSidecar.Json(HttpStatusCode.NotFound, """{"error":"not_found","message":"gone"}""");
+		}
+
+		string head = string.Join('\n', content.Split('\n').Take(64));
+		return FakeSidecar.Json(HttpStatusCode.OK, $$"""
+			{"docid":"d","file":"c/p","collection":"c","path":"p","title":"t","context":null,"modifiedAt":"2026-01-01T00:00:00.000Z","bodyLength":0,"body":{{JsonSerializer.Serialize(head)}},"metadata":null}
+			""");
 	}
 
 	private string Job()
@@ -132,29 +155,37 @@ internal static class IngestKit
 		string collection = "c",
 		string format = "claude",
 		string sessionId = "11111111-2222-3333-4444-555555555555",
-		DateTimeOffset? updated = null)
+		DateTimeOffset? updated = null,
+		bool allowShrink = false,
+		string? projectDirectory = null)
 	{
-		string query = $"/v1/ingest/session?collection={Uri.EscapeDataString(collection)}&format={format}&sessionId={Uri.EscapeDataString(sessionId)}&updated={Uri.EscapeDataString((updated ?? Stamp).ToString("O"))}";
+		string query = $"/v1/ingest/session?collection={Uri.EscapeDataString(collection)}&format={format}&sessionId={Uri.EscapeDataString(sessionId)}&updated={Uri.EscapeDataString((updated ?? Stamp).ToString("O"))}{(allowShrink ? "&allowShrink=true" : "")}{(projectDirectory is null ? "" : "&projectDirectory=" + Uri.EscapeDataString(projectDirectory))}";
 		return client.PostAsync(query, new StringContent(jsonl, Encoding.UTF8, "application/x-ndjson"));
 	}
 
 	/// <summary>One Claude Code line. Text this long fills a part by itself, so <paramref name="messages"/> gives as many parts.</summary>
-	public static string Transcript(int messages, char fill = 'w')
+	public static string Transcript(int messages, char fill = 'w', string day = "2026-01-15")
 	{
 		StringBuilder lines = new();
 		string text = string.Join(' ', Enumerable.Repeat(new string(fill, 60), 1200));
 		for (int i = 0; i < messages; i++)
 		{
-			lines.Append(ClaudeLine(i % 2 == 0 ? "user" : "assistant", text, i));
+			lines.Append(ClaudeLine(i % 2 == 0 ? "user" : "assistant", text, i, day));
 		}
 
 		return lines.ToString();
 	}
 
-	public static string ClaudeLine(string role, string text, int minute = 0)
+	public static string ClaudeLine(string role, string text, int minute = 0, string day = "2026-01-15", string cwd = "/srv/demo")
 	{
 		string message = JsonSerializer.Serialize(new { role, content = text });
-		return $$"""{"type":"{{role}}","timestamp":"2026-01-15T10:{{minute % 60:D2}}:00.000Z","cwd":"/srv/demo","message":{{message}}}""" + "\n";
+		return $$"""{"type":"{{role}}","timestamp":"{{day}}T10:{{minute % 60:D2}}:00.000Z","cwd":"{{cwd}}","message":{{message}}}""" + "\n";
+	}
+
+	/// <summary>A part as an earlier exporter wrote it: frontmatter naming its session, and no ledger entry.</summary>
+	public static string ExporterPart(string sessionId, int bytes = 100)
+	{
+		return $"---\nsession_id: \"{sessionId}\"\nproject: \"demo\"\n---\n\n## User\n\n" + new string('w', bytes) + "\n";
 	}
 
 	public static async Task<JsonElement> ReadAsync(HttpResponseMessage response)

@@ -45,7 +45,7 @@ public sealed record DocumentEnvelope(
 	{
 		RequireIdentity();
 		string source = Source.Trim();
-		string digest = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes($"{source}\0{SourceId.Trim()}")))[..DigestChars];
+		string digest = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes($"{source.Length}:{source}{SourceId.Trim()}")))[..DigestChars];
 		string label = Redactor.Shared.RedactFragment(source).Text == source ? PathLabel(source) : "";
 		return label.Length == 0 ? $"doc-{digest}.md" : $"{label}-{digest}.md";
 	}

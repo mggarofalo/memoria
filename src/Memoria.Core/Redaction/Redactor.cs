@@ -62,6 +62,20 @@ public sealed class Redactor : IRedactor
 		return failure is RedactionFailure.DidNotConverge or RedactionFailure.ScanBudgetExhausted;
 	}
 
+	/// <summary>True when redaction would change a value. A value it cannot finish counts, as nothing vouches for it. For deciding whether caller text may go in a log, a table or a file name.</summary>
+	public static bool HoldsCredential(string value)
+	{
+		ArgumentNullException.ThrowIfNull(value);
+		try
+		{
+			return Shared.RedactFragment(value).Text != value;
+		}
+		catch (RedactionException)
+		{
+			return true;
+		}
+	}
+
 	/// <summary>The name of every built-in rule, for dashboards and audit logs.</summary>
 	public static IReadOnlyList<string> RuleNames { get; } = [.. RedactionRules.All.Select(static r => r.Name)];
 

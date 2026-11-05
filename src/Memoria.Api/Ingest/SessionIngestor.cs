@@ -12,18 +12,21 @@ using Microsoft.Extensions.Options;
 namespace Memoria.Api.Ingest;
 
 /// <summary>What a caller says about a raw transcript.</summary>
-public sealed record SessionIngestInput(string Collection, SessionFormat Format, string SessionId, DateTimeOffset Updated, string? ProjectDirectory);
+public sealed record SessionIngestInput(string Collection, SessionFormat Format, string SessionId, DateTimeOffset Updated, string? ProjectDirectory, bool AllowShrink = false);
 
 /// <summary>
-/// Renders a raw transcript and stores its parts. Parts are separate files, so an upload can stop halfway. Three
-/// things keep that honest. The ledger holds <c>partial</c> until the end, so a half-written session never reads as
-/// finished. Part paths are deterministic, so sending the same upload again overwrites and finishes it. And superseded
-/// parts go last, only after everything else arrived, so a failed upload never loses text the old parts still held.
+/// Renders a raw transcript and stores its parts. Parts are separate files, so an upload can stop halfway. What keeps that honest:
+/// the ledger holds <c>partial</c> until the end, and an upload that lost content, or had none, is never called complete. Part paths are
+/// deterministic, so sending the same upload again overwrites and finishes it. Fewer messages than last time is refused unless the caller says it is
+/// intended, as a cut copy looks just like that. Superseded parts go last, only after everything else arrived, and only when
+/// the ledger or their own frontmatter says they are this session's: a file name is not enough, as another session can share its start.
 /// </summary>
 public sealed class SessionIngestor(
 	IMemoriaQmdClient sidecar,
 	IIngestLedger ledger,
 	IngestRedactionPolicy redaction,
+	IngestGates gates,
+	CollectionReindexer reindexer,
 	ICallerScope scope,
 	IRequestAudit audit,
 	IOptions<MemoriaOptions> options,
@@ -35,36 +38,52 @@ public sealed class SessionIngestor(
 		IngestRules.RequireCollection(scope, input.Collection);
 		audit.SetResult([input.Collection], 0);
 
+		RedactedSession session = await RenderAsync(input, payload, cancellationToken);
+		if (session.NamesAnotherSession)
+		{
+			throw new IngestRefusedException(StatusCodes.Status400BadRequest, "session_id_mismatch", "The transcript's session_meta names a different session from sessionId. Nothing was changed.");
+		}
+
+		if (session.Documents.Count == 0)
+		{
+			return Report(input, session, [], SupersededRun.None, null, IngestStateName.Partial);
+		}
+
+		string identity = IngestIdentity.For("session", input.Collection, session.PathIdentity);
+		FamilyListing family = await ListFamilyAsync(input.Collection, session, identity, cancellationToken);
+		session = family.HasForeignFiles ? session.WithDistinctPaths() : session;
+		(session, IngestClaim claim) = await ClaimAsync(input, session, identity, cancellationToken);
+
+		return await WriteAsync(input, session, identity, claim, family, cancellationToken);
+	}
+
+	public async Task<SessionIngestStatus> StatusAsync(SessionIngestInput input, CancellationToken cancellationToken)
+	{
+		ArgumentNullException.ThrowIfNull(input);
+		IngestRules.RequireCollection(scope, input.Collection);
+		IReadOnlyList<IngestRecord> records = await ledger.FindByLookupAsync(LookupOf(input), cancellationToken);
+		DateTimeOffset now = timeProvider.GetUtcNow();
+		return new SessionIngestStatus(
+			input.Collection,
+			input.SessionId,
+			WorstState(records.Select(record => ledger.EffectiveState(record, now))),
+			records.Count == 0 ? null : records.Max(static record => record.Version),
+			[.. records.SelectMany(static record => record.Paths)]);
+	}
+
+	/// <summary>Reading can be slow and only takes this request's slot. Rendering takes the CPU and memory, so it has its own bound and starts only once the body is in.</summary>
+	private async Task<RedactedSession> RenderAsync(SessionIngestInput input, Stream payload, CancellationToken cancellationToken)
+	{
 		SessionSource source = new(input.Format, input.SessionId) { ProjectDirectory = input.ProjectDirectory };
 		SessionRenderOptions renderOptions = RenderOptions(options.Value.Ingest.MaxDocumentBytes);
 		RedactionDisabledCollection? disabled = redaction.For(input.Collection);
-		RedactedSession session = disabled is null
-			? await SessionRenderer.RenderAsync(payload, source, renderOptions, cancellationToken)
-			: await SessionRenderer.RenderWithoutRedactionForDisabledCollectionAsync(payload, source, disabled, renderOptions, cancellationToken);
-
-		string identity = IdentityOf(input);
-		IngestClaim claim = await ledger.ClaimAsync(identity, input.Updated, timeProvider.GetUtcNow(), cancellationToken);
-		IngestRules.RequireClaim(claim);
-
-		List<SessionPartResult> parts = [];
-		SupersededRun superseded = SupersededRun.None;
-		string? jobId = null;
-		string state = IngestStateName.Partial;
-		try
-		{
-			jobId = await WritePartsAsync(input.Collection, identity, session, parts, cancellationToken);
-			if (AllWritten(parts))
-			{
-				superseded = await RemoveSupersededAsync(input.Collection, session, claim.PreviousPaths, cancellationToken);
-				state = superseded.Finished && !LostMessages(session.Report) ? IngestStateName.Complete : IngestStateName.Partial;
-			}
-		}
-		finally
-		{
-			await ledger.FinishAsync(identity, state, KnownPaths(session, claim, parts, superseded, state));
-		}
-
-		return Report(input, session, parts, superseded, jobId, state);
+		ReadSessionTranscript read = await IngestRules.WithinDeadlineAsync(
+			options.Value.Ingest.SessionUploadDeadline,
+			token => disabled is null
+				? SessionRenderer.ReadAsync(payload, source, renderOptions, token)
+				: SessionRenderer.ReadWithoutRedactionForDisabledCollectionAsync(payload, source, disabled, renderOptions, token),
+			cancellationToken);
+		return await gates.WorkAsync(read.Render, cancellationToken);
 	}
 
 	/// <summary>A part of many messages is measured in characters, of up to four bytes each, so a low document limit has to bring it down too.</summary>
@@ -78,33 +97,89 @@ public sealed class SessionIngestor(
 		};
 	}
 
-	public async Task<SessionIngestStatus> StatusAsync(SessionIngestInput input, CancellationToken cancellationToken)
+	private async Task<(RedactedSession Session, IngestClaim Claim)> ClaimAsync(SessionIngestInput input, RedactedSession session, string identity, CancellationToken cancellationToken)
 	{
-		ArgumentNullException.ThrowIfNull(input);
-		IngestRules.RequireCollection(scope, input.Collection);
-		IngestRecord? record = await ledger.FindAsync(IdentityOf(input), cancellationToken);
-		return new SessionIngestStatus(input.Collection, input.SessionId, record?.State ?? IngestStateName.None, record?.Version, record?.Paths ?? []);
+		IngestClaim claim = await ledger.ClaimAsync(ClaimRequest(input, session, identity), cancellationToken);
+		if (claim.Outcome == IngestClaimOutcome.StemClash)
+		{
+			session = session.WithDistinctPaths();
+			claim = await ledger.ClaimAsync(ClaimRequest(input, session, identity), cancellationToken);
+		}
+
+		IngestRules.RequireClaim(claim);
+		return (session, claim);
 	}
 
-	internal static string IdentityOf(SessionIngestInput input)
+	private IngestClaimRequest ClaimRequest(SessionIngestInput input, RedactedSession session, string identity)
 	{
-		return IngestIdentity.For("session", input.Collection, input.Format.ToString(), input.SessionId, input.ProjectDirectory);
+		return new IngestClaimRequest(
+			identity,
+			input.Collection,
+			input.Updated,
+			timeProvider.GetUtcNow(),
+			[.. session.Documents.Select(static document => document.Path)],
+			LookupOf(input),
+			session.PathStem,
+			session.Report.Messages,
+			input.AllowShrink);
 	}
 
-	/// <summary>Returns the last job id. A part the backend stopped answering for ends the upload here, while a part refused on its own merits does not stop the rest.</summary>
-	private async Task<string?> WritePartsAsync(string collection, string identity, RedactedSession session, List<SessionPartResult> parts, CancellationToken cancellationToken)
+	private async Task<SessionIngestResult> WriteAsync(SessionIngestInput input, RedactedSession session, string identity, IngestClaim claim, FamilyListing family, CancellationToken cancellationToken)
+	{
+		List<SessionPartResult> parts = [];
+		SupersededRun superseded = SupersededRun.None;
+		string? jobId = null;
+		string state = IngestStateName.Partial;
+		try
+		{
+			jobId = await WritePartsAsync(input.Collection, identity, claim.LeaseToken!, session, parts, cancellationToken);
+			if (AllWritten(parts))
+			{
+				superseded = await RemoveSupersededAsync(input.Collection, session, claim.PreviousPaths, family, cancellationToken);
+				state = superseded.Finished ? IngestStateName.Complete : IngestStateName.Partial;
+			}
+		}
+		finally
+		{
+			await ledger.FinishAsync(identity, claim.LeaseToken!, input.Collection, state, KnownPaths(session, claim, parts, superseded, state));
+		}
+
+		return Report(input, session, parts, superseded, jobId, state);
+	}
+
+	private static string LookupOf(SessionIngestInput input)
+	{
+		return IngestIdentity.For("session-name", input.Collection, input.Format.ToString(), input.SessionId);
+	}
+
+	private static string WorstState(IEnumerable<string> states)
+	{
+		string[] all = [.. states];
+		foreach (string state in new[] { IngestStateName.Writing, IngestStateName.Partial, IngestStateName.Deleted, IngestStateName.Complete })
+		{
+			if (all.Contains(state))
+			{
+				return state;
+			}
+		}
+
+		return IngestStateName.None;
+	}
+
+	/// <summary>Returns the last job id. A part the backend stopped answering for ends the upload here, while a part refused on its own merits does not stop the rest. Losing the lease stops it too, as someone else now holds these files.</summary>
+	private async Task<string?> WritePartsAsync(string collection, string identity, string leaseToken, RedactedSession session, List<SessionPartResult> parts, CancellationToken cancellationToken)
 	{
 		string? jobId = null;
 		bool stopped = false;
 		foreach (RedactedSessionDocument document in session.Documents)
 		{
+			stopped = stopped || !await ledger.RenewAsync(identity, leaseToken, timeProvider.GetUtcNow(), cancellationToken);
 			if (stopped)
 			{
 				parts.Add(new SessionPartResult(document.Part, document.Path, SessionPartState.NotAttempted, Retryable: true));
 				continue;
 			}
 
-			await ledger.RenewAsync(identity, timeProvider.GetUtcNow(), cancellationToken);
 			(SessionPartResult result, string? job) = await WritePartAsync(collection, document, cancellationToken);
 			parts.Add(result);
 			jobId = job ?? jobId;
@@ -142,19 +217,8 @@ public sealed class SessionIngestor(
 	private SessionPartResult FailedPart(RedactedSessionDocument document, SidecarException exception)
 	{
 		SidecarFailureView view = SidecarDisclosure.For(exception, scope);
-		int? retryAfter = exception.IsTransient ? RetryAfterOf(exception) : null;
+		int? retryAfter = exception.IsTransient ? MemoriaExceptionHandler.RetryAfterSeconds(exception) ?? DefaultRetryAfterSeconds : null;
 		return new SessionPartResult(document.Part, document.Path, SessionPartState.Failed, view.Code, view.Message, exception.IsTransient, retryAfter);
-	}
-
-	private static int RetryAfterOf(SidecarException exception)
-	{
-		return exception.RetryAfter is { } after ? Math.Max(1, (int)Math.Ceiling(after.TotalSeconds)) : IngestRules.BusyRetrySeconds;
-	}
-
-	/// <summary>Whole messages or lines were left out for size. What is stored is a true prefix, but it is not the session, and sending it again changes nothing. A malformed line is different: live transcripts end in one.</summary>
-	private static bool LostMessages(SessionReadReport report)
-	{
-		return report.MessagesOverLimit > 0 || report.OversizedLines > 0;
 	}
 
 	private static bool AllWritten(List<SessionPartResult> parts)
@@ -163,20 +227,66 @@ public sealed class SessionIngestor(
 	}
 
 	/// <summary>
-	/// A session that shrank leaves old parts behind, which only a delete removes. An upload that lost content or is empty may
-	/// be a truncated copy rather than a smaller session, so its old parts stay, and the session is not called complete. Candidates come from the ledger, which knows files
-	/// the index has not seen yet, and from the index, which knows files from before there was a ledger.
+	/// What is on disk with this session's shape, sorted by whose it really is. A file the ledger assigns elsewhere is someone else's.
+	/// A file nobody has claimed, from before there was a ledger, is judged by the full id in its frontmatter, as it was written by the same
+	/// renderer. When a file cannot be judged, the listing is incomplete and the session is not called complete.
 	/// </summary>
-	private async Task<SupersededRun> RemoveSupersededAsync(string collection, RedactedSession session, IReadOnlyList<string> previous, CancellationToken cancellationToken)
+	private async Task<FamilyListing> ListFamilyAsync(string collection, RedactedSession session, string identity, CancellationToken cancellationToken)
 	{
-		IReadOnlyList<string>? indexed = await ListIndexedAsync(collection, session, cancellationToken);
-		string[] candidates = previous.Concat(indexed ?? []).Distinct(StringComparer.Ordinal).Where(session.IsSupersededPath).ToArray();
-		if (session.Documents.Count == 0 || session.Report.HasSkippedContent)
+		IReadOnlyList<ListedFile>? listed = await ListIndexedAsync(collection, session, cancellationToken);
+		if (listed is null)
 		{
-			return new SupersededRun([], [], candidates, null, indexed is not null && candidates.Length == 0);
+			return FamilyListing.Unknown;
 		}
 
-		return await DeleteSupersededAsync(collection, candidates, indexed is not null, cancellationToken);
+		IReadOnlyDictionary<string, string> owners = await ledger.OwnersAsync(collection, [.. listed.Select(static file => file.Path)], cancellationToken);
+		List<string> mine = [];
+		bool foreign = false;
+		bool complete = true;
+		foreach (ListedFile file in listed)
+		{
+			bool? isMine = owners.TryGetValue(file.Path, out string? owner)
+				? owner == identity
+				: await HeadSaysMineAsync(collection, session, file, cancellationToken);
+			complete &= isMine is not null;
+			foreign |= isMine == false && !owners.ContainsKey(file.Path);
+			if (isMine == true)
+			{
+				mine.Add(file.Path);
+			}
+		}
+
+		return new FamilyListing(mine, foreign, complete);
+	}
+
+	/// <summary>Null when the sidecar could not say.</summary>
+	private async Task<bool?> HeadSaysMineAsync(string collection, RedactedSession session, ListedFile file, CancellationToken cancellationToken)
+	{
+		try
+		{
+			SidecarDocument document = await sidecar.GetDocumentAsync(file.Reference, new SidecarDocumentQuery(FromLine: 1, MaxLines: HeadLines, Collections: [collection], SimilarFiles: false), cancellationToken);
+			return session.HeadNamesThisSession(document.Body ?? "");
+		}
+		catch (SidecarException)
+		{
+			return null;
+		}
+	}
+
+	/// <summary>
+	/// A session that shrank leaves old parts behind, which only a delete removes. An upload that lost content may be a cut copy
+	/// rather than a smaller session, so its old parts stay and the session is not called complete.
+	/// </summary>
+	private async Task<SupersededRun> RemoveSupersededAsync(string collection, RedactedSession session, IReadOnlyList<string> previous, FamilyListing family, CancellationToken cancellationToken)
+	{
+		HashSet<string> current = [.. session.Documents.Select(static document => document.Path)];
+		string[] candidates = [.. previous.Concat(family.Mine).Distinct(StringComparer.Ordinal).Where(path => !current.Contains(path))];
+		if (session.Report.HasLostContent)
+		{
+			return new SupersededRun([], [], candidates, null, ReindexState.NotNeeded, false);
+		}
+
+		return await DeleteSupersededAsync(collection, candidates, family.Complete, cancellationToken);
 	}
 
 	private async Task<SupersededRun> DeleteSupersededAsync(string collection, string[] candidates, bool listed, CancellationToken cancellationToken)
@@ -188,13 +298,16 @@ public sealed class SessionIngestor(
 			(await DeletedAsync(collection, path, cancellationToken) ? deleted : failed).Add(path);
 		}
 
-		string? reindex = deleted.Count > 0 ? await ReindexNowAsync(collection, cancellationToken) : null;
-		bool finished = listed && failed.Count == 0 && (deleted.Count == 0 || reindex is not null);
-		return new SupersededRun(deleted, failed, [], reindex, finished);
+		ReindexOutcome reindex = await reindexer.RequestAsync(collection, deleted.Count > 0, cancellationToken);
+		bool finished = listed && failed.Count == 0 && reindex.State != ReindexState.Failed;
+		return new SupersededRun(deleted, failed, [], reindex.JobId, reindex.State, finished);
 	}
 
-	/// <summary>Null when the sidecar could not say. Then superseded parts may remain, so the session cannot be called complete.</summary>
-	private async Task<IReadOnlyList<string>?> ListIndexedAsync(string collection, RedactedSession session, CancellationToken cancellationToken)
+	/// <summary>
+	/// Null when the sidecar could not say. Then superseded parts may remain, so the session cannot be called complete. A document over the
+	/// size limit is listed under skipped even though no body was asked for, and it counts as much as any other.
+	/// </summary>
+	private async Task<IReadOnlyList<ListedFile>?> ListIndexedAsync(string collection, RedactedSession session, CancellationToken cancellationToken)
 	{
 		try
 		{
@@ -205,7 +318,12 @@ public sealed class SessionIngestor(
 				IncludeBody = false,
 				SimilarFiles = false,
 			}, cancellationToken);
-			return listing.Truncated ? null : [.. listing.Docs.Select(static doc => doc.Path)];
+			string prefix = collection + "/";
+			IEnumerable<ListedFile> docs = listing.Docs.Select(static doc => new ListedFile(doc.Path, doc.Docid));
+			IEnumerable<ListedFile> skipped = listing.Skipped
+				.Where(file => file.File.StartsWith(prefix, StringComparison.Ordinal))
+				.Select(file => new ListedFile(file.File[prefix.Length..], file.File));
+			return listing.Truncated ? null : [.. docs.Concat(skipped).Where(file => session.IsInPathFamily(file.Path))];
 		}
 		catch (SidecarException)
 		{
@@ -226,25 +344,12 @@ public sealed class SessionIngestor(
 		}
 	}
 
-	private async Task<string?> ReindexNowAsync(string collection, CancellationToken cancellationToken)
-	{
-		try
-		{
-			return (await sidecar.ReindexAsync(new SidecarReindexRequest([collection], Embed: false), cancellationToken)).Id;
-		}
-		catch (SidecarException)
-		{
-			return null;
-		}
-	}
-
 	/// <summary>A finished upload knows exactly its own parts. An unfinished one keeps every path it may have left on disk, so the retry can still find them.</summary>
 	private static string[] KnownPaths(RedactedSession session, IngestClaim claim, List<SessionPartResult> parts, SupersededRun superseded, string state)
 	{
-		IEnumerable<string> current = session.Documents.Select(static document => document.Path);
 		if (state == IngestStateName.Complete)
 		{
-			return [.. current];
+			return [.. session.Documents.Select(static document => document.Path)];
 		}
 
 		IEnumerable<string> written = parts.Where(static part => part.State == SessionPartState.Written).Select(static part => part.Path);
@@ -256,15 +361,16 @@ public sealed class SessionIngestor(
 		bool complete = state == IngestStateName.Complete;
 		int written = parts.Count(static part => part.State == SessionPartState.Written);
 		IngestRefusal[] refusals = [.. session.Refusals.Take(IngestRules.RefusalsReturned).Select(static refusal => new IngestRefusal(refusal.Part, refusal.Field, refusal.Rule))];
-		audit.SetResult([input.Collection], written);
 		string redactionName = IngestRedactionPolicy.NameOf(redaction.For(input.Collection));
-		audit.SetTarget(new AuditIngest("session", redactionName, complete, written, parts.Count - written, superseded.Deleted.Count, session.CountsByRule.Values.Sum(), session.Refusals.Count));
+		string[] paths = [.. parts.Select(static part => part.Path).Concat(superseded.Deleted).Take(IngestRules.MaxAuditPaths)];
+		audit.SetResult([input.Collection], written);
+		audit.SetTarget(new AuditIngest("session", redactionName, complete, written, parts.Count - written, superseded.Deleted.Count, session.CountsByRule.Values.Sum(), session.Refusals.Count, paths));
 		return new SessionIngestResult(
 			input.Collection,
 			input.SessionId,
 			input.Format == SessionFormat.Codex ? IngestEndpointNames.Codex : IngestEndpointNames.Claude,
 			complete,
-			!complete && IsRetryable(parts) && superseded.Kept.Count == 0 && !LostMessages(session.Report),
+			!complete && IsRetryable(session, parts, superseded),
 			parts,
 			new SessionSupersededResult(superseded.Deleted, superseded.Failed, superseded.Kept),
 			redactionName,
@@ -273,18 +379,22 @@ public sealed class SessionIngestor(
 			session.Refusals.Count,
 			Summarize(session.Report),
 			jobId,
-			superseded.ReindexJobId);
+			superseded.ReindexJobId,
+			superseded.ReindexState);
 	}
 
-	/// <summary>A part refused for good, such as one too large, stays refused however many times the upload is sent.</summary>
-	private static bool IsRetryable(List<SessionPartResult> parts)
+	/// <summary>Sending it again helps only when what stopped it was the backend. A part refused for good, content the copy does not have, or a session with no messages stays that way.</summary>
+	private static bool IsRetryable(RedactedSession session, List<SessionPartResult> parts, SupersededRun superseded)
 	{
-		return !parts.Exists(static part => part is { State: SessionPartState.Failed, Retryable: false });
+		return parts.Count > 0
+			&& !session.Report.HasLostContent
+			&& superseded.Kept.Count == 0
+			&& !parts.Exists(static part => part is { State: SessionPartState.Failed, Retryable: false });
 	}
 
 	private static SessionReadSummary Summarize(SessionReadReport report)
 	{
-		return new SessionReadSummary(report.BytesRead, report.Lines, report.Messages, report.MalformedLines, report.OversizedLines, report.UnterminatedLines, report.MessagesOverLimit, report.HasSkippedContent);
+		return new SessionReadSummary(report.BytesRead, report.Lines, report.Messages, report.MalformedLines, report.OversizedLines, report.UnterminatedLines, report.MessagesOverLimit, report.HasLostContent);
 	}
 
 	private const string UnknownCollection = "unknown_collection";
@@ -292,9 +402,21 @@ public sealed class SessionIngestor(
 	/// <summary>Room in a document for the frontmatter, title and headings around the longest message.</summary>
 	private const int MessageHeadroomBytes = 16 * 1024;
 
-	private sealed record SupersededRun(IReadOnlyList<string> Deleted, IReadOnlyList<string> Failed, IReadOnlyList<string> Kept, string? ReindexJobId, bool Finished)
+	private const int DefaultRetryAfterSeconds = 5;
+
+	/// <summary>Frontmatter is at most 8 KiB, and the id comes first, so this always reaches it.</summary>
+	private const int HeadLines = 64;
+
+	private sealed record ListedFile(string Path, string Reference);
+
+	private sealed record FamilyListing(IReadOnlyList<string> Mine, bool HasForeignFiles, bool Complete)
 	{
-		public static readonly SupersededRun None = new([], [], [], null, false);
+		public static readonly FamilyListing Unknown = new([], false, false);
+	}
+
+	private sealed record SupersededRun(IReadOnlyList<string> Deleted, IReadOnlyList<string> Failed, IReadOnlyList<string> Kept, string? ReindexJobId, string ReindexState, bool Finished)
+	{
+		public static readonly SupersededRun None = new([], [], [], null, Memoria.Core.Contracts.ReindexState.NotNeeded, false);
 	}
 }
 

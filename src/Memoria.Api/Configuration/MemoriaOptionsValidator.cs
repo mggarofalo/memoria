@@ -58,6 +58,13 @@ public sealed class MemoriaOptionsValidator : IValidateOptions<MemoriaOptions>
 		Require(ingest.MaxDocumentBytes >= MinDocumentBytes, $"Memoria:Ingest:MaxDocumentBytes must be at least {MinDocumentBytes}, as frontmatter alone can take 8 KiB.", failures);
 		Require(ingest.MaxSessionBytes >= 1024, "Memoria:Ingest:MaxSessionBytes must be at least 1024.", failures);
 		Require(ingest.MaxConcurrentSessions >= 1, "Memoria:Ingest:MaxConcurrentSessions must be at least 1.", failures);
+		Require(ingest.MaxConcurrentSessionsPerKey >= 1, "Memoria:Ingest:MaxConcurrentSessionsPerKey must be at least 1.", failures);
+		Require(ingest.MaxConcurrentDocuments >= 1, "Memoria:Ingest:MaxConcurrentDocuments must be at least 1.", failures);
+		Require(ingest.MaxConcurrentDocumentsPerKey >= 1, "Memoria:Ingest:MaxConcurrentDocumentsPerKey must be at least 1.", failures);
+		Require(ingest.MaxConcurrentRenders >= 1, "Memoria:Ingest:MaxConcurrentRenders must be at least 1.", failures);
+		Require(ingest.SessionUploadDeadline > TimeSpan.Zero, "Memoria:Ingest:SessionUploadDeadline must be positive.", failures);
+		Require(ingest.DocumentUploadDeadline > TimeSpan.Zero, "Memoria:Ingest:DocumentUploadDeadline must be positive.", failures);
+		Require(ingest.MinReindexInterval >= TimeSpan.Zero, "Memoria:Ingest:MinReindexInterval may not be negative.", failures);
 	}
 
 	private static void ValidateAuthMode(AuthOptions auth, List<string> failures)

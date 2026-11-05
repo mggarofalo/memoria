@@ -133,7 +133,7 @@ public sealed class SessionIngestTests(AuthApiFactory factory) : IClassFixture<A
 		await PostSessionAsync(client, Transcript(5), sessionId: id);
 		corpus.OnWrite = static path => path.Contains("_part-002", StringComparison.Ordinal) ? Busy() : null;
 
-		await PostSessionAsync(client, Transcript(2), sessionId: id, updated: Stamp.AddHours(1));
+		await PostSessionAsync(client, Transcript(2), sessionId: id, updated: Stamp.AddHours(1), allowShrink: true);
 
 		Assert.Equal(5, corpus.Files.Count);
 		Assert.DoesNotContain(corpus.Calls, static call => call.StartsWith("delete", StringComparison.Ordinal));
@@ -177,14 +177,14 @@ public sealed class SessionIngestTests(AuthApiFactory factory) : IClassFixture<A
 		corpus.Calls.Clear();
 		factory.Sidecar.Requests.Clear();
 
-		HttpResponseMessage response = await PostSessionAsync(client, Transcript(2), sessionId: id, updated: Stamp.AddHours(1));
+		HttpResponseMessage response = await PostSessionAsync(client, Transcript(2), sessionId: id, updated: Stamp.AddHours(1), allowShrink: true);
 
 		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
 		JsonElement result = await ReadAsync(response);
 		Assert.Equal(3, result.GetProperty("superseded").GetProperty("deleted").GetArrayLength());
 		Assert.NotNull(result.GetProperty("reindexJobId").GetString());
 		Assert.Equal(2, corpus.Files.Count);
-		string[] calls = [.. corpus.Calls];
+		string[] calls = [.. corpus.Calls.Where(static call => call.StartsWith("write", StringComparison.Ordinal) || call.StartsWith("delete", StringComparison.Ordinal))];
 		Assert.All(calls[..2], static call => Assert.StartsWith("write", call, StringComparison.Ordinal));
 		Assert.All(calls[3..], static call => Assert.StartsWith("delete", call, StringComparison.Ordinal));
 		Assert.Equal("POST /reindex", factory.Sidecar.Requests.Select(static r => r.Method + " " + r.Uri.AbsolutePath).Last());
@@ -200,7 +200,7 @@ public sealed class SessionIngestTests(AuthApiFactory factory) : IClassFixture<A
 		await PostSessionAsync(client, Transcript(4), sessionId: id);
 		corpus.OnList = static () => FakeSidecar.Json(HttpStatusCode.OK, """{"docs":[],"skipped":[],"errors":[]}""");
 
-		await PostSessionAsync(client, Transcript(1), sessionId: id, updated: Stamp.AddHours(1));
+		await PostSessionAsync(client, Transcript(1), sessionId: id, updated: Stamp.AddHours(1), allowShrink: true);
 
 		Assert.Single(corpus.Files);
 	}
@@ -212,7 +212,7 @@ public sealed class SessionIngestTests(AuthApiFactory factory) : IClassFixture<A
 		HttpClient client = await WriterAsync();
 		string id = NewSession();
 		string shortId = id[..8];
-		corpus.Files[$"2026-01-15_{shortId}_part-007.md"] = "from an earlier exporter";
+		corpus.Files[$"2026-01-15_{shortId}_part-007.md"] = ExporterPart(id);
 
 		await PostSessionAsync(client, Transcript(1), sessionId: id);
 
@@ -229,7 +229,7 @@ public sealed class SessionIngestTests(AuthApiFactory factory) : IClassFixture<A
 		await PostSessionAsync(client, Transcript(3), sessionId: other);
 		await PostSessionAsync(client, Transcript(3), sessionId: mine);
 
-		await PostSessionAsync(client, Transcript(1), sessionId: mine, updated: Stamp.AddHours(1));
+		await PostSessionAsync(client, Transcript(1), sessionId: mine, updated: Stamp.AddHours(1), allowShrink: true);
 
 		Assert.Equal(3, corpus.Files.Keys.Count(path => path.Contains(other[..8], StringComparison.Ordinal)));
 		Assert.Equal(1, corpus.Files.Keys.Count(path => path.Contains(mine[..8], StringComparison.Ordinal)));
@@ -243,7 +243,7 @@ public sealed class SessionIngestTests(AuthApiFactory factory) : IClassFixture<A
 		string id = NewSession();
 		await PostSessionAsync(client, Transcript(4), sessionId: id);
 
-		HttpResponseMessage response = await PostSessionAsync(client, Transcript(1) + "{not json\n", sessionId: id, updated: Stamp.AddHours(1));
+		HttpResponseMessage response = await PostSessionAsync(client, Transcript(1) + "{not json\n", sessionId: id, updated: Stamp.AddHours(1), allowShrink: true);
 
 		Assert.Equal(HttpStatusCode.MultiStatus, response.StatusCode);
 		JsonElement result = await ReadAsync(response);
@@ -286,10 +286,12 @@ public sealed class SessionIngestTests(AuthApiFactory factory) : IClassFixture<A
 		string id = NewSession();
 		await PostSessionAsync(client, Transcript(3), sessionId: id);
 
-		HttpResponseMessage response = await PostSessionAsync(client, "", sessionId: id, updated: Stamp.AddHours(1));
+		HttpResponseMessage response = await PostSessionAsync(client, "", sessionId: id, updated: Stamp.AddHours(1), allowShrink: true);
 
 		Assert.Equal(HttpStatusCode.MultiStatus, response.StatusCode);
+		Assert.False((await ReadAsync(response)).GetProperty("complete").GetBoolean());
 		Assert.Equal(3, corpus.Files.Count);
+		Assert.Equal(IngestStateName.Complete, (await StatusAsync(client, id)).GetProperty("state").GetString());
 	}
 
 	[Fact]
@@ -301,7 +303,7 @@ public sealed class SessionIngestTests(AuthApiFactory factory) : IClassFixture<A
 		await PostSessionAsync(client, Transcript(3), sessionId: id);
 		corpus.OnDelete = static _ => Busy();
 
-		HttpResponseMessage first = await PostSessionAsync(client, Transcript(1), sessionId: id, updated: Stamp.AddHours(1));
+		HttpResponseMessage first = await PostSessionAsync(client, Transcript(1), sessionId: id, updated: Stamp.AddHours(1), allowShrink: true);
 
 		Assert.Equal(HttpStatusCode.MultiStatus, first.StatusCode);
 		JsonElement result = await ReadAsync(first);
@@ -310,7 +312,7 @@ public sealed class SessionIngestTests(AuthApiFactory factory) : IClassFixture<A
 		Assert.Equal(IngestStateName.Partial, (await StatusAsync(client, id)).GetProperty("state").GetString());
 
 		corpus.OnDelete = static _ => null;
-		Assert.Equal(HttpStatusCode.Accepted, (await PostSessionAsync(client, Transcript(1), sessionId: id, updated: Stamp.AddHours(1))).StatusCode);
+		Assert.Equal(HttpStatusCode.Accepted, (await PostSessionAsync(client, Transcript(1), sessionId: id, updated: Stamp.AddHours(1), allowShrink: true)).StatusCode);
 		Assert.Single(corpus.Files);
 	}
 
@@ -329,7 +331,7 @@ public sealed class SessionIngestTests(AuthApiFactory factory) : IClassFixture<A
 		string id = NewSession();
 		await PostSessionAsync(client, Transcript(3), sessionId: id);
 		factory.Sidecar.On("POST", "/reindex", (_, _) => Busy());
-		HttpResponseMessage response = await PostSessionAsync(client, Transcript(1), sessionId: id, updated: Stamp.AddHours(1));
+		HttpResponseMessage response = await PostSessionAsync(client, Transcript(1), sessionId: id, updated: Stamp.AddHours(1), allowShrink: true);
 		Assert.Equal(HttpStatusCode.MultiStatus, response.StatusCode);
 		Assert.Equal(JsonValueKind.Null, (await ReadAsync(response)).GetProperty("reindexJobId").ValueKind);
 	}
@@ -349,7 +351,7 @@ public sealed class SessionIngestTests(AuthApiFactory factory) : IClassFixture<A
 
 		Assert.Equal(HttpStatusCode.Conflict, replay.StatusCode);
 		Assert.Equal("stale_version", (await ReadAsync(replay)).GetProperty("code").GetString());
-		Assert.Empty(corpus.Calls);
+		Assert.DoesNotContain(corpus.Calls, static call => call.StartsWith("write", StringComparison.Ordinal) || call.StartsWith("delete", StringComparison.Ordinal));
 		Assert.Equal(IngestStateName.Complete, (await StatusAsync(client, id)).GetProperty("state").GetString());
 	}
 
@@ -389,15 +391,16 @@ public sealed class SessionIngestTests(AuthApiFactory factory) : IClassFixture<A
 		IIngestLedger ledger = factory.Services.GetRequiredService<IIngestLedger>();
 		string identity = IngestIdentity.For("crash", Guid.NewGuid().ToString());
 		DateTimeOffset now = DateTimeOffset.UtcNow;
-		await ledger.ClaimAsync(identity, Stamp, now, default);
-		await ledger.FinishAsync(identity, IngestStateName.Partial, ["a.md"]);
-		await ledger.ClaimAsync(identity, Stamp, now, default);
+		IngestClaimRequest At(DateTimeOffset when) => new(identity, "crash", Stamp, when, ["a.md"]);
+		IngestClaim first = await ledger.ClaimAsync(At(now), default);
+		await ledger.FinishAsync(identity, first.LeaseToken!, "crash", IngestStateName.Partial, ["a.md"]);
+		IngestClaim second = await ledger.ClaimAsync(At(now), default);
 
-		Assert.Equal(IngestClaimOutcome.Busy, (await ledger.ClaimAsync(identity, Stamp, now.AddMinutes(1), default)).Outcome);
-		await ledger.RenewAsync(identity, now.AddMinutes(4), default);
-		Assert.Equal(IngestClaimOutcome.Busy, (await ledger.ClaimAsync(identity, Stamp, now.AddMinutes(6), default)).Outcome);
+		Assert.Equal(IngestClaimOutcome.Busy, (await ledger.ClaimAsync(At(now.AddMinutes(1)), default)).Outcome);
+		Assert.True(await ledger.RenewAsync(identity, second.LeaseToken!, now.AddMinutes(4), default));
+		Assert.Equal(IngestClaimOutcome.Busy, (await ledger.ClaimAsync(At(now.AddMinutes(6)), default)).Outcome);
 
-		IngestClaim after = await ledger.ClaimAsync(identity, Stamp, now.AddMinutes(10), default);
+		IngestClaim after = await ledger.ClaimAsync(At(now.AddMinutes(10)), default);
 
 		Assert.Equal(IngestClaimOutcome.Acquired, after.Outcome);
 		Assert.Equal(["a.md"], after.PreviousPaths);
@@ -410,7 +413,7 @@ public sealed class SessionIngestTests(AuthApiFactory factory) : IClassFixture<A
 		string identity = IngestIdentity.For("race", Guid.NewGuid().ToString());
 		DateTimeOffset now = DateTimeOffset.UtcNow;
 
-		IngestClaim[] claims = await Task.WhenAll(Enumerable.Range(0, 16).Select(_ => Task.Run(() => ledger.ClaimAsync(identity, Stamp, now, default))));
+		IngestClaim[] claims = await Task.WhenAll(Enumerable.Range(0, 16).Select(_ => Task.Run(() => ledger.ClaimAsync(new IngestClaimRequest(identity, "race", Stamp, now, []), default))));
 
 		Assert.Equal(1, claims.Count(static claim => claim.Outcome == IngestClaimOutcome.Acquired));
 		Assert.Equal(15, claims.Count(static claim => claim.Outcome == IngestClaimOutcome.Busy));
@@ -446,9 +449,8 @@ public sealed class SessionIngestTests(AuthApiFactory factory) : IClassFixture<A
 	public async Task A_codex_session_id_cannot_steer_any_path(string format, string sessionId)
 	{
 		FakeCorpus corpus = new(factory.Sidecar);
-		string jsonl = """{"timestamp":"2026-01-15T10:00:00.000Z","type":"session_meta","payload":{"id":"x","cwd":"/srv/demo"}}""" + "\n"
-			+ """{"timestamp":"2026-01-15T10:00:01.000Z","type":"event_msg","payload":{"type":"user_message","message":"hello"}}""" + "\n"
-			+ """{"timestamp":"2026-01-15T10:00:02.000Z","type":"event_msg","payload":{"type":"agent_message","message":"reply"}}""" + "\n";
+		string jsonl = """{"timestamp":"2026-01-15T10:00:00.000Z","type":"session_meta","payload":{"cwd":"/srv/demo"}}""" + "\n"
+			+ CodexMessage("user", "hello", "t1");
 
 		await PostSessionAsync(await WriterAsync(), jsonl, format: format, sessionId: sessionId, updated: DateTimeOffset.UtcNow);
 
@@ -460,7 +462,7 @@ public sealed class SessionIngestTests(AuthApiFactory factory) : IClassFixture<A
 	{
 		FakeCorpus corpus = new(factory.Sidecar);
 		string random = RandomBody(32);
-		StringBuilder jsonl = new("""{"timestamp":"2026-01-15T10:00:00.000Z","type":"session_meta","payload":{"id":"x","cwd":"/srv/demo"}}""" + "\n");
+		StringBuilder jsonl = new("""{"timestamp":"2026-01-15T10:00:00.000Z","type":"session_meta","payload":{"cwd":"/srv/demo"}}""" + "\n");
 		string filler = string.Join(' ', Enumerable.Repeat("word", 6000));
 		for (int part = 0; part < 210; part++)
 		{
@@ -686,6 +688,8 @@ public sealed class IngestLedgerMigrationTests
 			await using Microsoft.Data.Sqlite.SqliteCommand command = connection.CreateCommand();
 			command.CommandText = """
 				DROP TABLE ingest_state;
+				DROP TABLE ingest_paths;
+				DROP TABLE ingest_stems;
 				INSERT INTO api_keys (id, sha256_hash, label, scopes, collections, all_collections, created_at) VALUES ('k', x'00', 'l', '[]', '[]', 0, 't');
 				PRAGMA user_version = 1;
 				""";
@@ -695,7 +699,7 @@ public sealed class IngestLedgerMigrationTests
 		await new Memoria.Api.Auth.ControlDatabase(path).InitializeAsync();
 
 		SqliteIngestLedger ledger = new(database);
-		Assert.Equal(IngestClaimOutcome.Acquired, (await ledger.ClaimAsync("x", Stamp, Stamp, default)).Outcome);
+		Assert.Equal(IngestClaimOutcome.Acquired, (await ledger.ClaimAsync(new IngestClaimRequest("x", "c", Stamp, Stamp, []), default)).Outcome);
 		await using Microsoft.Data.Sqlite.SqliteConnection check = await database.OpenAsync();
 		await using Microsoft.Data.Sqlite.SqliteCommand count = check.CreateCommand();
 		count.CommandText = "SELECT COUNT(*) FROM api_keys;";

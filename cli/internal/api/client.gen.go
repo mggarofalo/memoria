@@ -77,10 +77,12 @@ type Document struct {
 
 // DocumentDeleteResult defines model for DocumentDeleteResult.
 type DocumentDeleteResult struct {
-	Collection   string  `json:"collection"`
-	Deleted      bool    `json:"deleted"`
-	Path         string  `json:"path"`
-	ReindexJobId *string `json:"reindexJobId"`
+	Collection       string  `json:"collection"`
+	Deleted          bool    `json:"deleted"`
+	Path             string  `json:"path"`
+	ReindexInSeconds *int32  `json:"reindexInSeconds,omitempty"`
+	ReindexJobId     *string `json:"reindexJobId,omitempty"`
+	ReindexState     string  `json:"reindexState"`
 }
 
 // DocumentIngestRequest defines model for DocumentIngestRequest.
@@ -248,6 +250,7 @@ type SessionIngestResult struct {
 	RefusalCount int32                   `json:"refusalCount"`
 	Refusals     []IngestRefusal         `json:"refusals"`
 	ReindexJobId *string                 `json:"reindexJobId"`
+	ReindexState string                  `json:"reindexState"`
 	Retryable    bool                    `json:"retryable"`
 	SessionId    string                  `json:"sessionId"`
 	Superseded   SessionSupersededResult `json:"superseded"`
@@ -431,6 +434,9 @@ type GetSessionIngestStatusParams struct {
 
 	// ProjectDirectory The Claude Code project folder the transcript was in. Tells apart two copies of one session.
 	ProjectDirectory *string `form:"projectDirectory,omitempty" json:"projectDirectory,omitempty"`
+
+	// AllowShrink Set when the session really did lose messages. Without it, an upload with fewer messages than the stored one is refused, as it looks just like a cut copy.
+	AllowShrink *bool `form:"allowShrink,omitempty" json:"allowShrink,omitempty"`
 }
 
 // IngestSessionParams defines parameters for IngestSession.
@@ -446,6 +452,9 @@ type IngestSessionParams struct {
 
 	// ProjectDirectory The Claude Code project folder the transcript was in. Tells apart two copies of one session.
 	ProjectDirectory *string `form:"projectDirectory,omitempty" json:"projectDirectory,omitempty"`
+
+	// AllowShrink Set when the session really did lose messages. Without it, an upload with fewer messages than the stored one is refused, as it looks just like a cut copy.
+	AllowShrink *bool `form:"allowShrink,omitempty" json:"allowShrink,omitempty"`
 
 	// Updated When this copy of the transcript last changed, as an ISO timestamp. Orders uploads, so an older one is refused.
 	Updated *time.Time `form:"updated,omitempty" json:"updated,omitempty"`
@@ -660,14 +669,14 @@ type ClientInterface interface {
 
 	// DeleteDocument Delete a document
 	//
-	// Names a document by `source` and `sourceId`, or by `path` within the collection, and removes it. The index update starts at once, because a deleted document stays searchable until the index changes. It also stops an older version being stored again. Safe to repeat: a missing document answers `deleted: false`. When `reindexJobId` is null the update could not be queued, so repeat the request. Requires the `ingest` scope.
+	// Names a document by `source` and `sourceId`, or by `path` within the collection, and removes it. A deleted document stays searchable until the index changes, so an update starts at once, or within `reindexInSeconds` when one just ran in this collection: `reindexState` says which. It also stops an older copy being stored again. Safe to repeat: a missing document answers `deleted: false` and costs no update. When `reindexState` is `failed`, repeat the request. Requires the `ingest` scope.
 	//
 	// Corresponds with DELETE /v1/documents (the `DeleteDocument` operationId).
 	DeleteDocument(ctx context.Context, params *DeleteDocumentParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// IngestDocumentWithBody Store a document
 	//
-	// Renders the envelope to frontmatter, redacts the whole document, and stores it. Redaction cannot be turned off, and a document it cannot finish is refused with 422. `source` and `sourceId` are its identity: sending them again overwrites, and `updated` orders versions, so an older version gets 409. The response counts what was replaced, by rule, with no values. The document becomes searchable when the job finishes. Requires the `ingest` scope.
+	// Renders the envelope to frontmatter, redacts the whole document, and stores it. No caller can turn redaction off: only an operator can, for a named collection, and `redaction` in the response says which applied. A document redaction cannot finish is refused with 422. `source` and `sourceId` are its identity: sending them again overwrites, and `updated` orders versions, so an older version gets 409. The response counts what was replaced, by rule, with no values. The document becomes searchable when the job finishes. Requires the `ingest` scope.
 	//
 	// Takes any type of body and a specified content type.
 	//
@@ -676,7 +685,7 @@ type ClientInterface interface {
 
 	// IngestDocument Store a document
 	//
-	// Renders the envelope to frontmatter, redacts the whole document, and stores it. Redaction cannot be turned off, and a document it cannot finish is refused with 422. `source` and `sourceId` are its identity: sending them again overwrites, and `updated` orders versions, so an older version gets 409. The response counts what was replaced, by rule, with no values. The document becomes searchable when the job finishes. Requires the `ingest` scope.
+	// Renders the envelope to frontmatter, redacts the whole document, and stores it. No caller can turn redaction off: only an operator can, for a named collection, and `redaction` in the response says which applied. A document redaction cannot finish is refused with 422. `source` and `sourceId` are its identity: sending them again overwrites, and `updated` orders versions, so an older version gets 409. The response counts what was replaced, by rule, with no values. The document becomes searchable when the job finishes. Requires the `ingest` scope.
 	//
 	// Takes a body of the `application/json` content type.
 	//
@@ -692,7 +701,7 @@ type ClientInterface interface {
 
 	// IngestSessionWithBody Store a raw session transcript
 	//
-	// The body is the raw JSONL of a Claude Code or Codex session, read as a stream. It is rendered and redacted here into one or more parts. 202 means every part arrived. 207 means some did not: `parts` says which, the session stays `partial`, and when `retryable` is true sending the same upload again finishes it. An older version than the one stored gets 409, as does a second upload of the session while one is running. Parts a shrunken session no longer has are deleted last. Requires the `ingest` scope.
+	// The body is the raw JSONL of a Claude Code or Codex session, read as a stream. It is rendered and redacted here into one or more parts. 202 means every part arrived. 207 means not all of it is stored: `parts` and `read` say why, the session stays `partial`, and when `retryable` is true sending the same upload again finishes it. A transcript with no messages, or that lost any, is never 202. An older version than the one stored gets 409, as does a second upload of the session while one is running, a file belonging to another session, and fewer messages than the one stored unless `allowShrink` is set. Parts a shrunken session no longer has are deleted last, and only when they are provably this session's. Requires the `ingest` scope.
 	//
 	// Takes any type of body and a specified content type.
 	//
@@ -911,7 +920,7 @@ func (c *Client) GetDocuments(ctx context.Context, body GetDocumentsJSONRequestB
 
 // DeleteDocument Delete a document
 //
-// Names a document by `source` and `sourceId`, or by `path` within the collection, and removes it. The index update starts at once, because a deleted document stays searchable until the index changes. It also stops an older version being stored again. Safe to repeat: a missing document answers `deleted: false`. When `reindexJobId` is null the update could not be queued, so repeat the request. Requires the `ingest` scope.
+// Names a document by `source` and `sourceId`, or by `path` within the collection, and removes it. A deleted document stays searchable until the index changes, so an update starts at once, or within `reindexInSeconds` when one just ran in this collection: `reindexState` says which. It also stops an older copy being stored again. Safe to repeat: a missing document answers `deleted: false` and costs no update. When `reindexState` is `failed`, repeat the request. Requires the `ingest` scope.
 //
 // Corresponds with DELETE /v1/documents (the `DeleteDocument` operationId).
 func (c *Client) DeleteDocument(ctx context.Context, params *DeleteDocumentParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
@@ -928,7 +937,7 @@ func (c *Client) DeleteDocument(ctx context.Context, params *DeleteDocumentParam
 
 // IngestDocumentWithBody Store a document
 //
-// Renders the envelope to frontmatter, redacts the whole document, and stores it. Redaction cannot be turned off, and a document it cannot finish is refused with 422. `source` and `sourceId` are its identity: sending them again overwrites, and `updated` orders versions, so an older version gets 409. The response counts what was replaced, by rule, with no values. The document becomes searchable when the job finishes. Requires the `ingest` scope.
+// Renders the envelope to frontmatter, redacts the whole document, and stores it. No caller can turn redaction off: only an operator can, for a named collection, and `redaction` in the response says which applied. A document redaction cannot finish is refused with 422. `source` and `sourceId` are its identity: sending them again overwrites, and `updated` orders versions, so an older version gets 409. The response counts what was replaced, by rule, with no values. The document becomes searchable when the job finishes. Requires the `ingest` scope.
 //
 // Takes any type of body and a specified content type.
 //
@@ -947,7 +956,7 @@ func (c *Client) IngestDocumentWithBody(ctx context.Context, contentType string,
 
 // IngestDocument Store a document
 //
-// Renders the envelope to frontmatter, redacts the whole document, and stores it. Redaction cannot be turned off, and a document it cannot finish is refused with 422. `source` and `sourceId` are its identity: sending them again overwrites, and `updated` orders versions, so an older version gets 409. The response counts what was replaced, by rule, with no values. The document becomes searchable when the job finishes. Requires the `ingest` scope.
+// Renders the envelope to frontmatter, redacts the whole document, and stores it. No caller can turn redaction off: only an operator can, for a named collection, and `redaction` in the response says which applied. A document redaction cannot finish is refused with 422. `source` and `sourceId` are its identity: sending them again overwrites, and `updated` orders versions, so an older version gets 409. The response counts what was replaced, by rule, with no values. The document becomes searchable when the job finishes. Requires the `ingest` scope.
 //
 // Takes a body of the `application/json` content type.
 //
@@ -983,7 +992,7 @@ func (c *Client) GetSessionIngestStatus(ctx context.Context, params *GetSessionI
 
 // IngestSessionWithBody Store a raw session transcript
 //
-// The body is the raw JSONL of a Claude Code or Codex session, read as a stream. It is rendered and redacted here into one or more parts. 202 means every part arrived. 207 means some did not: `parts` says which, the session stays `partial`, and when `retryable` is true sending the same upload again finishes it. An older version than the one stored gets 409, as does a second upload of the session while one is running. Parts a shrunken session no longer has are deleted last. Requires the `ingest` scope.
+// The body is the raw JSONL of a Claude Code or Codex session, read as a stream. It is rendered and redacted here into one or more parts. 202 means every part arrived. 207 means not all of it is stored: `parts` and `read` say why, the session stays `partial`, and when `retryable` is true sending the same upload again finishes it. A transcript with no messages, or that lost any, is never 202. An older version than the one stored gets 409, as does a second upload of the session while one is running, a file belonging to another session, and fewer messages than the one stored unless `allowShrink` is set. Parts a shrunken session no longer has are deleted last, and only when they are provably this session's. Requires the `ingest` scope.
 //
 // Takes any type of body and a specified content type.
 //
@@ -1620,6 +1629,18 @@ func NewGetSessionIngestStatusRequest(server string, params *GetSessionIngestSta
 
 		}
 
+		if params.AllowShrink != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "allowShrink", *params.AllowShrink, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
 		if encoded := queryValues.Encode(); encoded != "" {
 			rawQueryFragments = append(rawQueryFragments, encoded)
 		}
@@ -1701,6 +1722,18 @@ func NewIngestSessionRequestWithBody(server string, params *IngestSessionParams,
 		if params.ProjectDirectory != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "projectDirectory", *params.ProjectDirectory, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.AllowShrink != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "allowShrink", *params.AllowShrink, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
 				return nil, err
 			} else {
 				for _, qp := range strings.Split(queryFrag, "&") {
@@ -2096,7 +2129,7 @@ type ClientWithResponsesInterface interface {
 
 	// DeleteDocumentWithResponse Delete a document
 	//
-	// Names a document by `source` and `sourceId`, or by `path` within the collection, and removes it. The index update starts at once, because a deleted document stays searchable until the index changes. It also stops an older version being stored again. Safe to repeat: a missing document answers `deleted: false`. When `reindexJobId` is null the update could not be queued, so repeat the request. Requires the `ingest` scope.
+	// Names a document by `source` and `sourceId`, or by `path` within the collection, and removes it. A deleted document stays searchable until the index changes, so an update starts at once, or within `reindexInSeconds` when one just ran in this collection: `reindexState` says which. It also stops an older copy being stored again. Safe to repeat: a missing document answers `deleted: false` and costs no update. When `reindexState` is `failed`, repeat the request. Requires the `ingest` scope.
 	//
 	// Returns a wrapper object for the known response body format(s).
 	//
@@ -2105,7 +2138,7 @@ type ClientWithResponsesInterface interface {
 
 	// IngestDocumentWithBodyWithResponse Store a document
 	//
-	// Renders the envelope to frontmatter, redacts the whole document, and stores it. Redaction cannot be turned off, and a document it cannot finish is refused with 422. `source` and `sourceId` are its identity: sending them again overwrites, and `updated` orders versions, so an older version gets 409. The response counts what was replaced, by rule, with no values. The document becomes searchable when the job finishes. Requires the `ingest` scope.
+	// Renders the envelope to frontmatter, redacts the whole document, and stores it. No caller can turn redaction off: only an operator can, for a named collection, and `redaction` in the response says which applied. A document redaction cannot finish is refused with 422. `source` and `sourceId` are its identity: sending them again overwrites, and `updated` orders versions, so an older version gets 409. The response counts what was replaced, by rule, with no values. The document becomes searchable when the job finishes. Requires the `ingest` scope.
 	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -2114,7 +2147,7 @@ type ClientWithResponsesInterface interface {
 
 	// IngestDocumentWithResponse Store a document
 	//
-	// Renders the envelope to frontmatter, redacts the whole document, and stores it. Redaction cannot be turned off, and a document it cannot finish is refused with 422. `source` and `sourceId` are its identity: sending them again overwrites, and `updated` orders versions, so an older version gets 409. The response counts what was replaced, by rule, with no values. The document becomes searchable when the job finishes. Requires the `ingest` scope.
+	// Renders the envelope to frontmatter, redacts the whole document, and stores it. No caller can turn redaction off: only an operator can, for a named collection, and `redaction` in the response says which applied. A document redaction cannot finish is refused with 422. `source` and `sourceId` are its identity: sending them again overwrites, and `updated` orders versions, so an older version gets 409. The response counts what was replaced, by rule, with no values. The document becomes searchable when the job finishes. Requires the `ingest` scope.
 	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -2132,7 +2165,7 @@ type ClientWithResponsesInterface interface {
 
 	// IngestSessionWithBodyWithResponse Store a raw session transcript
 	//
-	// The body is the raw JSONL of a Claude Code or Codex session, read as a stream. It is rendered and redacted here into one or more parts. 202 means every part arrived. 207 means some did not: `parts` says which, the session stays `partial`, and when `retryable` is true sending the same upload again finishes it. An older version than the one stored gets 409, as does a second upload of the session while one is running. Parts a shrunken session no longer has are deleted last. Requires the `ingest` scope.
+	// The body is the raw JSONL of a Claude Code or Codex session, read as a stream. It is rendered and redacted here into one or more parts. 202 means every part arrived. 207 means not all of it is stored: `parts` and `read` say why, the session stays `partial`, and when `retryable` is true sending the same upload again finishes it. A transcript with no messages, or that lost any, is never 202. An older version than the one stored gets 409, as does a second upload of the session while one is running, a file belonging to another session, and fewer messages than the one stored unless `allowShrink` is set. Parts a shrunken session no longer has are deleted last, and only when they are provably this session's. Requires the `ingest` scope.
 	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -3535,7 +3568,7 @@ func (c *ClientWithResponses) GetDocumentsWithResponse(ctx context.Context, body
 
 // DeleteDocumentWithResponse Delete a document
 //
-// Names a document by `source` and `sourceId`, or by `path` within the collection, and removes it. The index update starts at once, because a deleted document stays searchable until the index changes. It also stops an older version being stored again. Safe to repeat: a missing document answers `deleted: false`. When `reindexJobId` is null the update could not be queued, so repeat the request. Requires the `ingest` scope.
+// Names a document by `source` and `sourceId`, or by `path` within the collection, and removes it. A deleted document stays searchable until the index changes, so an update starts at once, or within `reindexInSeconds` when one just ran in this collection: `reindexState` says which. It also stops an older copy being stored again. Safe to repeat: a missing document answers `deleted: false` and costs no update. When `reindexState` is `failed`, repeat the request. Requires the `ingest` scope.
 //
 // Returns a wrapper object for the known response body format(s).
 //
@@ -3550,7 +3583,7 @@ func (c *ClientWithResponses) DeleteDocumentWithResponse(ctx context.Context, pa
 
 // IngestDocumentWithBodyWithResponse Store a document
 //
-// Renders the envelope to frontmatter, redacts the whole document, and stores it. Redaction cannot be turned off, and a document it cannot finish is refused with 422. `source` and `sourceId` are its identity: sending them again overwrites, and `updated` orders versions, so an older version gets 409. The response counts what was replaced, by rule, with no values. The document becomes searchable when the job finishes. Requires the `ingest` scope.
+// Renders the envelope to frontmatter, redacts the whole document, and stores it. No caller can turn redaction off: only an operator can, for a named collection, and `redaction` in the response says which applied. A document redaction cannot finish is refused with 422. `source` and `sourceId` are its identity: sending them again overwrites, and `updated` orders versions, so an older version gets 409. The response counts what was replaced, by rule, with no values. The document becomes searchable when the job finishes. Requires the `ingest` scope.
 //
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 //
@@ -3565,7 +3598,7 @@ func (c *ClientWithResponses) IngestDocumentWithBodyWithResponse(ctx context.Con
 
 // IngestDocumentWithResponse Store a document
 //
-// Renders the envelope to frontmatter, redacts the whole document, and stores it. Redaction cannot be turned off, and a document it cannot finish is refused with 422. `source` and `sourceId` are its identity: sending them again overwrites, and `updated` orders versions, so an older version gets 409. The response counts what was replaced, by rule, with no values. The document becomes searchable when the job finishes. Requires the `ingest` scope.
+// Renders the envelope to frontmatter, redacts the whole document, and stores it. No caller can turn redaction off: only an operator can, for a named collection, and `redaction` in the response says which applied. A document redaction cannot finish is refused with 422. `source` and `sourceId` are its identity: sending them again overwrites, and `updated` orders versions, so an older version gets 409. The response counts what was replaced, by rule, with no values. The document becomes searchable when the job finishes. Requires the `ingest` scope.
 //
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 //
@@ -3595,7 +3628,7 @@ func (c *ClientWithResponses) GetSessionIngestStatusWithResponse(ctx context.Con
 
 // IngestSessionWithBodyWithResponse Store a raw session transcript
 //
-// The body is the raw JSONL of a Claude Code or Codex session, read as a stream. It is rendered and redacted here into one or more parts. 202 means every part arrived. 207 means some did not: `parts` says which, the session stays `partial`, and when `retryable` is true sending the same upload again finishes it. An older version than the one stored gets 409, as does a second upload of the session while one is running. Parts a shrunken session no longer has are deleted last. Requires the `ingest` scope.
+// The body is the raw JSONL of a Claude Code or Codex session, read as a stream. It is rendered and redacted here into one or more parts. 202 means every part arrived. 207 means not all of it is stored: `parts` and `read` say why, the session stays `partial`, and when `retryable` is true sending the same upload again finishes it. A transcript with no messages, or that lost any, is never 202. An older version than the one stored gets 409, as does a second upload of the session while one is running, a file belonging to another session, and fewer messages than the one stored unless `allowShrink` is set. Parts a shrunken session no longer has are deleted last, and only when they are provably this session's. Requires the `ingest` scope.
 //
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 //

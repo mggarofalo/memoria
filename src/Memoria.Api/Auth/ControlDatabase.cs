@@ -15,10 +15,28 @@ public sealed class ControlDatabase(string? path)
 	private const string SchemaV2 = """
 		CREATE TABLE ingest_state (
 			identity TEXT PRIMARY KEY NOT NULL,
+			lookup TEXT NULL,
 			version_ticks INTEGER NOT NULL,
 			state TEXT NOT NULL,
 			lease_until_ticks INTEGER NOT NULL,
+			lease_owner TEXT NULL,
+			deleted_version_ticks INTEGER NULL,
+			message_count INTEGER NULL,
 			paths TEXT NOT NULL
+		);
+		CREATE INDEX ingest_state_lookup ON ingest_state (lookup);
+		CREATE TABLE ingest_paths (
+			collection TEXT NOT NULL,
+			path TEXT NOT NULL,
+			owner TEXT NOT NULL,
+			PRIMARY KEY (collection, path)
+		);
+		CREATE INDEX ingest_paths_owner ON ingest_paths (owner);
+		CREATE TABLE ingest_stems (
+			collection TEXT NOT NULL,
+			stem TEXT NOT NULL,
+			owner TEXT NOT NULL,
+			PRIMARY KEY (collection, stem)
 		);
 		""";
 

@@ -29,7 +29,36 @@ public static class SessionRenderer
 	{
 		ArgumentNullException.ThrowIfNull(payload);
 		ArgumentNullException.ThrowIfNull(source);
-		return await RenderCoreAsync(payload, source, options ?? SessionRenderOptions.Default, null, cancellationToken);
+		return (await ReadCoreAsync(payload, source, options ?? SessionRenderOptions.Default, null, cancellationToken)).Render();
+	}
+
+	/// <summary>
+	/// The first half of <see cref="RenderAsync"/>: reads the stream, which can be slow, and leaves the expensive work for
+	/// <see cref="ReadSessionTranscript.Render"/>, so a caller can bound rendering without a slow client holding the bound.
+	/// </summary>
+	public static async Task<ReadSessionTranscript> ReadAsync(
+		Stream payload,
+		SessionSource source,
+		SessionRenderOptions? options = null,
+		CancellationToken cancellationToken = default)
+	{
+		ArgumentNullException.ThrowIfNull(payload);
+		ArgumentNullException.ThrowIfNull(source);
+		return await ReadCoreAsync(payload, source, options ?? SessionRenderOptions.Default, null, cancellationToken);
+	}
+
+	/// <summary>The first half of <see cref="RenderWithoutRedactionForDisabledCollectionAsync"/>.</summary>
+	public static async Task<ReadSessionTranscript> ReadWithoutRedactionForDisabledCollectionAsync(
+		Stream payload,
+		SessionSource source,
+		RedactionDisabledCollection disabled,
+		SessionRenderOptions? options = null,
+		CancellationToken cancellationToken = default)
+	{
+		ArgumentNullException.ThrowIfNull(payload);
+		ArgumentNullException.ThrowIfNull(source);
+		ArgumentNullException.ThrowIfNull(disabled);
+		return await ReadCoreAsync(payload, source, options ?? SessionRenderOptions.Default, disabled, cancellationToken);
 	}
 
 	/// <summary>
@@ -46,10 +75,10 @@ public static class SessionRenderer
 		ArgumentNullException.ThrowIfNull(payload);
 		ArgumentNullException.ThrowIfNull(source);
 		ArgumentNullException.ThrowIfNull(disabled);
-		return await RenderCoreAsync(payload, source, options ?? SessionRenderOptions.Default, disabled, cancellationToken);
+		return (await ReadCoreAsync(payload, source, options ?? SessionRenderOptions.Default, disabled, cancellationToken)).Render();
 	}
 
-	private static async Task<RedactedSession> RenderCoreAsync(
+	private static async Task<ReadSessionTranscript> ReadCoreAsync(
 		Stream payload,
 		SessionSource source,
 		SessionRenderOptions options,
@@ -65,15 +94,8 @@ public static class SessionRenderer
 			SessionFormat.Codex => new CodexTranscript(source, options, report) { RedactionDisabled = disabled },
 			_ => throw new ArgumentException("Unknown session format.", nameof(source)),
 		};
-		try
-		{
-			await JsonlReader.ReadAsync(payload, options.MaxLineBytes, report, transcript.Add, cancellationToken);
-			return transcript.Render();
-		}
-		catch (RedactionException exception)
-		{
-			throw new RedactionException(exception.RuleName, exception.Failure, exception.Part) { ReadReport = report };
-		}
+		await JsonlReader.ReadAsync(payload, options.MaxLineBytes, report, transcript.Add, cancellationToken);
+		return new ReadSessionTranscript(transcript, report);
 	}
 
 	private static void Validate(SessionSource source, SessionRenderOptions options)
@@ -90,6 +112,32 @@ public static class SessionRenderer
 }
 
 /// <summary>The state shared by both formats: time bounds, the message list, and the memory budget.</summary>
+/// <summary>A transcript that has been read and not yet rendered. It holds the session's text, redacted only as far as its metadata.</summary>
+public sealed class ReadSessionTranscript
+{
+	private readonly SessionTranscript _transcript;
+	private readonly SessionReadReport _report;
+
+	internal ReadSessionTranscript(SessionTranscript transcript, SessionReadReport report)
+	{
+		_transcript = transcript;
+		_report = report;
+	}
+
+	/// <summary>Redacts, splits and renders. Slow and memory-hungry on a large session, so bound how many run at once. Call it once.</summary>
+	public RedactedSession Render()
+	{
+		try
+		{
+			return _transcript.Render();
+		}
+		catch (RedactionException exception)
+		{
+			throw new RedactionException(exception.RuleName, exception.Failure, exception.Part) { ReadReport = _report };
+		}
+	}
+}
+
 internal abstract class SessionTranscript(SessionSource source, SessionRenderOptions options, SessionReadReport report)
 {
 	/// <summary>Per-entry overhead charged to the budget, so many tiny entries cannot evade it.</summary>
@@ -98,9 +146,13 @@ internal abstract class SessionTranscript(SessionSource source, SessionRenderOpt
 	/// <summary>Rounds of replacing messages before every remaining message is replaced. Each round's cost is about one redaction per doubling of the message count.</summary>
 	private const int MaxMessageRounds = 8;
 
+	/// <summary>Values longer than this are redacted every time rather than remembered, so a long value cannot be kept twice.</summary>
+	private const int MaxCachedValueChars = 1024;
+
 	private readonly Dictionary<string, string> _redactedMetadata = new(StringComparer.Ordinal);
 	private readonly Dictionary<int, string> _refusedMessages = [];
 	private long _retained;
+	private long _metadataCached;
 	private bool _overBudget;
 
 	/// <summary>Set only through <see cref="SessionRenderer.RenderWithoutRedactionForDisabledCollectionAsync"/>. Null, the normal case, means every value is redacted.</summary>
@@ -111,6 +163,9 @@ internal abstract class SessionTranscript(SessionSource source, SessionRenderOpt
 	protected SessionRenderOptions Options { get; } = options;
 
 	protected SessionReadReport Report { get; } = report;
+
+	/// <summary>What remembering redacted metadata holds now. It has an eighth of the retention budget, because repeated values are the only ones worth remembering.</summary>
+	internal long MetadataCachedChars => _metadataCached;
 
 	protected List<SessionMessage> Messages { get; } = [];
 
@@ -190,8 +245,19 @@ internal abstract class SessionTranscript(SessionSource source, SessionRenderOpt
 			return known;
 		}
 		string redacted = RedactMetadataOrRefuse(value);
-		_redactedMetadata[value] = redacted;
+		Remember(value, redacted);
 		return redacted;
+	}
+
+	/// <summary>Nothing is lost by not remembering: the value is only redacted again next time. So a session of endless distinct values costs time, not memory.</summary>
+	private void Remember(string value, string redacted)
+	{
+		long cost = value.Length + redacted.Length + EntryOverhead;
+		if (value.Length <= MaxCachedValueChars && _metadataCached + cost <= Options.MaxRetainedChars / 8)
+		{
+			_metadataCached += cost;
+			_redactedMetadata[value] = redacted;
+		}
 	}
 
 	/// <summary>A value redaction cannot finish becomes a marker, reported against part 0 because it belongs to the whole session.</summary>
@@ -366,19 +432,7 @@ internal abstract class SessionTranscript(SessionSource source, SessionRenderOpt
 	/// <summary>Asked even with redaction off: a file name is not content, and turning the switch must not move a session's files.</summary>
 	private bool WouldRedactionChange(string value)
 	{
-		if (RedactionDisabled is null)
-		{
-			return RedactMetadata(value) != value;
-		}
-
-		try
-		{
-			return Redactor.Shared.RedactFragment(value).Text != value;
-		}
-		catch (RedactionException)
-		{
-			return true;
-		}
+		return RedactionDisabled is null ? RedactMetadata(value) != value : Redactor.HoldsCredential(value);
 	}
 
 	private string RepairBoundary(SessionMessage message)

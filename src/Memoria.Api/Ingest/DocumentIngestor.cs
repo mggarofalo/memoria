@@ -20,6 +20,8 @@ public sealed class DocumentIngestor(
 	IIngestLedger ledger,
 	IRedactor redactor,
 	IngestRedactionPolicy redaction,
+	IngestGates gates,
+	CollectionReindexer reindexer,
 	ICallerScope scope,
 	IRequestAudit audit,
 	IOptions<MemoriaOptions> options,
@@ -32,23 +34,22 @@ public sealed class DocumentIngestor(
 		string collection = request.Collection!;
 		IngestRules.RequireCollection(scope, collection);
 		audit.SetResult([collection], 0);
+		RequireFits(Encoding.UTF8.GetByteCount(request.Body!), "The body alone");
 
 		DocumentEnvelope envelope = new(request.Source!, request.SourceId!, request.Url, request.Title, request.Updated, request.Project, request.Tags);
 		string path = envelope.StoragePath();
 		RedactionDisabledCollection? disabled = redaction.For(collection);
-		List<EnvelopeFieldRedaction> fields = [];
-		RedactedMarkdown decided = disabled is null
-			? redactor.Redact(envelope.Render(request.Body!, fields))
-			: envelope.RenderWithoutRedactionForDisabledCollection(request.Body!, disabled);
+		string redactionName = IngestRedactionPolicy.NameOf(disabled);
+		(RedactedMarkdown decided, List<EnvelopeFieldRedaction> fields) = await gates.WorkAsync(() => Decide(envelope, request.Body!, disabled), cancellationToken);
 		Dictionary<string, int> counts = new(decided.CountsByRule, StringComparer.Ordinal);
 		fields.ForEach(field => counts[field.Rule] = counts.GetValueOrDefault(field.Rule) + field.Count);
 		IngestRefusal[] refusals = [.. fields.Select(static field => new IngestRefusal(1, field.Field, field.Rule))];
-		string redactionName = IngestRedactionPolicy.NameOf(disabled);
-		RequireFits(decided);
+		RequireFits(Encoding.UTF8.GetByteCount(decided.Text), "A document once rendered");
 
 		string identity = IdentityOf(collection, path);
-		IngestClaim claim = await ledger.ClaimAsync(identity, request.Updated!.Value, timeProvider.GetUtcNow(), cancellationToken);
+		IngestClaim claim = await ledger.ClaimAsync(new IngestClaimRequest(identity, collection, request.Updated!.Value, timeProvider.GetUtcNow(), [path]), cancellationToken);
 		IngestRules.RequireClaim(claim);
+		audit.SetTarget(new AuditIngest("document", redactionName, false, 0, 1, 0, counts.Values.Sum(), refusals.Length, [path]));
 
 		string state = IngestStateName.Partial;
 		try
@@ -56,56 +57,61 @@ public sealed class DocumentIngestor(
 			SidecarIngestResponse response = await sidecar.IngestAsync(new SidecarIngestRequest(collection, path, decided, Overwrite: true), cancellationToken);
 			state = IngestStateName.Complete;
 			audit.SetResult([collection], 1);
-			audit.SetTarget(new AuditIngest("document", redactionName, true, 1, 0, 0, counts.Values.Sum(), refusals.Length));
+			audit.SetTarget(new AuditIngest("document", redactionName, true, 1, 0, 0, counts.Values.Sum(), refusals.Length, [path]));
 			return new DocumentIngestResult(collection, response.Path, response.File, response.Bytes, response.Created, redactionName, counts, refusals, response.Job.Id);
 		}
 		finally
 		{
-			await ledger.FinishAsync(identity, state, [path]);
+			await ledger.FinishAsync(identity, claim.LeaseToken!, collection, state, [path]);
 		}
 	}
 
 	/// <summary>
-	/// Removes a document, then asks for the index update at once: the document stays searchable until the index
-	/// changes, so it must not wait out the debounce. A tombstone goes first, so an older copy replayed later cannot bring it
-	/// back. Safe to retry, including after the file is gone, which is how a failed update is finished.
+	/// Removes a document. An index update follows only when something was removed, or an earlier one is still owed: a deleted document
+	/// stays searchable until the index changes, and each update is a scan that blocks the sidecar. Safe to retry, including after the file is
+	/// gone, which is how a failed update is finished. The ledger is told first, so an older copy replayed later cannot bring it back.
 	/// </summary>
 	public async Task<DocumentDeleteResult> DeleteAsync(string collection, string path, CancellationToken cancellationToken)
 	{
 		IngestRules.RequireCollection(scope, collection);
 		audit.SetResult([collection], 0);
-		if (!await ledger.TombstoneAsync(IdentityOf(collection, path), timeProvider.GetUtcNow(), cancellationToken))
+		audit.SetTarget(new AuditIngest("delete", IngestRedactionPolicy.NameOf(redaction.For(collection)), false, 0, 0, 0, 0, 0, [path]));
+
+		string identity = IdentityOf(collection, path);
+		IngestDeleteGate gate = await ledger.PrepareDeleteAsync(collection, path, identity, timeProvider.GetUtcNow(), cancellationToken);
+		if (gate.Outcome == IngestDeleteOutcome.Busy)
 		{
-			IngestRules.RequireClaim(new IngestClaim(IngestClaimOutcome.Busy, []));
+			IngestRules.RequireClaim(new IngestClaim(IngestClaimOutcome.Busy, [], null, gate.RetryAfterSeconds));
 		}
 
 		SidecarDeleteResponse response = await sidecar.DeleteDocumentAsync(collection, path, cancellationToken);
-		string? reindexJobId = await ReindexNowAsync(collection, cancellationToken);
-		audit.SetResult([collection], response.Deleted ? 1 : 0);
-		audit.SetTarget(new AuditIngest("delete", IngestRedactionPolicy.NameOf(redaction.For(collection)), reindexJobId is not null, 0, 0, response.Deleted ? 1 : 0, 0, 0));
-		return new DocumentDeleteResult(collection, response.Path, response.Deleted, reindexJobId);
+		if (gate.Outcome == IngestDeleteOutcome.NoRecord && response.Deleted)
+		{
+			await ledger.RecordDeletedAsync(identity, timeProvider.GetUtcNow(), cancellationToken);
+		}
+
+		ReindexOutcome reindex = await reindexer.RequestAsync(collection, response.Deleted, cancellationToken);
+		int deleted = response.Deleted ? 1 : 0;
+		audit.SetResult([collection], deleted);
+		audit.SetTarget(new AuditIngest("delete", IngestRedactionPolicy.NameOf(redaction.For(collection)), reindex.State != ReindexState.Failed, 0, 0, deleted, 0, 0, [path]));
+		return new DocumentDeleteResult(collection, response.Path, response.Deleted, reindex.State, reindex.JobId, reindex.StartsInSeconds);
 	}
 
-	/// <summary>Null when the update could not be queued, which the caller reports. The sidecar's own debounced job still stands behind it.</summary>
-	private async Task<string?> ReindexNowAsync(string collection, CancellationToken cancellationToken)
+	private (RedactedMarkdown Decided, List<EnvelopeFieldRedaction> Fields) Decide(DocumentEnvelope envelope, string body, RedactionDisabledCollection? disabled)
 	{
-		try
-		{
-			SidecarJob job = await sidecar.ReindexAsync(new SidecarReindexRequest([collection], Embed: false), cancellationToken);
-			return job.Id;
-		}
-		catch (SidecarException)
-		{
-			return null;
-		}
+		List<EnvelopeFieldRedaction> fields = [];
+		RedactedMarkdown decided = disabled is null
+			? redactor.Redact(envelope.Render(body, fields))
+			: envelope.RenderWithoutRedactionForDisabledCollection(body, disabled);
+		return (decided, fields);
 	}
 
-	private void RequireFits(RedactedMarkdown decided)
+	private void RequireFits(int bytes, string what)
 	{
 		int limit = options.Value.Ingest.MaxDocumentBytes;
-		if (Encoding.UTF8.GetByteCount(decided.Text) > limit)
+		if (bytes > limit)
 		{
-			throw IngestRules.TooLarge($"A document can be at most {limit} bytes once rendered. Split it.");
+			throw IngestRules.TooLarge($"{what} can be at most {limit} bytes. Split it.");
 		}
 	}
 

@@ -217,10 +217,28 @@ configured `TrustedProxies` entry.
 |---|---|---|
 | `MaxDocumentBytes` | `2097152` | The largest stored document, in UTF-8 bytes, at least 64 KiB. Set it to the sidecar's `MEMORIA_QMD_MAX_DOCUMENT_BYTES`. Over it, `POST /v1/documents` answers 413 and a session part fails on its own. The renderer splits a long message to fit. |
 | `MaxSessionBytes` | `268435456` | The largest raw transcript one request may send. It is read as a stream, and past this the request gets 413 or, if the upload has no declared length and the client is still sending, a closed connection. A transcript under this limit whose text passes the renderer's 32 million character budget is stored as far as the budget goes and answered with 207: it stays `partial`, and `read.messagesOverLimit` says how much was left out. |
-| `MaxConcurrentSessions` | `2` | Transcripts rendered at once. One render can hold about 100 MB, so this bounds memory. Past it a caller gets 503 with `Retry-After`. |
+| `MaxConcurrentSessions` | `4` | Transcripts handled at once, from the first byte read to the last part written. Past it a caller gets 503 with `Retry-After`. |
+| `MaxConcurrentSessionsPerKey` | `2` | The most of those one key can hold. |
+| `MaxConcurrentDocuments` | `8` | Documents handled at once. |
+| `MaxConcurrentDocumentsPerKey` | `4` | The most of those one key can hold. |
+| `MaxConcurrentRenders` | `2` | Redactions and renders run at once, for documents and transcripts together. Reading a body does not take one. A transcript that filled the text budget took the API to about 600 MiB of peak working set under a 512 MiB GC limit (`DOTNET_GCHeapHardLimit`), which it survived, so allow for that much memory or set such a limit. |
+| `SessionUploadDeadline` | `00:10:00` | How long a transcript's body may take to arrive. Past it the request gets 408 and nothing changes. |
+| `DocumentUploadDeadline` | `00:01:00` | The same for a document. |
+| `MinReindexInterval` | `00:00:10` | The least time between index updates a delete starts in one collection. A delete with none recently starts one at once, so removing a leaked secret stays immediate. A burst shares one more when the interval ends, so no delete waits longer than this. |
 | `Collections:<name>:Redaction` | not set | Exactly `Disabled` turns redaction off for that collection. See below. |
 
 Writing needs the `ingest` scope and the target collection in the key's allowlist, and is not available when `Memoria:Auth:Mode` is `Disabled`.
+
+### What a session upload promises
+
+- **`202` and `complete` mean all of it.** The transcript had messages and lost none, every part was written, and every old part was dealt with. Anything less answers `207`, stays `partial` in `GET /v1/ingest/session`, and `read` and `parts` say why. A live transcript whose last line is still being written reads as `partial` until it is sent whole.
+- **Fewer messages than the stored copy is refused** with 409 `session_shrank`, whatever its version, because a cut copy looks just like that. Send `allowShrink=true` if the session really did shrink.
+- **A session owns its files.** The ledger records which session owns each path, and a file belonging to another gets 409 `path_owned`. A session whose short id is already taken gets a digest in its file names. A Codex transcript whose `session_meta.id` differs from `sessionId` gets 400.
+- **Old parts are deleted only when they are provably this session's:** the ledger says so, or, for a file from before there was a ledger, the full `session_id` in its frontmatter does. A file that says otherwise is left alone, and one that cannot be read leaves the session `partial`.
+
+### What redaction cannot catch
+
+Rules read text and decode nothing, so a credential that is base64, URL-encoded as a whole, written as literal `\uXXXX` text, or reversed is stored as it came. JSON escapes in the request itself, control characters and unusual spaces inside a token, and a token split by line breaks, content blocks or messages are all caught when the token starts with a recognized prefix.
 
 ### Turning redaction off for a collection
 

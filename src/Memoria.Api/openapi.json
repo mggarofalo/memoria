@@ -1012,7 +1012,7 @@
           "Ingest"
         ],
         "summary": "Store a document",
-        "description": "Renders the envelope to frontmatter, redacts the whole document, and stores it. Redaction cannot be turned off, and a document it cannot finish is refused with 422. `source` and `sourceId` are its identity: sending them again overwrites, and `updated` orders versions, so an older version gets 409. The response counts what was replaced, by rule, with no values. The document becomes searchable when the job finishes. Requires the `ingest` scope.",
+        "description": "Renders the envelope to frontmatter, redacts the whole document, and stores it. No caller can turn redaction off: only an operator can, for a named collection, and `redaction` in the response says which applied. A document redaction cannot finish is refused with 422. `source` and `sourceId` are its identity: sending them again overwrites, and `updated` orders versions, so an older version gets 409. The response counts what was replaced, by rule, with no values. The document becomes searchable when the job finishes. Requires the `ingest` scope.",
         "operationId": "ingestDocument",
         "requestBody": {
           "content": {
@@ -1147,7 +1147,7 @@
           "Ingest"
         ],
         "summary": "Delete a document",
-        "description": "Names a document by `source` and `sourceId`, or by `path` within the collection, and removes it. The index update starts at once, because a deleted document stays searchable until the index changes. It also stops an older version being stored again. Safe to repeat: a missing document answers `deleted: false`. When `reindexJobId` is null the update could not be queued, so repeat the request. Requires the `ingest` scope.",
+        "description": "Names a document by `source` and `sourceId`, or by `path` within the collection, and removes it. A deleted document stays searchable until the index changes, so an update starts at once, or within `reindexInSeconds` when one just ran in this collection: `reindexState` says which. It also stops an older copy being stored again. Safe to repeat: a missing document answers `deleted: false` and costs no update. When `reindexState` is `failed`, repeat the request. Requires the `ingest` scope.",
         "operationId": "deleteDocument",
         "parameters": [
           {
@@ -1288,7 +1288,7 @@
           "Ingest"
         ],
         "summary": "Store a raw session transcript",
-        "description": "The body is the raw JSONL of a Claude Code or Codex session, read as a stream. It is rendered and redacted here into one or more parts. 202 means every part arrived. 207 means some did not: `parts` says which, the session stays `partial`, and when `retryable` is true sending the same upload again finishes it. An older version than the one stored gets 409, as does a second upload of the session while one is running. Parts a shrunken session no longer has are deleted last. Requires the `ingest` scope.",
+        "description": "The body is the raw JSONL of a Claude Code or Codex session, read as a stream. It is rendered and redacted here into one or more parts. 202 means every part arrived. 207 means not all of it is stored: `parts` and `read` say why, the session stays `partial`, and when `retryable` is true sending the same upload again finishes it. A transcript with no messages, or that lost any, is never 202. An older version than the one stored gets 409, as does a second upload of the session while one is running, a file belonging to another session, and fewer messages than the one stored unless `allowShrink` is set. Parts a shrunken session no longer has are deleted last, and only when they are provably this session's. Requires the `ingest` scope.",
         "operationId": "ingestSession",
         "parameters": [
           {
@@ -1321,6 +1321,14 @@
             "description": "The Claude Code project folder the transcript was in. Tells apart two copies of one session.",
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "allowShrink",
+            "in": "query",
+            "description": "Set when the session really did lose messages. Without it, an upload with fewer messages than the stored one is refused, as it looks just like a cut copy.",
+            "schema": {
+              "type": "boolean"
             }
           },
           {
@@ -1509,6 +1517,14 @@
             "description": "The Claude Code project folder the transcript was in. Tells apart two copies of one session.",
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "allowShrink",
+            "in": "query",
+            "description": "Set when the session really did lose messages. Without it, an upload with fewer messages than the stored one is refused, as it looks just like a cut copy.",
+            "schema": {
+              "type": "boolean"
             }
           }
         ],
@@ -1829,7 +1845,7 @@
           "collection",
           "path",
           "deleted",
-          "reindexJobId"
+          "reindexState"
         ],
         "type": "object",
         "properties": {
@@ -1842,8 +1858,16 @@
           "deleted": {
             "type": "boolean"
           },
+          "reindexState": {
+            "type": "string"
+          },
           "reindexJobId": {
             "type": "string",
+            "nullable": true
+          },
+          "reindexInSeconds": {
+            "type": "integer",
+            "format": "int32",
             "nullable": true
           }
         }
@@ -2417,7 +2441,8 @@
           "refusalCount",
           "read",
           "jobId",
-          "reindexJobId"
+          "reindexJobId",
+          "reindexState"
         ],
         "type": "object",
         "properties": {
@@ -2475,6 +2500,9 @@
           "reindexJobId": {
             "type": "string",
             "nullable": true
+          },
+          "reindexState": {
+            "type": "string"
           }
         }
       },

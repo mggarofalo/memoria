@@ -115,6 +115,13 @@ public sealed class SessionReadReport
 	/// <summary>Touched-file entries dropped once <see cref="SessionRenderOptions.MaxRetainedChars"/> was reached.</summary>
 	public long FilesOverLimit { get; internal set; }
 
+	/// <summary>
+	/// True when transcript content did not make it: lines not read, or messages left out. What is stored is then not the whole session.
+	/// Unlike <see cref="HasSkippedContent"/> this leaves out frontmatter lists cut to fit, as the messages behind them are all kept.
+	/// </summary>
+	public bool HasLostContent =>
+		MalformedLines + NonObjectLines + OversizedLines + UnterminatedLines + InvalidKeys + MessagesOverLimit + FilesOverLimit > 0;
+
 	/// <summary>True when input was lost: anything other than routine, unrendered record types.</summary>
 	public bool HasSkippedContent =>
 		MalformedLines + NonObjectLines + OversizedLines + UnterminatedLines + InvalidKeys + MessagesOverLimit + FilesOverLimit + FilesTruncated + TurnIdsTruncated > 0;
@@ -143,6 +150,7 @@ public sealed record SessionFieldRefusal(int Part, string Field, string Rule);
 public sealed class RedactedSession
 {
 	private readonly Func<string, bool> _isInSessionFamily;
+	private readonly SessionPathing _pathing;
 
 	internal RedactedSession(
 		SessionFormat format,
@@ -152,9 +160,10 @@ public sealed class RedactedSession
 		IReadOnlyDictionary<string, int> countsByRule,
 		IReadOnlyList<SessionFieldRefusal> refusals,
 		Func<string, bool> isInSessionFamily,
-		string existingPathsGlob)
+		SessionPathing pathing)
 	{
-		ExistingPathsGlob = existingPathsGlob;
+		_pathing = pathing;
+		ExistingPathsGlob = pathing.Glob;
 		Format = format;
 		SessionId = sessionId;
 		Documents = documents;
@@ -165,6 +174,18 @@ public sealed class RedactedSession
 	}
 
 	public SessionFormat Format { get; }
+
+	/// <summary>
+	/// What this session's paths are made from, for keying anything that orders or locks them. Two uploads share this exactly
+	/// when they are the same session, whatever else they say. Holds raw ids, so digest it before storing it.
+	/// </summary>
+	public string PathIdentity => _pathing.Identity;
+
+	/// <summary>The short part of the file names, which another session can share. Goes with <see cref="ExistingPathsGlob"/>.</summary>
+	public string PathStem => _pathing.Stem;
+
+	/// <summary>True when the transcript names a different session from the one the caller said. Its parts would land on the other session's files, so refuse it.</summary>
+	public bool NamesAnotherSession => _pathing.NamesAnotherSession;
 
 	/// <summary>A glob matching at least every path of this session, for listing what exists. Filter what it finds with <see cref="IsSupersededPath"/>.</summary>
 	public string ExistingPathsGlob { get; }
@@ -189,8 +210,38 @@ public sealed class RedactedSession
 	/// </summary>
 	public bool IsSupersededPath(string existingPath)
 	{
-		ArgumentNullException.ThrowIfNull(existingPath);
-		return _isInSessionFamily(existingPath)
+		return IsInPathFamily(existingPath)
 			&& !Documents.Any(document => string.Equals(document.Path, existingPath, StringComparison.Ordinal));
+	}
+
+	/// <summary>True when a path has the shape of this session's. Only the shape: another session whose id starts alike has the same one, so check who owns it before deleting or overwriting.</summary>
+	public bool IsInPathFamily(string existingPath)
+	{
+		ArgumentNullException.ThrowIfNull(existingPath);
+		return _isInSessionFamily(existingPath);
+	}
+
+	/// <summary>True when the start of a stored document says it is this session, by its full id. A document with no id says no.</summary>
+	public bool HeadNamesThisSession(string documentHead)
+	{
+		ArgumentNullException.ThrowIfNull(documentHead);
+		return string.Equals(SessionFrontmatter.ReadSessionId(documentHead), SessionId, StringComparison.Ordinal);
+	}
+
+	/// <summary>The same session under paths carrying a digest of its id, for when another session already has its short stem.</summary>
+	public RedactedSession WithDistinctPaths()
+	{
+		SessionPathing distinct = _pathing.Distinct();
+		RedactedSessionDocument[] documents = [.. Documents.Select(document => document with { Path = SessionPaths.ReplaceStem(document.Path, _pathing.Stem, distinct.Stem) })];
+		return new RedactedSession(Format, SessionId, documents, Report, CountsByRule, Refusals, distinct.IsFamily, distinct);
+	}
+}
+
+/// <summary>How one session's paths are built, kept together so everything that decides who owns a path agrees.</summary>
+internal sealed record SessionPathing(string Identity, string Stem, string Glob, Func<string, bool> IsFamily, Func<string, SessionPathing> WithStem, string FullId, bool NamesAnotherSession = false)
+{
+	public SessionPathing Distinct()
+	{
+		return WithStem($"{Stem}-{SessionPaths.Digest(FullId)}");
 	}
 }

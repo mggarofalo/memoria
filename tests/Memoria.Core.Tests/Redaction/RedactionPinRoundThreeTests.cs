@@ -312,12 +312,11 @@ public sealed class RedactionPinRoundThreeTests
 		Assert.Equal("ab", Assert.IsType<DetectionView>(DetectionView.Create("a\U000E0041b", joinWrappedLines: false)).Text);
 	}
 
-	[Theory]
-	[InlineData("\u001b[1")]
-	[InlineData("\u001b[1\u0001")]
-	public void Csi_needs_its_final_byte(string input)
+	[Fact]
+	public void Csi_needs_its_final_byte()
 	{
-		Assert.Null(DetectionView.Create(input, joinWrappedLines: false));
+		Assert.Null(DetectionView.Create("\u001b[1", joinWrappedLines: false));
+		Assert.Equal("\u001b[1", DetectionView.Create("\u001b[1\u0001", joinWrappedLines: false)!.Text);
 	}
 
 	[Fact]

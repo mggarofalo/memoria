@@ -31,6 +31,7 @@ public class MemoriaApiFactory : WebApplicationFactory<Program>
 		builder.UseSetting("Memoria:Sidecar:ReadinessTimeout", "00:00:01");
 		builder.UseSetting("Memoria:Search:MaxLimit", "50");
 		builder.UseSetting("Memoria:Search:DefaultLimit", "10");
+		builder.UseSetting("Memoria:Ingest:MinReindexInterval", "00:00:00");
 		builder.UseSetting("Logging:LogLevel:Default", "Debug");
 		ConfigureAuth(builder);
 

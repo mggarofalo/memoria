@@ -17,6 +17,8 @@ internal sealed partial class CodexTranscript : SessionTranscript
 	private string _sessionId;
 	private string _pathId;
 	private string _rootThreadId = "";
+	private readonly string _namedId;
+	private bool _namesAnother;
 	private string _parentThreadId = "";
 	private string _forkedFromId = "";
 	private string _agentPath = "";
@@ -30,6 +32,7 @@ internal sealed partial class CodexTranscript : SessionTranscript
 	{
 		Match uuid = UuidPattern().Match(source.SessionId);
 		string id = uuid.Success ? uuid.Value : source.SessionId;
+		_namedId = id;
 		_sessionId = Clip(id);
 		_pathId = PathId(id);
 	}
@@ -54,6 +57,7 @@ internal sealed partial class CodexTranscript : SessionTranscript
 	{
 		RedactMessages();
 		string safeId = SessionPaths.SafeSegment(_pathId);
+		SessionPathing pathing = Pathing(safeId);
 		string project = SessionProject.FromCodexCwd(_cwd, Source.HomeDirectory);
 		List<RedactedSessionDocument> documents = BuildDocuments(
 			SplitIntoParts(),
@@ -66,8 +70,13 @@ internal sealed partial class CodexTranscript : SessionTranscript
 			Report,
 			CountsByRule,
 			Refusals,
-			path => SessionPaths.IsCodexFamily(path, safeId),
-			SessionPaths.CodexGlob(safeId));
+			pathing.IsFamily,
+			pathing);
+	}
+
+	private SessionPathing Pathing(string stem)
+	{
+		return new SessionPathing($"codex\0{_namedId}", stem, SessionPaths.CodexGlob(stem), path => SessionPaths.IsCodexFamily(path, stem), Pathing, _namedId, _namesAnother);
 	}
 
 	private void Apply(string type, JsonElement payload, SessionTimestamp? time)
@@ -95,6 +104,7 @@ internal sealed partial class CodexTranscript : SessionTranscript
 	private void ApplyMeta(JsonElement payload)
 	{
 		string? rawId = JsonValues.String(payload, "id", Report);
+		_namesAnother |= !string.IsNullOrEmpty(rawId) && !string.Equals(rawId, _namedId, StringComparison.Ordinal);
 		_pathId = string.IsNullOrEmpty(rawId) ? _pathId : PathId(rawId);
 		_sessionId = MetaOr(payload, "id", _sessionId);
 		_rootThreadId = MetaOr(payload, "session_id", _sessionId);

@@ -34,6 +34,7 @@ public sealed partial class MemoriaExceptionHandler(IProblemDetailsService probl
 			IngestRefusedException refused => FromRefusal(refused),
 			RedactionException redaction => FromRedaction(redaction),
 			BadHttpRequestException { StatusCode: StatusCodes.Status413PayloadTooLarge } => FromRefusal(new IngestRefusedException(StatusCodes.Status413PayloadTooLarge, "payload_too_large", "The request body is too large.")),
+			BadHttpRequestException bad => FromRefusal(new IngestRefusedException(bad.StatusCode, "bad_request_body", "The request body could not be read.")),
 			_ => null,
 		};
 

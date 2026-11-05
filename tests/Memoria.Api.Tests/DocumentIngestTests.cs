@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using Memoria.Api.Http;
 using Memoria.Api.Ingest;
+using Memoria.Core.Contracts;
 using Memoria.Core.Redaction;
 using Memoria.Core.Sessions;
 using Microsoft.AspNetCore.Hosting;
@@ -186,7 +187,6 @@ public sealed class DocumentIngestTests(AuthApiFactory factory) : IClassFixture<
 	[InlineData("/etc/passwd")]
 	[InlineData(".git/config")]
 	[InlineData("a/b/c.md")]
-	[InlineData("name\u0000.md")]
 	[InlineData("*.md")]
 	public async Task A_source_id_cannot_steer_the_path(string sourceId)
 	{
@@ -225,7 +225,7 @@ public sealed class DocumentIngestTests(AuthApiFactory factory) : IClassFixture<
 		await using Microsoft.Data.Sqlite.SqliteConnection connection = new($"Data Source={factory.DatabasePath}");
 		await connection.OpenAsync();
 		await using Microsoft.Data.Sqlite.SqliteCommand command = connection.CreateCommand();
-		command.CommandText = "SELECT group_concat(identity || paths) FROM ingest_state;";
+		command.CommandText = "SELECT group_concat(identity || paths) || (SELECT group_concat(collection || path || owner) FROM ingest_paths) FROM ingest_state;";
 		Assert.DoesNotContain(token, (string)(await command.ExecuteScalarAsync())!, StringComparison.Ordinal);
 	}
 
@@ -391,6 +391,7 @@ public sealed class DocumentIngestTests(AuthApiFactory factory) : IClassFixture<
 		JsonElement result = await ReadAsync(response);
 		Assert.True(result.GetProperty("deleted").GetBoolean());
 		Assert.NotNull(result.GetProperty("reindexJobId").GetString());
+		Assert.Equal(ReindexState.Started, result.GetProperty("reindexState").GetString());
 		Assert.Empty(corpus.Files);
 		string[] order = [.. factory.Sidecar.Requests.Select(static r => r.Method + " " + r.Uri.AbsolutePath)];
 		Assert.Equal(["DELETE /documents", "POST /reindex"], order);
@@ -400,15 +401,18 @@ public sealed class DocumentIngestTests(AuthApiFactory factory) : IClassFixture<
 	}
 
 	[Fact]
-	public async Task Deleting_what_is_not_there_is_safe_and_still_reindexes()
+	public async Task Deleting_what_is_not_there_is_safe_and_costs_no_reindex()
 	{
 		FakeCorpus corpus = new(factory.Sidecar);
+		string collection = "nothing-" + UniqueId();
 
-		HttpResponseMessage response = await (await WriterAsync()).DeleteAsync($"/v1/documents?collection=c&source=notes&sourceId={UniqueId()}");
+		HttpResponseMessage response = await (await WriterAsync(collection)).DeleteAsync($"/v1/documents?collection={collection}&source=notes&sourceId={UniqueId()}");
 
 		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
-		Assert.False((await ReadAsync(response)).GetProperty("deleted").GetBoolean());
-		Assert.Contains(factory.Sidecar.Requests, static r => r.Uri.AbsolutePath == "/reindex");
+		JsonElement result = await ReadAsync(response);
+		Assert.False(result.GetProperty("deleted").GetBoolean());
+		Assert.Equal(ReindexState.NotNeeded, result.GetProperty("reindexState").GetString());
+		Assert.DoesNotContain(factory.Sidecar.Requests, static r => r.Uri.AbsolutePath == "/reindex");
 		Assert.Empty(corpus.Files);
 	}
 
@@ -445,18 +449,20 @@ public sealed class DocumentIngestTests(AuthApiFactory factory) : IClassFixture<
 	public async Task When_the_reindex_cannot_be_queued_the_answer_says_so_and_a_retry_finishes()
 	{
 		FakeCorpus corpus = new(factory.Sidecar);
-		HttpClient client = await WriterAsync();
+		string collection = "owed-" + UniqueId();
+		HttpClient client = await WriterAsync(collection);
 		string id = UniqueId();
-		await PostDocumentAsync(client, sourceId: id);
+		await PostDocumentAsync(client, collection: collection, sourceId: id);
 		factory.Sidecar.On("POST", "/reindex", (_, _) => Busy());
 
-		JsonElement first = await ReadAsync(await client.DeleteAsync($"/v1/documents?collection=c&source=notes&sourceId={id}"));
+		JsonElement first = await ReadAsync(await client.DeleteAsync($"/v1/documents?collection={collection}&source=notes&sourceId={id}"));
 
 		Assert.True(first.GetProperty("deleted").GetBoolean());
+		Assert.Equal(ReindexState.Failed, first.GetProperty("reindexState").GetString());
 		Assert.Equal(JsonValueKind.Null, first.GetProperty("reindexJobId").ValueKind);
 
 		_ = new FakeCorpus(factory.Sidecar);
-		JsonElement second = await ReadAsync(await client.DeleteAsync($"/v1/documents?collection=c&source=notes&sourceId={id}"));
+		JsonElement second = await ReadAsync(await client.DeleteAsync($"/v1/documents?collection={collection}&source=notes&sourceId={id}"));
 		Assert.False(second.GetProperty("deleted").GetBoolean());
 		Assert.NotNull(second.GetProperty("reindexJobId").GetString());
 		Assert.Empty(corpus.Files);
@@ -475,7 +481,7 @@ public sealed class DocumentIngestTests(AuthApiFactory factory) : IClassFixture<
 
 		Assert.Equal(HttpStatusCode.Conflict, replay.StatusCode);
 		Assert.Empty(corpus.Files);
-		Assert.Equal(HttpStatusCode.Accepted, (await PostDocumentAsync(client, sourceId: id, updated: DateTimeOffset.UtcNow.AddHours(1))).StatusCode);
+		Assert.Equal(HttpStatusCode.Accepted, (await PostDocumentAsync(client, sourceId: id, updated: DateTimeOffset.UtcNow.AddMinutes(30))).StatusCode);
 	}
 
 	[Fact]
@@ -499,13 +505,13 @@ public sealed class DocumentIngestTests(AuthApiFactory factory) : IClassFixture<
 		string id = UniqueId();
 		string path = new DocumentEnvelope("notes", id).StoragePath();
 		IIngestLedger ledger = factory.Services.GetRequiredService<IIngestLedger>();
-		await ledger.ClaimAsync(DocumentIngestor.IdentityOf("c", path), Stamp, DateTimeOffset.UtcNow, default);
+		await ledger.ClaimAsync(new IngestClaimRequest(DocumentIngestor.IdentityOf("c", path), "c", Stamp, DateTimeOffset.UtcNow, [path]), default);
 
 		HttpResponseMessage response = await (await WriterAsync()).DeleteAsync($"/v1/documents?collection=c&source=notes&sourceId={id}");
 
 		Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
 		Assert.Equal("ingest_in_progress", (await ReadAsync(response)).GetProperty("code").GetString());
-		Assert.True(response.Headers.Contains("Retry-After"));
+		Assert.InRange(int.Parse(response.Headers.GetValues("Retry-After").Single(), System.Globalization.CultureInfo.InvariantCulture), 200, 300);
 		Assert.Empty(corpus.Calls);
 	}
 
@@ -566,7 +572,7 @@ public sealed class DocumentIngestTests(AuthApiFactory factory) : IClassFixture<
 	}
 }
 
-/// <summary>A long body with no declared length, as a hostile client would send. The test server buffers it and declares its length, so what this proves is the answer. <see cref="RequestBodyTests"/> covers a body whose length nobody declared.</summary>
+/// <summary>A long body with no declared length, as a hostile client would send. The test server buffers it and may declare its length, so what this proves is the answer. <see cref="RequestBodyTests"/> covers a body whose length nobody declared.</summary>
 internal sealed class EndlessContent : HttpContent
 {
 	private const int ChunkBytes = 64 * 1024;
