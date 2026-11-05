@@ -176,7 +176,7 @@ function readCount(value: unknown, fallback: number, name: string, min: number, 
 /** Text from examples and templates, which someone may well have pasted in as it stood. */
 const PLACEHOLDERS = ["a-long-random", "at-least-16", "changeme", "change-me", "replace-me", "replaceme", "placeholder", "your-secret", "yoursecret", "example", "password"];
 const MIN_SECRET_LENGTH = 16;
-// Of the secret as written. Folding case first, with 8, refused about 1 random 16-character secret in 100,000.
+// Of the secret as written. Folding case first, with 8, refused about 1 random 16-character secret in 40,000.
 const MIN_DISTINCT_CHARACTERS = 6;
 const KEYBOARD_ROWS = ["1234567890", "qwertyuiop", "asdfghjkl", "zxcvbnm"];
 const MIN_RUN = 4;
