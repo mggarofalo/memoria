@@ -3,7 +3,7 @@
   "testRunner": "tap",
   "tap": {
     "testFiles": ["sidecar/test/**/*.test.ts"],
-    "nodeArgs": ["--test-reporter=tap", "-r", "{{hookFile}}", "{{testFile}}"]
+    "nodeArgs": ["--max-old-space-size=512", "--test-reporter=tap", "-r", "{{hookFile}}", "{{testFile}}"]
   },
   "coverageAnalysis": "perTest",
   "mutate": ["sidecar/src/**/*.ts", "!sidecar/src/secret-file.ts"],

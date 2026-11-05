@@ -69,8 +69,9 @@ jobs:
   node:
     name: Mutation (${{ matrix.package }})
     runs-on: ubuntu-latest
-    # A full worker run took longer than 45 minutes on a hosted runner.
-    timeout-minutes: 120
+    # A full run takes hours on a hosted runner. A pull request stops itself at 50
+    # minutes and reports inconclusive; see scripts/mutation-js.sh.
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 60 || 240 }}
     strategy:
       fail-fast: false
       matrix:
@@ -93,6 +94,8 @@ jobs:
           npm ci --no-fund --no-audit --prefix ${{ matrix.package }}
       - name: Mutate
         run: sh scripts/mutation-js.sh ${{ matrix.package }}
+        env:
+          MUTATION_LIMIT_MINUTES: ${{ github.event_name == 'pull_request' && '50' || '' }}
       - name: Upload report
         if: ${{ !cancelled() && github.event_name != 'pull_request' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
