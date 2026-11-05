@@ -189,6 +189,9 @@ public static class IngestStateName
 
 	public const string Complete = "complete";
 
+	/// <summary>A rendered document whose session has since been uploaded, and now owns its path.</summary>
+	public const string TakenOver = "taken_over";
+
 	/// <summary>Deleted. Only a newer version can bring it back.</summary>
 	public const string Deleted = "deleted";
 }

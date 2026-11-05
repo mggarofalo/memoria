@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.RegularExpressions;
 using Memoria.Core.Contracts;
 using Memoria.Core.Redaction;
@@ -20,6 +21,48 @@ public static partial class RenderedDocument
 		ArgumentNullException.ThrowIfNull(disabled);
 		return RedactedMarkdown.PassThroughForDisabledCollection(ForRedaction(text), disabled);
 	}
+
+	/// <summary>The session a rendered document says it belongs to, wherever in its frontmatter that is, as the session can take the document over even when the sidecar cannot read the block.</summary>
+	public static string? SessionIdOf(string text)
+	{
+		Match found = SessionIdField().Match(FrontmatterBlock(text));
+		return found.Success ? found.Groups[1].Value : null;
+	}
+
+	/// <summary>How many of its session's messages come up to the end of this document. A later copy with fewer has lost some. Null when it does not say.</summary>
+	public static long? MessagesThroughOf(string text)
+	{
+		string block = FrontmatterBlock(text);
+		Match end = MessageEndField().Match(block);
+		if (end.Success)
+		{
+			return long.Parse(end.Groups[1].ValueSpan, CultureInfo.InvariantCulture) + 1;
+		}
+
+		Match count = MessageCountField().Match(block);
+		return count.Success ? long.Parse(count.Groups[1].ValueSpan, CultureInfo.InvariantCulture) : null;
+	}
+
+	private static string FrontmatterBlock(string text)
+	{
+		string body = text.StartsWith('﻿') ? text[1..] : text;
+		if (!body.StartsWith("---\n", StringComparison.Ordinal) && !body.StartsWith("---\r\n", StringComparison.Ordinal))
+		{
+			return "";
+		}
+
+		Match close = ClosingFence().Match(body);
+		return close.Success ? body[..close.Index] : "";
+	}
+
+	[GeneratedRegex(@"^session_id:[ \t]*""?([^""\r\n]+?)""?[ \t]*\r?$", RegexOptions.Multiline, 1000)]
+	private static partial Regex SessionIdField();
+
+	[GeneratedRegex(@"^message_end:[ \t]*(\d{1,18})[ \t]*\r?$", RegexOptions.Multiline, 1000)]
+	private static partial Regex MessageEndField();
+
+	[GeneratedRegex(@"^message_count:[ \t]*(\d{1,18})[ \t]*\r?$", RegexOptions.Multiline, 1000)]
+	private static partial Regex MessageCountField();
 
 	/// <summary>The sidecar is what decides, as it reads the same window here as in a rescan. This only says why, when it found nothing.</summary>
 	public static string FrontmatterOf(string text, bool read)

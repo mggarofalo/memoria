@@ -87,7 +87,7 @@ public sealed class DocumentIngestor(
 		RequireFits(Encoding.UTF8.GetByteCount(decided.Text), "A document once redacted");
 
 		string identity = IdentityOf(collection, path);
-		IngestClaimRequest claiming = new(identity, collection, updated, timeProvider.GetUtcNow(), [path], ContentHash: digests.Of(decided.Text), IsSameContent: stored => digests.Matches(stored, decided.Text));
+		IngestClaimRequest claiming = new(identity, collection, updated, timeProvider.GetUtcNow(), [path], Lookup: RenderedDocument.SessionIdOf(decided.Text) is { } sessionId ? IngestIdentity.ForRenderedSession(collection, sessionId) : null, MessageCount: RenderedDocument.MessagesThroughOf(decided.Text), ContentHash: digests.Of(decided.Text), IsSameContent: stored => digests.Matches(stored, decided.Text));
 		IngestClaim claim = await ledger.ClaimAsync(claiming, cancellationToken);
 		IngestRules.RequireClaim(claim);
 		int redactions = decided.CountsByRule.Values.Sum();

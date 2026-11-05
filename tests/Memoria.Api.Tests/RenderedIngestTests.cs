@@ -227,6 +227,162 @@ public sealed class RenderedIngestTests(AuthApiFactory factory) : IClassFixture<
 		Assert.Empty(corpus.Calls);
 	}
 
+	private static string RenderedPart(string sessionId, string word, int through)
+	{
+		return $"---\nsession_id: \"{sessionId}\"\nmessage_end: {through}\n---\n\n## User\n\n{word}\n";
+	}
+
+	[Fact]
+	public async Task A_session_takes_over_its_migrated_documents_and_no_message_stays_twice()
+	{
+		FakeCorpus corpus = new(factory.Sidecar);
+		HttpClient client = await WriterAsync();
+		string id = Guid.NewGuid().ToString();
+		string same = $"2026-01-15_{id[..8]}.md", other = $"2026-01-15_{id[..8]}_part-009.md";
+		await PostAsync(client, same, RenderedPart(id, "oldfirst", 0));
+		await PostAsync(client, other, RenderedPart(id, "oldsecond", 1));
+
+		HttpResponseMessage session = await PostSessionAsync(client, ClaudeLine("user", "newfirst") + ClaudeLine("assistant", "newsecond", 1), sessionId: id, updated: Stamp.AddHours(1));
+
+		Assert.Equal(HttpStatusCode.Accepted, session.StatusCode);
+		Assert.Contains(other, (await ReadAsync(session)).GetProperty("superseded").GetProperty("deleted").EnumerateArray().Select(static path => path.GetString()));
+		string stored = Assert.Single(corpus.Files).Value;
+		Assert.Contains("newfirst", stored, StringComparison.Ordinal);
+		Assert.DoesNotContain("oldfirst", stored, StringComparison.Ordinal);
+		Assert.DoesNotContain(corpus.Files.Keys, static path => path.Contains("part-009", StringComparison.Ordinal));
+	}
+
+	[Fact]
+	public async Task A_failed_takeover_loses_nothing_and_the_next_upload_finishes_it()
+	{
+		FakeCorpus corpus = new(factory.Sidecar);
+		HttpClient client = await WriterAsync();
+		string id = Guid.NewGuid().ToString();
+		string other = $"2026-01-15_{id[..8]}_part-009.md";
+		await PostAsync(client, other, RenderedPart(id, "oldsecond", 0));
+		corpus.OnWrite = static _ => Busy();
+
+		HttpResponseMessage failed = await PostSessionAsync(client, ClaudeLine("user", "x"), sessionId: id, updated: Stamp.AddHours(1));
+
+		Assert.Equal((HttpStatusCode)207, failed.StatusCode);
+		Assert.True(corpus.Files.ContainsKey(other), "the old document stays until every part has arrived");
+		corpus.OnWrite = static _ => null;
+		Assert.Equal(HttpStatusCode.Accepted, (await PostSessionAsync(client, ClaudeLine("user", "x"), sessionId: id, updated: Stamp.AddHours(1))).StatusCode);
+		Assert.False(corpus.Files.ContainsKey(other));
+	}
+
+	[Fact]
+	public async Task A_cut_copy_cannot_replace_what_the_migrated_documents_hold()
+	{
+		FakeCorpus corpus = new(factory.Sidecar);
+		HttpClient client = await WriterAsync();
+		string id = Guid.NewGuid().ToString();
+		string path = $"2026-01-15_{id[..8]}.md";
+		await PostAsync(client, path, RenderedPart(id, "themigratedtext", 5));
+
+		HttpResponseMessage cut = await PostSessionAsync(client, ClaudeLine("user", "only one"), sessionId: id, updated: Stamp.AddHours(1));
+		HttpResponseMessage whole = await PostSessionAsync(client, string.Concat(Enumerable.Range(0, 6).Select(static n => ClaudeLine(n % 2 == 0 ? "user" : "assistant", $"m{n}", n))), sessionId: id, updated: Stamp.AddHours(1));
+
+		Assert.Equal("session_shrank", (await ReadAsync(cut)).GetProperty("code").GetString());
+		Assert.Equal(HttpStatusCode.Accepted, whole.StatusCode);
+		Assert.Contains("m5", corpus.Files[path], StringComparison.Ordinal);
+	}
+
+	[Fact]
+	public async Task A_copy_older_than_the_migrated_document_is_refused()
+	{
+		_ = new FakeCorpus(factory.Sidecar);
+		HttpClient client = await WriterAsync();
+		string id = Guid.NewGuid().ToString();
+		await PostAsync(client, $"2026-01-15_{id[..8]}.md", RenderedPart(id, "x", 0));
+
+		HttpResponseMessage older = await PostSessionAsync(client, ClaudeLine("user", "x"), sessionId: id, updated: Stamp.AddDays(-1));
+
+		Assert.Equal("stale_version", (await ReadAsync(older)).GetProperty("code").GetString());
+	}
+
+	[Fact]
+	public async Task A_deleted_path_stays_deleted_when_its_session_arrives()
+	{
+		FakeCorpus corpus = new(factory.Sidecar);
+		HttpClient client = await WriterAsync();
+		string id = Guid.NewGuid().ToString();
+		string path = $"2026-01-15_{id[..8]}.md";
+		await PostAsync(client, path, RenderedPart(id, "holds a credential", 0));
+		await client.DeleteAsync($"/v1/documents?collection=c&path={path}");
+
+		JsonElement session = await ReadAsync(await PostSessionAsync(client, ClaudeLine("user", "holds a credential"), sessionId: id, updated: DateTimeOffset.UtcNow.AddMinutes(30)));
+
+		Assert.Equal([SessionPartState.Deleted], States(session));
+		Assert.Empty(corpus.Files);
+	}
+
+	[Theory]
+	[InlineData(true)]
+	[InlineData(false)]
+	public async Task A_document_naming_no_session_or_another_is_not_taken_over(bool namesAnother)
+	{
+		FakeCorpus corpus = new(factory.Sidecar);
+		HttpClient client = await WriterAsync();
+		string id = Guid.NewGuid().ToString();
+		string path = $"2026-01-15_{id[..8]}.md";
+		string text = namesAnother ? RenderedPart(Guid.NewGuid().ToString(), "someone else", 0) : "---\ntitle: \"none\"\n---\n\nsomeone else\n";
+		await PostAsync(client, path, text);
+
+		HttpResponseMessage session = await PostSessionAsync(client, ClaudeLine("user", "x"), sessionId: id, updated: Stamp.AddHours(1));
+
+		Assert.Equal("path_owned", (await ReadAsync(session)).GetProperty("code").GetString());
+		Assert.Equal(text, corpus.Files[path]);
+	}
+
+	[Fact]
+	public async Task After_a_takeover_the_session_owns_the_path_and_a_rendered_copy_is_refused()
+	{
+		FakeCorpus corpus = new(factory.Sidecar);
+		HttpClient client = await factory.ClientWithScopesAsync([MemoriaScopes.Ingest, MemoriaScopes.Read], ["c"]);
+		string id = Guid.NewGuid().ToString();
+		string path = $"2026-01-15_{id[..8]}.md";
+		await PostAsync(client, path, RenderedPart(id, "oldword", 0));
+		await PostSessionAsync(client, ClaudeLine("user", "newword"), sessionId: id, updated: Stamp.AddHours(1));
+
+		HttpResponseMessage again = await PostAsync(client, path, RenderedPart(id, "oldword", 0), updated: Stamp.AddHours(2));
+		JsonElement status = await ReadAsync(await client.GetAsync($"/v1/ingest/rendered?collection=c&path={path}"));
+		HttpResponseMessage resumed = await PostSessionAsync(client, ClaudeLine("user", "newword") + ClaudeLine("assistant", "resumed", 1), sessionId: id, updated: Stamp.AddHours(3));
+
+		Assert.Equal("path_owned", (await ReadAsync(again)).GetProperty("code").GetString());
+		Assert.Equal(IngestStateName.TakenOver, status.GetProperty("state").GetString());
+		Assert.Equal(HttpStatusCode.Accepted, resumed.StatusCode);
+		Assert.Contains("resumed", corpus.Files[path], StringComparison.Ordinal);
+	}
+
+	[Fact]
+	public async Task A_session_waits_for_a_rendered_write_still_running()
+	{
+		_ = new FakeCorpus(factory.Sidecar);
+		string id = Guid.NewGuid().ToString();
+		string path = $"2026-01-15_{id[..8]}.md";
+		IngestClaimRequest running = new(DocumentIngestor.IdentityOf("c", path), "c", Stamp, DateTimeOffset.UtcNow, [path], Lookup: IngestIdentity.ForRenderedSession("c", id));
+		await factory.Services.GetRequiredService<IIngestLedger>().ClaimAsync(running, default);
+
+		HttpResponseMessage session = await PostSessionAsync(await WriterAsync(), ClaudeLine("user", "x"), sessionId: id, updated: Stamp.AddHours(1));
+
+		Assert.Equal("ingest_in_progress", (await ReadAsync(session)).GetProperty("code").GetString());
+	}
+
+	[Fact]
+	public void A_session_and_how_far_a_document_reaches_are_read_from_its_frontmatter_alone()
+	{
+		Assert.Equal("abc", RenderedDocument.SessionIdOf("---\nsession_id: \"abc\"\n---\n\nbody\n"));
+		Assert.Equal("abc", RenderedDocument.SessionIdOf("﻿---\r\nsession_id: abc\r\n---\r\n"));
+		Assert.Null(RenderedDocument.SessionIdOf("---\ntitle: x\n---\n\nsession_id: \"not this\"\n"));
+		Assert.Null(RenderedDocument.SessionIdOf("session_id: \"no block\"\n"));
+		Assert.Null(RenderedDocument.SessionIdOf("---\nsession_id: \"never closes\"\n"));
+		Assert.Equal("abc", RenderedDocument.SessionIdOf($"---\nfiles_touched: [\"{new string('x', 9000)}\"]\nsession_id: \"abc\"\n---\n"));
+		Assert.Equal(6, RenderedDocument.MessagesThroughOf("---\nmessage_count: 2\nmessage_end: 5\n---\n"));
+		Assert.Equal(2, RenderedDocument.MessagesThroughOf("---\nmessage_count: 2\n---\n"));
+		Assert.Null(RenderedDocument.MessagesThroughOf("---\ntitle: x\n---\n"));
+	}
+
 	[Fact]
 	public async Task A_date_too_far_ahead_is_refused_saying_how_far()
 	{

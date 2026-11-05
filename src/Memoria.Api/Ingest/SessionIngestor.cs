@@ -125,7 +125,10 @@ public sealed class SessionIngestor(
 			Restore: input.Restore,
 			// A copy that lost lines has a chain that is no later copy's start, so it records none, and only the count applies to what follows it.
 			MessagesDigest: session.Report.HasHoles ? null : digests.Of(session.MessageDigestAt(session.Report.Messages) ?? ""),
-			StartsWithStored: (count, stored) => session.MessageDigestAt(count) is { } chain && digests.Matches(stored, chain));
+			StartsWithStored: (count, stored) => session.MessageDigestAt(count) is { } chain && digests.Matches(stored, chain))
+		{
+			RenderedLookup = IngestIdentity.ForRenderedSession(input.Collection, input.SessionId),
+		};
 	}
 
 	private async Task<SessionIngestResult> WriteAsync(SessionIngestInput input, RedactedSession session, string identity, IngestClaim claim, CancellationToken cancellationToken)

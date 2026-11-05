@@ -6,9 +6,11 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { type ApiKeyMaker, type Harness } from "./harness.ts";
 import { forceIndex } from "./ingest.ts";
-import { code, folder, headers, SAFE, send, type Answer } from "./ingest-races.ts";
+import { code, folder, headers, line, SAFE, send, type Answer } from "./ingest-races.ts";
 
 const VERSION = "2026-02-01T00:00:00Z";
+const LATER = "2026-02-01T01:00:00Z";
+const LATEST = "2026-02-01T02:00:00Z";
 const MAX_DOCUMENT_BYTES = 2 * 1024 * 1024;
 
 function post(h: Harness, key: string, relative: string, text: string, collection = SAFE): Promise<Answer> {
@@ -23,6 +25,36 @@ function field(answer: Answer, name: string): unknown {
 async function hits(h: Harness, key: string, word: string): Promise<number> {
   const answer = await send(`${h.apiUrl}/v1/search?query=${word}&rerank=false&limit=20&collection=${SAFE}`, { headers: headers(key) });
   return (JSON.parse(answer.text) as { results: unknown[] }).results.length;
+}
+
+async function sessionTakesOver(h: Harness, key: string): Promise<void> {
+  const id = "cdcdcdcd-1111-2222-3333-444444444444";
+  const same = "2026-01-15_cdcdcdcd.md";
+  const other = "2026-01-15_cdcdcdcd_part-009.md";
+  const old = (word: string, end: number): string => `---\nsession_id: "${id}"\nmessage_end: ${end}\n---\n\n## User\n\n${word}\n`;
+  await post(h, key, same, old("takeoverold", 0));
+  await post(h, key, other, old("takeoverother", 1));
+  const session = (extra: Record<string, string>, ...lines: string[]): Promise<Answer> => send(`${h.apiUrl}/v1/ingest/session?${new URLSearchParams({ collection: SAFE, format: "claude", sessionId: id, updated: LATER, ...extra })}`, { method: "POST", headers: headers(key, "application/x-ndjson"), body: lines.join("") });
+  const cut = await session({}, line("user", "takeovernew"));
+  h.check("rendered: a cut copy of a session cannot replace its migrated documents", cut.status === 409 && code(cut) === "session_shrank" && readFileSync(path.join(folder(h), same), "utf8").includes("takeoverold"), cut.text);
+
+  const whole = await session({}, line("user", "takeovernew"), line("assistant", "takeoversecond"));
+  const stored = readFileSync(path.join(folder(h), same), "utf8");
+  h.check("rendered: a session takes over its file name and replaces the old text", whole.status === 202 && stored.includes("takeovernew") && !stored.includes("takeoverold"), whole.text);
+  h.check("rendered: and a document under a name it no longer writes is gone, so nothing stays twice", !existsSync(path.join(folder(h), other)), whole.text);
+  const again = await post(h, key, same, old("takeoverold", 0));
+  h.check("rendered: a rendered copy sent afterwards is refused", again.status === 409, again.text);
+  const resumed = await session({ updated: LATEST }, line("user", "takeovernew"), line("assistant", "takeoversecond"), line("user", "takeoverresumed"));
+  h.check("rendered: and the session carries on under its normal rules", resumed.status === 202 && readFileSync(path.join(folder(h), same), "utf8").includes("takeoverresumed"), resumed.text);
+}
+
+async function aDeletedPathStaysDeleted(h: Harness, key: string): Promise<void> {
+  const id = "cecececc-1111-2222-3333-444444444444";
+  const name = "2026-01-15_cecececc.md";
+  await post(h, key, name, `---\nsession_id: "${id}"\nmessage_end: 0\n---\n\nsecretish\n`);
+  await send(`${h.apiUrl}/v1/documents?${new URLSearchParams({ collection: SAFE, path: name })}`, { method: "DELETE", headers: headers(key) });
+  const session = await send(`${h.apiUrl}/v1/ingest/session?${new URLSearchParams({ collection: SAFE, format: "claude", sessionId: id, updated: new Date(Date.now() + 60_000).toISOString() })}`, { method: "POST", headers: headers(key, "application/x-ndjson"), body: line("user", "secretish") });
+  h.check("rendered: a deleted path stays deleted when its session arrives", !existsSync(path.join(folder(h), name)) && session.text.includes("part_deleted"), session.text);
 }
 
 async function refusals(h: Harness, key: string, token: string): Promise<void> {
@@ -62,4 +94,6 @@ export async function ingestRendered(h: Harness, keys: ApiKeyMaker): Promise<voi
   h.check("rendered: the document is searchable", (await hits(h, key, "renderedword")) === 1);
   h.check("rendered: and so is the one with frontmatter past the window", (await hits(h, key, "longfrontmatterword")) === 1);
   await refusals(h, key, token);
+  await sessionTakesOver(h, key);
+  await aDeletedPathStaysDeleted(h, key);
 }
