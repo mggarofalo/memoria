@@ -215,13 +215,15 @@ function mcpRefused(h: Harness, label: string, token: string): void {
 }
 
 async function mcpAudit(h: Harness, keys: ScopeKeys): Promise<void> {
-  const rows = await auditByKey(h, keys.scoped.id, (found) => found.filter((row) => row.operation === "mcp.get_documents").length >= 2);
+  // Rows are written as each response ends, in no set order, so wait for every call in the session.
+  const rows = await auditByKey(h, keys.scoped.id, (found) => found.filter((row) => row.operation.startsWith("mcp.")).length >= SCOPED_CALLS.length);
+  const seen = rows.map((row) => [row.operation, row.status, row.collections]);
   const denied = rows.find((row) => row.operation === "mcp.search" && row.status === 403);
   h.check("MCP denial audit: 403 and the collection asked for, though HTTP said 200", denied?.attempted_collections === '["secret"]', rows.map((row) => [row.operation, row.status, row.attempted_collections]));
   const notFound = rows.find((row) => row.operation === "mcp.get_document");
-  h.check("MCP denial audit: an out-of-scope get_document is recorded as 404", notFound?.status === 404 && notFound.result_count === 0, notFound);
+  h.check("MCP denial audit: an out-of-scope get_document is recorded as 404", notFound?.status === 404 && notFound.result_count === 0, seen);
   const allowed = rows.find((row) => row.operation === "mcp.list_collections");
-  h.check("MCP audit marker: an allowed tool call is recorded as 200", allowed?.status === 200 && allowed.collections === '["notes"]', allowed);
+  h.check("MCP audit marker: an allowed tool call is recorded as 200", allowed?.status === 200 && allowed.collections === '["notes"]', seen);
 
   const adminRows = await auditByKey(h, keys.adminOnly.id, (found) => found.some((row) => row.status === 403 && !row.operation.startsWith("get")));
   h.check("MCP denial audit: an admin-only key's refused session is recorded as 403", adminRows.some((row) => row.status === 403), adminRows.map((row) => [row.operation, row.status]));
