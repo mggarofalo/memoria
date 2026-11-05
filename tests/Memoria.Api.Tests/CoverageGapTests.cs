@@ -14,7 +14,7 @@ public sealed class MemoriaOptionsValidatorTests
 {
 	private static MemoriaOptions Valid()
 	{
-		return new MemoriaOptions { Auth = new AuthOptions { DatabasePath = "control.db" } };
+		return new MemoriaOptions { Auth = new AuthOptions { DatabasePath = "control.db" }, Ingest = new IngestOptions { DigestKey = "a-key-of-at-least-thirty-two-characters" } };
 	}
 
 	public static TheoryData<string, Action<MemoriaOptions>> Invalid => new()

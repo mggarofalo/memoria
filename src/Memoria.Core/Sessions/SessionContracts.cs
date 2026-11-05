@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using Memoria.Core.Redaction;
 
 namespace Memoria.Core.Sessions;
@@ -122,6 +124,9 @@ public sealed class SessionReadReport
 	public bool HasLostContent =>
 		MalformedLines + NonObjectLines + OversizedLines + UnterminatedLines + InvalidKeys + MessagesOverLimit + FilesOverLimit > 0;
 
+	/// <summary>True when lines were lost from somewhere other than the end, so the messages kept are not a true start of the session.</summary>
+	public bool HasHoles => MalformedLines + NonObjectLines + OversizedLines + InvalidKeys > 0;
+
 	/// <summary>True when input was lost: anything other than routine, unrendered record types.</summary>
 	public bool HasSkippedContent =>
 		MalformedLines + NonObjectLines + OversizedLines + UnterminatedLines + InvalidKeys + MessagesOverLimit + FilesOverLimit + FilesTruncated + TurnIdsTruncated > 0;
@@ -163,7 +168,6 @@ public sealed class RedactedSession
 		SessionPathing pathing)
 	{
 		_pathing = pathing;
-		ExistingPathsGlob = pathing.Glob;
 		Format = format;
 		SessionId = sessionId;
 		Documents = documents;
@@ -184,11 +188,19 @@ public sealed class RedactedSession
 	/// <summary>The short part of the file names, which another session can share. Goes with <see cref="ExistingPathsGlob"/>.</summary>
 	public string PathStem => _pathing.Stem;
 
+	/// <summary>
+	/// A digest of this session's first <paramref name="messages"/> messages, as redacted, or null when it has fewer. A later upload that starts with the
+	/// same messages gives the same digest, whatever follows and however it splits into parts, so comparing these says whether stored text would be lost.
+	/// </summary>
+	public string? MessageDigestAt(long messages)
+	{
+		return messages < 0 || messages > MessageChain.Count ? null : MessageChain.DigestAt((int)messages);
+	}
+
+	internal MessageChain MessageChain { get; init; } = MessageChain.Empty;
+
 	/// <summary>True when the transcript names a different session from the one the caller said. Its parts would land on the other session's files, so refuse it.</summary>
 	public bool NamesAnotherSession => _pathing.NamesAnotherSession;
-
-	/// <summary>A glob matching at least every path of this session, for listing what exists. Filter what it finds with <see cref="IsSupersededPath"/>.</summary>
-	public string ExistingPathsGlob { get; }
 
 	public string SessionId { get; }
 
@@ -210,38 +222,79 @@ public sealed class RedactedSession
 	/// </summary>
 	public bool IsSupersededPath(string existingPath)
 	{
-		return IsInPathFamily(existingPath)
+		ArgumentNullException.ThrowIfNull(existingPath);
+		return _isInSessionFamily(existingPath)
 			&& !Documents.Any(document => string.Equals(document.Path, existingPath, StringComparison.Ordinal));
 	}
 
-	/// <summary>True when a path has the shape of this session's. Only the shape: another session whose id starts alike has the same one, so check who owns it before deleting or overwriting.</summary>
-	public bool IsInPathFamily(string existingPath)
+	/// <summary>
+	/// The same session under paths carrying a digest of its id, for when another session already has its short stem. Each call goes
+	/// one longer. Null when there is nothing longer to try.
+	/// </summary>
+	public RedactedSession? WithDistinctPaths()
 	{
-		ArgumentNullException.ThrowIfNull(existingPath);
-		return _isInSessionFamily(existingPath);
-	}
+		if (_pathing.Distinct() is not { } distinct)
+		{
+			return null;
+		}
 
-	/// <summary>True when the start of a stored document says it is this session, by its full id. A document with no id says no.</summary>
-	public bool HeadNamesThisSession(string documentHead)
-	{
-		ArgumentNullException.ThrowIfNull(documentHead);
-		return string.Equals(SessionFrontmatter.ReadSessionId(documentHead), SessionId, StringComparison.Ordinal);
-	}
-
-	/// <summary>The same session under paths carrying a digest of its id, for when another session already has its short stem.</summary>
-	public RedactedSession WithDistinctPaths()
-	{
-		SessionPathing distinct = _pathing.Distinct();
 		RedactedSessionDocument[] documents = [.. Documents.Select(document => document with { Path = SessionPaths.ReplaceStem(document.Path, _pathing.Stem, distinct.Stem) })];
-		return new RedactedSession(Format, SessionId, documents, Report, CountsByRule, Refusals, distinct.IsFamily, distinct);
+		return new RedactedSession(Format, SessionId, documents, Report, CountsByRule, Refusals, distinct.IsFamily, distinct) { MessageChain = MessageChain };
 	}
 }
 
 /// <summary>How one session's paths are built, kept together so everything that decides who owns a path agrees.</summary>
-internal sealed record SessionPathing(string Identity, string Stem, string Glob, Func<string, bool> IsFamily, Func<string, SessionPathing> WithStem, string FullId, bool NamesAnotherSession = false)
+internal sealed record SessionPathing(string Identity, string Stem, Func<string, bool> IsFamily, Func<string, SessionPathing> WithStem, string FullId, bool NamesAnotherSession = false)
 {
-	public SessionPathing Distinct()
+	/// <summary>Longer each time, as each one tried was taken.</summary>
+	private static readonly int[] s_digestChars = [8, 16, 32];
+
+	private string BaseStem { get; init; } = Stem;
+
+	private int Level { get; init; }
+
+	/// <summary>The next stem to try, or null when even the longest is taken, which takes someone squatting on purpose.</summary>
+	public SessionPathing? Distinct()
 	{
-		return WithStem($"{Stem}-{SessionPaths.Digest(FullId)}");
+		return Level >= s_digestChars.Length
+			? null
+			: WithStem($"{BaseStem}-{SessionPaths.DistinctDigest(FullId, s_digestChars[Level])}") with { BaseStem = BaseStem, Level = Level + 1 };
+	}
+}
+
+/// <summary>One digest per message, each over the one before and the message's text, so a digest stands for everything up to it.</summary>
+internal sealed class MessageChain
+{
+	private const int DigestBytes = 32;
+
+	private readonly byte[] _digests;
+
+	private MessageChain(byte[] digests)
+	{
+		_digests = digests;
+	}
+
+	public static MessageChain Empty { get; } = new([]);
+
+	public int Count => _digests.Length / DigestBytes;
+
+	public static MessageChain Of(IReadOnlyList<SessionMessage> messages)
+	{
+		byte[] digests = new byte[messages.Count * DigestBytes];
+		for (int i = 0; i < messages.Count; i++)
+		{
+			using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+			hash.AppendData(digests, Math.Max(0, (i - 1) * DigestBytes), i == 0 ? 0 : DigestBytes);
+			hash.AppendData(Encoding.UTF8.GetBytes(messages[i].Role + "\0"));
+			hash.AppendData(Encoding.UTF8.GetBytes(messages[i].Text));
+			hash.GetHashAndReset(digests.AsSpan(i * DigestBytes, DigestBytes));
+		}
+
+		return new MessageChain(digests);
+	}
+
+	public string DigestAt(int messages)
+	{
+		return messages == 0 ? "" : Convert.ToHexStringLower(_digests, (messages - 1) * DigestBytes, DigestBytes);
 	}
 }

@@ -73,13 +73,25 @@ public sealed partial class SqliteAuditLog(
 	/// <summary>Writes between per-key trims, so a key's rows stay within the cap plus this many.</summary>
 	private int TrimEvery => Math.Clamp(_maxRowsPerKey / 10, 1, 1000);
 
+	/// <summary>The table keeps which files. The log does not, as it travels further and a path can hold part of a session id.</summary>
+	private static string? TargetForLog(object? target)
+	{
+		object? logged = target switch
+		{
+			AuditIngest ingest => ingest with { Paths = [] },
+			AuditRead => null,
+			_ => target,
+		};
+		return logged is null ? null : JsonSerializer.Serialize(logged, logged.GetType());
+	}
+
 	public async Task WriteAsync(AuditRecord record)
 	{
 		ArgumentNullException.ThrowIfNull(record);
 		string? collections = record.Collections is null ? null : JsonSerializer.Serialize(record.Collections);
 		string? attempted = record.AttemptedCollections is null ? null : JsonSerializer.Serialize(record.AttemptedCollections);
 		string? target = record.Target is null ? null : JsonSerializer.Serialize(record.Target, record.Target.GetType());
-		LogAudit(logger, record.AuditId, record.KeyId, record.Operation, collections, attempted, record.ResultCount, record.Status, record.TraceId, target);
+		LogAudit(logger, record.AuditId, record.KeyId, record.Operation, collections, attempted, record.ResultCount, record.Status, record.TraceId, TargetForLog(record.Target));
 
 		try
 		{

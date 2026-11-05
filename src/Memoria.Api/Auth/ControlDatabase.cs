@@ -10,7 +10,18 @@ namespace Memoria.Api.Auth;
 /// </summary>
 public sealed class ControlDatabase(string? path)
 {
-	private const int SchemaVersion = 2;
+	private const int SchemaVersion = 3;
+
+	private const string SchemaV3 = """
+		ALTER TABLE ingest_state ADD COLUMN content_hash TEXT NULL;
+		ALTER TABLE ingest_state ADD COLUMN messages_digest TEXT NULL;
+		ALTER TABLE ingest_state ADD COLUMN deleted_paths TEXT NOT NULL DEFAULT '[]';
+		ALTER TABLE ingest_state DROP COLUMN deleted_version_ticks;
+		CREATE TABLE ingest_collections (
+			collection TEXT PRIMARY KEY NOT NULL,
+			opened_ticks INTEGER NOT NULL
+		);
+		""";
 
 	private const string SchemaV2 = """
 		CREATE TABLE ingest_state (
@@ -101,7 +112,7 @@ public sealed class ControlDatabase(string? path)
 		if (current < SchemaVersion)
 		{
 			await using SqliteTransaction transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
-			string migration = current < 1 ? SchemaV1 + SchemaV2 : SchemaV2;
+			string migration = string.Concat(current < 1 ? SchemaV1 : "", current < 2 ? SchemaV2 : "", SchemaV3);
 			await ExecuteAsync(connection, migration, cancellationToken, transaction);
 			await ExecuteAsync(connection, $"PRAGMA user_version = {SchemaVersion};", cancellationToken, transaction);
 			await transaction.CommitAsync(cancellationToken);

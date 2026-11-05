@@ -30,6 +30,9 @@ public interface IMemoriaQmdClient
 	/// <summary>Every collection the sidecar serves.</summary>
 	Task<SidecarCollectionsResponse> ListCollectionsAsync(CancellationToken cancellationToken = default);
 
+	/// <summary>Whether a collection's directory holds anything, asked once before ingest opens it.</summary>
+	Task<SidecarCollectionEmptyResponse> IsCollectionEmptyAsync(string collection, CancellationToken cancellationToken = default);
+
 	/// <summary>Write a (redacted) markdown document into a collection and queue indexing. Returns the accepted job.</summary>
 	Task<SidecarIngestResponse> IngestAsync(SidecarIngestRequest request, CancellationToken cancellationToken = default);
 

@@ -239,33 +239,111 @@ public sealed class SessionHardeningTests
 		Assert.NotNull(read.Render().Report);
 	}
 
-	[Theory]
-	[InlineData("---\nsession_id: \"abc\"\n---\n", "abc")]
-	[InlineData("---\nsession_id: abc\n---\n", "abc")]
-	[InlineData("---\r\nproject: x\r\nsession_id: 'abc'\r\n---\r\n", "abc")]
-	[InlineData("---\nproject: x\n---\nsession_id: abc\n", null)]
-	[InlineData("session_id: abc\n", null)]
-	[InlineData("", null)]
-	public void The_session_id_is_read_only_from_the_opening_block(string head, string? expected)
-	{
-		Assert.Equal(expected, SessionFrontmatter.ReadSessionId(head));
-	}
-
 	[Fact]
 	public async Task Distinct_paths_keep_date_and_part_and_change_the_family()
 	{
 		string jsonl = ClaudeLine("user", new string('a', 3000)) + ClaudeLine("assistant", new string('b', 3000));
 		RedactedSession session = await Claude(jsonl, new SessionRenderOptions { MaxPartChars = 60 });
 
-		RedactedSession distinct = session.WithDistinctPaths();
+		RedactedSession distinct = session.WithDistinctPaths()!;
 
 		Assert.Equal(session.Documents.Count, distinct.Documents.Count);
 		Assert.Equal(session.PathIdentity, distinct.PathIdentity);
 		Assert.Matches("^2026-10-01_abcdef12-[0-9a-f]{8}\\.md$", distinct.Documents[0].Path);
 		Assert.Matches("^2026-10-01_abcdef12-[0-9a-f]{8}_part-002\\.md$", distinct.Documents[1].Path);
-		Assert.True(distinct.IsInPathFamily(distinct.Documents[1].Path));
-		Assert.False(distinct.IsInPathFamily(session.Documents[1].Path));
-		Assert.False(session.IsInPathFamily(distinct.Documents[1].Path));
+		Assert.True(distinct.IsSupersededPath(session.Documents[1].Path) is false);
+		Assert.False(session.IsSupersededPath(distinct.Documents[1].Path));
+	}
+
+	[Fact]
+	public async Task Distinct_paths_get_longer_and_then_run_out()
+	{
+		RedactedSession session = await Claude(ClaudeLine("user", "hello"));
+
+		RedactedSession first = session.WithDistinctPaths()!;
+		RedactedSession second = first.WithDistinctPaths()!;
+		RedactedSession third = second.WithDistinctPaths()!;
+
+		Assert.Matches("^abcdef12-[0-9a-f]{8}$", first.PathStem);
+		Assert.Matches("^abcdef12-[0-9a-f]{16}$", second.PathStem);
+		Assert.Matches("^abcdef12-[0-9a-f]{32}$", third.PathStem);
+		Assert.Matches("^2026-10-01_abcdef12-[0-9a-f]{32}\\.md$", third.Documents[0].Path);
+		Assert.Null(third.WithDistinctPaths());
+	}
+
+	[Fact]
+	public async Task A_project_folder_cannot_be_chosen_to_produce_a_distinct_path()
+	{
+		string jsonl = ClaudeLine("user", "hello");
+		RedactedSession victim = await Claude(jsonl);
+		RedactedSession squatter = await SessionRenderer.RenderAsync(
+			new MemoryStream(Encoding.UTF8.GetBytes(jsonl)),
+			new SessionSource(SessionFormat.ClaudeCode, "abcdef12-ffff-ffff-ffff-ffffffffffff") { ProjectDirectory = ClaudeId });
+
+		Assert.NotEqual(victim.WithDistinctPaths()!.PathStem, squatter.PathStem);
+	}
+
+	[Fact]
+	public async Task The_digest_of_the_stored_messages_says_whether_an_upload_starts_with_them()
+	{
+		string a = ClaudeLine("user", "message A"), b = ClaudeLine("assistant", "message B"), c = ClaudeLine("user", "message C");
+		RedactedSession stored = await Claude(a + b);
+
+		string digest = stored.MessageDigestAt(2)!;
+		Assert.NotEqual((await Claude(ClaudeLine("assistant", "message A"))).MessageDigestAt(1), (await Claude(a)).MessageDigestAt(1));
+
+		Assert.Equal(digest, (await Claude(a + b + c)).MessageDigestAt(2));
+		Assert.Equal(digest, (await Claude(a + "{torn\n" + b)).MessageDigestAt(2));
+		Assert.NotEqual(digest, (await Claude(a + c)).MessageDigestAt(2));
+		Assert.NotEqual(digest, (await Claude(b + a)).MessageDigestAt(2));
+		Assert.Null((await Claude(a)).MessageDigestAt(2));
+		Assert.Null(stored.MessageDigestAt(-1));
+		Assert.Equal("", stored.MessageDigestAt(0));
+		Assert.Equal(digest, stored.WithDistinctPaths()!.MessageDigestAt(2));
+	}
+
+	[Fact]
+	public async Task The_digest_does_not_care_how_a_session_splits_into_parts()
+	{
+		string jsonl = ClaudeLine("user", new string('a', 3000)) + ClaudeLine("assistant", new string('b', 3000));
+
+		RedactedSession one = await Claude(jsonl);
+		RedactedSession two = await Claude(jsonl, new SessionRenderOptions { MaxPartChars = 60 });
+
+		Assert.Single(one.Documents);
+		Assert.Equal(2, two.Documents.Count);
+		Assert.Equal(one.MessageDigestAt(2), two.MessageDigestAt(2));
+	}
+
+	[Fact]
+	public void A_replaced_message_takes_the_digest_of_it_too()
+	{
+		string token = Synthetic.GitHubClassic('p');
+		string document = "---\nmessage_sha256: \"digestoftheoriginal\"\n---\n\n## User\n\n" + token + "\n";
+		SessionPart part = new(new ArraySegment<SessionMessage>([new SessionMessage(SessionMessage.User, token, null, null, token.Length)]), 1, 0, SessionTimestamp.FromFallback(null));
+
+		string clean = PartGate.Clean(document, part, []).Text;
+
+		Assert.DoesNotContain("digestoftheoriginal", clean, StringComparison.Ordinal);
+		Assert.DoesNotContain(token, clean, StringComparison.Ordinal);
+	}
+
+	[Fact]
+	public void A_part_with_nothing_replaced_keeps_its_digest()
+	{
+		string document = "---\nmessage_sha256: \"digestoftheoriginal\"\n---\n\n## User\n\nhello\n";
+		SessionPart part = new(new ArraySegment<SessionMessage>([new SessionMessage(SessionMessage.User, "hello", null, null, 5)]), 1, 0, SessionTimestamp.FromFallback(null));
+
+		Assert.Contains("digestoftheoriginal", PartGate.Clean(document, part, []).Text, StringComparison.Ordinal);
+	}
+
+	[Fact]
+	public async Task A_copy_with_a_hole_says_so()
+	{
+		string line = ClaudeLine("user", "a");
+
+		Assert.True((await Claude(line + "{torn\n" + line)).Report.HasHoles);
+		Assert.False((await Claude(line + line.TrimEnd('\n'))).Report.HasHoles);
 	}
 
 	[Fact]

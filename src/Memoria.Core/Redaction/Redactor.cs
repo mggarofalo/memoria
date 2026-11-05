@@ -203,6 +203,11 @@ public sealed class Redactor : IRedactor
 			// Its Input property holds the whole document, so it must not travel as an inner exception.
 			throw new RedactionException(rule.Name, RedactionFailure.TimedOut);
 		}
+		catch (OutOfMemoryException)
+		{
+			// Nothing to do with this text: the server is short of memory, and that is a reason to come back.
+			throw;
+		}
 		catch (Exception)
 		{
 			throw new RedactionException(rule.Name, RedactionFailure.RuleFailed);

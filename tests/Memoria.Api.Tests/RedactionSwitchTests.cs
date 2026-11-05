@@ -142,19 +142,18 @@ public sealed class RedactionSwitchTests : IClassFixture<AuthApiFactory>, IAsync
 	}
 
 	[Fact]
-	public async Task A_collection_not_listed_is_redacted_even_when_its_name_differs_only_by_case()
+	public async Task A_name_differing_only_by_case_is_another_collection_and_an_enabled_one_stays_redacted()
 	{
 		FakeCorpus corpus = new(_factory.Sidecar);
-		HttpClient client = await ClientAsync([MemoriaScopes.Ingest], "Open", "never-heard-of-it");
+		HttpClient client = await ClientAsync([MemoriaScopes.Ingest], "Open", "closed");
 		string token = Token(23);
 
-		await PostDocumentAsync(client, collection: "Open", sourceId: Unique(), body: token);
-		string wrongCase = StoredWith(corpus, "Open", _factory.Sidecar);
-		await PostDocumentAsync(client, collection: "never-heard-of-it", sourceId: Unique(), body: token);
-		string unknown = StoredWith(corpus, "never-heard-of-it", _factory.Sidecar);
+		HttpResponseMessage wrongCase = await PostDocumentAsync(client, collection: "Open", sourceId: Unique(), body: token);
+		await PostDocumentAsync(client, collection: "closed", sourceId: Unique(), body: token);
 
-		Assert.DoesNotContain(token, wrongCase, StringComparison.Ordinal);
-		Assert.DoesNotContain(token, unknown, StringComparison.Ordinal);
+		Assert.Equal(HttpStatusCode.Conflict, wrongCase.StatusCode);
+		Assert.Equal("ingest_not_enabled", (await ReadAsync(wrongCase)).GetProperty("code").GetString());
+		Assert.DoesNotContain(token, StoredWith(corpus, "closed", _factory.Sidecar), StringComparison.Ordinal);
 	}
 
 	[Theory]
@@ -172,7 +171,11 @@ public sealed class RedactionSwitchTests : IClassFixture<AuthApiFactory>, IAsync
 	{
 		FakeCorpus corpus = new(_factory.Sidecar);
 		string collection = "typo-" + Unique();
-		await using WebApplicationFactory<Program> typo = _factory.WithWebHostBuilder(builder => builder.UseSetting($"Memoria:Ingest:Collections:{collection}:Redaction", value));
+		await using WebApplicationFactory<Program> typo = _factory.WithWebHostBuilder(builder =>
+		{
+			builder.UseSetting($"Memoria:Ingest:Collections:{collection}:Redaction", value);
+			builder.UseSetting($"Memoria:Ingest:Collections:{collection}:Enabled", "true");
+		});
 		(_, string key) = await _factory.IssueAsync([MemoriaScopes.Ingest], [collection]);
 		string token = Token(24);
 

@@ -108,7 +108,7 @@ public sealed partial class MemoriaExceptionHandler(IProblemDetailsService probl
 		}
 		else
 		{
-			LogSidecarRejection(logger, exception.Code, (int)exception.StatusCode!.Value, exception.Message);
+			LogSidecarRejection(logger, exception.Code, (int)exception.StatusCode!.Value);
 		}
 
 		SidecarFailureView view = SidecarDisclosure.For(exception, scope);
@@ -160,6 +160,7 @@ public sealed partial class MemoriaExceptionHandler(IProblemDetailsService probl
 	[LoggerMessage(EventId = 2000, Level = LogLevel.Error, Message = "Sidecar call failed with {Code} (upstream status {UpstreamStatus})")]
 	private static partial void LogSidecarFailure(ILogger logger, Exception exception, string code, int? upstreamStatus);
 
-	[LoggerMessage(EventId = 2001, Level = LogLevel.Information, Message = "Sidecar rejected request with {Code} ({UpstreamStatus}): {Message}")]
-	private static partial void LogSidecarRejection(ILogger logger, string code, int upstreamStatus, string message);
+	/// <remarks>Not the sidecar's message, which can quote a document reference.</remarks>
+	[LoggerMessage(EventId = 2001, Level = LogLevel.Information, Message = "Sidecar rejected request with {Code} ({UpstreamStatus})")]
+	private static partial void LogSidecarRejection(ILogger logger, string code, int upstreamStatus);
 }

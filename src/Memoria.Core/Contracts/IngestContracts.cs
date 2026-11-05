@@ -86,6 +86,9 @@ public static class SessionPartState
 	public const string Written = "written";
 	public const string Failed = "failed";
 
+	/// <summary>This part was deleted. Sending the session again does not bring it back: only an operator can, with <c>restoreDeleted</c>.</summary>
+	public const string Deleted = "deleted";
+
 	/// <summary>The backend stopped answering before this part's turn. Retry the session.</summary>
 	public const string NotAttempted = "not_attempted";
 }

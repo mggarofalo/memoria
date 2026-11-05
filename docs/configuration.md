@@ -217,24 +217,66 @@ configured `TrustedProxies` entry.
 |---|---|---|
 | `MaxDocumentBytes` | `2097152` | The largest stored document, in UTF-8 bytes, at least 64 KiB. Set it to the sidecar's `MEMORIA_QMD_MAX_DOCUMENT_BYTES`. Over it, `POST /v1/documents` answers 413 and a session part fails on its own. The renderer splits a long message to fit. |
 | `MaxSessionBytes` | `268435456` | The largest raw transcript one request may send. It is read as a stream, and past this the request gets 413 or, if the upload has no declared length and the client is still sending, a closed connection. A transcript under this limit whose text passes the renderer's 32 million character budget is stored as far as the budget goes and answered with 207: it stays `partial`, and `read.messagesOverLimit` says how much was left out. |
-| `MaxConcurrentSessions` | `4` | Transcripts handled at once, from the first byte read to the last part written. Past it a caller gets 503 with `Retry-After`. |
-| `MaxConcurrentSessionsPerKey` | `2` | The most of those one key can hold. |
-| `MaxConcurrentDocuments` | `8` | Documents handled at once. |
-| `MaxConcurrentDocumentsPerKey` | `4` | The most of those one key can hold. |
-| `MaxConcurrentRenders` | `2` | Redactions and renders run at once, for documents and transcripts together. Reading a body does not take one. A transcript that filled the text budget took the API to about 600 MiB of peak working set under a 512 MiB GC limit (`DOTNET_GCHeapHardLimit`), which it survived, so allow for that much memory or set such a limit. |
-| `SessionUploadDeadline` | `00:10:00` | How long a transcript's body may take to arrive. Past it the request gets 408 and nothing changes. |
-| `DocumentUploadDeadline` | `00:01:00` | The same for a document. |
-| `MinReindexInterval` | `00:00:10` | The least time between index updates a delete starts in one collection. A delete with none recently starts one at once, so removing a leaked secret stays immediate. A burst shares one more when the interval ends, so no delete waits longer than this. |
+| `MaxConcurrentLargeUploads` | `2` | Transcripts over 8 MiB handled at once. Past it a large upload gets 503 `ingest_busy` with `Retry-After`, while documents and smaller transcripts carry on. A slow large upload holds its place until it ends, so two uploads dripping at the rate floor can keep other large uploads out for as long as the upload deadline allows. That is accepted on a private server whose keys all belong to one owner. |
+| `MaxConcurrentRenders` | `2` | Redactions and renders run at once, for documents and transcripts together. Reading a body does not take one. Only one job of 32 MiB or more runs at a time, whatever this says. Under a 512 MiB GC limit (`DOTNET_GCHeapHardLimit`) in the Linux image, one or two 200 MiB transcripts took the API to about 570 MiB of peak memory, all answered 207. Under 1 GiB the peak was about 1 GB. So allow for that much memory or set such a limit. If memory runs out anyway, the request gets 503 `ingest_busy` and can be repeated. |
+| `MinUploadBytesPerSecond` | `16384` | The slowest a body may arrive, after 10 seconds' grace. A link slower than this gets 408, so a client on one needs to send less at a time. Above it, a link costs nothing but the time. |
+| `SessionUploadDeadline` | `01:00:00` | The longest a transcript's body may take to arrive, however steadily. Past it the request gets 408 and nothing changes. |
+| `DocumentUploadDeadline` | `00:05:00` | The same for a document. |
+| `DeleteWriteWait` | `00:00:30` | How long a delete waits for a write of its path to answer. Past it the delete answers 503 `delete_unconfirmed`, having changed nothing, and repeating it is safe. |
+| `DigestKey` | required with API keys | At least 32 random characters, held outside the database: the API will not start without it. It keys every digest made from content that the ledger stores. See below. |
+| `PreviousDigestKeys` | empty | Keys that used to be `DigestKey`. Stored digests made with one still match, so a key can be changed without losing them. See below. |
+| `MinReindexInterval` | `00:00:10` | The least time between index updates a delete starts in one collection. A delete with none recently starts one at once, so removing a leaked secret stays immediate. A burst shares one more when the interval ends, so no update starts later than this. This bounds when the update starts, not when it finishes: an update took about 1.7 s at 1,500 documents and about 118 s at 52,000, and a deleted document stays searchable until it ends. |
+| `Collections:<name>:Enabled` | `false` | Opens a collection to ingest. See below. |
 | `Collections:<name>:Redaction` | not set | Exactly `Disabled` turns redaction off for that collection. See below. |
 
-Writing needs the `ingest` scope and the target collection in the key's allowlist, and is not available when `Memoria:Auth:Mode` is `Disabled`.
+Writing needs the `ingest` scope, the target collection in the key's allowlist, and the collection opened to ingest. It is not available when `Memoria:Auth:Mode` is `Disabled`.
+
+### Collections belong to ingest or not at all
+
+A collection is opened to ingest by setting `Memoria:Ingest:Collections:<name>:Enabled` to `true`. The first time ingest uses it, the API asks the sidecar whether the collection's directory is empty. If it is not, the request gets 409 `collection_not_empty` and nothing changes. Otherwise the API records that in the control database and never asks again. A collection not enabled gets 409 `ingest_not_enabled`, for writes and deletes alike.
+
+Everything inside an opened collection is Memoria's. So a write replaces whatever is at its path, and a retry after a lost answer simply overwrites with the same result. A delete removes whatever is at its path, and it is up to no one else to have put it there. Nothing else may write to such a collection, and losing the control database means restoring it, since a collection with files in it will not open again.
+
+### One API and one sidecar, with nothing between them
+
+This design assumes one API instance, talking directly to the sidecar on one host. **Two API instances, or anything between them that buffers or answers, break it.** See [deployment](deployment.md#nothing-may-sit-between-the-api-and-the-sidecar).
+
+Each path has one lock, in the API process. A write holds it until the sidecar answers. A delete waits for it, leaves its tombstone, and has the file removed, so it cannot miss a write in flight.
+
+If the API dies or gives up on a write, its connection closes. The sidecar writes to a temporary file and checks the connection immediately before the atomic rename, so that write does not land. On one Linux host, a killed process's close was seen within 5 ms, and the rename followed the check by under 1 ms. A write past its check when the API dies still lands, and if a delete has been answered by then, the file is back. A restart takes far longer than that window, so this needs the sidecar to stall in that exact place, and repeating the delete clears it.
 
 ### What a session upload promises
 
 - **`202` and `complete` mean all of it.** The transcript had messages and lost none, every part was written, and every old part was dealt with. Anything less answers `207`, stays `partial` in `GET /v1/ingest/session`, and `read` and `parts` say why. A live transcript whose last line is still being written reads as `partial` until it is sent whole.
-- **Fewer messages than the stored copy is refused** with 409 `session_shrank`, whatever its version, because a cut copy looks just like that. Send `allowShrink=true` if the session really did shrink.
-- **A session owns its files.** The ledger records which session owns each path, and a file belonging to another gets 409 `path_owned`. A session whose short id is already taken gets a digest in its file names. A Codex transcript whose `session_meta.id` differs from `sessionId` gets 400.
-- **Old parts are deleted only when they are provably this session's:** the ledger says so, or, for a file from before there was a ledger, the full `session_id` in its frontmatter does. A file that says otherwise is left alone, and one that cannot be read leaves the session `partial`.
+- **An upload must start with the messages stored.** Fewer gets 409 `session_shrank`, and different ones get 409 `lost_content`, whatever the version, because a cut or damaged copy looks just like that. A torn last line, or a damaged line that held no stored message, does not trigger this: the session stays `partial` and keeps taking new messages. Rendering to fewer parts does not trigger it either. Send `allowShrink=true` if the history really did change. That needs no extra privilege: any key that can write the collection can send it. An upgrade that changes redaction rules can change stored text, and such a session then needs it too.
+- **Sessions do not overwrite each other.** The ledger records which session each path belongs to, and a path belonging to another gets 409 `path_owned`. A session whose short id is already taken gets a digest in its file names, a longer one if that is taken too, and a name is free again once its owner has no files. A Codex transcript whose `session_meta.id` differs from `sessionId` gets 400.
+- **Old parts are removed once they stop being parts.** When a session renders to fewer parts than it did, the ledger says which paths it had, and those go. An upload that lost content keeps them, and the session is not called complete.
+
+### Deleting
+
+A delete waits for any write of its path to answer, up to `DeleteWriteWait`. It then leaves its tombstone, which also stops the upload that was running, and has the file removed. That upload answers `deleted_during_upload`, or says the part was deleted, unless it finished first. No client hanging up can stop a delete that has started.
+
+202 means the sidecar confirmed the file is gone. 503 `delete_unconfirmed` means it could not say so, and repeating the request is safe. If the sidecar cannot be reached the tombstone is already there, so a replay stays out in the meantime. A refusal on the merits, such as a directory at the path, is answered as what it is.
+
+A name in another case is another file, so it answers `deleted: false`, or 409 `case_conflict` from the sidecar, and the document stays. A delete of a path holding nothing answers `deleted: false` and costs no index update.
+
+A delete and an upload that has not yet started writing are simply ordered. A delete arriving first answers `deleted: false` and the upload then lands. Both answers are true.
+
+**A delete is not a content ban.** A deleted document can come back only as new content dated after the delete. The same content under a later date is refused, by comparing a keyed digest of its redacted text. Only the last version deleted is remembered, so an older version replayed under a later date does come back. A deleted session part stays deleted however often the session is sent. A date ahead of the clock is recorded as the clock, so it cannot hold honest updates back. A leaked credential must also be removed from the source, or it can return under a new identity.
+
+To bring back what was deleted, send `restoreDeleted=true` with a key that has `admin` as well as `ingest`. The audit record says so. It guards a path, not the content. A collection with redaction off works the same way: its digests are of the unredacted text, keyed in the same way.
+
+Audit rows name what was read or written, in the table only, never the log, so finding which document a request asked for does not need `RequestDetails`. A read that found nothing is recorded as `[unresolved]`, as the text someone asked for may be a credential pasted in by mistake, and nothing can tell that by its look. A read that found a document records the document's own path.
+
+### Digests in the ledger
+
+The ledger keeps digests so a stolen database cannot confirm a guess at what a document said: redaction cannot stop a plain hash confirming text no rule matches. Everything derived from content, which is the document digest and the chain of message digests with each message's role, is an HMAC under `DigestKey`.
+
+To change the key, set the new one as `DigestKey` and put the old one in `PreviousDigestKeys`. Stored digests made with an old key keep matching, and each is replaced with one under the new key as its document or session is next written. Once an old key is dropped from the list, digests made with it stop matching: a session then needs `allowShrink=true` once, and a deleted document no longer refuses its same content, so only the date protects it.
+
+Identity, lookup and path digests are not keyed. They are made from names, not content, and must stay the same however the key changes.
+
+`message_sha256` in a Codex part's frontmatter says no more than the part's own text. When the last check replaced a message in that part, the digest is the only trace of what the message said, so it is replaced too.
 
 ### What redaction cannot catch
 
@@ -255,6 +297,14 @@ Every collection is redacted unless an operator names it here:
 - **Search results from an unredacted collection can reach cloud models.** They go wherever the caller sends them, along with any credential the text holds. Treat every credential ingested into the collection as exposed to those models.
 - **A switch changes future ingest only.** Turning redaction back on does not clean what is already stored. Older documents stay as they were written until they are ingested again or deleted, so re-ingest or delete them, and rotate any credential they held. Turning redaction off does not change older documents either.
 - **It is visible.** Startup logs a warning naming each unredacted collection. The ingest response and the audit record say `redaction: "disabled"`, and `GET /v1/status` lists `unredactedCollections` for a key that has `admin` as well as `read`. The per-rule counts, refusals and the check on finished parts do not apply to such a collection, so they are empty.
+
+## `Memoria:Logging` — what the log may hold
+
+Query strings and request paths carry search text and document paths, so they are kept out of the log in code, at every log level, whatever `appsettings.json` or `Logging:*` says. The framework's request log is off, its other logs that hold paths or URIs are limited to warnings, and the MCP library's, which name tools, to critical failures. The sidecar likewise logs route patterns, never paths or query strings. So raising log levels to debug something cannot put a secret in the log this way.
+
+| Key | Default | Purpose |
+|---|---|---|
+| `RequestDetails` | not set | Exactly `Enabled` lets the framework log request details again at the configured levels. Startup logs a loud warning when it is on. Only for debugging, on a host you can clean up afterwards. |
 
 ## Host settings outside `Memoria`
 

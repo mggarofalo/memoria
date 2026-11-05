@@ -79,10 +79,16 @@ export interface CliOptions {
 /** What a server started by a check file needs beyond the defaults. */
 export interface HarnessOptions {
   /** Empty collections to index, beside the two fixtures. */
+  /** Empty, as a collection opened to ingest must be. */
   extraCollections?: readonly string[];
+  /** Enabled for ingest with files already in them, to show that is refused. */
+  filledCollections?: readonly string[];
   apiEnv?: NodeJS.ProcessEnv;
   sidecarEnv?: NodeJS.ProcessEnv;
 }
+
+/** Makes a key on this run's server. A key has a budget of requests, so a check that makes many takes its own. */
+export type ApiKeyMaker = (label: string, scopes: string[]) => Promise<string>;
 
 export class Harness {
   readonly dir = mkdtempSync(path.join(os.tmpdir(), "memoria-e2e-"));
@@ -104,6 +110,7 @@ export class Harness {
   private readonly apiEnv: NodeJS.ProcessEnv;
 
   private readonly options: HarnessOptions;
+  private api: ChildProcess | undefined;
 
   constructor(options: HarnessOptions = {}) {
     this.options = options;
@@ -188,6 +195,11 @@ export class Harness {
     for (const name of this.options.extraCollections ?? []) {
       const folder = path.join(this.dir, "corpus", name);
       mkdirSync(folder, { recursive: true });
+      collections[name] = { path: folder, pattern: "**/*.md" };
+    }
+    for (const name of this.options.filledCollections ?? []) {
+      const folder = path.join(this.dir, "corpus", name);
+      mkdirSync(folder, { recursive: true });
       writeFileSync(path.join(folder, "seed.md"), `# Seed\n\nSeed text for ${name}.\n`);
       collections[name] = { path: folder, pattern: "**/*.md" };
     }
@@ -223,6 +235,7 @@ await store.close();`;
       MEMORIA_QMD_HOST: "127.0.0.1",
       MEMORIA_QMD_PORT: String(this.sidecarPort),
       MEMORIA_QMD_SECRET: this.sidecarSecret,
+      E2E_STALL_FILE: path.join(this.dir, "stall.json"),
       MEMORIA_QMD_DB_PATH: path.join(this.dir, "index.sqlite"),
       MEMORIA_QMD_WARMUP: "0",
       MEMORIA_QMD_KEEP_WARM: "0",
@@ -245,8 +258,20 @@ await store.close();`;
   }
 
   async startApi(): Promise<void> {
-    this.launch("dotnet", [apiDll()], apiDirectory(), this.apiEnvironment(), "api.log");
+    this.api = this.launch("dotnet", [apiDll()], apiDirectory(), this.apiEnvironment(), "api.log");
     this.check("API answers", await waitForHttp(`${this.apiUrl}/health`), this.log("api"));
+  }
+
+  /** Kills the API outright, with no chance to tidy up, and starts it again on the same database. */
+  async restartApi(): Promise<void> {
+    const api = this.api;
+    if (api) {
+      const exited = new Promise((resolve) => api.once("exit", resolve));
+      api.kill("SIGKILL");
+      await exited;
+    }
+
+    await this.startApi();
   }
 
   async choosePorts(): Promise<void> {
@@ -273,6 +298,11 @@ await store.close();`;
   proxied(from = 0): ProxyRecord[] {
     const lines = readFileSync(this.proxyRecordFile(), "utf8").split("\n").filter((line) => line !== "");
     return lines.slice(from).map((line) => JSON.parse(line) as ProxyRecord);
+  }
+
+  /** What stall-writes.mjs holds writes for from now on. Writes already held stay held. */
+  stallWrites(where: { before?: number; after?: number }): void {
+    writeFileSync(path.join(this.dir, "stall.json"), JSON.stringify(where));
   }
 
   async planProxy(plan: Plan): Promise<void> {
@@ -352,6 +382,7 @@ await store.close();`;
       DOTNET_NOLOGO: "1",
       Memoria__Sidecar__BaseUrl: `http://127.0.0.1:${this.proxyPort}`,
       Memoria__Sidecar__Secret: this.sidecarSecret,
+      Memoria__Ingest__DigestKey: randomBytes(32).toString("base64url"),
       Memoria__Sidecar__ReadyRequiresModels: "false",
       Memoria__Search__MaxMultiGetBytes: String(BATCH_BUDGET),
       Memoria__Auth__Mode: "ApiKey",
@@ -368,10 +399,12 @@ await store.close();`;
     return readFileSync(path.join(this.dir, `${service}.log`), "utf8");
   }
 
-  private launch(command: string, args: string[], cwd: string, env: NodeJS.ProcessEnv, logName: string): void {
+  private launch(command: string, args: string[], cwd: string, env: NodeJS.ProcessEnv, logName: string): ChildProcess {
     const fd = openSync(path.join(this.dir, logName), "a");
     this.fds.push(fd);
-    this.children.push(spawn(command, args, { cwd, env, stdio: ["ignore", fd, fd] }));
+    const child = spawn(command, args, { cwd, env, stdio: ["ignore", fd, fd] });
+    this.children.push(child);
+    return child;
   }
 
   /** Talks to the sidecar directly, as only a check should, for what the API does not offer such as forcing the index up to date. */

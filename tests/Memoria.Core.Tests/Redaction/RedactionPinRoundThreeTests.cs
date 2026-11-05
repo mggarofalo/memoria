@@ -385,6 +385,15 @@ public sealed class RedactionPinRoundThreeTests
 	}
 
 	[Fact]
+	public void Running_out_of_memory_in_a_rule_is_not_called_a_redaction_failure()
+	{
+		RedactionRule bad = new("bad", new System.Text.RegularExpressions.Regex("a"), _ => throw new OutOfMemoryException());
+		Redactor redactor = new([bad], TimeSpan.FromMinutes(1));
+
+		Assert.Throws<OutOfMemoryException>(() => redactor.FindFirstHit("a"));
+	}
+
+	[Fact]
 	public void Gate_reports_a_rule_failure_as_typed()
 	{
 		RedactionRule bad = new("bad", new System.Text.RegularExpressions.Regex("a"), _ => throw new InvalidOperationException());

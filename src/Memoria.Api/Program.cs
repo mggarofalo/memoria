@@ -54,6 +54,7 @@ IConfigurationSection memoriaSection = builder.Configuration.GetSection(MemoriaO
 builder.Services.AddMemoriaAuth(memoriaSection.GetSection(nameof(MemoriaOptions.Auth)).Get<AuthOptions>() ?? new AuthOptions());
 builder.Services.AddScoped<ScopedCorpus>();
 builder.Services.AddMemoriaIngest();
+builder.Services.AddSafeRequestLogging(builder.Configuration);
 
 builder.Services.AddProblemDetails(options =>
 	options.CustomizeProblemDetails = context =>
@@ -82,6 +83,7 @@ WebApplication app = builder.Build();
 
 await app.InitializeMemoriaAuthAsync();
 app.WarnAboutRedactionSettings();
+app.WarnIfRequestDetailsAreLogged();
 
 // First, so logs and the failed-authentication limit see the real client.
 app.UseMemoriaForwardedHeaders(app.Services.GetRequiredService<IOptions<MemoriaOptions>>().Value.Auth.TrustedProxies);

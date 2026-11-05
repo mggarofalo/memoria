@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using Memoria.Api.Auth;
+using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Http.Metadata;
 
 namespace Memoria.Api.Http;
@@ -36,7 +37,7 @@ public sealed partial class RequestLoggingMiddleware(RequestDelegate next, ILogg
 		{
 			double elapsedMs = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
 			int status = context.Response.StatusCode;
-			string route = context.GetEndpoint()?.Metadata.GetMetadata<IRouteDiagnosticsMetadata>()?.Route ?? context.Request.Path.Value ?? "/";
+			string route = RouteOf(context);
 			string method = context.Request.Method;
 			string? remote = context.Connection.RemoteIpAddress?.ToString();
 			string? keyId = context.User.FindFirst(MemoriaClaims.KeyId)?.Value;
@@ -60,6 +61,13 @@ public sealed partial class RequestLoggingMiddleware(RequestDelegate next, ILogg
 	public static string CurrentTraceId(HttpContext context)
 	{
 		return Activity.Current?.TraceId.ToString() ?? context.TraceIdentifier;
+	}
+
+	/// <summary>The pattern, never the raw path, which can carry a document path. The exception handler clears the endpoint, so a failed request has it on the feature.</summary>
+	private static string RouteOf(HttpContext context)
+	{
+		Endpoint? endpoint = context.GetEndpoint() ?? context.Features.Get<IExceptionHandlerFeature>()?.Endpoint;
+		return endpoint?.Metadata.GetMetadata<IRouteDiagnosticsMetadata>()?.Route ?? "(no route)";
 	}
 
 	private static bool IsProbe(PathString path)

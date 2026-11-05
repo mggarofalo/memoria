@@ -21,6 +21,9 @@ public sealed class DocumentIngestor(
 	IRedactor redactor,
 	IngestRedactionPolicy redaction,
 	IngestGates gates,
+	IngestDigests digests,
+	IngestPathLocks locks,
+	IngestCollections collections,
 	CollectionReindexer reindexer,
 	ICallerScope scope,
 	IRequestAudit audit,
@@ -28,73 +31,117 @@ public sealed class DocumentIngestor(
 	TimeProvider timeProvider)
 {
 	/// <summary>The request has been validated: every field it needs is set.</summary>
-	public async Task<DocumentIngestResult> IngestAsync(DocumentIngestRequest request, CancellationToken cancellationToken)
+	public async Task<DocumentIngestResult> IngestAsync(DocumentIngestRequest request, bool restore, CancellationToken cancellationToken)
 	{
 		ArgumentNullException.ThrowIfNull(request);
 		string collection = request.Collection!;
 		IngestRules.RequireCollection(scope, collection);
 		audit.SetResult([collection], 0);
-		RequireFits(Encoding.UTF8.GetByteCount(request.Body!), "The body alone");
+		await collections.RequireOpenAsync(collection, sidecar, cancellationToken);
+		int bodyBytes = Encoding.UTF8.GetByteCount(request.Body!);
+		RequireFits(bodyBytes, "The body alone");
 
 		DocumentEnvelope envelope = new(request.Source!, request.SourceId!, request.Url, request.Title, request.Updated, request.Project, request.Tags);
 		string path = envelope.StoragePath();
 		RedactionDisabledCollection? disabled = redaction.For(collection);
 		string redactionName = IngestRedactionPolicy.NameOf(disabled);
-		(RedactedMarkdown decided, List<EnvelopeFieldRedaction> fields) = await gates.WorkAsync(() => Decide(envelope, request.Body!, disabled), cancellationToken);
+		(RedactedMarkdown decided, List<EnvelopeFieldRedaction> fields) = await gates.WorkAsync(bodyBytes, () => Decide(envelope, request.Body!, disabled), cancellationToken);
 		Dictionary<string, int> counts = new(decided.CountsByRule, StringComparer.Ordinal);
 		fields.ForEach(field => counts[field.Rule] = counts.GetValueOrDefault(field.Rule) + field.Count);
 		IngestRefusal[] refusals = [.. fields.Select(static field => new IngestRefusal(1, field.Field, field.Rule))];
 		RequireFits(Encoding.UTF8.GetByteCount(decided.Text), "A document once rendered");
 
 		string identity = IdentityOf(collection, path);
-		IngestClaim claim = await ledger.ClaimAsync(new IngestClaimRequest(identity, collection, request.Updated!.Value, timeProvider.GetUtcNow(), [path]), cancellationToken);
+		string content = ContentOf(decided.Text);
+		IngestClaimRequest claiming = new(identity, collection, request.Updated!.Value, timeProvider.GetUtcNow(), [path], ContentHash: digests.Of(content), Restore: restore, IsSameContent: stored => digests.Matches(stored, content));
+		IngestClaim claim = await ledger.ClaimAsync(claiming, cancellationToken);
 		IngestRules.RequireClaim(claim);
-		audit.SetTarget(new AuditIngest("document", redactionName, false, 0, 1, 0, counts.Values.Sum(), refusals.Length, [path]));
+		audit.SetTarget(new AuditIngest("document", redactionName, false, 0, 1, 0, counts.Values.Sum(), refusals.Length, [path], restore));
 
-		string state = IngestStateName.Partial;
+		SidecarIngestResponse? response = null;
+		bool kept = false;
 		try
 		{
-			SidecarIngestResponse response = await sidecar.IngestAsync(new SidecarIngestRequest(collection, path, decided, Overwrite: true), cancellationToken);
-			state = IngestStateName.Complete;
-			audit.SetResult([collection], 1);
-			audit.SetTarget(new AuditIngest("document", redactionName, true, 1, 0, 0, counts.Values.Sum(), refusals.Length, [path]));
-			return new DocumentIngestResult(collection, response.Path, response.File, response.Bytes, response.Created, redactionName, counts, refusals, response.Job.Id);
+			response = await WriteAsync(new SidecarIngestRequest(collection, path, decided), identity, claim.LeaseToken!, cancellationToken);
 		}
 		finally
 		{
-			await ledger.FinishAsync(identity, claim.LeaseToken!, collection, state, [path]);
+			kept = await ledger.FinishAsync(identity, claim.LeaseToken!, collection, response is null ? IngestStateName.Partial : IngestStateName.Complete, [path], response is null ? null : claiming);
 		}
+
+		// The write landed, and then a delete took the path before the upload finished, so the file is gone.
+		if (!kept)
+		{
+			throw IngestRules.DeletedDuringUpload();
+		}
+
+		audit.SetResult([collection], 1);
+		audit.SetTarget(new AuditIngest("document", redactionName, true, 1, 0, 0, counts.Values.Sum(), refusals.Length, [path], restore));
+		return new DocumentIngestResult(collection, response!.Path, response.File, response.Bytes, response.Created, redactionName, counts, refusals, response.Job.Id);
 	}
 
 	/// <summary>
-	/// Removes a document. An index update follows only when something was removed, or an earlier one is still owed: a deleted document
-	/// stays searchable until the index changes, and each update is a scan that blocks the sidecar. Safe to retry, including after the file is
-	/// gone, which is how a failed update is finished. The ledger is told first, so an older copy replayed later cannot bring it back.
+	/// Removes a document. It waits for any write of the path to answer, leaves the tombstone, and then removes the file. An index update follows only when something was removed: a
+	/// deleted document stays searchable until the index changes, and each update is a scan that blocks the sidecar. Anything short of the sidecar's confirmation answers 503, and repeating it is safe.
 	/// </summary>
 	public async Task<DocumentDeleteResult> DeleteAsync(string collection, string path, CancellationToken cancellationToken)
 	{
 		IngestRules.RequireCollection(scope, collection);
 		audit.SetResult([collection], 0);
-		audit.SetTarget(new AuditIngest("delete", IngestRedactionPolicy.NameOf(redaction.For(collection)), false, 0, 0, 0, 0, 0, [path]));
+		string redactionName = IngestRedactionPolicy.NameOf(redaction.For(collection));
+		audit.SetTarget(new AuditIngest("delete", redactionName, false, 0, 0, 0, 0, 0, [path]));
+		await collections.RequireOpenAsync(collection, sidecar, cancellationToken);
 
-		string identity = IdentityOf(collection, path);
-		IngestDeleteGate gate = await ledger.PrepareDeleteAsync(collection, path, identity, timeProvider.GetUtcNow(), cancellationToken);
-		if (gate.Outcome == IngestDeleteOutcome.Busy)
-		{
-			IngestRules.RequireClaim(new IngestClaim(IngestClaimOutcome.Busy, [], null, gate.RetryAfterSeconds));
-		}
+		using IDisposable held = await locks.TryHoldAsync(collection, path, options.Value.Ingest.DeleteWriteWait, cancellationToken) ?? throw IngestRules.DeleteUnconfirmed();
+		await ledger.MarkDeletedAsync(collection, path, IdentityOf(collection, path), timeProvider.GetUtcNow());
+		SidecarDeleteResponse response = await RemoveAsync(collection, path);
+		await ledger.ForgetPathAsync(collection, path);
 
-		SidecarDeleteResponse response = await sidecar.DeleteDocumentAsync(collection, path, cancellationToken);
-		if (gate.Outcome == IngestDeleteOutcome.NoRecord && response.Deleted)
-		{
-			await ledger.RecordDeletedAsync(identity, timeProvider.GetUtcNow(), cancellationToken);
-		}
-
-		ReindexOutcome reindex = await reindexer.RequestAsync(collection, response.Deleted, cancellationToken);
+		ReindexOutcome reindex = await reindexer.RequestAsync(collection, response.Deleted, CancellationToken.None);
 		int deleted = response.Deleted ? 1 : 0;
 		audit.SetResult([collection], deleted);
-		audit.SetTarget(new AuditIngest("delete", IngestRedactionPolicy.NameOf(redaction.For(collection)), reindex.State != ReindexState.Failed, 0, 0, deleted, 0, 0, [path]));
-		return new DocumentDeleteResult(collection, response.Path, response.Deleted, reindex.State, reindex.JobId, reindex.StartsInSeconds);
+		audit.SetTarget(new AuditIngest("delete", redactionName, reindex.State != ReindexState.Failed, 0, 0, deleted, 0, 0, [path]));
+		return new DocumentDeleteResult(collection, path, response.Deleted, reindex.State, reindex.JobId, reindex.StartsInSeconds);
+	}
+
+	/// <summary>Runs to its answer even if the caller goes away. A refusal on the merits, such as a directory at the path, is the answer; no answer, or a sidecar too busy to give one, is not.</summary>
+	private async Task<SidecarDeleteResponse> RemoveAsync(string collection, string path)
+	{
+		try
+		{
+			return await sidecar.DeleteDocumentAsync(collection, path, CancellationToken.None);
+		}
+		catch (SidecarException exception) when (exception.StatusCode is null || exception.IsTransient)
+		{
+			throw IngestRules.DeleteUnconfirmed();
+		}
+	}
+
+	/// <summary>
+	/// The write runs to its answer even if the caller goes away, as the sidecar drops it only if this process dies or gives up on it. The path's lock is held for all of that,
+	/// and the lease is checked under it, so a delete either comes first and stops this write, or waits for it.
+	/// </summary>
+	private async Task<SidecarIngestResponse> WriteAsync(SidecarIngestRequest request, string identity, string leaseToken, CancellationToken cancellationToken)
+	{
+		using IDisposable held = (await locks.TryHoldAsync(request.Collection, request.Path, IngestRules.NoLimit, cancellationToken))!;
+		if (!await ledger.BeginWriteAsync(identity, leaseToken, request.Collection, request.Path, timeProvider.GetUtcNow(), cancellationToken))
+		{
+			throw IngestRules.DeletedDuringUpload();
+		}
+
+		return await sidecar.IngestAsync(request, CancellationToken.None);
+	}
+
+	/// <summary>
+	/// What a document says, leaving out its date, so a tombstone can tell the deleted copy from a real new version whatever date it claims.
+	/// Only ever stored through <see cref="IngestDigests"/>: redaction alone would not stop a hash confirming a guess at text no rule matches.
+	/// </summary>
+	private static string ContentOf(string text)
+	{
+		const string Fence = "\n---\n";
+		int close = text.IndexOf(Fence, 3, StringComparison.Ordinal);
+		IEnumerable<string> fields = text[..close].Split('\n').Where(static line => !line.StartsWith("updated:", StringComparison.Ordinal) && !line.StartsWith("date:", StringComparison.Ordinal));
+		return string.Join('\n', fields) + text[close..];
 	}
 
 	private (RedactedMarkdown Decided, List<EnvelopeFieldRedaction> Fields) Decide(DocumentEnvelope envelope, string body, RedactionDisabledCollection? disabled)

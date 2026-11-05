@@ -30,32 +30,39 @@ public sealed class IngestOptions
 	public int MaxDocumentBytes { get; set; } = 2 * 1024 * 1024;
 
 	/// <summary>The largest raw transcript one request may send. It is read as a stream, so this limits work, not memory.</summary>
-	public long MaxSessionBytes { get; set; } = 256L * 1024 * 1024;
+	public long MaxSessionBytes { get; set; } = 384L * 1024 * 1024;
 
-	/// <summary>Transcripts handled at once, from the first byte read to the last part written. Past it, callers get 503 and <c>Retry-After</c>.</summary>
-	public int MaxConcurrentSessions { get; set; } = 4;
-
-	/// <summary>The most of <see cref="MaxConcurrentSessions"/> one key can hold, so one key's slow uploads leave room for the others.</summary>
-	public int MaxConcurrentSessionsPerKey { get; set; } = 2;
-
-	/// <summary>Documents handled at once, from the first byte read to the sidecar's answer.</summary>
-	public int MaxConcurrentDocuments { get; set; } = 8;
-
-	public int MaxConcurrentDocumentsPerKey { get; set; } = 4;
+	/// <summary>Transcripts over 8 MiB handled at once. It keeps the API inside its memory limit. Past it, an upload gets 503 with <c>Retry-After</c>. A slow large upload holds its place until it ends.</summary>
+	public int MaxConcurrentLargeUploads { get; set; } = 2;
 
 	/// <summary>Redactions and renders run at once, for documents and transcripts together. This is what bounds CPU and most of the memory. Reading a body does not take one.</summary>
 	public int MaxConcurrentRenders { get; set; } = 2;
 
-	/// <summary>How long a transcript's body may take to arrive. Past it, the request gets 408 and nothing changes.</summary>
-	public TimeSpan SessionUploadDeadline { get; set; } = TimeSpan.FromMinutes(10);
+	/// <summary>The slowest a body may arrive, after a few seconds' grace. Below it the server cuts the request off with 408.</summary>
+	public int MinUploadBytesPerSecond { get; set; } = 16 * 1024;
 
-	/// <summary>How long a document's body may take to arrive.</summary>
-	public TimeSpan DocumentUploadDeadline { get; set; } = TimeSpan.FromMinutes(1);
+	/// <summary>The longest a transcript's body may take to arrive, however steadily. Past it, the request gets 408 and nothing changes.</summary>
+	public TimeSpan SessionUploadDeadline { get; set; } = TimeSpan.FromHours(1);
+
+	/// <summary>The same for a document.</summary>
+	public TimeSpan DocumentUploadDeadline { get; set; } = TimeSpan.FromMinutes(5);
+
+	/// <summary>How long a delete waits for a write of its path to answer. Past it, the delete answers 503 <c>delete_unconfirmed</c>, having changed nothing, and repeating it is safe.</summary>
+	public TimeSpan DeleteWriteWait { get; set; } = TimeSpan.FromSeconds(30);
+
+	/// <summary>
+	/// The key for digests of content, kept only so a tombstone or an upload can be compared with what was stored. It keeps the database from confirming a guessed
+	/// secret, so it lives outside it, as the sidecar's secret does. At least 32 characters. Required whenever API keys are on.
+	/// </summary>
+	public string? DigestKey { get; set; }
+
+	/// <summary>Older keys, still accepted when comparing, so rotating does not refuse what was stored under them. Drop one once what it covered has been sent again.</summary>
+	public List<string> PreviousDigestKeys { get; set; } = [];
 
 	/// <summary>The least time between index updates a delete starts in one collection. A delete with none recently starts one at once; a burst shares one when this ends.</summary>
 	public TimeSpan MinReindexInterval { get; set; } = TimeSpan.FromSeconds(10);
 
-	/// <summary>Per-collection settings, by exact collection name. A collection not listed here is redacted.</summary>
+	/// <summary>Per-collection settings, by exact collection name. A collection not listed here cannot be written by ingest.</summary>
 	public Dictionary<string, IngestCollectionOptions> Collections { get; set; } = new(StringComparer.Ordinal);
 }
 
@@ -68,6 +75,9 @@ public sealed class IngestCollectionOptions
 	/// A string for the same reason as <see cref="AuthOptions.Mode"/>: an enum would accept values nobody meant as this.
 	/// </summary>
 	public string? Redaction { get; set; }
+
+	/// <summary>Opens this collection to ingest, which refuses unless its directory is empty when it first uses it. Everything inside then belongs to Memoria.</summary>
+	public bool Enabled { get; set; }
 }
 
 /// <summary>How callers authenticate.</summary>

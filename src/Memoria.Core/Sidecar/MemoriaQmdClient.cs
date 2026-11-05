@@ -110,6 +110,12 @@ public sealed class MemoriaQmdClient(HttpClient http) : IMemoriaQmdClient
 		return GetAsync("collections", SidecarJsonContext.Default.SidecarCollectionsResponse, cancellationToken);
 	}
 
+	public Task<SidecarCollectionEmptyResponse> IsCollectionEmptyAsync(string collection, CancellationToken cancellationToken = default)
+	{
+		ArgumentException.ThrowIfNullOrWhiteSpace(collection);
+		return GetAsync($"collections/{Uri.EscapeDataString(collection)}/empty", SidecarJsonContext.Default.SidecarCollectionEmptyResponse, cancellationToken);
+	}
+
 	public Task<SidecarIngestResponse> IngestAsync(SidecarIngestRequest request, CancellationToken cancellationToken = default)
 	{
 		ArgumentNullException.ThrowIfNull(request);

@@ -27,6 +27,7 @@ public static class IngestEndpoints
 			.WithMemoriaScope(MemoriaScopes.Ingest)
 			.WithTags("Ingest")
 			.AddEndpointFilter(AdminKeyEndpoints.RequireApiKeyModeAsync)
+			.AddEndpointFilter(ComeBackWhenOutOfMemoryAsync)
 			.ProducesProblem(StatusCodes.Status401Unauthorized)
 			.ProducesProblem(StatusCodes.Status403Forbidden)
 			.ProducesProblem(StatusCodes.Status429TooManyRequests)
@@ -37,6 +38,19 @@ public static class IngestEndpoints
 		MapDocumentRoutes(group);
 		MapSessionRoutes(group);
 		return app;
+	}
+
+	/// <summary>The budget is an estimate, so memory can still run out under load. That is a reason to come back, not a fault: the request is simply answered with 503, like any other refusal.</summary>
+	private static async ValueTask<object?> ComeBackWhenOutOfMemoryAsync(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
+	{
+		try
+		{
+			return await next(context);
+		}
+		catch (OutOfMemoryException)
+		{
+			throw new IngestRefusedException(StatusCodes.Status503ServiceUnavailable, "ingest_busy", "The server ran short of memory for this upload. Try again shortly.", 30);
+		}
 	}
 
 	private static void MapDocumentRoutes(RouteGroupBuilder group)
@@ -58,8 +72,8 @@ public static class IngestEndpoints
 			.WithName("deleteDocument")
 			.WithSummary("Delete a document")
 			.WithDescription(
-				"Names a document by `source` and `sourceId`, or by `path` within the collection, and removes it. A deleted document stays searchable until the index changes, so an update starts at once, "
-				+ "or within `reindexInSeconds` when one just ran in this collection: `reindexState` says which. It also stops an older copy being stored again. Safe to repeat: "
+				"Names a document by `source` and `sourceId`, or by `path` within the collection, and removes it, waiting for any write of it in progress to finish first. 503 `delete_unconfirmed` means it could not be confirmed done, and repeating it is safe. A deleted document stays searchable until the index changes, so an update starts at once, "
+				+ "or within `reindexInSeconds` when one just ran in this collection: `reindexState` says which. It also stops an older copy, or the same content under a later date, being stored again. Safe to repeat: "
 				+ "a missing document answers `deleted: false` and costs no update. When `reindexState` is `failed`, repeat the request.")
 			.ProducesValidationProblem()
 			.ProducesProblem(StatusCodes.Status409Conflict);
@@ -73,8 +87,8 @@ public static class IngestEndpoints
 			.WithDescription(
 				"The body is the raw JSONL of a Claude Code or Codex session, read as a stream. It is rendered and redacted here into one or more parts. 202 means every part arrived. "
 				+ "207 means not all of it is stored: `parts` and `read` say why, the session stays `partial`, and when `retryable` is true sending the same upload again finishes it. "
-				+ "A transcript with no messages, or that lost any, is never 202. An older version than the one stored gets 409, as does a second upload of the session while one is running, a file belonging to another session, "
-				+ "and fewer messages than the one stored unless `allowShrink` is set. Parts a shrunken session no longer has are deleted last, and only when they are provably this session's.")
+				+ "A transcript with no messages, or that lost any, is never 202. An older version than the one stored gets 409, as does a second upload of the session while one is running, a file the ledger does not say is this session's, "
+				+ "and messages that do not start with the stored ones, unless `allowShrink` is set. Parts it no longer has are deleted last, and a part someone deleted stays deleted.")
 			.Accepts<Stream>("application/x-ndjson")
 			.Produces<SessionIngestResult>(StatusCodes.Status207MultiStatus)
 			.ProducesValidationProblem()
@@ -90,9 +104,9 @@ public static class IngestEndpoints
 	}
 
 	private static async Task<Results<Accepted<DocumentIngestResult>, ValidationProblem>> IngestDocumentAsync(
+		[FromQuery(Name = "restoreDeleted")][Description("Stores this even though it was deleted, including the same content. Needs a key with the `admin` scope as well.")] bool? restoreDeleted,
 		HttpContext context,
 		DocumentIngestor ingestor,
-		IngestGates gates,
 		IOptions<MemoriaOptions> options,
 		TimeProvider timeProvider,
 		CancellationToken cancellationToken)
@@ -100,7 +114,8 @@ public static class IngestEndpoints
 		// Escaping can double text in JSON, and the envelope sits beside the body. What fits is checked once parsed.
 		long limit = (options.Value.Ingest.MaxDocumentBytes * 2L) + 64 * 1024;
 		RequestBody.AllowUpTo(context, limit);
-		using IngestGate.Slot slot = gates.Documents.Enter(KeyOf(context));
+		RequestBody.RequireRate(context, options.Value.Ingest.MinUploadBytesPerSecond);
+		RequireRestoreRight(context, restoreDeleted);
 		DocumentIngestRequest? request = await IngestRules.WithinDeadlineAsync(
 			options.Value.Ingest.DocumentUploadDeadline,
 			token => ReadDocumentAsync(context, limit, token),
@@ -111,12 +126,16 @@ public static class IngestEndpoints
 			return TypedResults.ValidationProblem(errors);
 		}
 
-		return TypedResults.Accepted((string?)null, await ingestor.IngestAsync(request!, cancellationToken));
+		return TypedResults.Accepted((string?)null, await ingestor.IngestAsync(request!, restoreDeleted == true, cancellationToken));
 	}
 
-	private static string KeyOf(HttpContext context)
+	/// <summary>Bringing back what someone deleted is an operator's decision: a deleted document may have held a credential.</summary>
+	private static void RequireRestoreRight(HttpContext context, bool? restoreDeleted)
 	{
-		return context.User.FindFirst(MemoriaClaims.KeyId)?.Value ?? "";
+		if (restoreDeleted == true && !context.User.HasClaim(MemoriaClaims.Scope, MemoriaScopes.Admin))
+		{
+			throw new IngestRefusedException(StatusCodes.Status403Forbidden, "restore_needs_admin", "Only a key with the admin scope can restore what was deleted.");
+		}
 	}
 
 	private static async Task<DocumentIngestRequest?> ReadDocumentAsync(HttpContext context, long limit, CancellationToken cancellationToken)
@@ -156,12 +175,13 @@ public static class IngestEndpoints
 		HttpContext context,
 		SessionIngestor ingestor,
 		ICallerScope scope,
-		IngestGates gates,
+		LargeUploads large,
 		IOptions<MemoriaOptions> options,
 		TimeProvider timeProvider,
 		CancellationToken cancellationToken)
 	{
 		RequestBody.AllowUpTo(context, options.Value.Ingest.MaxSessionBytes);
+		RequestBody.RequireRate(context, options.Value.Ingest.MinUploadBytesPerSecond);
 		Dictionary<string, string[]> errors = IngestValidation.Session(query, updated, timeProvider.GetUtcNow());
 		if (errors.Count > 0)
 		{
@@ -170,8 +190,8 @@ public static class IngestEndpoints
 
 		SessionIngestInput input = query.ToInput(updated!.Value);
 		IngestRules.RequireCollection(scope, input.Collection);
-		using IngestGate.Slot slot = gates.Sessions.Enter(KeyOf(context));
-		await using Stream body = RequestBody.Open(context, options.Value.Ingest.MaxSessionBytes);
+		RequireRestoreRight(context, query.RestoreDeleted);
+		await using Stream body = large.Watch(RequestBody.Open(context, options.Value.Ingest.MaxSessionBytes), context.Request.ContentLength);
 		SessionIngestResult result = await ingestor.IngestAsync(input, body, cancellationToken);
 		return result.Complete
 			? TypedResults.Accepted((string?)null, result)
@@ -213,13 +233,17 @@ public sealed class SessionQuery
 	public string? ProjectDirectory { get; set; }
 
 	[FromQuery(Name = "allowShrink")]
-	[Description("Set when the session really did lose messages. Without it, an upload with fewer messages than the stored one is refused, as it looks just like a cut copy.")]
+	[Description("Set when the session's history really did change. Without it, an upload whose messages do not start with the stored ones is refused, as it looks just like a cut or damaged copy.")]
 	public bool? AllowShrink { get; set; }
+
+	[FromQuery(Name = "restoreDeleted")]
+	[Description("Writes parts of this session that were deleted, which otherwise stay deleted. Needs a key with the `admin` scope as well.")]
+	public bool? RestoreDeleted { get; set; }
 
 	internal SessionIngestInput ToInput(DateTimeOffset updated)
 	{
 		SessionFormat format = Format == IngestEndpointNames.Codex ? SessionFormat.Codex : SessionFormat.ClaudeCode;
-		return new SessionIngestInput(Collection!, format, SessionId!, updated, string.IsNullOrWhiteSpace(ProjectDirectory) ? null : ProjectDirectory, AllowShrink == true);
+		return new SessionIngestInput(Collection!, format, SessionId!, updated, string.IsNullOrWhiteSpace(ProjectDirectory) ? null : ProjectDirectory, AllowShrink == true, Restore: RestoreDeleted == true);
 	}
 }
 

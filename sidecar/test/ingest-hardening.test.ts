@@ -45,7 +45,7 @@ for (const step of ["opened", "written", "checked"] as const) {
     const target = resolveTarget(f.root, "**/*.md", "sub/victim.md");
     let flipped = false;
     await assert.rejects(
-      writeDocument(target, "overwritten", true, {
+      writeDocument(target, "overwritten", {
         onStep: async (s) => {
           if (s === step && !flipped) {
             flipped = true;
@@ -65,7 +65,7 @@ test("a temp file created through a swapped directory is caught when the swap is
   const target = resolveTarget(f.root, "**/*.md", "sub/victim.md");
   let unflipped = false;
   await assert.rejects(
-    writeDocument(target, "overwritten", true, {
+    writeDocument(target, "overwritten", {
       onStep: async (s) => {
         if (s === "ready") await flip(f.dir, f.outside);
         if (s === "opened") {
@@ -90,7 +90,7 @@ test("a temp file created through a swapped directory that stays swapped is refu
   const f = await fixture();
   const target = resolveTarget(f.root, "**/*.md", "sub/victim.md");
   await assert.rejects(
-    writeDocument(target, "overwritten", true, {
+    writeDocument(target, "overwritten", {
       onStep: async (s) => {
         if (s === "ready") await flip(f.dir, f.outside);
       },
@@ -104,7 +104,7 @@ test("a directory swapped just before the rename leaves the temp file's name unr
   const f = await fixture();
   const target = resolveTarget(f.root, "**/*.md", "sub/victim.md");
   await assert.rejects(
-    writeDocument(target, "overwritten", true, {
+    writeDocument(target, "overwritten", {
       onStep: async (s) => {
         if (s === "checked") await flip(f.dir, f.outside);
       },
@@ -118,7 +118,7 @@ test("a directory swapped after the rename is reported, not reported as success"
   const f = await fixture();
   const target = resolveTarget(f.root, "**/*.md", "sub/x.md");
   await assert.rejects(
-    writeDocument(target, "body", true, {
+    writeDocument(target, "body", {
       onStep: async (s) => {
         if (s === "renamed") await flip(f.dir, f.outside);
       },
@@ -167,7 +167,7 @@ test("a junction flipping under real requests never overwrites a file outside th
 test("the rename replaces a hard link instead of writing through it", async () => {
   const f = await fixture();
   const target = resolveTarget(f.root, "**/*.md", "hardlink.md");
-  await writeDocument(target, "body", true, {
+  await writeDocument(target, "body", {
     onStep: async (s) => {
       // Past every check: only the rename stands between this link and the outside file.
       if (s === "checked") await link(f.victim, target.absolute);
@@ -182,7 +182,7 @@ test("overwriting a hard-linked file is refused and leaves both names intact", a
   const f = await fixture();
   const target = resolveTarget(f.root, "**/*.md", "hardlink.md");
   await link(f.victim, target.absolute);
-  await assert.rejects(writeDocument(target, "overwritten", true), isCode("hard_link"));
+  await assert.rejects(writeDocument(target, "overwritten"), isCode("hard_link"));
   assert.equal(await readFile(f.victim, "utf8"), "keep");
   assert.equal(await readFile(target.absolute, "utf8"), "keep");
 });
@@ -199,9 +199,9 @@ test("deleting a hard link removes that name only", async () => {
 test("a failed write leaves no temp file behind and the old document in place", async () => {
   const f = await fixture();
   const target = resolveTarget(f.root, "**/*.md", "sub/x.md");
-  await writeDocument(target, "old", true);
+  await writeDocument(target, "old");
   await assert.rejects(
-    writeDocument(target, "new", true, {
+    writeDocument(target, "new", {
       onStep: async (s) => {
         if (s === "written") throw new Error("boom");
       },
@@ -214,7 +214,7 @@ test("a failed write leaves no temp file behind and the old document in place", 
 
 test("a successful write leaves only the document", async () => {
   const f = await fixture();
-  await writeDocument(resolveTarget(f.root, "**/*.md", "sub/x.md"), "body", true);
+  await writeDocument(resolveTarget(f.root, "**/*.md", "sub/x.md"), "body");
   assert.deepEqual(await readdir(f.dir), ["x.md"]);
 });
 
@@ -222,14 +222,14 @@ test("an overwrite keeps the file's permission bits", { skip: process.platform =
   const f = await fixture();
   const target = resolveTarget(f.root, "**/*.md", "secret.md");
   await writeFile(target.absolute, "old", { mode: 0o600 });
-  await writeDocument(target, "new", true);
+  await writeDocument(target, "new");
   assert.equal((await stat(target.absolute)).mode & 0o777, 0o600);
 });
 
 test("a directory swapped before a delete's rename gets the outside file put back", async () => {
   const f = await fixture();
   const target = resolveTarget(f.root, "**/*.md", "sub/victim.md");
-  await writeDocument(target, "inside", true);
+  await writeDocument(target, "inside");
   await assert.rejects(
     removeDocument(target, {
       onStep: async (s) => {
@@ -244,7 +244,7 @@ test("a directory swapped before a delete's rename gets the outside file put bac
 test("a directory swapped after a delete's rename cannot touch the outside file", async () => {
   const f = await fixture();
   const target = resolveTarget(f.root, "**/*.md", "sub/victim.md");
-  await writeDocument(target, "inside", true);
+  await writeDocument(target, "inside");
   await assert.rejects(
     removeDocument(target, {
       onStep: async (s) => {
@@ -278,7 +278,7 @@ test("a link between the root and the file is refused even when it stays inside 
   await writeFile(path.join(f.dir, "x.md"), "keep");
   await symlink(f.dir, path.join(f.root, "alias"), "junction");
   const target = resolveTarget(f.root, "**/*.md", "alias/x.md");
-  await assert.rejects(writeDocument(target, "new", true), isCode("invalid_path"));
+  await assert.rejects(writeDocument(target, "new"), isCode("invalid_path"));
   await assert.rejects(removeDocument(target), isCode("invalid_path"));
   assert.equal(await readFile(path.join(f.dir, "x.md"), "utf8"), "keep");
 });
@@ -286,15 +286,15 @@ test("a link between the root and the file is refused even when it stays inside 
 test("a file used as a directory is a conflict, not a server error", async () => {
   const f = await fixture();
   await writeFile(path.join(f.root, "file.md"), "keep");
-  await assert.rejects(writeDocument(resolveTarget(f.root, "**/*.md", "file.md/x.md"), "x", true), isCode("not_a_directory"));
+  await assert.rejects(writeDocument(resolveTarget(f.root, "**/*.md", "file.md/x.md"), "x"), isCode("not_a_directory"));
   assert.equal(await readFile(path.join(f.root, "file.md"), "utf8"), "keep");
 });
 
 test("blank content is refused, because QMD would leave the old text indexed", async () => {
   const f = await fixture();
   const target = resolveTarget(f.root, "**/*.md", "x.md");
-  await writeDocument(target, "body", true);
-  for (const blank of ["", "  ", "\n\r\n\t"]) await assert.rejects(writeDocument(target, blank, true), isCode("empty_content"));
+  await writeDocument(target, "body");
+  for (const blank of ["", "  ", "\n\r\n\t"]) await assert.rejects(writeDocument(target, blank), isCode("empty_content"));
   assert.equal(await readFile(target.absolute, "utf8"), "body");
 });
 

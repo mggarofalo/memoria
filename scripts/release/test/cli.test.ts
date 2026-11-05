@@ -355,6 +355,7 @@ test("verify-image waits for the container, compares the version, and always rem
 
   assert.equal(polls, 3);
   assert.ok(calls[0]?.includes("repo@sha256:abc"));
+  assert.ok(calls[0]?.some((arg) => /^Memoria__Ingest__DigestKey=.{32,}$/.test(arg)), "the image refuses to start without a digest key");
   assert.deepEqual(calls.at(-1), ["rm", "-f", "memoria-verify"]);
   assert.match(lines[0] as string, /reports 1\.2\.3/);
 });

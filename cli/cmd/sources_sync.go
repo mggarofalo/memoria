@@ -285,7 +285,7 @@ func (r *syncRun) post(request api.DocumentIngestRequest) (*api.DocumentIngestRe
 		return nil, err
 	}
 	for attempt := 0; ; attempt++ {
-		resp, err := s.client.IngestDocumentWithResponse(r.ctx, request)
+		resp, err := s.client.IngestDocumentWithResponse(r.ctx, nil, request)
 		if err != nil {
 			return nil, apperr.FromTransport(err)
 		}

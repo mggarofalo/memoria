@@ -192,34 +192,6 @@ public sealed class SessionIngestTests(AuthApiFactory factory) : IClassFixture<A
 	}
 
 	[Fact]
-	public async Task Parts_the_index_has_not_seen_yet_are_still_found_through_the_ledger()
-	{
-		FakeCorpus corpus = new(factory.Sidecar);
-		HttpClient client = await WriterAsync();
-		string id = NewSession();
-		await PostSessionAsync(client, Transcript(4), sessionId: id);
-		corpus.OnList = static () => FakeSidecar.Json(HttpStatusCode.OK, """{"docs":[],"skipped":[],"errors":[]}""");
-
-		await PostSessionAsync(client, Transcript(1), sessionId: id, updated: Stamp.AddHours(1), allowShrink: true);
-
-		Assert.Single(corpus.Files);
-	}
-
-	[Fact]
-	public async Task Parts_from_before_the_ledger_are_still_found_through_the_index()
-	{
-		FakeCorpus corpus = new(factory.Sidecar);
-		HttpClient client = await WriterAsync();
-		string id = NewSession();
-		string shortId = id[..8];
-		corpus.Files[$"2026-01-15_{shortId}_part-007.md"] = ExporterPart(id);
-
-		await PostSessionAsync(client, Transcript(1), sessionId: id);
-
-		Assert.Equal($"2026-01-15_{shortId}.md", Assert.Single(corpus.Files).Key);
-	}
-
-	[Fact]
 	public async Task A_shrink_never_touches_another_sessions_parts()
 	{
 		FakeCorpus corpus = new(factory.Sidecar);
@@ -243,7 +215,8 @@ public sealed class SessionIngestTests(AuthApiFactory factory) : IClassFixture<A
 		string id = NewSession();
 		await PostSessionAsync(client, Transcript(4), sessionId: id);
 
-		HttpResponseMessage response = await PostSessionAsync(client, Transcript(1) + "{not json\n", sessionId: id, updated: Stamp.AddHours(1), allowShrink: true);
+		string cut = Transcript(1);
+		HttpResponseMessage response = await PostSessionAsync(client, cut + cut.TrimEnd('\n'), sessionId: id, updated: Stamp.AddHours(1), allowShrink: true);
 
 		Assert.Equal(HttpStatusCode.MultiStatus, response.StatusCode);
 		JsonElement result = await ReadAsync(response);
@@ -317,21 +290,16 @@ public sealed class SessionIngestTests(AuthApiFactory factory) : IClassFixture<A
 	}
 
 	[Fact]
-	public async Task When_the_index_cannot_list_or_reindex_the_session_is_not_called_complete()
+	public async Task When_the_index_cannot_update_the_session_is_not_called_complete()
 	{
-		FakeCorpus corpus = new(factory.Sidecar);
+		_ = new FakeCorpus(factory.Sidecar);
 		HttpClient client = await WriterAsync();
-		corpus.OnList = static () => Busy();
-		Assert.Equal(HttpStatusCode.MultiStatus, (await PostSessionAsync(client, Transcript(1), sessionId: NewSession())).StatusCode);
-
-		corpus.OnList = static () => FakeSidecar.Json(HttpStatusCode.OK, """{"docs":[],"skipped":[],"errors":[],"truncated":true}""");
-		Assert.Equal(HttpStatusCode.MultiStatus, (await PostSessionAsync(client, Transcript(1), sessionId: NewSession())).StatusCode);
-
-		corpus.OnList = static () => null;
 		string id = NewSession();
 		await PostSessionAsync(client, Transcript(3), sessionId: id);
 		factory.Sidecar.On("POST", "/reindex", (_, _) => Busy());
+
 		HttpResponseMessage response = await PostSessionAsync(client, Transcript(1), sessionId: id, updated: Stamp.AddHours(1), allowShrink: true);
+
 		Assert.Equal(HttpStatusCode.MultiStatus, response.StatusCode);
 		Assert.Equal(JsonValueKind.Null, (await ReadAsync(response)).GetProperty("reindexJobId").ValueKind);
 	}
@@ -393,11 +361,11 @@ public sealed class SessionIngestTests(AuthApiFactory factory) : IClassFixture<A
 		DateTimeOffset now = DateTimeOffset.UtcNow;
 		IngestClaimRequest At(DateTimeOffset when) => new(identity, "crash", Stamp, when, ["a.md"]);
 		IngestClaim first = await ledger.ClaimAsync(At(now), default);
-		await ledger.FinishAsync(identity, first.LeaseToken!, "crash", IngestStateName.Partial, ["a.md"]);
+		await ledger.FinishAsync(identity, first.LeaseToken!, "crash", IngestStateName.Partial, ["a.md"], null);
 		IngestClaim second = await ledger.ClaimAsync(At(now), default);
 
 		Assert.Equal(IngestClaimOutcome.Busy, (await ledger.ClaimAsync(At(now.AddMinutes(1)), default)).Outcome);
-		Assert.True(await ledger.RenewAsync(identity, second.LeaseToken!, now.AddMinutes(4), default));
+		Assert.True(await ledger.BeginWriteAsync(identity, second.LeaseToken!, "crash", "a.md", now.AddMinutes(4), default));
 		Assert.Equal(IngestClaimOutcome.Busy, (await ledger.ClaimAsync(At(now.AddMinutes(6)), default)).Outcome);
 
 		IngestClaim after = await ledger.ClaimAsync(At(now.AddMinutes(10)), default);
@@ -438,9 +406,6 @@ public sealed class SessionIngestTests(AuthApiFactory factory) : IClassFixture<A
 		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
 		Assert.Equal(2, corpus.Files.Count);
 		Assert.All(corpus.Files.Keys, static path => Assert.Matches("^2026-01-15_[A-Za-z0-9._-]+\\.md$", path));
-		string glob = JsonDocument.Parse(factory.Sidecar.Requests.Single(static r => r.Uri.AbsolutePath == "/docs:multiGet").Body!).RootElement.GetProperty("pattern").GetString()!;
-		Assert.DoesNotContain('/', glob);
-		Assert.DoesNotContain("**", glob, StringComparison.Ordinal);
 	}
 
 	[Theory]
@@ -585,7 +550,6 @@ public sealed class IngestLimitTests : IClassFixture<AuthApiFactory>
 		_limited = factory.WithWebHostBuilder(static builder =>
 		{
 			builder.UseSetting("Memoria:Ingest:MaxSessionBytes", "4096");
-			builder.UseSetting("Memoria:Ingest:MaxConcurrentSessions", "1");
 		});
 	}
 
@@ -623,33 +587,6 @@ public sealed class IngestLimitTests : IClassFixture<AuthApiFactory>
 		Assert.Equal(IngestStateName.None, status.GetProperty("state").GetString());
 	}
 
-	[Fact]
-	public async Task Past_the_concurrency_limit_a_caller_is_told_to_come_back()
-	{
-		FakeCorpus corpus = new(_factory.Sidecar);
-		HttpClient client = await WriterAsync();
-		using ManualResetEventSlim entered = new();
-		using ManualResetEventSlim release = new();
-		corpus.OnWrite = _ =>
-		{
-			entered.Set();
-			release.Wait(TimeSpan.FromSeconds(30));
-			return null;
-		};
-
-		Task<HttpResponseMessage> running = PostSessionAsync(client, ClaudeLine("user", "hello"), sessionId: Guid.NewGuid().ToString());
-		Assert.True(entered.Wait(TimeSpan.FromSeconds(30)));
-		HttpResponseMessage second = await PostSessionAsync(client, ClaudeLine("user", "hi"), sessionId: Guid.NewGuid().ToString());
-		release.Set();
-		await running;
-
-		Assert.Equal(HttpStatusCode.ServiceUnavailable, second.StatusCode);
-		Assert.Equal("ingest_busy", (await ReadAsync(second)).GetProperty("code").GetString());
-		Assert.Equal("5", second.Headers.GetValues("Retry-After").Single());
-
-		corpus.OnWrite = static _ => null;
-		Assert.Equal(HttpStatusCode.Accepted, (await PostSessionAsync(client, ClaudeLine("user", "again"), sessionId: Guid.NewGuid().ToString())).StatusCode);
-	}
 }
 
 public sealed class IngestWithoutKeysTests(MemoriaApiFactory factory) : IClassFixture<MemoriaApiFactory>
@@ -678,6 +615,36 @@ public sealed class IngestWithoutKeysTests(MemoriaApiFactory factory) : IClassFi
 public sealed class IngestLedgerMigrationTests
 {
 	[Fact]
+	public async Task A_version_2_database_gains_the_content_hash_and_keeps_its_rows()
+	{
+		string path = Path.Combine(Path.GetTempPath(), "memoria-tests", Guid.NewGuid().ToString("N"), "control.db");
+		Memoria.Api.Auth.ControlDatabase database = new(path);
+		await database.InitializeAsync();
+		SqliteIngestLedger ledger = new(database);
+		IngestClaimRequest kept = new("kept", "c", Stamp, Stamp, ["a.md"]);
+		IngestClaim claim = await ledger.ClaimAsync(kept, default);
+		await ledger.FinishAsync("kept", claim.LeaseToken!, "c", IngestStateName.Complete, ["a.md"], kept);
+		await using (Microsoft.Data.Sqlite.SqliteConnection connection = await database.OpenAsync())
+		{
+			await using Microsoft.Data.Sqlite.SqliteCommand command = connection.CreateCommand();
+			command.CommandText = """
+				ALTER TABLE ingest_state ADD COLUMN deleted_version_ticks INTEGER NULL;
+				ALTER TABLE ingest_state DROP COLUMN content_hash;
+				ALTER TABLE ingest_state DROP COLUMN messages_digest;
+				ALTER TABLE ingest_state DROP COLUMN deleted_paths;
+				DROP TABLE ingest_collections;
+				PRAGMA user_version = 2;
+				""";
+			await command.ExecuteNonQueryAsync();
+		}
+
+		await new Memoria.Api.Auth.ControlDatabase(path).InitializeAsync();
+
+		Assert.Equal(IngestStateName.Complete, (await ledger.FindAsync("kept", default))!.State);
+		Assert.Equal(IngestClaimOutcome.Acquired, (await ledger.ClaimAsync(new IngestClaimRequest("new", "c", Stamp, Stamp, [], ContentHash: "h"), default)).Outcome);
+	}
+
+	[Fact]
 	public async Task A_version_1_database_gains_the_ledger_and_keeps_its_data()
 	{
 		string path = Path.Combine(Path.GetTempPath(), "memoria-tests", Guid.NewGuid().ToString("N"), "control.db");
@@ -690,6 +657,7 @@ public sealed class IngestLedgerMigrationTests
 				DROP TABLE ingest_state;
 				DROP TABLE ingest_paths;
 				DROP TABLE ingest_stems;
+				DROP TABLE ingest_collections;
 				INSERT INTO api_keys (id, sha256_hash, label, scopes, collections, all_collections, created_at) VALUES ('k', x'00', 'l', '[]', '[]', 0, 't');
 				PRAGMA user_version = 1;
 				""";

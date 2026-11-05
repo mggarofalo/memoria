@@ -1014,6 +1014,16 @@
         "summary": "Store a document",
         "description": "Renders the envelope to frontmatter, redacts the whole document, and stores it. No caller can turn redaction off: only an operator can, for a named collection, and `redaction` in the response says which applied. A document redaction cannot finish is refused with 422. `source` and `sourceId` are its identity: sending them again overwrites, and `updated` orders versions, so an older version gets 409. The response counts what was replaced, by rule, with no values. The document becomes searchable when the job finishes. Requires the `ingest` scope.",
         "operationId": "ingestDocument",
+        "parameters": [
+          {
+            "name": "restoreDeleted",
+            "in": "query",
+            "description": "Stores this even though it was deleted, including the same content. Needs a key with the `admin` scope as well.",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -1147,7 +1157,7 @@
           "Ingest"
         ],
         "summary": "Delete a document",
-        "description": "Names a document by `source` and `sourceId`, or by `path` within the collection, and removes it. A deleted document stays searchable until the index changes, so an update starts at once, or within `reindexInSeconds` when one just ran in this collection: `reindexState` says which. It also stops an older copy being stored again. Safe to repeat: a missing document answers `deleted: false` and costs no update. When `reindexState` is `failed`, repeat the request. Requires the `ingest` scope.",
+        "description": "Names a document by `source` and `sourceId`, or by `path` within the collection, and removes it, waiting for any write of it in progress to finish first. 503 `delete_unconfirmed` means it could not be confirmed done, and repeating it is safe. A deleted document stays searchable until the index changes, so an update starts at once, or within `reindexInSeconds` when one just ran in this collection: `reindexState` says which. It also stops an older copy, or the same content under a later date, being stored again. Safe to repeat: a missing document answers `deleted: false` and costs no update. When `reindexState` is `failed`, repeat the request. Requires the `ingest` scope.",
         "operationId": "deleteDocument",
         "parameters": [
           {
@@ -1288,7 +1298,7 @@
           "Ingest"
         ],
         "summary": "Store a raw session transcript",
-        "description": "The body is the raw JSONL of a Claude Code or Codex session, read as a stream. It is rendered and redacted here into one or more parts. 202 means every part arrived. 207 means not all of it is stored: `parts` and `read` say why, the session stays `partial`, and when `retryable` is true sending the same upload again finishes it. A transcript with no messages, or that lost any, is never 202. An older version than the one stored gets 409, as does a second upload of the session while one is running, a file belonging to another session, and fewer messages than the one stored unless `allowShrink` is set. Parts a shrunken session no longer has are deleted last, and only when they are provably this session's. Requires the `ingest` scope.",
+        "description": "The body is the raw JSONL of a Claude Code or Codex session, read as a stream. It is rendered and redacted here into one or more parts. 202 means every part arrived. 207 means not all of it is stored: `parts` and `read` say why, the session stays `partial`, and when `retryable` is true sending the same upload again finishes it. A transcript with no messages, or that lost any, is never 202. An older version than the one stored gets 409, as does a second upload of the session while one is running, a file the ledger does not say is this session's, and messages that do not start with the stored ones, unless `allowShrink` is set. Parts it no longer has are deleted last, and a part someone deleted stays deleted. Requires the `ingest` scope.",
         "operationId": "ingestSession",
         "parameters": [
           {
@@ -1326,7 +1336,15 @@
           {
             "name": "allowShrink",
             "in": "query",
-            "description": "Set when the session really did lose messages. Without it, an upload with fewer messages than the stored one is refused, as it looks just like a cut copy.",
+            "description": "Set when the session's history really did change. Without it, an upload whose messages do not start with the stored ones is refused, as it looks just like a cut or damaged copy.",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "restoreDeleted",
+            "in": "query",
+            "description": "Writes parts of this session that were deleted, which otherwise stay deleted. Needs a key with the `admin` scope as well.",
             "schema": {
               "type": "boolean"
             }
@@ -1522,7 +1540,15 @@
           {
             "name": "allowShrink",
             "in": "query",
-            "description": "Set when the session really did lose messages. Without it, an upload with fewer messages than the stored one is refused, as it looks just like a cut copy.",
+            "description": "Set when the session's history really did change. Without it, an upload whose messages do not start with the stored ones is refused, as it looks just like a cut or damaged copy.",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "restoreDeleted",
+            "in": "query",
+            "description": "Writes parts of this session that were deleted, which otherwise stay deleted. Needs a key with the `admin` scope as well.",
             "schema": {
               "type": "boolean"
             }

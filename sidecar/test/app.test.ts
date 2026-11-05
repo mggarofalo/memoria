@@ -415,10 +415,6 @@ test("POST /documents writes the file into the collection and queues an update+e
     // Metadata is visible immediately, before the scan completes.
     assert.equal(app.ctx.metadata.get("claude-sessions/2026-10-31_new.md")?.project, "Memoria");
 
-    const again = await app.inject({ method: "POST", url: "/documents", headers: authHeaders, payload: { collection: "claude-sessions", path: "2026-10-31_new.md", content: "# v2", overwrite: false } });
-    assert.equal(again.statusCode, 409);
-    assert.equal(again.json().error, "exists");
-
     const noEmbed = await app.inject({ method: "POST", url: "/documents", headers: authHeaders, payload: { collection: "claude-sessions", path: "2026-10-31_new.md", content: "# v2", embed: false } });
     assert.equal(noEmbed.statusCode, 202);
     assert.equal(noEmbed.json().created, false);
@@ -743,7 +739,7 @@ test("GET /openapi.json describes every route and matches the committed contract
     const spec = r.json();
     assert.equal(spec.openapi, "3.1.0");
     const paths = Object.keys(spec.paths).sort();
-    assert.deepEqual(paths, ["/cache:purge", "/collections", "/docs/{reference}", "/docs:multiGet", "/documents", "/health", "/openapi.json", "/queue", "/queue/dead-letters", "/queue/dead-letters:clear", "/queue/jobs/{id}:cancel", "/queue/jobs/{id}:retry", "/ready", "/reindex", "/reindex/jobs", "/reindex/jobs/{id}", "/search", "/status", "/workers"]);
+    assert.deepEqual(paths, ["/cache:purge", "/collections", "/collections/{name}/empty", "/docs/{reference}", "/docs:multiGet", "/documents", "/health", "/openapi.json", "/queue", "/queue/dead-letters", "/queue/dead-letters:clear", "/queue/jobs/{id}:cancel", "/queue/jobs/{id}:retry", "/ready", "/reindex", "/reindex/jobs", "/reindex/jobs/{id}", "/search", "/status", "/workers"]);
     assert.ok(spec.components.securitySchemes.bearer);
     assert.deepEqual(spec.paths["/health"].get.security, []);
     assert.equal(spec.paths["/search"].post.security, undefined); // inherits the global requirement

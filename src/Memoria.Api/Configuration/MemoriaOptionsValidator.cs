@@ -15,6 +15,7 @@ public sealed class MemoriaOptionsValidator : IValidateOptions<MemoriaOptions>
 		ValidateSearch(options.Search, failures);
 		ValidateMcp(options.Mcp, failures);
 		ValidateIngest(options.Ingest, failures);
+		ValidateDigestKey(options, failures);
 		ValidateAuthMode(options.Auth, failures);
 		ValidateTrustedProxies(options.Auth.TrustedProxies, failures);
 		ValidateFailedAuth(options.Auth.FailedAuth, failures);
@@ -53,17 +54,27 @@ public sealed class MemoriaOptionsValidator : IValidateOptions<MemoriaOptions>
 
 	private const int MinDocumentBytes = 64 * 1024;
 
+	private const int MinDigestKeyChars = 32;
+
+	/// <summary>Only ingest uses it, and ingest needs API keys.</summary>
+	private static void ValidateDigestKey(MemoriaOptions options, List<string> failures)
+	{
+		if (!options.Auth.IsDisabled && (options.Ingest.DigestKey?.Length ?? 0) < MinDigestKeyChars)
+		{
+			failures.Add($"Memoria:Ingest:DigestKey is required when API keys are on, at least {MinDigestKeyChars} characters. Keep it outside the database, as with Memoria:Sidecar:Secret: it stops the database confirming a guessed secret.");
+		}
+	}
+
 	private static void ValidateIngest(IngestOptions ingest, List<string> failures)
 	{
 		Require(ingest.MaxDocumentBytes >= MinDocumentBytes, $"Memoria:Ingest:MaxDocumentBytes must be at least {MinDocumentBytes}, as frontmatter alone can take 8 KiB.", failures);
 		Require(ingest.MaxSessionBytes >= 1024, "Memoria:Ingest:MaxSessionBytes must be at least 1024.", failures);
-		Require(ingest.MaxConcurrentSessions >= 1, "Memoria:Ingest:MaxConcurrentSessions must be at least 1.", failures);
-		Require(ingest.MaxConcurrentSessionsPerKey >= 1, "Memoria:Ingest:MaxConcurrentSessionsPerKey must be at least 1.", failures);
-		Require(ingest.MaxConcurrentDocuments >= 1, "Memoria:Ingest:MaxConcurrentDocuments must be at least 1.", failures);
-		Require(ingest.MaxConcurrentDocumentsPerKey >= 1, "Memoria:Ingest:MaxConcurrentDocumentsPerKey must be at least 1.", failures);
+		Require(ingest.MaxConcurrentLargeUploads >= 1, "Memoria:Ingest:MaxConcurrentLargeUploads must be at least 1.", failures);
 		Require(ingest.MaxConcurrentRenders >= 1, "Memoria:Ingest:MaxConcurrentRenders must be at least 1.", failures);
+		Require(ingest.MinUploadBytesPerSecond >= 1, "Memoria:Ingest:MinUploadBytesPerSecond must be at least 1.", failures);
 		Require(ingest.SessionUploadDeadline > TimeSpan.Zero, "Memoria:Ingest:SessionUploadDeadline must be positive.", failures);
 		Require(ingest.DocumentUploadDeadline > TimeSpan.Zero, "Memoria:Ingest:DocumentUploadDeadline must be positive.", failures);
+		Require(ingest.DeleteWriteWait > TimeSpan.Zero, "Memoria:Ingest:DeleteWriteWait must be positive.", failures);
 		Require(ingest.MinReindexInterval >= TimeSpan.Zero, "Memoria:Ingest:MinReindexInterval may not be negative.", failures);
 	}
 

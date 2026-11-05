@@ -4,6 +4,7 @@ using Memoria.Api.Auth;
 using Memoria.Api.Configuration;
 using Memoria.Api.Endpoints;
 using Memoria.Api.Http;
+using Memoria.Api.Ingest;
 using Memoria.Core.Contracts;
 using Memoria.Core.Sidecar;
 using Microsoft.Extensions.Options;
@@ -59,6 +60,7 @@ public sealed class ScopedCorpus(IMemoriaQmdClient sidecar, ICallerScope scope, 
 	{
 		ArgumentNullException.ThrowIfNull(query);
 		audit.SetQuery(reference);
+		audit.SetTarget(new AuditRead("[unresolved]", false));
 		if (ReadsNothing || reference.Length > MultiGetPolicy.MaxReferenceLength)
 		{
 			audit.SetResult([], 0);
@@ -87,6 +89,7 @@ public sealed class ScopedCorpus(IMemoriaQmdClient sidecar, ICallerScope scope, 
 		}
 
 		audit.SetResult([document.Collection], 1);
+		audit.SetTarget(new AuditRead(document.File, true));
 		return document.ToContract();
 	}
 

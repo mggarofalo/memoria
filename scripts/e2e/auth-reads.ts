@@ -260,7 +260,7 @@ export function secretsAbsent(h: Harness, reader: string): void {
   h.check("the API runs on its shipped appsettings.json, so its log lines are JSON", api.trimStart().startsWith("{"), api.slice(0, 200));
   h.check("no secret in the API log, which does name a key's public id", absentFrom(api).length === 0 && api.includes(idOf(reader)), absentFrom(api));
   const sidecar = h.log("sidecar");
-  h.check("no secret in the sidecar log, which does show requests", absentFrom(sidecar).length === 0 && sidecar.includes('"path":"/docs'), absentFrom(sidecar));
+  h.check("no secret in the sidecar log, which does show requests", absentFrom(sidecar).length === 0 && sidecar.includes('"route":"/docs'), absentFrom(sidecar));
 
   const rows = h.control<Record<string, unknown>>("SELECT * FROM audit_log");
   const audit = JSON.stringify(rows);

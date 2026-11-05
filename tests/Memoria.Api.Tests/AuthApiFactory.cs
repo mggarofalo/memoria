@@ -16,6 +16,12 @@ public sealed class AuthApiFactory : MemoriaApiFactory
 	protected override void ConfigureAuth(IWebHostBuilder builder)
 	{
 		builder.UseSetting("Memoria:Auth:Mode", "ApiKey");
+		builder.UseSetting("Memoria:Ingest:DigestKey", "a-test-key-of-at-least-thirty-two-characters");
+		foreach (string collection in new[] { "c", "open", "closed", "owed", "nothing" })
+		{
+			builder.UseSetting($"Memoria:Ingest:Collections:{collection}:Enabled", "true");
+		}
+
 		builder.UseSetting("Memoria:Auth:DatabasePath", DatabasePath);
 		builder.UseSetting("Memoria:Auth:RateLimit:PermitLimit", "100000");
 		builder.UseSetting("Memoria:Auth:FailedAuth:PermitLimit", "100000");

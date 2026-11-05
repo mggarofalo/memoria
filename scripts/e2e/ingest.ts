@@ -6,12 +6,16 @@
  */
 import { randomInt } from "node:crypto";
 import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import http from "node:http";
 import path from "node:path";
-import { pause, type Harness, type HarnessOptions } from "./harness.ts";
+import { pathToFileURL } from "node:url";
+import { pause, type ApiKeyMaker, type Harness, type HarnessOptions } from "./harness.ts";
 
 export const SAFE = "safe";
 const OPEN = "open";
 const TYPO = "typo";
+const CLOSED = "closed";
+const FILLED = "filled";
 const VERSION = "2026-02-01T00:00:00Z";
 const LATER = "2026-02-02T00:00:00Z";
 const ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -19,12 +23,21 @@ const SESSION_DAY = "2026-01-15";
 
 /** A debounce far longer than the run: nothing reaches the index unless something forces it. */
 export const INGEST_SERVER: HarnessOptions = {
-  extraCollections: [SAFE, OPEN, TYPO],
-  sidecarEnv: { MEMORIA_QMD_REINDEX_DEBOUNCE_MS: "600000", MEMORIA_QMD_REINDEX_MAX_WAIT_MS: "600000" },
+  extraCollections: [SAFE, OPEN, TYPO, CLOSED],
+  filledCollections: [FILLED],
+  sidecarEnv: { MEMORIA_QMD_REINDEX_DEBOUNCE_MS: "600000", MEMORIA_QMD_REINDEX_MAX_WAIT_MS: "600000", MEMORIA_QMD_LOG_LEVEL: "debug", NODE_OPTIONS: `--import=${pathToFileURL(path.join(import.meta.dirname, "stall-writes.mjs")).href}` },
+  // The most anyone could ask of the log: nothing below may depend on a settings file keeping it quiet.
   apiEnv: {
+    Logging__LogLevel__Default: "Debug",
+    "Logging__LogLevel__Microsoft.AspNetCore": "Debug",
+    "Logging__LogLevel__Microsoft.AspNetCore.Hosting.Diagnostics": "Debug",
+    Logging__Console__LogLevel__Default: "Debug",
     [`Memoria__Ingest__Collections__${OPEN}__Redaction`]: "Disabled",
     [`Memoria__Ingest__Collections__${TYPO}__Redaction`]: "disabled",
     Memoria__Ingest__MinReindexInterval: "00:00:00",
+    ...Object.fromEntries([SAFE, OPEN, TYPO, FILLED].map((name) => [`Memoria__Ingest__Collections__${name}__Enabled`, "true"])),
+    // Short, so the check that the API gives up on a stalled write does not take two minutes.
+    Memoria__Sidecar__Timeout: "00:00:15",
   },
 };
 
@@ -135,7 +148,7 @@ export async function forceIndex(c: Pick<Context, "h">): Promise<void> {
 }
 
 async function createKey(h: Harness, admin: string, label: string, scopes: string[]): Promise<string> {
-  const answer = await call(`${h.apiUrl}/v1/admin/keys`, { method: "POST", headers: headersFor(admin), body: JSON.stringify({ label, scopes, collections: [SAFE, OPEN, TYPO] }) });
+  const answer = await call(`${h.apiUrl}/v1/admin/keys`, { method: "POST", headers: headersFor(admin), body: JSON.stringify({ label, scopes, collections: [SAFE, OPEN, TYPO, CLOSED, FILLED] }) });
   return h.remember((JSON.parse(answer.text) as { key: string }).key);
 }
 
@@ -199,6 +212,29 @@ async function searchEveryWay(c: Context, secrets: Record<string, string>): Prom
   for (const [name, secret] of Object.entries(secrets)) {
     const found = await search(c, secret, SAFE);
     c.h.check(`ingest: searching for the ${name} token itself finds no secret`, found.status === 200 && !holdsAny(found.text, all));
+  }
+}
+
+/** Everything a URL can carry, sent at debug level everywhere. None of it may reach a log. */
+async function nothingInTheLogs(c: Context, secrets: Record<string, string>, stored: string): Promise<void> {
+  const token = secrets["github"] ?? "";
+  const marker = "markerdocumentpath";
+  const reader = headersFor(c.reader);
+  await call(`${c.h.apiUrl}/v1/search?query=${token}&rerank=false&collection=${SAFE}`, { headers: reader });
+  await call(`${c.h.apiUrl}/v1/docs/${SAFE}/${marker}.md`, { headers: reader });
+  await call(`${c.h.apiUrl}/v1/docs/${marker}`, { headers: reader });
+  await call(`${c.h.apiUrl}/v1/no-such-route/${marker}?query=${marker}`, { headers: reader });
+  await deleteDocument(c, `collection=${SAFE}&path=${marker}.md`);
+  await mcpCall(c, "search", { query: token, collections: [SAFE], rerank: false });
+  await mcpCall(c, "get_document", { reference: `${SAFE}/${marker}.md` });
+  await pause(200);
+
+  for (const service of ["api", "sidecar"] as const) {
+    const log = c.h.log(service);
+    c.h.check(`logging: at debug level the ${service} log still runs`, log.length > 0);
+    c.h.check(`logging: a token in a query string or tool argument is not in the ${service} log`, !holdsAny(log, Object.values(secrets)));
+    c.h.check(`logging: a document path in a URL is not in the ${service} log`, !log.includes(marker));
+    c.h.check(`logging: a stored document's path is not in the ${service} log`, !log.includes(stored));
   }
 }
 
@@ -303,6 +339,70 @@ function codexMessage(text: string): string {
   return JSON.stringify({ timestamp: `${SESSION_DAY}T10:00:01.000Z`, type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text }] } }) + "\n";
 }
 
+async function damagedCopies(c: Context): Promise<void> {
+  const id = "bbbbbbbb-1111-2222-3333-444444444444";
+  const a = line("user", "firstmessage"), b = line("assistant", "middlemessage", 1), d = line("user", "thirdmessage", 2), e = line("assistant", "fourthmessage", 3);
+  await postSession(c, { sessionId: id }, a + b + d);
+  const damaged = await postSession(c, { sessionId: id, updated: LATER }, a + "{corrupt\n" + d + e);
+  c.h.check("ingest: a copy with a corrupt middle line is refused", damaged.status === 409 && (JSON.parse(damaged.text) as { code: string }).code === "lost_content", damaged.text);
+  c.h.check("ingest: and the line it lost is still stored", onDisk(c, "bbbbbbbb").some((file) => readFileSync(path.join(c.h.dir, "corpus", SAFE, file), "utf8").includes("middlemessage")));
+}
+
+async function deleteWinsAndContentStaysGone(c: Context): Promise<void> {
+  const body = "contentword replayed under a later date";
+  await postDocument(c, c.writer, { collection: SAFE, sourceId: "hash-1", body });
+  await deleteDocument(c, `collection=${SAFE}&source=notes&sourceId=hash-1`);
+  const later = new Date(Date.now() + 30 * 60_000).toISOString();
+  c.h.check("ingest: the same content under a later date does not come back after a delete", (await postDocument(c, c.writer, { collection: SAFE, sourceId: "hash-1", body, updated: later })).status === 409);
+  c.h.check("ingest: new content dated after the delete does", (await postDocument(c, c.writer, { collection: SAFE, sourceId: "hash-1", body: "really new", updated: later })).status === 202);
+}
+
+/**
+ * A delete racing an upload, over and over, against the real sidecar. Cancelling a write does not stop it there, so a file could land after the
+ * delete and stay searchable. Only a real sidecar can show this. What counts as a race is a delete that found the upload first: the two
+ * orders where the delete really came first, or the upload had already finished, prove nothing here and are left alone.
+ */
+async function deleteRacesUpload(c: Context): Promise<void> {
+  const body = (i: number) => `raceword${i} ${"w".repeat(1_500_000)}`;
+  let lost = 0;
+  let preempted = 0;
+  for (let round = 0; round < 40; round++) {
+    const sourceId = `race-${round}`;
+    const uploading = postDocument(c, c.writer, { collection: OPEN, sourceId, body: body(round) });
+    await pause(round % 12);
+    const deleted = await deleteDocument(c, `collection=${OPEN}&source=notes&sourceId=${sourceId}`);
+    const uploaded = await uploading;
+    const tookOver = uploaded.status === 409;
+    preempted += tookOver ? 1 : 0;
+    const deleteWonOrCameLast = tookOver || (JSON.parse(deleted.text) as { deleted: boolean }).deleted;
+    const onDiskNow = readdirSync(path.join(c.h.dir, "corpus", OPEN)).some((file) => file.startsWith("notes-") && readFileSync(path.join(c.h.dir, "corpus", OPEN, file), "utf8").includes(`raceword${round} `));
+    if (deleteWonOrCameLast && onDiskNow) lost++;
+  }
+
+  console.log(`     (${preempted} of 40 rounds had the delete take over a write)`);
+  await forceIndex(c);
+  c.h.check("ingest: after a delete wins a race with an upload, the file never comes back", lost === 0, `${lost} files survived`);
+}
+
+/** The server cuts off a body slower than the floor, on real Kestrel. A slow but steady one is not affected. */
+function slowUploadIsCutOff(c: Context): Promise<void> {
+  const started = Date.now();
+  return new Promise((resolve) => {
+    const url = new URL(`${c.h.apiUrl}/v1/ingest/session?collection=${SAFE}&format=claude&sessionId=55555551-1111-1111-1111-111111111111&updated=${VERSION}`);
+    const request = http.request(url, { method: "POST", headers: { ...headersFor(c.writer, "application/x-ndjson"), "transfer-encoding": "chunked" } });
+    const timer = setInterval(() => request.write(Buffer.alloc(512, "x")), 500);
+    const finish = (status: number): void => {
+      clearInterval(timer);
+      request.destroy();
+      c.h.check("ingest: a body arriving a byte at a time is cut off within seconds", status === 408 || status === 0, status);
+      c.h.check("ingest: and well before any flat deadline", Date.now() - started < 60_000, Date.now() - started);
+      resolve();
+    };
+    request.on("response", (response) => finish(response.statusCode ?? 0));
+    request.on("error", () => finish(0));
+  });
+}
+
 async function ownership(c: Context): Promise<void> {
   const victim = "11112222-aaaa-bbbb-cccc-111111111111";
   await postSession(c, { format: "codex", sessionId: victim }, codexMeta(victim) + codexMessage("victimword original"));
@@ -317,12 +417,10 @@ async function ownership(c: Context): Promise<void> {
   c.h.check("ingest: a session sharing a short id deletes nothing of the other", clash.status === 202 && (JSON.parse(clash.text) as { superseded: { deleted: string[] } }).superseded.deleted.length === 0 && owned.length === 4, clash.text);
 
   const exporter = "99887766-1111-1111-1111-111111111111";
-  for (const part of [2, 3]) {
-    writeFileSync(path.join(c.h.dir, "corpus", SAFE, `${SESSION_DAY}_${exporter.slice(0, 8)}_part-00${part}.md`), `---\nsession_id: "${exporter}"\nproject: "demo"\n---\n\n## User\n\nexporterword ${"z".repeat(100000)}\n`);
-  }
-  await forceIndex(c);
-  const cleaned = await postSession(c, { sessionId: exporter }, line("user", "onepart"));
-  c.h.check("ingest: old 100 KB parts are found through skipped and removed", cleaned.status === 202 && (JSON.parse(cleaned.text) as { superseded: { deleted: string[] } }).superseded.deleted.length === 2, cleaned.text);
+  const stray = path.join(c.h.dir, "corpus", SAFE, `${SESSION_DAY}_${exporter.slice(0, 8)}.md`);
+  writeFileSync(stray, `---\nsession_id: "${exporter}"\n---\n\n## User\n\nexporterword\n`);
+  const replaced = await postSession(c, { sessionId: exporter }, line("user", "onepart"));
+  c.h.check("ingest: everything in the collection is ours, so a file at a path is overwritten", replaced.status === 202 && !readFileSync(stray, "utf8").includes("exporterword"), replaced.text);
 }
 
 async function inputThatStopsHere(c: Context, secrets: Record<string, string>): Promise<void> {
@@ -330,6 +428,11 @@ async function inputThatStopsHere(c: Context, secrets: Record<string, string>): 
   const collection = await postDocument(c, c.writer, { collection: secret, sourceId: "x", body: "b" });
   const deletion = await deleteDocument(c, `collection=${SAFE}&path=${secret}`);
   c.h.check("ingest: a credential sent as a collection or path gets 400 and is not repeated", collection.status === 400 && deletion.status === 400 && !holdsAny(collection.text + deletion.text, [secret]));
+}
+
+/** Makes keys on the server these checks run against, for any collection they use. */
+export function keyMaker(h: Harness, admin: string): ApiKeyMaker {
+  return (label, scopes) => createKey(h, admin, label, scopes);
 }
 
 /** Runs against a server started with INGEST_SERVER. */
@@ -341,10 +444,16 @@ export async function ingest(h: Harness, admin: string): Promise<void> {
   const stored = await writeSecrets(c, secrets);
   await readEveryRoute(c, secrets, stored);
   await inputThatStopsHere(c, secrets);
+  await nothingInTheLogs(c, secrets, stored);
   nothingOnDisk(c, secrets);
   await offSwitch(c, secrets);
   await deletes(c);
   await scope(c);
   await sessions(c);
+  await damagedCopies(c);
+  await deleteWinsAndContentStaysGone(c);
   await ownership(c);
+  // Keys of their own, as a key has a budget of 100 requests in this run.
+  await deleteRacesUpload({ ...c, writer: await createKey(h, admin, "racer", ["ingest", "read"]) });
+  await slowUploadIsCutOff({ ...c, writer: await createKey(h, admin, "slow", ["ingest"]) });
 }
