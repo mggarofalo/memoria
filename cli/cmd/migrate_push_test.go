@@ -781,6 +781,8 @@ func TestAFolderThatCouldNotBeReadFailsUnlessAcknowledged(t *testing.T) {
 	if strings.Contains(f.h.stdout.String()+f.h.stderr.String(), "secretfolder") {
 		t.Fatalf("named: %q", f.h.stderr.String())
 	}
+	_, _, report := f.result(t, server, "--accept-skips")
+	checkOneProblem(t, report, "secretfolder", migrate.ProblemUnreadable, "")
 }
 
 func TestPushRunsFewWorkersWithNoFlag(t *testing.T) {
@@ -970,8 +972,13 @@ func checkTakeover(t *testing.T, reason string) {
 	if problems := readProblems(t, report); len(problems) != 0 {
 		t.Fatalf("problems = %+v", problems)
 	}
-	if code := f.push(server); code != 0 || !strings.Contains(f.h.stdout.String(), "Every selected document is stored") {
-		t.Fatalf("code = %d, stdout = %q", code, f.h.stdout.String())
+	out := ""
+	if code := f.push(server); code != 0 {
+		t.Fatalf("code = %d", code)
+	}
+	out = f.h.stdout.String()
+	if strings.Contains(out, "Every selected document is stored") || !strings.Contains(out, "0 stored") || !strings.Contains(out, "3 taken over") {
+		t.Fatalf("stdout = %q", out)
 	}
 }
 
@@ -1254,7 +1261,7 @@ func checkEditAfterTakeover(t *testing.T, f *pushFixture, server *pushServer) {
 		t.Fatalf("code = %d, summary = %+v", code, summary)
 	}
 	checkOneProblem(t, report, "a.md", migrate.ProblemLocalEdits, "")
-	if code := f.push(server); code != 0 || !strings.Contains(f.h.stdout.String(), "but 1 taken over by their session have local changes") {
+	if code := f.push(server); code != 0 || !strings.Contains(f.h.stdout.String(), "1 of those have local changes") {
 		t.Fatalf("code = %d, stdout = %q", code, f.h.stdout.String())
 	}
 }

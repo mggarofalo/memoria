@@ -170,21 +170,32 @@ func pushVerdict(result *migrate.PushResult) string {
 	if result.DryRun {
 		return "Dry run: nothing was sent. Pass --apply to send."
 	}
-	unstored, selected, edited := 0, 0, 0
+	unstored, selected, edited, taken := 0, 0, 0, 0
 	for i := range result.Collections {
 		unstored += result.Collections[i].NotStored() + result.Collections[i].OverCap + result.Collections[i].FoldersSkipped
 		selected += result.Collections[i].Selected
 		edited += result.Collections[i].TakenOverEdited
+		taken += result.Collections[i].TakenOver
 	}
 	switch {
 	case unstored > 0:
 		return fmt.Sprintf("NOT everything was stored: %d not stored or not read. The local report names them, and these counts do not.", unstored)
 	case selected == 0:
 		return "Nothing was selected, so nothing was sent."
-	case edited > 0:
-		return fmt.Sprintf("Every selected document is stored, but %d taken over by their session have local changes that were not sent.", edited)
+	case taken > 0:
+		return takenOverVerdict(selected-taken, taken, edited)
 	}
 	return "Every selected document is stored. The server confirmed each one."
+}
+
+// takenOverVerdict keeps taken-over documents out of what is called stored: the server records the takeover, and a part of
+// that session can since have been deleted.
+func takenOverVerdict(stored, taken, edited int) string {
+	verdict := fmt.Sprintf("%d stored, which the server confirmed. %d taken over by their session: the server records that, but not that their text is still held.", stored, taken)
+	if edited > 0 {
+		verdict += fmt.Sprintf(" %d of those have local changes that were not sent.", edited)
+	}
+	return verdict
 }
 
 func sum(counts map[string]int) int {
@@ -252,7 +263,7 @@ func MigratePushTable(w io.Writer, result *migrate.PushResult) error {
 			b.WriteString(row(line) + "\n")
 		}
 	}
-	header := "COLLECTION\tTARGET\tSELECTED\tSENT\tALREADY SENT\tTAKEN OVER\tREFUSED\tOVER CAP\tUNREADABLE\tFOLDERS SKIPPED\tNOT REACHED\tFRONTMATTER ISSUES"
+	header := "COLLECTION\tTARGET\tSELECTED\tSENT\tALREADY SENT\tTAKEN OVER\tREFUSED\tOVER CAP\tUNREADABLE\tSKIPPED BEFORE SENDING\tNOT REACHED\tFRONTMATTER ISSUES"
 	if result.DryRun {
 		header = "COLLECTION\tTARGET\tWOULD SEND\tBYTES\tOVER 2 MIB\tCANNOT BE STORED\tFOLDERS SKIPPED"
 	}

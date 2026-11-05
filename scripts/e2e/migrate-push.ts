@@ -310,7 +310,7 @@ async function takenOver(h: Harness, key: string): Promise<void> {
   const file = path.join(s.root, "2026-01-15_dededede.md");
   writeFileSync(file, `${text}\nedited\n`);
   const edited = push(s, h.apiUrl, "--apply");
-  h.check("push: a local edit after a takeover is said not to have been sent", edited.code === 0 && edited.out.includes("local changes that were not sent") && !edited.out.includes("The server confirmed each one"), edited.out + edited.err);
+  h.check("push: a local edit after a takeover is said not to have been sent", edited.code === 0 && edited.out.includes("local changes that were not sent") && edited.out.includes("not that their text is still held") && !edited.out.includes("Every selected document is stored"), edited.out + edited.err);
 
   const before = new Set(storedFiles(h, TAKEOVER_TARGET));
   const owned = await session("efefefef-1111-2222-3333-444444444444", "mine");
