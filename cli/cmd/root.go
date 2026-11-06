@@ -53,6 +53,7 @@ type app struct {
 	selfUpdate      selfUpdateDeps
 	sleep           func(context.Context, time.Duration) error
 	redactionCheck  func(context.Context, []string, []byte) ([]byte, error)
+	localQMD        func(context.Context, string, []string) ([]byte, error)
 
 	flags rootFlags
 }
@@ -244,6 +245,7 @@ func newApp(stdin io.Reader, stdout, stderr io.Writer) *app {
 		selfUpdate:      defaultSelfUpdateDeps(),
 		sleep:           sleepUntilDone,
 		redactionCheck:  runDotnet,
+		localQMD:        runLocalQMD,
 	}
 }
 

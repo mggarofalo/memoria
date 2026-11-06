@@ -85,6 +85,7 @@ type harness struct {
 	checkArgs     []string
 	checkDuring   func()
 	sleptMu       sync.Mutex
+	localQMD      func(args []string) ([]byte, error)
 }
 
 func newHarness(t *testing.T) *harness {
@@ -120,6 +121,7 @@ func (h *harness) app() *app {
 	}
 	a.selfUpdate.executable = func() (string, error) { return "memoria-test-exe", nil }
 	a.redactionCheck = h.fakeRedactionCheck
+	a.localQMD = func(_ context.Context, _ string, args []string) ([]byte, error) { return h.localQMD(args) }
 	a.sleep = func(_ context.Context, wait time.Duration) error {
 		h.sleptMu.Lock()
 		defer h.sleptMu.Unlock()
