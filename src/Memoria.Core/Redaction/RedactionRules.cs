@@ -334,7 +334,7 @@ internal static class RedactionRules
 	/// <summary>curl's <c>-b</c> and <c>--cookie</c> with inline cookies. A cookie file name has no equals sign.</summary>
 	public static readonly RedactionRule CurlCookie = new(
 		"curl-cookie",
-		Pattern(@"(?:^|\s)(?:-b|--cookie)[ =][""']?(?<secret>[^""'\r\n]+)"),
+		Pattern(@"(?:^|\s)(?:-b|--cookie)[ =](?:""(?<secret>[^""\r\n]+)|'(?<secret>[^'\r\n]+)|(?<secret>[^\s""']+))"),
 		SecretHeuristics.IsCurlCookie);
 
 	/// <summary>Session cookies known by name: <c>PHPSESSID</c>, <c>JSESSIONID</c>, <c>ASP.NET_SessionId</c>, <c>connect.sid</c>.</summary>
