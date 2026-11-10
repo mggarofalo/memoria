@@ -148,12 +148,13 @@ public sealed class RedactionGapTests
 		Assert.Equal(text, Redactor.Redact(text).Text);
 	}
 
+	/// <summary>Decoded base64 that reads as text is judged as the text would be: password=hunter22 is replaced written out, so it is replaced encoded.</summary>
 	[Fact]
-	public void Encoded_text_a_contextual_rule_would_take_stays()
+	public void Encoded_text_a_contextual_rule_would_take_is_replaced()
 	{
 		string text = "note " + Encoded("password=hunter22 in some document") + " here";
 
-		Assert.Equal(text, Redactor.Redact(text).Text);
+		Assert.Equal("note [REDACTED:base64-token] here", Redactor.Redact(text).Text);
 	}
 
 	[Fact]

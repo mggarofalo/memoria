@@ -82,6 +82,17 @@ internal static class SecretHeuristics
 		return !ValueShapes.IsPlaceholder(candidate.JudgedValue);
 	}
 
+	/// <summary>
+	/// A Facebook token is letters and digits of mixed case. Text with no lower-case letter is a hash or base32, as upper-case hex is, and a
+	/// run of A is the zero bytes of base64 data.
+	/// </summary>
+	public static bool IsFacebookToken(SecretCandidate candidate)
+	{
+		string value = candidate.Value;
+		bool lower = value.AsSpan().IndexOfAnyInRange('a', 'z') >= 0;
+		return lower && !value.AsSpan(3).Contains("AAAAA", StringComparison.Ordinal) && IsPrefixedToken(candidate);
+	}
+
 	/// <summary>The value after an access key id: token-like, and not a commit or other hex.</summary>
 	public static bool IsAwsSecretNearId(SecretCandidate candidate)
 	{
