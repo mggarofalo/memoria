@@ -114,7 +114,7 @@ test("a directory swapped just before the rename leaves the temp file's name unr
   await assertVictimUntouched(f);
 });
 
-test("a directory swapped after the rename is reported, not reported as success", async () => {
+test("a directory swapped after the rename is reported as a 5xx, as the file landed, not as success or a refusal", async () => {
   const f = await fixture();
   const target = resolveTarget(f.root, "**/*.md", "sub/x.md");
   await assert.rejects(
@@ -123,7 +123,7 @@ test("a directory swapped after the rename is reported, not reported as success"
         if (s === "renamed") await flip(f.dir, f.outside);
       },
     }),
-    isCode("invalid_path"),
+    (err: unknown) => err instanceof HttpError && err.code === "landed_unverified" && err.statusCode === 500,
   );
   await assertVictimUntouched(f);
 });

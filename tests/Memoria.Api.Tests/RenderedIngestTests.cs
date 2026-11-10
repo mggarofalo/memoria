@@ -685,6 +685,29 @@ public sealed class RenderedIngestTests(AuthApiFactory factory) : IClassFixture<
 	}
 
 	[Fact]
+	public async Task A_refused_resend_of_a_stored_export_keeps_its_path_and_what_it_holds()
+	{
+		FakeCorpus corpus = new(factory.Sidecar);
+		HttpClient client = await WriterAsync();
+		string id = Guid.NewGuid().ToString();
+		string path = $"2026-01-15_{id[..8]}.md";
+		string export = RenderedPart(id, "stored first", 3);
+		Assert.Equal(HttpStatusCode.Accepted, (await PostAsync(client, path, export)).StatusCode);
+		corpus.OnWrite = static _ => TooLarge();
+
+		HttpResponseMessage refused = await PostAsync(client, path, RenderedPart(id, "never stored", 3), updated: Stamp.AddMinutes(1));
+		corpus.OnWrite = static _ => null;
+		IngestRecord? row = await factory.Services.GetRequiredService<IIngestLedger>().FindAsync(DocumentIngestor.IdentityOf("c", path), default);
+		HttpResponseMessage cut = await PostSessionAsync(client, ClaudeLine("user", "only one"), projectDirectory: OwnFolder, sessionId: id, updated: Stamp.AddHours(1));
+
+		Assert.Equal(HttpStatusCode.RequestEntityTooLarge, refused.StatusCode);
+		Assert.Equal([path], row!.Paths);
+		Assert.Equal(4, row.MessageCount);
+		Assert.Equal("session_shrank", (await ReadAsync(cut)).GetProperty("code").GetString());
+		Assert.Equal(export, corpus.Files[path]);
+	}
+
+	[Fact]
 	public async Task A_rendered_write_whose_answer_was_lost_holds_the_takeover_until_it_is_sent_again()
 	{
 		FakeCorpus corpus = new(factory.Sidecar);
