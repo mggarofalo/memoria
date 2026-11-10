@@ -59,7 +59,7 @@ public sealed partial class DocumentIngestor(
 		IngestRules.RequireClaim(claim);
 		audit.SetTarget(new AuditIngest("document", redactionName, false, 0, 1, 0, counts.Values.Sum(), refusals.Length, [path], restore));
 
-		SidecarIngestResponse response = await WriteAndFinishAsync(new SidecarIngestRequest(collection, path, decided), identity, claim.LeaseToken!, claiming, cancellationToken);
+		SidecarIngestResponse response = await WriteAndFinishAsync(new SidecarIngestRequest(collection, path, decided), identity, claim, claiming, cancellationToken);
 		audit.SetResult([collection], 1);
 		audit.SetTarget(new AuditIngest("document", redactionName, true, 1, 0, 0, counts.Values.Sum(), refusals.Length, [path], restore));
 		return new DocumentIngestResult(collection, response.Path, response.File, response.Bytes, response.Created, redactionName, counts, refusals, response.Job.Id);
@@ -98,7 +98,7 @@ public sealed partial class DocumentIngestor(
 		int redactions = decided.CountsByRule.Values.Sum();
 		audit.SetTarget(new AuditIngest("rendered", redactionName, false, 0, 1, 0, redactions, 0, [path]));
 
-		SidecarIngestResponse response = await WriteAndFinishAsync(new SidecarIngestRequest(collection, path, decided), identity, claim.LeaseToken!, claiming, cancellationToken);
+		SidecarIngestResponse response = await WriteAndFinishAsync(new SidecarIngestRequest(collection, path, decided), identity, claim, claiming, cancellationToken);
 		audit.SetResult([collection], 1);
 		audit.SetTarget(new AuditIngest("rendered", redactionName, true, 1, 0, 0, redactions, 0, [path]));
 		return new RenderedDocumentResult(collection, response.Path, response.File, response.Bytes, response.Created, redactionName, decided.CountsByRule, RenderedDocument.FrontmatterOf(decided.Text, response.Metadata is not null), response.Job.Id);
@@ -162,17 +162,28 @@ public sealed partial class DocumentIngestor(
 		}
 	}
 
-	private async Task<SidecarIngestResponse> WriteAndFinishAsync(SidecarIngestRequest request, string identity, string leaseToken, IngestClaimRequest claiming, CancellationToken cancellationToken)
+	/// <summary>
+	/// A write the sidecar refused, with a 4xx answer, wrote nothing: it validates before the file lands. So the row keeps only what earlier writes left, and a session
+	/// taking it over is not held up by a count it never had. Without an answer, or with a 5xx one after the file may have landed, the path stays claimed, as what it
+	/// holds is unknown.
+	/// </summary>
+	private async Task<SidecarIngestResponse> WriteAndFinishAsync(SidecarIngestRequest request, string identity, IngestClaim claim, IngestClaimRequest claiming, CancellationToken cancellationToken)
 	{
 		SidecarIngestResponse? response = null;
+		IReadOnlyList<string> paths = [.. claim.PreviousPaths.Union([request.Path], StringComparer.Ordinal)];
 		bool kept;
 		try
 		{
-			response = await WriteAsync(request, identity, leaseToken, cancellationToken);
+			response = await WriteAsync(request, identity, claim.LeaseToken!, cancellationToken);
+		}
+		catch (SidecarException exception) when (exception.StatusCode is { } status && (int)status < 500)
+		{
+			paths = claim.PreviousPaths;
+			throw;
 		}
 		finally
 		{
-			kept = await ledger.FinishAsync(identity, leaseToken, request.Collection, response is null ? IngestStateName.Partial : IngestStateName.Complete, [request.Path], response is null ? null : claiming);
+			kept = await ledger.FinishAsync(identity, claim.LeaseToken!, request.Collection, response is null ? IngestStateName.Partial : IngestStateName.Complete, response is null ? paths : [request.Path], response is null ? null : claiming);
 		}
 
 		// The write landed, and then a delete took the path before the upload finished, so the file is gone.

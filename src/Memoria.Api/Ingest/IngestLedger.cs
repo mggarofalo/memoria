@@ -327,17 +327,27 @@ public sealed class SqliteIngestLedger(ControlDatabase database) : IIngestLedger
 		return merged with { DeletedPaths = [.. (merged.DeletedPaths ?? []).Union(deleted, StringComparer.Ordinal)] };
 	}
 
+	/// <summary>A row with no path holds no text, as when its only write was refused, so only its lease counts: one still being written holds the session up.</summary>
 	private static IngestRecord Merged(IngestRecord soFar, IngestRecord record)
 	{
-		return soFar with
+		IngestRecord leased = WithLease(soFar, record);
+		if (record.Paths.Count == 0)
+		{
+			return leased;
+		}
+
+		return leased with
 		{
 			Version = record.Version > soFar.Version ? record.Version : soFar.Version,
 			// A document that does not say how many it holds refuses a takeover rather than guess: allowShrink is how someone says the session really is the whole of it.
 			MessageCount = (record.MessageCount ?? long.MaxValue) > (soFar.MessageCount ?? 0) ? record.MessageCount ?? long.MaxValue : soFar.MessageCount,
 			Paths = [.. soFar.Paths.Union(record.Paths, StringComparer.Ordinal)],
-			LeaseUntil = record.LeaseOwner is null ? soFar.LeaseUntil : record.LeaseUntil,
-			LeaseOwner = record.LeaseOwner ?? soFar.LeaseOwner,
 		};
+	}
+
+	private static IngestRecord WithLease(IngestRecord soFar, IngestRecord record)
+	{
+		return record.LeaseOwner is null ? soFar : soFar with { LeaseUntil = record.LeaseUntil, LeaseOwner = record.LeaseOwner };
 	}
 
 	/// <summary>The session owns these paths from here on, so its normal rules apply to them, and a rendered copy sent later is refused for the path it no longer owns.</summary>
