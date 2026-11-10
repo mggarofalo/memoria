@@ -117,6 +117,13 @@ public sealed class AuthOptions
 	/// default: the socket address is the client, and the header means nothing.
 	/// </summary>
 	public string[]? TrustedProxies { get; set; }
+
+	/// <summary>
+	/// How long a key without the <c>admin</c> scope lasts when <c>POST /v1/admin/keys</c> names no <c>expiresAt</c>. Unset, such a
+	/// key never expires, as before. Admin keys, the bootstrap key among them, are never given one: losing every admin key at once
+	/// would lock the operator out. A key's own <c>expiresAt</c> always wins.
+	/// </summary>
+	public TimeSpan? DefaultKeyLifetime { get; set; }
 }
 
 /// <summary>Per-client-address budget for failed authentication. See <c>FailedAuthLimiter</c>.</summary>

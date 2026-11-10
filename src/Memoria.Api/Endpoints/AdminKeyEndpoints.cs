@@ -38,7 +38,8 @@ public static partial class AdminKeyEndpoints
 			.WithDescription(
 				"Creates a key and returns its plaintext. This response is the only time the plaintext exists. "
 				+ "`read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. "
-				+ "A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`.")
+				+ "A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. "
+				+ "With `Memoria:Auth:DefaultKeyLifetime` set, a key without the `admin` scope and with no `expiresAt` expires that long after it is made.")
 			.ProducesValidationProblem();
 
 		keys.MapGet("/", ListAsync)
@@ -87,6 +88,7 @@ public static partial class AdminKeyEndpoints
 		ILoggerFactory loggerFactory,
 		IRequestAudit audit,
 		KnownGoodKeys knownGood,
+		IOptions<MemoriaOptions> options,
 		CancellationToken cancellationToken)
 	{
 		DateTimeOffset now = timeProvider.GetUtcNow();
@@ -98,7 +100,8 @@ public static partial class AdminKeyEndpoints
 
 		string[] scopes = request.Scopes!.Distinct(StringComparer.Ordinal).ToArray();
 		string[] collections = (request.Collections ?? []).Distinct(StringComparer.Ordinal).ToArray();
-		(ApiKeyRecord record, string token) = ApiKeyRecord.Issue(request.Label!.Trim(), scopes, collections, request.AllCollections == true, request.ExpiresAt, now);
+		DateTimeOffset? expiresAt = request.ExpiresAt ?? DefaultExpiry(scopes, now, options.Value.Auth.DefaultKeyLifetime);
+		(ApiKeyRecord record, string token) = ApiKeyRecord.Issue(request.Label!.Trim(), scopes, collections, request.AllCollections == true, expiresAt, now);
 		await store.InsertAsync(record, cancellationToken);
 
 		knownGood.Remember(record.Id, record.Sha256Hash);
@@ -106,6 +109,12 @@ public static partial class AdminKeyEndpoints
 		LogIssued(loggerFactory.CreateLogger(typeof(AdminKeyEndpoints).FullName!), record.Id, Actor(context));
 		context.Response.Headers[HeaderNames.CacheControl] = "no-store";
 		return TypedResults.Created($"/v1/admin/keys/{record.Id}", new IssuedApiKey(token, ToInfo(record)));
+	}
+
+	/// <summary>When a key with no <c>expiresAt</c> of its own expires: never for an admin key, or with no default lifetime set.</summary>
+	public static DateTimeOffset? DefaultExpiry(IReadOnlyCollection<string> scopes, DateTimeOffset now, TimeSpan? lifetime)
+	{
+		return lifetime is { } span && !scopes.Contains(MemoriaScopes.Admin) ? now + span : null;
 	}
 
 	private static async Task<Ok<ApiKeyList>> ListAsync(IApiKeyStore store, CancellationToken cancellationToken)

@@ -100,6 +100,7 @@ claude mcp add --transport http memoria http://<api-host>:8080/mcp \
 | `RateLimit:PermitLimit` | `120` | Requests one key may make per window, counting ones that end in `403`. Over the limit: `429` with `Retry-After`. |
 | `RateLimit:Window` | `00:01:00` | Length of the fixed window. |
 | `TrustedProxies` | empty | Proxies whose `X-Forwarded-For` is believed, as IPs or CIDR ranges. Empty means the socket address is the client and the header is ignored, and loopback is not trusted implicitly. A `/0` range or an unparseable entry stops the host. See [the reverse proxy section](deployment.md#reverse-proxy-and-tls): behind a proxy this must be set. |
+| `DefaultKeyLifetime` | unset | How long a key without the `admin` scope lasts when it is issued with no `expiresAt`, as a `d.hh:mm:ss` span between an hour and ten years. Unset, such keys never expire. Admin keys never get one, so the operator is not locked out when they all lapse at once. A key's own `expiresAt` wins. `deploy/compose.yaml` sets a year. |
 | `FailedAuth:Enabled` | `true` | Limit failed authentication per client address. |
 | `FailedAuth:PermitLimit` | `20` | Failed attempts one address may make per window. Past it, a credential from that address gets `429` and `Retry-After` with no database lookup until the window ends, unless its secret matches a key this process already knows. Requests that authenticate spend nothing. An IPv6 client is counted by its /64. |
 | `FailedAuth:Window` | `00:01:00` | Length of the fixed window. |
@@ -120,7 +121,7 @@ then manage keys over REST with that key:
 
 | Route | Does |
 |---|---|
-| `POST /v1/admin/keys` | Issue a key. Body: `label`, `scopes`, then `collections` or `allCollections: true`, and optionally `expiresAt`. |
+| `POST /v1/admin/keys` | Issue a key. Body: `label`, `scopes`, then `collections` or `allCollections: true`, and optionally `expiresAt`, else `DefaultKeyLifetime` applies to a key without `admin`. |
 | `GET /v1/admin/keys` | List keys, with no key material. |
 | `DELETE /v1/admin/keys/{id}` | Revoke. |
 | `POST /v1/admin/keys/{id}:rotate` | New secret, same id, scopes and expiry. The old token stops working at once. Revoked or expired keys get `409`. |
