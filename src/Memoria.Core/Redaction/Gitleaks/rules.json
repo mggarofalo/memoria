@@ -33,11 +33,19 @@
       "reason": "Upstream applies it only to files whose path matches (?i)(?:^|\\/)[^\\/]+\\.p(?:12|fx)$. A document has no path, so applying it everywhere would change what it means."
     }
   ],
+  "patches": [
+    {
+      "where": "global allowlist",
+      "upstream": "(?i)^true|false|null$",
+      "replacement": "(?i)^(?:true|false|null)$",
+      "reason": "Without a group the anchors bind to the first and last words only, so any secret containing \"false\", starting with \"true\" or ending in \"null\" was allowed."
+    }
+  ],
   "globalAllowlist": {
     "condition": "or",
     "target": "secret",
     "regexes": [
-      "(?i)^true|false|null\\z",
+      "(?i)^(?:true|false|null)\\z",
       "^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)\\z",
       "^\\$(?:[0-9]+|{[0-9]+})\\z",
       "^\\$(?:[A-Z_]+|[a-z_]+)\\z",
@@ -60,7 +68,7 @@
     {
       "id": "1password-secret-key",
       "description": "Uncovered a possible 1Password secret key, potentially compromising access to secrets in vaults.",
-      "pattern": "\\bA3-[A-Z0-9]{6}-(?:(?:[A-Z0-9]{11})|(?:[A-Z0-9]{6}-[A-Z0-9]{5}))-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}\\b",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>A3-[A-Z0-9]{6}-(?:(?:[A-Z0-9]{11})|(?:[A-Z0-9]{6}-[A-Z0-9]{5}))-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5})(?:[^0-9A-Za-z_]|\\z)",
       "upstreamPattern": "\\bA3-[A-Z0-9]{6}-(?:(?:[A-Z0-9]{11})|(?:[A-Z0-9]{6}-[A-Z0-9]{5}))-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}\\b",
       "keywords": [
         "a3-"
@@ -104,7 +112,7 @@
     {
       "id": "adobe-client-secret",
       "description": "Discovered a potential Adobe Client Secret, which, if exposed, could allow unauthorized Adobe service access and data manipulation.",
-      "pattern": "\\b(?<secret>p8e-(?i)[a-z0-9]{32})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>p8e-(?i)[a-z0-9]{32})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "\\b(p8e-(?i)[a-z0-9]{32})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "p8e-"
@@ -137,7 +145,7 @@
     {
       "id": "airtable-personnal-access-token",
       "description": "Uncovered a possible Airtable Personal AccessToken, potentially compromising database access and leading to data leakage or alteration.",
-      "pattern": "\\b(?<secret>pat[0-9A-Za-z]{14}\\.[a-f0-9]{64})\\b",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>pat[0-9A-Za-z]{14}\\.[a-f0-9]{64})(?:[^0-9A-Za-z_]|\\z)",
       "upstreamPattern": "\\b(pat[[:alnum:]]{14}\\.[a-f0-9]{64})\\b",
       "keywords": [
         "airtable"
@@ -159,7 +167,7 @@
     {
       "id": "alibaba-access-key-id",
       "description": "Detected an Alibaba Cloud AccessKey ID, posing a risk of unauthorized cloud resource access and potential data compromise.",
-      "pattern": "\\b(?<secret>LTAI(?i)[a-z0-9]{20})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>LTAI(?i)[a-z0-9]{20})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "\\b(LTAI(?i)[a-z0-9]{20})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "ltai"
@@ -181,7 +189,7 @@
     {
       "id": "anthropic-admin-api-key",
       "description": "Detected an Anthropic Admin API Key, risking unauthorized access to administrative functions and sensitive AI model configurations.",
-      "pattern": "\\b(?<secret>sk-ant-admin01-[a-zA-Z0-9_\\-]{93}AA)(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>sk-ant-admin01-[a-zA-Z0-9_\\-]{93}AA)(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "\\b(sk-ant-admin01-[a-zA-Z0-9_\\-]{93}AA)(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "sk-ant-admin01"
@@ -192,7 +200,7 @@
     {
       "id": "anthropic-api-key",
       "description": "Identified an Anthropic API Key, which may compromise AI assistant integrations and expose sensitive data to unauthorized access.",
-      "pattern": "\\b(?<secret>sk-ant-api03-[a-zA-Z0-9_\\-]{93}AA)(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>sk-ant-api03-[a-zA-Z0-9_\\-]{93}AA)(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "\\b(sk-ant-api03-[a-zA-Z0-9_\\-]{93}AA)(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "sk-ant-api03"
@@ -203,7 +211,7 @@
     {
       "id": "artifactory-api-key",
       "description": "Detected an Artifactory api key, posing a risk unauthorized access to the central repository.",
-      "pattern": "\\bAKCp[A-Za-z0-9]{69}\\b",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>AKCp[A-Za-z0-9]{69})(?:[^0-9A-Za-z_]|\\z)",
       "upstreamPattern": "\\bAKCp[A-Za-z0-9]{69}\\b",
       "keywords": [
         "akcp"
@@ -214,7 +222,7 @@
     {
       "id": "artifactory-reference-token",
       "description": "Detected an Artifactory reference token, posing a risk of impersonation and unauthorized access to the central repository.",
-      "pattern": "\\bcmVmd[A-Za-z0-9]{59}\\b",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>cmVmd[A-Za-z0-9]{59})(?:[^0-9A-Za-z_]|\\z)",
       "upstreamPattern": "\\bcmVmd[A-Za-z0-9]{59}\\b",
       "keywords": [
         "cmvmd"
@@ -261,7 +269,7 @@
     {
       "id": "authress-service-client-access-key",
       "description": "Uncovered a possible Authress Service Client Access Key, which may compromise access control services and sensitive data.",
-      "pattern": "\\b(?<secret>(?:sc|ext|scauth|authress)_(?i)[a-z0-9]{5,30}\\.[a-z0-9]{4,6}\\.(?-i:acc)[_-][a-z0-9-]{10,32}\\.[a-z0-9+/_=-]{30,120})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>(?:sc|ext|scauth|authress)_(?i)[a-z0-9]{5,30}\\.[a-z0-9]{4,6}\\.(?-i:acc)[_-][a-z0-9-]{10,32}\\.[a-z0-9+/_=-]{30,120})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "\\b((?:sc|ext|scauth|authress)_(?i)[a-z0-9]{5,30}\\.[a-z0-9]{4,6}\\.(?-i:acc)[_-][a-z0-9-]{10,32}\\.[a-z0-9+/_=-]{30,120})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "sc_",
@@ -275,7 +283,7 @@
     {
       "id": "aws-access-token",
       "description": "Identified a pattern that may indicate AWS credentials, risking unauthorized cloud resource access and data breaches on AWS platforms.",
-      "pattern": "\\b(?<secret>(?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[A-Z2-7]{16})\\b",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>(?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[A-Z2-7]{16})(?:[^0-9A-Za-z_]|\\z)",
       "upstreamPattern": "\\b((?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[A-Z2-7]{16})\\b",
       "keywords": [
         "a3t",
@@ -299,7 +307,7 @@
     {
       "id": "aws-amazon-bedrock-api-key-long-lived",
       "description": "Identified a pattern that may indicate long-lived Amazon Bedrock API keys, risking unauthorized Amazon Bedrock usage",
-      "pattern": "\\b(?<secret>ABSK[A-Za-z0-9+/]{109,269}={0,2})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>ABSK[A-Za-z0-9+/]{109,269}={0,2})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "\\b(ABSK[A-Za-z0-9+/]{109,269}={0,2})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "absk"
@@ -398,7 +406,7 @@
     {
       "id": "clickhouse-cloud-api-secret-key",
       "description": "Identified a pattern that may indicate clickhouse cloud API secret key, risking unauthorized clickhouse cloud api access and data breaches on ClickHouse Cloud platforms.",
-      "pattern": "\\b(?<secret>4b1d[A-Za-z0-9]{38})\\b",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>4b1d[A-Za-z0-9]{38})(?:[^0-9A-Za-z_]|\\z)",
       "upstreamPattern": "\\b(4b1d[A-Za-z0-9]{38})\\b",
       "keywords": [
         "4b1d"
@@ -442,7 +450,7 @@
     {
       "id": "cloudflare-origin-ca-key",
       "description": "Detected a Cloudflare Origin CA Key, potentially compromising cloud application deployments and operational security.",
-      "pattern": "\\b(?<secret>v1\\.0-[a-f0-9]{24}-[a-f0-9]{146})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>v1\\.0-[a-f0-9]{24}-[a-f0-9]{146})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "\\b(v1\\.0-[a-f0-9]{24}-[a-f0-9]{146})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "cloudflare",
@@ -557,7 +565,7 @@
     {
       "id": "databricks-api-token",
       "description": "Uncovered a Databricks API token, which may compromise big data analytics platforms and sensitive data processing.",
-      "pattern": "\\b(?<secret>dapi[a-f0-9]{32}(?:-[0-9])?)(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>dapi[a-f0-9]{32}(?:-[0-9])?)(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "\\b(dapi[a-f0-9]{32}(?:-\\d)?)(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "dapi"
@@ -590,7 +598,7 @@
     {
       "id": "digitalocean-access-token",
       "description": "Found a DigitalOcean OAuth Access Token, risking unauthorized cloud resource access and data compromise.",
-      "pattern": "\\b(?<secret>doo_v1_[a-f0-9]{64})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>doo_v1_[a-f0-9]{64})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "\\b(doo_v1_[a-f0-9]{64})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "doo_v1_"
@@ -601,7 +609,7 @@
     {
       "id": "digitalocean-pat",
       "description": "Discovered a DigitalOcean Personal Access Token, posing a threat to cloud infrastructure security and data privacy.",
-      "pattern": "\\b(?<secret>dop_v1_[a-f0-9]{64})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>dop_v1_[a-f0-9]{64})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "\\b(dop_v1_[a-f0-9]{64})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "dop_v1_"
@@ -612,7 +620,7 @@
     {
       "id": "digitalocean-refresh-token",
       "description": "Uncovered a DigitalOcean OAuth Refresh Token, which could allow prolonged unauthorized access and resource manipulation.",
-      "pattern": "(?i)\\b(?<secret>dor_v1_[a-f0-9]{64})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?i)(?:^|[^0-9A-Za-z_])(?<secret>dor_v1_[a-f0-9]{64})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "(?i)\\b(dor_v1_[a-f0-9]{64})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "dor_v1_"
@@ -733,7 +741,7 @@
     {
       "id": "easypost-api-token",
       "description": "Identified an EasyPost API token, which could lead to unauthorized postal and shipment service access and data exposure.",
-      "pattern": "\\bEZAK(?i)[a-z0-9]{54}\\b",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>EZAK(?i)[a-z0-9]{54})(?:[^0-9A-Za-z_]|\\z)",
       "upstreamPattern": "\\bEZAK(?i)[a-z0-9]{54}\\b",
       "keywords": [
         "ezak"
@@ -744,7 +752,7 @@
     {
       "id": "easypost-test-api-token",
       "description": "Detected an EasyPost test API token, risking exposure of test environments and potentially sensitive shipment data.",
-      "pattern": "\\bEZTK(?i)[a-z0-9]{54}\\b",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>EZTK(?i)[a-z0-9]{54})(?:[^0-9A-Za-z_]|\\z)",
       "upstreamPattern": "\\bEZTK(?i)[a-z0-9]{54}\\b",
       "keywords": [
         "eztk"
@@ -766,7 +774,7 @@
     {
       "id": "facebook-access-token",
       "description": "Discovered a Facebook Access Token, posing a risk of unauthorized access to Facebook accounts and personal data exposure.",
-      "pattern": "(?i)\\b(?<secret>[0-9]{15,16}(?:\\||%)[0-9a-z\\-_]{27,40})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?i)(?:^|[^0-9A-Za-z_])(?<secret>[0-9]{15,16}(?:\\||%)[0-9a-z\\-_]{27,40})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "(?i)\\b(\\d{15,16}(\\||%)[0-9a-z\\-_]{27,40})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "facebook"
@@ -777,7 +785,7 @@
     {
       "id": "facebook-page-access-token",
       "description": "Discovered a Facebook Page Access Token, posing a risk of unauthorized access to Facebook accounts and personal data exposure.",
-      "pattern": "\\b(?<secret>EAA[MC](?i)[a-z0-9]{100,})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>EAA[MC](?i)[a-z0-9]{100,})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "\\b(EAA[MC](?i)[a-z0-9]{100,})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "eaam",
@@ -888,7 +896,7 @@
     {
       "id": "flyio-access-token",
       "description": "Uncovered a Fly.io API key",
-      "pattern": "\\b(?<secret>(?:fo1_[0-9A-Za-z_-]{43}|fm1[ar]_[a-zA-Z0-9+\\/]{100,}={0,3}|fm2_[a-zA-Z0-9+\\/]{100,}={0,3}))(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>(?:fo1_[0-9A-Za-z_\\-]{43}|fm1[ar]_[a-zA-Z0-9+\\/]{100,}={0,3}|fm2_[a-zA-Z0-9+\\/]{100,}={0,3}))(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "\\b((?:fo1_[\\w-]{43}|fm1[ar]_[a-zA-Z0-9+\\/]{100,}={0,3}|fm2_[a-zA-Z0-9+\\/]{100,}={0,3}))(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "fo1_",
@@ -923,7 +931,7 @@
     {
       "id": "gcp-api-key",
       "description": "Uncovered a GCP API key, which could lead to unauthorized access to Google Cloud services and data breaches.",
-      "pattern": "\\b(?<secret>AIza[0-9A-Za-z_-]{35})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>AIza[0-9A-Za-z_\\-]{35})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "\\b(AIza[\\w-]{35})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "aiza"
@@ -1091,7 +1099,7 @@
     {
       "id": "gitlab-pat",
       "description": "Identified a GitLab Personal Access Token, risking unauthorized access to GitLab repositories and codebase exposure.",
-      "pattern": "glpat-[0-9A-Za-z_-]{20}",
+      "pattern": "glpat-[0-9A-Za-z_\\-]{20}",
       "upstreamPattern": "glpat-[\\w-]{20}",
       "keywords": [
         "glpat-"
@@ -1102,7 +1110,7 @@
     {
       "id": "gitlab-pat-routable",
       "description": "Identified a GitLab Personal Access Token (routable), risking unauthorized access to GitLab repositories and codebase exposure.",
-      "pattern": "\\bglpat-[0-9a-zA-Z_-]{27,300}\\.[0-9a-z]{2}[0-9a-z]{7}\\b",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>glpat-[0-9a-zA-Z_-]{27,300}\\.[0-9a-z]{2}[0-9a-z]{7})(?:[^0-9A-Za-z_]|\\z)",
       "upstreamPattern": "\\bglpat-[0-9a-zA-Z_-]{27,300}\\.[0-9a-z]{2}[0-9a-z]{7}\\b",
       "keywords": [
         "glpat-"
@@ -1124,7 +1132,7 @@
     {
       "id": "gitlab-rrt",
       "description": "Discovered a GitLab Runner Registration Token, posing a risk to CI/CD pipeline integrity and unauthorized access.",
-      "pattern": "GR1348941[0-9A-Za-z_-]{20}",
+      "pattern": "GR1348941[0-9A-Za-z_\\-]{20}",
       "upstreamPattern": "GR1348941[\\w-]{20}",
       "keywords": [
         "gr1348941"
@@ -1146,7 +1154,7 @@
     {
       "id": "gitlab-runner-authentication-token-routable",
       "description": "Discovered a GitLab Runner Authentication Token (Routable), posing a risk to CI/CD pipeline integrity and unauthorized access.",
-      "pattern": "\\bglrt-t[0-9]_[0-9a-zA-Z_\\-]{27,300}\\.[0-9a-z]{2}[0-9a-z]{7}\\b",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>glrt-t[0-9]_[0-9a-zA-Z_\\-]{27,300}\\.[0-9a-z]{2}[0-9a-z]{7})(?:[^0-9A-Za-z_]|\\z)",
       "upstreamPattern": "\\bglrt-t\\d_[0-9a-zA-Z_\\-]{27,300}\\.[0-9a-z]{2}[0-9a-z]{7}\\b",
       "keywords": [
         "glrt-"
@@ -1202,7 +1210,7 @@
     {
       "id": "grafana-api-key",
       "description": "Identified a Grafana API key, which could compromise monitoring dashboards and sensitive data analytics.",
-      "pattern": "(?i)\\b(?<secret>eyJrIjoi[A-Za-z0-9]{70,400}={0,3})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?i)(?:^|[^0-9A-Za-z_])(?<secret>eyJrIjoi[A-Za-z0-9]{70,400}={0,3})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "(?i)\\b(eyJrIjoi[A-Za-z0-9]{70,400}={0,3})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "eyjrijoi"
@@ -1213,7 +1221,7 @@
     {
       "id": "grafana-cloud-api-token",
       "description": "Found a Grafana cloud API token, risking unauthorized access to cloud-based monitoring services and data exposure.",
-      "pattern": "(?i)\\b(?<secret>glc_[A-Za-z0-9+/]{32,400}={0,3})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?i)(?:^|[^0-9A-Za-z_])(?<secret>glc_[A-Za-z0-9+/]{32,400}={0,3})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "(?i)\\b(glc_[A-Za-z0-9+/]{32,400}={0,3})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "glc_"
@@ -1224,7 +1232,7 @@
     {
       "id": "grafana-service-account-token",
       "description": "Discovered a Grafana service account token, posing a risk of compromised monitoring services and data integrity.",
-      "pattern": "(?i)\\b(?<secret>glsa_[A-Za-z0-9]{32}_[A-Fa-f0-9]{8})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?i)(?:^|[^0-9A-Za-z_])(?<secret>glsa_[A-Za-z0-9]{32}_[A-Fa-f0-9]{8})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "(?i)\\b(glsa_[A-Za-z0-9]{32}_[A-Fa-f0-9]{8})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "glsa_"
@@ -1269,7 +1277,7 @@
     {
       "id": "heroku-api-key-v2",
       "description": "Detected a Heroku API Key, potentially compromising cloud application deployments and operational security.",
-      "pattern": "\\b(?<secret>(?:HRKU-AA[0-9a-zA-Z_-]{58}))(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>(?:HRKU-AA[0-9a-zA-Z_-]{58}))(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "\\b((HRKU-AA[0-9a-zA-Z_-]{58}))(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "hrku-aa"
@@ -1291,7 +1299,7 @@
     {
       "id": "huggingface-access-token",
       "description": "Discovered a Hugging Face Access token, which could lead to unauthorized access to AI models and sensitive data.",
-      "pattern": "\\b(?<secret>hf_(?i:[a-z]{34}))(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>hf_(?i:[a-z]{34}))(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "\\b(hf_(?i:[a-z]{34}))(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "hf_"
@@ -1302,7 +1310,7 @@
     {
       "id": "huggingface-organization-api-token",
       "description": "Uncovered a Hugging Face Organization API token, potentially compromising AI organization accounts and associated data.",
-      "pattern": "\\b(?<secret>api_org_(?i:[a-z]{34}))(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>api_org_(?i:[a-z]{34}))(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "\\b(api_org_(?i:[a-z]{34}))(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "api_org_"
@@ -1313,7 +1321,7 @@
     {
       "id": "infracost-api-token",
       "description": "Detected an Infracost API Token, risking unauthorized access to cloud cost estimation tools and financial data.",
-      "pattern": "\\b(?<secret>ico-[a-zA-Z0-9]{32})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>ico-[a-zA-Z0-9]{32})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "\\b(ico-[a-zA-Z0-9]{32})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "ico-"
@@ -1335,7 +1343,7 @@
     {
       "id": "intra42-client-secret",
       "description": "Found a Intra42 client secret, which could lead to unauthorized access to the 42School API and sensitive data.",
-      "pattern": "\\b(?<secret>s-s4t2(?:ud|af)-(?i)[abcdef0123456789]{64})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>s-s4t2(?:ud|af)-(?i)[abcdef0123456789]{64})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "\\b(s-s4t2(?:ud|af)-(?i)[abcdef0123456789]{64})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "intra",
@@ -1376,7 +1384,7 @@
     {
       "id": "jwt",
       "description": "Uncovered a JSON Web Token, which may lead to unauthorized access to web applications and sensitive user data.",
-      "pattern": "\\b(?<secret>ey[a-zA-Z0-9]{17,}\\.ey[a-zA-Z0-9\\/\\\\_-]{17,}\\.(?:[a-zA-Z0-9\\/\\\\_-]{10,}={0,2})?)(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>ey[a-zA-Z0-9]{17,}\\.ey[a-zA-Z0-9\\/\\\\_-]{17,}\\.(?:[a-zA-Z0-9\\/\\\\_-]{10,}={0,2})?)(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "\\b(ey[a-zA-Z0-9]{17,}\\.ey[a-zA-Z0-9\\/\\\\_-]{17,}\\.(?:[a-zA-Z0-9\\/\\\\_-]{10,}={0,2})?)(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "ey"
@@ -1387,7 +1395,7 @@
     {
       "id": "jwt-base64",
       "description": "Detected a Base64-encoded JSON Web Token, posing a risk of exposing encoded authentication and data exchange information.",
-      "pattern": "\\bZXlK(?:(?:aGJHY2lPaU)|(?:aGNIVWlPaU)|(?:aGNIWWlPaU)|(?:aGRXUWlPaU)|(?:aU5qUWlP)|(?:amNtbDBJanBi)|(?:amRIa2lPaU)|(?:bGNHc2lPbn)|(?:bGJtTWlPaU)|(?:cWEzVWlPaU)|(?:cWQyc2lPb)|(?:cGMzTWlPaU)|(?:cGRpSTZJ)|(?:cmFXUWlP)|(?:clpYbGZiM0J6SWpwY)|(?:cmRIa2lPaUp)|(?:dWIyNWpaU0k2)|(?:d01tTWlP)|(?:d01uTWlPaU)|(?:d2NIUWlPaU)|(?:emRXSWlPaU)|(?:emRuUWlP)|(?:MFlXY2lPaU)|(?:MGVYQWlPaUp)|(?:MWNtd2l)|(?:MWMyVWlPaUp)|(?:MlpYSWlPaU)|(?:MlpYSnphVzl1SWpv)|(?:NElqb2)|(?:NE5XTWlP)|(?:NE5YUWlPaU)|(?:NE5YUWpVekkxTmlJNkl)|(?:NE5YVWlPaU)|(?:NmFYQWlPaU))[a-zA-Z0-9\\/\\\\_+\\-\\r\\n]{40,}={0,2}",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>ZXlK(?:(?:aGJHY2lPaU)|(?:aGNIVWlPaU)|(?:aGNIWWlPaU)|(?:aGRXUWlPaU)|(?:aU5qUWlP)|(?:amNtbDBJanBi)|(?:amRIa2lPaU)|(?:bGNHc2lPbn)|(?:bGJtTWlPaU)|(?:cWEzVWlPaU)|(?:cWQyc2lPb)|(?:cGMzTWlPaU)|(?:cGRpSTZJ)|(?:cmFXUWlP)|(?:clpYbGZiM0J6SWpwY)|(?:cmRIa2lPaUp)|(?:dWIyNWpaU0k2)|(?:d01tTWlP)|(?:d01uTWlPaU)|(?:d2NIUWlPaU)|(?:emRXSWlPaU)|(?:emRuUWlP)|(?:MFlXY2lPaU)|(?:MGVYQWlPaUp)|(?:MWNtd2l)|(?:MWMyVWlPaUp)|(?:MlpYSWlPaU)|(?:MlpYSnphVzl1SWpv)|(?:NElqb2)|(?:NE5XTWlP)|(?:NE5YUWlPaU)|(?:NE5YUWpVekkxTmlJNkl)|(?:NE5YVWlPaU)|(?:NmFYQWlPaU))[a-zA-Z0-9\\/\\\\_+\\-\\r\\n]{40,}={0,2})",
       "upstreamPattern": "\\bZXlK(?:(?P<alg>aGJHY2lPaU)|(?P<apu>aGNIVWlPaU)|(?P<apv>aGNIWWlPaU)|(?P<aud>aGRXUWlPaU)|(?P<b64>aU5qUWlP)|(?P<crit>amNtbDBJanBi)|(?P<cty>amRIa2lPaU)|(?P<epk>bGNHc2lPbn)|(?P<enc>bGJtTWlPaU)|(?P<jku>cWEzVWlPaU)|(?P<jwk>cWQyc2lPb)|(?P<iss>cGMzTWlPaU)|(?P<iv>cGRpSTZJ)|(?P<kid>cmFXUWlP)|(?P<key_ops>clpYbGZiM0J6SWpwY)|(?P<kty>cmRIa2lPaUp)|(?P<nonce>dWIyNWpaU0k2)|(?P<p2c>d01tTWlP)|(?P<p2s>d01uTWlPaU)|(?P<ppt>d2NIUWlPaU)|(?P<sub>emRXSWlPaU)|(?P<svt>emRuUWlP)|(?P<tag>MFlXY2lPaU)|(?P<typ>MGVYQWlPaUp)|(?P<url>MWNtd2l)|(?P<use>MWMyVWlPaUp)|(?P<ver>MlpYSWlPaU)|(?P<version>MlpYSnphVzl1SWpv)|(?P<x>NElqb2)|(?P<x5c>NE5XTWlP)|(?P<x5t>NE5YUWlPaU)|(?P<x5ts256>NE5YUWpVekkxTmlJNkl)|(?P<x5u>NE5YVWlPaU)|(?P<zip>NmFYQWlPaU))[a-zA-Z0-9\\/\\\\_+\\-\\r\\n]{40,}={0,2}",
       "keywords": [
         "zxlk"
@@ -1603,7 +1611,7 @@
     {
       "id": "maxmind-license-key",
       "description": "Discovered a potential MaxMind license key.",
-      "pattern": "\\b(?<secret>[A-Za-z0-9]{6}_[A-Za-z0-9]{29}_mmk)(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>[A-Za-z0-9]{6}_[A-Za-z0-9]{29}_mmk)(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "\\b([A-Za-z0-9]{6}_[A-Za-z0-9]{29}_mmk)(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "_mmk"
@@ -1710,7 +1718,7 @@
     {
       "id": "notion-api-token",
       "description": "Notion API token",
-      "pattern": "\\b(?<secret>ntn_[0-9]{11}[A-Za-z0-9]{32}[A-Za-z0-9]{3})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>ntn_[0-9]{11}[A-Za-z0-9]{32}[A-Za-z0-9]{3})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "\\b(ntn_[0-9]{11}[A-Za-z0-9]{32}[A-Za-z0-9]{3})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "ntn_"
@@ -1721,7 +1729,7 @@
     {
       "id": "npm-access-token",
       "description": "Uncovered an npm access token, potentially compromising package management and code repository access.",
-      "pattern": "(?i)\\b(?<secret>npm_[a-z0-9]{36})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?i)(?:^|[^0-9A-Za-z_])(?<secret>npm_[a-z0-9]{36})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "(?i)\\b(npm_[a-z0-9]{36})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "npm_"
@@ -1745,7 +1753,7 @@
     {
       "id": "octopus-deploy-api-key",
       "description": "Discovered a potential Octopus Deploy API key, risking application deployments and operational security.",
-      "pattern": "\\b(?<secret>API-[A-Z0-9]{26})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>API-[A-Z0-9]{26})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "\\b(API-[A-Z0-9]{26})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "api-"
@@ -1767,7 +1775,7 @@
     {
       "id": "openai-api-key",
       "description": "Found an OpenAI API Key, posing a risk of unauthorized access to AI services and data manipulation.",
-      "pattern": "\\b(?<secret>sk-(?:proj|svcacct|admin)-(?:[A-Za-z0-9_-]{74}|[A-Za-z0-9_-]{58})T3BlbkFJ(?:[A-Za-z0-9_-]{74}|[A-Za-z0-9_-]{58})\\b|sk-[a-zA-Z0-9]{20}T3BlbkFJ[a-zA-Z0-9]{20})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>sk-(?:proj|svcacct|admin)-(?:[A-Za-z0-9_-]{74}|[A-Za-z0-9_-]{58})T3BlbkFJ(?:[A-Za-z0-9_-]{74}|[A-Za-z0-9_-]{58})\\b|sk-[a-zA-Z0-9]{20}T3BlbkFJ[a-zA-Z0-9]{20})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "\\b(sk-(?:proj|svcacct|admin)-(?:[A-Za-z0-9_-]{74}|[A-Za-z0-9_-]{58})T3BlbkFJ(?:[A-Za-z0-9_-]{74}|[A-Za-z0-9_-]{58})\\b|sk-[a-zA-Z0-9]{20}T3BlbkFJ[a-zA-Z0-9]{20})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "t3blbkfj"
@@ -1778,7 +1786,7 @@
     {
       "id": "openshift-user-token",
       "description": "Found an OpenShift user token, potentially compromising an OpenShift/Kubernetes cluster.",
-      "pattern": "\\b(?<secret>sha256~[0-9A-Za-z_-]{43})(?:[^0-9A-Za-z_-]|\\z)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>sha256~[0-9A-Za-z_\\-]{43})(?:[^0-9A-Za-z_\\-]|\\z)",
       "upstreamPattern": "\\b(sha256~[\\w-]{43})(?:[^\\w-]|\\z)",
       "keywords": [
         "sha256~"
@@ -1789,7 +1797,7 @@
     {
       "id": "perplexity-api-key",
       "description": "Detected a Perplexity API key, which could lead to unauthorized access to Perplexity AI services and data exposure.",
-      "pattern": "\\b(?<secret>pplx-[a-zA-Z0-9]{48})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z|\\b)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>pplx-[a-zA-Z0-9]{48})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z|\\b)",
       "upstreamPattern": "\\b(pplx-[a-zA-Z0-9]{48})(?:[\\x60'\"\\s;]|\\\\[nr]|$|\\b)",
       "keywords": [
         "pplx-"
@@ -1833,7 +1841,7 @@
     {
       "id": "planetscale-api-token",
       "description": "Identified a PlanetScale API token, potentially compromising database management and operations.",
-      "pattern": "\\b(?<secret>pscale_tkn_(?i)[0-9A-Za-z_=\\.-]{32,64})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>pscale_tkn_(?i)[0-9A-Za-z_=\\.-]{32,64})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "\\b(pscale_tkn_(?i)[\\w=\\.-]{32,64})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "pscale_tkn_"
@@ -1844,7 +1852,7 @@
     {
       "id": "planetscale-oauth-token",
       "description": "Found a PlanetScale OAuth token, posing a risk to database access control and sensitive data integrity.",
-      "pattern": "\\b(?<secret>pscale_oauth_[0-9A-Za-z_=\\.-]{32,64})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>pscale_oauth_[0-9A-Za-z_=\\.-]{32,64})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "\\b(pscale_oauth_[\\w=\\.-]{32,64})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "pscale_oauth_"
@@ -1855,7 +1863,7 @@
     {
       "id": "planetscale-password",
       "description": "Discovered a PlanetScale password, which could lead to unauthorized database operations and data breaches.",
-      "pattern": "(?i)\\b(?<secret>pscale_pw_(?i)[0-9A-Za-z_=\\.-]{32,64})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?i)(?:^|[^0-9A-Za-z_])(?<secret>pscale_pw_(?i)[0-9A-Za-z_=\\.-]{32,64})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "(?i)\\b(pscale_pw_(?i)[\\w=\\.-]{32,64})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "pscale_pw_"
@@ -1866,7 +1874,7 @@
     {
       "id": "postman-api-token",
       "description": "Uncovered a Postman API token, potentially compromising API testing and development workflows.",
-      "pattern": "\\b(?<secret>PMAK-(?i)[a-f0-9]{24}\\-[a-f0-9]{34})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>PMAK-(?i)[a-f0-9]{24}\\-[a-f0-9]{34})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "\\b(PMAK-(?i)[a-f0-9]{24}\\-[a-f0-9]{34})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "pmak-"
@@ -1877,7 +1885,7 @@
     {
       "id": "prefect-api-token",
       "description": "Detected a Prefect API token, risking unauthorized access to workflow management and automation services.",
-      "pattern": "\\b(?<secret>pnu_[a-zA-Z0-9]{36})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>pnu_[a-zA-Z0-9]{36})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "\\b(pnu_[a-zA-Z0-9]{36})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "pnu_"
@@ -1912,7 +1920,7 @@
     {
       "id": "pulumi-api-token",
       "description": "Found a Pulumi API token, posing a risk to infrastructure as code services and cloud resource management.",
-      "pattern": "\\b(?<secret>pul-[a-f0-9]{40})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>pul-[a-f0-9]{40})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "\\b(pul-[a-f0-9]{40})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "pul-"
@@ -1923,7 +1931,7 @@
     {
       "id": "pypi-upload-token",
       "description": "Discovered a PyPI upload token, potentially compromising Python package distribution and repository integrity.",
-      "pattern": "pypi-AgEIcHlwaS5vcmc[0-9A-Za-z_-]{50,1000}",
+      "pattern": "pypi-AgEIcHlwaS5vcmc[0-9A-Za-z_\\-]{50,1000}",
       "upstreamPattern": "pypi-AgEIcHlwaS5vcmc[\\w-]{50,1000}",
       "keywords": [
         "pypi-ageichlwas5vcmc"
@@ -1945,7 +1953,7 @@
     {
       "id": "readme-api-token",
       "description": "Detected a Readme API token, risking unauthorized documentation management and content exposure.",
-      "pattern": "\\b(?<secret>rdme_[a-z0-9]{70})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>rdme_[a-z0-9]{70})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "\\b(rdme_[a-z0-9]{70})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "rdme_"
@@ -1956,7 +1964,7 @@
     {
       "id": "rubygems-api-token",
       "description": "Identified a Rubygem API token, potentially compromising Ruby library distribution and package management.",
-      "pattern": "\\b(?<secret>rubygems_[a-f0-9]{48})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>rubygems_[a-f0-9]{48})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "\\b(rubygems_[a-f0-9]{48})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "rubygems_"
@@ -1967,7 +1975,7 @@
     {
       "id": "scalingo-api-token",
       "description": "Found a Scalingo API token, posing a risk to cloud platform services and application deployment security.",
-      "pattern": "\\b(?<secret>tk-us-[0-9A-Za-z_-]{48})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>tk-us-[0-9A-Za-z_\\-]{48})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "\\b(tk-us-[\\w-]{48})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "tk-us-"
@@ -2000,7 +2008,7 @@
     {
       "id": "sendgrid-api-token",
       "description": "Detected a SendGrid API token, posing a risk of unauthorized email service operations and data exposure.",
-      "pattern": "\\b(?<secret>SG\\.(?i)[a-z0-9=_\\-\\.]{66})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>SG\\.(?i)[a-z0-9=_\\-\\.]{66})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "\\b(SG\\.(?i)[a-z0-9=_\\-\\.]{66})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "sg."
@@ -2011,7 +2019,7 @@
     {
       "id": "sendinblue-api-token",
       "description": "Identified a Sendinblue API token, which may compromise email marketing services and subscriber data privacy.",
-      "pattern": "\\b(?<secret>xkeysib-[a-f0-9]{64}\\-(?i)[a-z0-9]{16})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>xkeysib-[a-f0-9]{64}\\-(?i)[a-z0-9]{16})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "\\b(xkeysib-[a-f0-9]{64}\\-(?i)[a-z0-9]{16})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "xkeysib-"
@@ -2033,7 +2041,7 @@
     {
       "id": "sentry-org-token",
       "description": "Found a Sentry.io Organization Token, risking unauthorized access to error tracking services and sensitive application data.",
-      "pattern": "\\bsntrys_eyJpYXQiO[a-zA-Z0-9+/]{10,200}(?:LCJyZWdpb25fdXJs|InJlZ2lvbl91cmwi|cmVnaW9uX3VybCI6)[a-zA-Z0-9+/]{10,200}={0,2}_[a-zA-Z0-9+/]{43}(?:[^a-zA-Z0-9+/]|\\z)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>sntrys_eyJpYXQiO[a-zA-Z0-9+/]{10,200}(?:LCJyZWdpb25fdXJs|InJlZ2lvbl91cmwi|cmVnaW9uX3VybCI6)[a-zA-Z0-9+/]{10,200}={0,2}_[a-zA-Z0-9+/]{43})(?:[^a-zA-Z0-9+/]|\\z)",
       "upstreamPattern": "\\bsntrys_eyJpYXQiO[a-zA-Z0-9+/]{10,200}(?:LCJyZWdpb25fdXJs|InJlZ2lvbl91cmwi|cmVnaW9uX3VybCI6)[a-zA-Z0-9+/]{10,200}={0,2}_[a-zA-Z0-9+/]{43}(?:[^a-zA-Z0-9+/]|\\z)",
       "keywords": [
         "sntrys_eyjpyxqio"
@@ -2044,7 +2052,7 @@
     {
       "id": "sentry-user-token",
       "description": "Found a Sentry.io User Token, risking unauthorized access to error tracking services and sensitive application data.",
-      "pattern": "\\b(?<secret>sntryu_[a-f0-9]{64})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>sntryu_[a-f0-9]{64})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "\\b(sntryu_[a-f0-9]{64})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "sntryu_"
@@ -2055,7 +2063,7 @@
     {
       "id": "settlemint-application-access-token",
       "description": "Found a Settlemint Application Access Token.",
-      "pattern": "\\b(?<secret>sm_aat_[a-zA-Z0-9]{16})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>sm_aat_[a-zA-Z0-9]{16})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "\\b(sm_aat_[a-zA-Z0-9]{16})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "sm_aat"
@@ -2066,7 +2074,7 @@
     {
       "id": "settlemint-personal-access-token",
       "description": "Found a Settlemint Personal Access Token.",
-      "pattern": "\\b(?<secret>sm_pat_[a-zA-Z0-9]{16})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>sm_pat_[a-zA-Z0-9]{16})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "\\b(sm_pat_[a-zA-Z0-9]{16})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "sm_pat"
@@ -2077,7 +2085,7 @@
     {
       "id": "settlemint-service-access-token",
       "description": "Found a Settlemint Service Access Token.",
-      "pattern": "\\b(?<secret>sm_sat_[a-zA-Z0-9]{16})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>sm_sat_[a-zA-Z0-9]{16})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "\\b(sm_sat_[a-zA-Z0-9]{16})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "sm_sat"
@@ -2088,7 +2096,7 @@
     {
       "id": "shippo-api-token",
       "description": "Discovered a Shippo API token, potentially compromising shipping services and customer order data.",
-      "pattern": "\\b(?<secret>shippo_(?:live|test)_[a-fA-F0-9]{40})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>shippo_(?:live|test)_[a-fA-F0-9]{40})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "\\b(shippo_(?:live|test)_[a-fA-F0-9]{40})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "shippo_"
@@ -2292,7 +2300,7 @@
     {
       "id": "sourcegraph-access-token",
       "description": "Sourcegraph is a code search and navigation engine.",
-      "pattern": "(?i)\\b(?<secret>\\b(?:sgp_(?:[a-fA-F0-9]{16}|local)_[a-fA-F0-9]{40}|sgp_[a-fA-F0-9]{40}|[a-fA-F0-9]{40})\\b)(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?i)(?:^|[^0-9A-Za-z_])(?<secret>\\b(?:sgp_(?:[a-fA-F0-9]{16}|local)_[a-fA-F0-9]{40}|sgp_[a-fA-F0-9]{40}|[a-fA-F0-9]{40})\\b)(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "(?i)\\b(\\b(sgp_(?:[a-fA-F0-9]{16}|local)_[a-fA-F0-9]{40}|sgp_[a-fA-F0-9]{40}|[a-fA-F0-9]{40})\\b)(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "sgp_",
@@ -2304,7 +2312,7 @@
     {
       "id": "square-access-token",
       "description": "Detected a Square Access Token, risking unauthorized payment processing and financial transaction exposure.",
-      "pattern": "\\b(?<secret>(?:EAAA|sq0atp-)[0-9A-Za-z_-]{22,60})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>(?:EAAA|sq0atp-)[0-9A-Za-z_\\-]{22,60})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "\\b((?:EAAA|sq0atp-)[\\w-]{22,60})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "sq0atp-",
@@ -2327,7 +2335,7 @@
     {
       "id": "stripe-access-token",
       "description": "Found a Stripe Access Token, posing a risk to payment processing services and sensitive financial data.",
-      "pattern": "\\b(?<secret>(?:sk|rk)_(?:test|live|prod)_[a-zA-Z0-9]{10,99})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>(?:sk|rk)_(?:test|live|prod)_[a-zA-Z0-9]{10,99})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "\\b((?:sk|rk)_(?:test|live|prod)_[a-zA-Z0-9]{10,99})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "sk_test",
@@ -2475,7 +2483,7 @@
     {
       "id": "vault-batch-token",
       "description": "Detected a Vault Batch Token, risking unauthorized access to secret management services and sensitive data.",
-      "pattern": "\\b(?<secret>hvb\\.[0-9A-Za-z_-]{138,300})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>hvb\\.[0-9A-Za-z_\\-]{138,300})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "\\b(hvb\\.[\\w-]{138,300})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "hvb."
@@ -2486,7 +2494,7 @@
     {
       "id": "vault-service-token",
       "description": "Identified a Vault Service Token, potentially compromising infrastructure security and access to sensitive credentials.",
-      "pattern": "\\b(?<secret>(?:hvs\\.[0-9A-Za-z_-]{90,120}|s\\.(?i:[a-z0-9]{24})))(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>(?:hvs\\.[0-9A-Za-z_\\-]{90,120}|s\\.(?i:[a-z0-9]{24})))(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "\\b((?:hvs\\.[\\w-]{90,120}|s\\.(?i:[a-z0-9]{24})))(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "hvs.",

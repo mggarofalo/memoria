@@ -10,12 +10,17 @@ namespace Memoria.Core.Tests.Redaction.Gitleaks;
 /// <item><c>$</c> becomes <c>\z</c>: RE2's <c>$</c> without <c>(?m)</c> is the end of the text, and .NET's also matches before a final newline.</item>
 /// <item>POSIX classes such as <c>[[:alnum:]]</c> become ranges, and a literal <c>[</c> in a class is escaped so .NET never reads class subtraction.</item>
 /// <item>The secret becomes the <c>secret</c> group. Upstream takes <c>secretGroup</c>, or else the first capture that matched: the one top-level
-/// capture, or any of several in separate branches. Captures in sequence, as in <c>(x-){3}</c>, would make the secret a fragment, so the whole
-/// match is the secret instead. Every other capture becomes non-capturing.</item>
+/// capture, or any of several in separate branches. Captures in sequence, as in <c>(x-){3}</c>, or under a quantifier at any depth, would
+/// make the secret a fragment, so the whole match is the secret instead. Every other capture becomes non-capturing.</item>
+/// <item>A <c>\b</c> that starts or ends the pattern beside the secret becomes a consuming ASCII boundary outside the secret,
+/// <c>(?:^|[^0-9A-Za-z_])</c> or <c>(?:[^0-9A-Za-z_]|\z)</c>. .NET's <c>\b</c> is Unicode-aware, so a token touching a non-ASCII
+/// letter, as in <c>éAKIA…</c>, would have no boundary and be missed. When the whole match is the secret, the secret group is drawn
+/// inside such a boundary, and before a final terminator such as <c>(?:[^a-z]|\z)</c>, so neither neighbour is taken with it.</item>
+/// <item>A <c>-</c> straight after an expanded shorthand or POSIX class in a class is escaped: <c>[\s-x]</c> is a space, a dash or an x.</item>
 /// </list>
 /// What it cannot express it refuses, so a rule is never imported with a different meaning: lookaround, <c>\Q</c>, <c>\p</c>, <c>\C</c>,
-/// backreferences, the <c>U</c> flag, and a negated shorthand inside a class with anything else in it. <c>\b</c> stays as it is, and is
-/// Unicode-aware in .NET, so a token touching a non-ASCII letter has no boundary there.
+/// backreferences, the <c>U</c> and <c>m</c> flags, and a negated shorthand inside a class with anything else in it. Any other <c>\b</c>
+/// stays as it is, and so is Unicode-aware.
 /// </summary>
 public sealed class Re2Translator
 {
@@ -56,8 +61,11 @@ public sealed class Re2Translator
 	private readonly List<string> _output = [];
 	private readonly List<Capture> _captures = [];
 	private readonly Stack<Frame> _frames = new();
+	private readonly List<int> _flagTokens = [];
+	private int _rootBranches;
 	private int _position;
 	private int _nodes;
+	private (int Open, int Close, bool IsCapture, bool TopLevel) _lastGroup = (-1, -1, false, false);
 
 	private Re2Translator(string pattern)
 	{
@@ -70,6 +78,7 @@ public sealed class Re2Translator
 	{
 		Re2Translator translator = Parse(pattern);
 		HashSet<int> secret = translator.SecretCaptures(secretGroup);
+		translator.DrawBoundaries(secret);
 		return translator.Render(index => secret.Contains(index) ? "(?<secret>" : "(?:");
 	}
 
@@ -128,6 +137,7 @@ public sealed class Re2Translator
 		{
 			Frame top = _frames.Pop();
 			_frames.Push(top with { Branch = top.Branch + 1 });
+			_rootBranches += _frames.Count == 1 ? 1 : 0;
 		}
 
 		return c == '$' ? "\\z" : c.ToString();
@@ -209,6 +219,7 @@ public sealed class Re2Translator
 		if (c == '[' && Next(_position + 1) == ':')
 		{
 			body.Items.Append(Posix());
+			EscapeDashAfterExpansion(body);
 			return;
 		}
 
@@ -229,6 +240,7 @@ public sealed class Re2Translator
 		if (s_inside.TryGetValue(next, out string? inside))
 		{
 			body.Items.Append(inside);
+			EscapeDashAfterExpansion(body);
 		}
 		else if (s_negatedInside.TryGetValue(next, out string? negated))
 		{
@@ -237,6 +249,16 @@ public sealed class Re2Translator
 		else
 		{
 			body.Items.Append(next == 'x' ? Hex() : Escaped(next));
+		}
+	}
+
+	/// <summary>In RE2 a dash after a shorthand or a POSIX class is a dash. After the expansion it would start a range, so it is escaped.</summary>
+	private void EscapeDashAfterExpansion(ClassBody body)
+	{
+		if (Next(_position) == '-')
+		{
+			body.Items.Append("\\-");
+			_position++;
 		}
 	}
 
@@ -294,16 +316,20 @@ public sealed class Re2Translator
 		}
 
 		string flags = rest[2..end];
-		if (end >= rest.Length || rest[end] is not (':' or ')') || flags.Contains('U', StringComparison.Ordinal))
+		if (end >= rest.Length || rest[end] is not (':' or ')') || flags.Contains('U', StringComparison.Ordinal) || flags.Contains('m', StringComparison.Ordinal))
 		{
-			throw Unsupported("lookaround or an unknown group");
+			throw Unsupported("lookaround, a multi-line or ungreedy flag, or an unknown group");
 		}
 
 		_output.Add(rest[..(end + 1)]);
 		_position += end + 1;
 		if (rest[end] == ':')
 		{
-			_frames.Push(new Frame(++_nodes, IsCapture: false));
+			_frames.Push(new Frame(++_nodes, IsCapture: false) { OpenToken = _output.Count - 1 });
+		}
+		else
+		{
+			_flagTokens.Add(_output.Count - 1);
 		}
 	}
 
@@ -317,9 +343,19 @@ public sealed class Re2Translator
 		Frame closed = _frames.Pop();
 		_output.Add(")");
 		_position++;
-		if (closed.IsCapture && _position < _pattern.Length && "*+?{".Contains(_pattern[_position], StringComparison.Ordinal))
+		if (closed.IsCapture)
 		{
-			_captures.Single(capture => capture.Node == closed.Node).Repeated = true;
+			_captures.Single(capture => capture.Node == closed.Node).CloseToken = _output.Count - 1;
+		}
+
+		_lastGroup = (closed.OpenToken, _output.Count - 1, closed.IsCapture, _frames.Count == 1);
+		if (_position < _pattern.Length && "*+?{".Contains(_pattern[_position], StringComparison.Ordinal))
+		{
+			// A quantifier on any group repeats every capture inside it, as in (?:(abc)-)+.
+			foreach (Capture capture in _captures.Where(capture => capture.Node == closed.Node || capture.Path.Any(step => step.Node == closed.Node)))
+			{
+				capture.Repeated = true;
+			}
 		}
 	}
 
@@ -342,6 +378,93 @@ public sealed class Re2Translator
 	{
 		Dictionary<int, int> branches = a.Path.ToDictionary(static step => step.Node, static step => step.Branch);
 		return b.Path.Any(step => branches.TryGetValue(step.Node, out int branch) && branch != step.Branch);
+	}
+
+	/// <summary>
+	/// Turns a <c>\b</c> that starts or ends the pattern beside the secret into a consuming ASCII boundary, and draws the secret
+	/// group inside it, and before a final terminator, when the whole match was the secret. A pattern whose top level is an
+	/// alternation is left as it is, as a boundary there belongs to one branch only.
+	/// </summary>
+	private void DrawBoundaries(HashSet<int> secret)
+	{
+		if (_rootBranches > 0)
+		{
+			return;
+		}
+
+		int first = FirstContentToken();
+		bool leading = first >= 0 && _output[first] == "\\b";
+		bool trailing = _output.Count - 1 > first && _output[^1] == "\\b";
+		if (secret.Count == 0)
+		{
+			WrapWholeMatch(secret, first, leading, trailing);
+		}
+
+		MarkBoundaries(secret, first, leading, trailing);
+	}
+
+	private void WrapWholeMatch(HashSet<int> secret, int first, bool leading, bool trailing)
+	{
+		int terminator = Terminator();
+		int end = trailing ? _output.Count - 1 : terminator >= 0 ? terminator : _output.Count;
+		Wrap(secret, leading ? first + 1 : first, end);
+	}
+
+	private void MarkBoundaries(HashSet<int> secret, int first, bool leading, bool trailing)
+	{
+		Capture[] groups = [.. _captures.Where(capture => secret.Contains(capture.Token))];
+		if (leading && groups.Any(capture => capture.Token == first + 1))
+		{
+			_output[first] = "(?:^|[^0-9A-Za-z_])";
+		}
+
+		if (trailing && groups.Any(capture => capture.CloseToken == _output.Count - 2))
+		{
+			_output[^1] = "(?:[^0-9A-Za-z_]|\\z)";
+		}
+	}
+
+	/// <summary>The opening token of a final top-level group that only ends the token, such as <c>(?:[^a-z0-9]|\z)</c>, or -1.</summary>
+	private int Terminator()
+	{
+		(int open, int close, bool isCapture, bool topLevel) = _lastGroup;
+		if (isCapture || !topLevel || close != _output.Count - 1 || open < 0)
+		{
+			return -1;
+		}
+
+		string body = string.Concat(_output.Skip(open + 1).Take(close - open - 1));
+		return body.Split('|').Any(static branch => branch is "\\z") ? open : -1;
+	}
+
+	/// <summary>Draws the secret group over tokens from <paramref name="start"/> up to <paramref name="end"/>, unless that is the whole pattern.</summary>
+	private void Wrap(HashSet<int> secret, int start, int end)
+	{
+		if (start < 0 || end <= start || (start == FirstContentToken() && end == _output.Count))
+		{
+			return;
+		}
+
+		_output.Insert(end, ")");
+		_output.Insert(start, "(");
+		foreach (Capture capture in _captures)
+		{
+			capture.Shift(start, end);
+		}
+
+		for (int i = 0; i < _flagTokens.Count; i++)
+		{
+			_flagTokens[i] += _flagTokens[i] >= end ? 2 : _flagTokens[i] >= start ? 1 : 0;
+		}
+
+		Capture wrapper = new(start, -1, 0, []) { CloseToken = end + 1 };
+		_captures.Add(wrapper);
+		secret.Add(start);
+	}
+
+	private int FirstContentToken()
+	{
+		return Enumerable.Range(0, _output.Count).FirstOrDefault(index => !_flagTokens.Contains(index), -1);
 	}
 
 	private string Render(Func<int, string> capture)
@@ -369,14 +492,33 @@ public sealed class Re2Translator
 	private sealed record Frame(int Node, bool IsCapture)
 	{
 		public int Branch { get; init; }
+
+		public int OpenToken { get; init; } = -1;
 	}
 
 	/// <summary>A capture group. <see cref="Repeated"/> is set when a quantifier follows it, so it holds one repetition, or nothing.</summary>
-	private sealed record Capture(int Token, int Node, int Depth, (int Node, int Branch)[] Path)
+	private sealed class Capture(int token, int node, int depth, (int Node, int Branch)[] path)
 	{
+		public int Token { get; private set; } = token;
+
+		public int Node { get; } = node;
+
+		public int Depth { get; } = depth;
+
+		public (int Node, int Branch)[] Path { get; } = path;
+
 		public bool Repeated { get; set; }
 
 		public bool Named { get; set; }
+
+		public int CloseToken { get; set; } = -1;
+
+		/// <summary>Moves the token indexes past a wrapper opened at <paramref name="start"/> and closed before <paramref name="end"/>.</summary>
+		public void Shift(int start, int end)
+		{
+			Token += Token >= end ? 2 : Token >= start ? 1 : 0;
+			CloseToken += CloseToken >= end ? 2 : CloseToken >= start ? 1 : 0;
+		}
 	}
 
 	private sealed class ClassBody

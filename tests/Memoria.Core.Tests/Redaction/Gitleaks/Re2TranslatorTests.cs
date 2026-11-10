@@ -21,6 +21,10 @@ public sealed class Re2TranslatorTests
 	[InlineData(@"(?i)a(?-i:b)(?s:.)", "(?i)a(?-i:b)(?s:.)")]
 	[InlineData(@"\bA\b\z", @"\bA\b\z")]
 	[InlineData(@"[]a]", "[]a]")]
+	[InlineData(@"[\s-x]", @"[\t\n\f\r \-x]")]
+	[InlineData(@"[\w-z]", @"[0-9A-Za-z_\-z]")]
+	[InlineData(@"[[:alpha:]-z]", @"[A-Za-z\-z]")]
+	[InlineData(@"key=\ba", @"key=\ba")]
 	public void Translates_to_the_same_meaning_on_ascii_text(string re2, string dotnet)
 	{
 		Assert.Equal(dotnet, Re2Translator.TranslatePlain(re2));
@@ -39,6 +43,15 @@ public sealed class Re2TranslatorTests
 	[InlineData(@"(?P<alg>ab)c", "(?:ab)c", 0)]
 	[InlineData(@"Z(?:(?P<a>x)|(?P<b>y))[a-z]{40}", "Z(?:(?:x)|(?:y))[a-z]{40}", 0)]
 	[InlineData(@"ghp_[0-9a-z]{36}", "ghp_[0-9a-z]{36}", 0)]
+	[InlineData(@"(?:(abc)-)+x", "(?:(?:abc)-)+x", 0)]
+	[InlineData(@"\bAKIA[A-Z]{16}\b", @"(?:^|[^0-9A-Za-z_])(?<secret>AKIA[A-Z]{16})(?:[^0-9A-Za-z_]|\z)", 0)]
+	[InlineData(@"\b(ghp_[a-z]{36})\b", @"(?:^|[^0-9A-Za-z_])(?<secret>ghp_[a-z]{36})(?:[^0-9A-Za-z_]|\z)", 0)]
+	[InlineData(@"(?i)\b(p8e-[a-z]{4})(?:[;]|$)", @"(?i)(?:^|[^0-9A-Za-z_])(?<secret>p8e-[a-z]{4})(?:[;]|\z)", 0)]
+	[InlineData(@"\bsntrys_[a-z]{4}(?:[^a-z]|\z)", @"(?:^|[^0-9A-Za-z_])(?<secret>sntrys_[a-z]{4})(?:[^a-z]|\z)", 0)]
+	[InlineData(@"sk_[a-z]{4}(?:[^a-z]|\z)", @"(?<secret>sk_[a-z]{4})(?:[^a-z]|\z)", 0)]
+	[InlineData(@"key=\b(x)", @"key=\b(?<secret>x)", 0)]
+	[InlineData(@"\ba|b\b", @"\ba|b\b", 0)]
+	[InlineData(@"\bA[0-9]{4}", @"(?:^|[^0-9A-Za-z_])(?<secret>A[0-9]{4})", 0)]
 	public void The_secret_is_the_group_upstream_reports(string re2, string dotnet, int secretGroup)
 	{
 		Assert.Equal(dotnet, Re2Translator.TranslateRule(re2, secretGroup));
@@ -54,6 +67,7 @@ public sealed class Re2TranslatorTests
 	[InlineData(@"\C")]
 	[InlineData(@"(a)\1")]
 	[InlineData(@"(?U)a+")]
+	[InlineData(@"(?m)a$")]
 	[InlineData(@"[\Da]")]
 	[InlineData(@"[^\D]")]
 	[InlineData(@"[[:nonsense:]]")]

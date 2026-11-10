@@ -8,7 +8,7 @@ These files bring gitleaks's default detection rules into Memoria's own engine. 
 | `LICENSE` | Upstream's MIT licence. It is copied into every build as `licenses/gitleaks/LICENSE`. |
 | `rules.json` | Generated from `gitleaks.toml`. Embedded in `Memoria.Core`. Never edit it by hand. |
 
-`rules.json` holds each rule's pattern translated from RE2 to .NET, with the original beside it for review, and its keywords, entropy threshold and allowlists. Its `excluded` list names every upstream rule left out, with the reason.
+`rules.json` holds each rule's pattern translated from RE2 to .NET, with the original beside it for review, and its keywords, entropy threshold and allowlists. Its `excluded` list names every upstream rule left out, with the reason. Its `patches` list names every upstream pattern corrected on the way in, with the reason. Only a correction that stops a pattern hiding secrets belongs there.
 
 ## How the translation works
 

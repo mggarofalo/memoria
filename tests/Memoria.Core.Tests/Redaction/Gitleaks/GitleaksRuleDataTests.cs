@@ -118,6 +118,42 @@ public sealed class GitleaksRuleDataTests
 	}
 
 	[Fact]
+	public void The_upstream_allowlist_that_hid_secrets_is_corrected_and_recorded()
+	{
+		GitleaksPatch patch = Assert.Single(GitleaksRuleData.BuiltIn.Patches);
+		Regex corrected = RedactionRules.Pattern(Assert.Single(GitleaksRuleData.BuiltIn.GlobalAllowlist.Regexes, static regex => regex.Contains("false", StringComparison.Ordinal)));
+
+		Assert.Equal("global allowlist", patch.Where);
+		Assert.Matches(corrected, "False");
+		Assert.DoesNotMatch(corrected, "a8falsez0Qx");
+		Assert.DoesNotMatch(corrected, "trueQ8x0aZ");
+	}
+
+	[Theory]
+	[InlineData("é", "é")]
+	[InlineData("トークン", "。")]
+	[InlineData("‍", "‍")]
+	[InlineData("", "")]
+	public void A_token_touching_a_non_ascii_letter_keeps_its_boundary(string before, string after)
+	{
+		string token = "AK" + "IA" + "QWERTYUIOPASDFGH";
+		Regex pattern = RedactionRules.Pattern(GitleaksRuleData.BuiltIn.Rules.Single(static rule => rule.Id == "aws-access-token").Pattern);
+
+		Assert.Equal(token, pattern.Match(before + token + after).Groups["secret"].Value);
+		Assert.DoesNotMatch(pattern, "x" + token);
+		Assert.DoesNotMatch(pattern, token + "x");
+	}
+
+	[Fact]
+	public void A_token_that_ends_with_a_terminator_does_not_take_it()
+	{
+		Regex pattern = RedactionRules.Pattern(GitleaksRuleData.BuiltIn.Rules.Single(static rule => rule.Id == "sentry-org-token").Pattern);
+		string token = "sntrys_" + "eyJpYXQiO" + "abcdefghij" + "LCJyZWdpb25fdXJs" + "abcdefghij" + "_" + new string('Q', 43);
+
+		Assert.Equal(token, pattern.Match("\"" + token + "\" next").Groups["secret"].Value);
+	}
+
+	[Fact]
 	public void Malformed_data_is_refused()
 	{
 		Assert.Throws<System.Text.Json.JsonException>(static () => GitleaksRuleData.Parse("""{"source":null}"""));

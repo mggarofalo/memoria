@@ -8,7 +8,12 @@ namespace Memoria.Core.Redaction;
 /// <c>gitleaks.toml</c> beside it by a test in <c>Memoria.Core.Tests</c>. Patterns are already translated from RE2 to .NET,
 /// and the span to replace is the <c>secret</c> group. See <c>Redaction/Gitleaks/README.md</c>.
 /// </summary>
-internal sealed record GitleaksRuleData(GitleaksSource Source, IReadOnlyList<GitleaksExclusion> Excluded, GitleaksAllowlist GlobalAllowlist, IReadOnlyList<GitleaksRuleSpec> Rules)
+internal sealed record GitleaksRuleData(
+	GitleaksSource Source,
+	IReadOnlyList<GitleaksExclusion> Excluded,
+	IReadOnlyList<GitleaksPatch> Patches,
+	GitleaksAllowlist GlobalAllowlist,
+	IReadOnlyList<GitleaksRuleSpec> Rules)
 {
 	private const string ResourceName = "Memoria.Core.Redaction.Gitleaks.rules.json";
 
@@ -45,6 +50,9 @@ internal sealed record GitleaksSource(string Project, string Version, string Com
 
 /// <summary>An upstream rule left out, and why.</summary>
 internal sealed record GitleaksExclusion(string Id, string Reason);
+
+/// <summary>An upstream pattern corrected on the way in, because as written it would hide secrets. <see cref="Where"/> names its place.</summary>
+internal sealed record GitleaksPatch(string Where, string Upstream, string Replacement, string Reason);
 
 /// <summary>
 /// What makes a finding not a secret. Upstream applies regexes to <see cref="Target"/> and stopwords to the secret. With

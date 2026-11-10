@@ -26,6 +26,15 @@ public static class GitleaksRuleGenerator
 			+ "Memoria's secret-assignment rule covers the same assignments with a judge that reads the name and the value.",
 	};
 
+	/// <summary>
+	/// Upstream patterns corrected on the way in, by their exact upstream text. Only a correction that stops a pattern hiding
+	/// secrets belongs here. Each must still apply, which <see cref="Generate"/> checks.
+	/// </summary>
+	private static readonly Dictionary<string, (string Replacement, string Reason)> s_patches = new(StringComparer.Ordinal)
+	{
+		["(?i)^true|false|null$"] = ("(?i)^(?:true|false|null)$", "Without a group the anchors bind to the first and last words only, so any secret containing \"false\", starting with \"true\" or ending in \"null\" was allowed."),
+	};
+
 	private static readonly JsonSerializerOptions s_write = new(GitleaksRuleData.JsonOptions)
 	{
 		WriteIndented = true,
@@ -46,6 +55,7 @@ public static class GitleaksRuleGenerator
 		TomlTable model = TomlSerializer.Deserialize<TomlTable>(Encoding.UTF8.GetString(toml))!;
 		List<GitleaksExclusion> excluded = [];
 		List<GitleaksRuleSpec> rules = [];
+		List<GitleaksPatch> patches = [];
 		foreach (TomlTable rule in (TomlTableArray)model["rules"])
 		{
 			if (Exclusion(rule) is { } exclusion)
@@ -54,13 +64,32 @@ public static class GitleaksRuleGenerator
 			}
 			else
 			{
-				rules.Add(Rule(rule));
+				rules.Add(Rule(rule, patches));
 			}
 		}
 
+		GitleaksAllowlist global = Global((TomlTable)model["allowlist"], patches);
+		string[] unused = [.. s_patches.Keys.Except(patches.Select(static patch => patch.Upstream), StringComparer.Ordinal)];
+		if (unused.Length > 0)
+		{
+			throw new InvalidDataException("These patches no longer apply to the pinned file: " + string.Join(", ", unused));
+		}
+
 		GitleaksSource source = new("gitleaks", Version, Commit, "config/gitleaks.toml", hash, "MIT");
-		GitleaksRuleData data = new(source, excluded, Global((TomlTable)model["allowlist"]), rules);
+		GitleaksRuleData data = new(source, excluded, patches, global, rules);
 		return JsonSerializer.Serialize(data, s_write) + "\n";
+	}
+
+	/// <summary>The allowlist pattern translated, with any correction applied and recorded.</summary>
+	private static string AllowPattern(string upstream, string where, List<GitleaksPatch> patches)
+	{
+		if (!s_patches.TryGetValue(upstream, out (string Replacement, string Reason) patch))
+		{
+			return Re2Translator.TranslatePlain(upstream);
+		}
+
+		patches.Add(new GitleaksPatch(where, upstream, patch.Replacement, patch.Reason));
+		return Re2Translator.TranslatePlain(patch.Replacement);
 	}
 
 	private static GitleaksExclusion? Exclusion(TomlTable rule)
@@ -79,7 +108,7 @@ public static class GitleaksRuleGenerator
 		return rule.ContainsKey("regex") ? null : new GitleaksExclusion(id, "It has no pattern to match text with.");
 	}
 
-	private static GitleaksRuleSpec Rule(TomlTable rule)
+	private static GitleaksRuleSpec Rule(TomlTable rule, List<GitleaksPatch> patches)
 	{
 		string upstream = (string)rule["regex"];
 		int secretGroup = rule.TryGetValue("secretGroup", out object? group) ? Convert.ToInt32(group, System.Globalization.CultureInfo.InvariantCulture) : 0;
@@ -90,7 +119,7 @@ public static class GitleaksRuleGenerator
 			upstream,
 			[.. Strings(rule, "keywords").Select(static keyword => keyword.ToLowerInvariant()).Distinct(StringComparer.Ordinal)],
 			rule.TryGetValue("entropy", out object? entropy) ? Convert.ToDouble(entropy, System.Globalization.CultureInfo.InvariantCulture) : 0,
-			[.. Allowlists(rule).Select(Allowlist).OfType<GitleaksAllowlist>()]);
+			[.. Allowlists(rule).Select(allowlist => Allowlist(allowlist, (string)rule["id"], patches)).OfType<GitleaksAllowlist>()]);
 	}
 
 	private static IEnumerable<TomlTable> Allowlists(TomlTable rule)
@@ -100,11 +129,11 @@ public static class GitleaksRuleGenerator
 	}
 
 	/// <summary>Null when nothing is left once paths and commits are gone, or when an AND allowlist needed one of them.</summary>
-	private static GitleaksAllowlist? Allowlist(TomlTable allowlist)
+	private static GitleaksAllowlist? Allowlist(TomlTable allowlist, string id, List<GitleaksPatch> patches)
 	{
 		bool and = allowlist.TryGetValue("condition", out object? condition) && ((string)condition).Equals("AND", StringComparison.OrdinalIgnoreCase);
 		bool hadPathOrCommit = allowlist.ContainsKey("paths") || allowlist.ContainsKey("commits");
-		string[] regexes = [.. Strings(allowlist, "regexes").Select(Re2Translator.TranslatePlain)];
+		string[] regexes = [.. Strings(allowlist, "regexes").Select(regex => AllowPattern(regex, id, patches))];
 		string[] stopwords = [.. Strings(allowlist, "stopwords")];
 		if ((and && hadPathOrCommit) || (regexes.Length == 0 && stopwords.Length == 0))
 		{
@@ -121,9 +150,10 @@ public static class GitleaksRuleGenerator
 			: GitleaksTarget.Secret;
 	}
 
-	private static GitleaksAllowlist Global(TomlTable allowlist)
+	private static GitleaksAllowlist Global(TomlTable allowlist, List<GitleaksPatch> patches)
 	{
-		return new GitleaksAllowlist(GitleaksCondition.Or, GitleaksTarget.Secret, [.. Strings(allowlist, "regexes").Select(Re2Translator.TranslatePlain)], [.. Strings(allowlist, "stopwords")]);
+		string[] regexes = [.. Strings(allowlist, "regexes").Select(regex => AllowPattern(regex, "global allowlist", patches))];
+		return new GitleaksAllowlist(GitleaksCondition.Or, GitleaksTarget.Secret, regexes, [.. Strings(allowlist, "stopwords")]);
 	}
 
 	private static IEnumerable<string> Strings(TomlTable table, string key)
