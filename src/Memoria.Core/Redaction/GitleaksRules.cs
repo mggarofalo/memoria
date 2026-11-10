@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.RegularExpressions;
 
 namespace Memoria.Core.Redaction;
@@ -45,7 +46,7 @@ internal static class GitleaksRules
 	private static RedactionRule Rule(GitleaksRuleSpec spec, CompiledAllowlist global)
 	{
 		CompiledAllowlist[] own = [.. spec.Allowlists.Select(static allowlist => new CompiledAllowlist(allowlist))];
-		string separators = SeparatorsIn(SecretPart(spec.Pattern));
+		string separators = SeparatorsIn(SecretParts(spec.Pattern));
 		return new RedactionRule(
 			Prefix + spec.Id,
 			null,
@@ -110,15 +111,23 @@ internal static class GitleaksRules
 
 	private const string Separators = "-.%+/_";
 
-	/// <summary>The pattern's <c>secret</c> group, or the whole pattern when the whole match is the secret.</summary>
-	private static string SecretPart(string pattern)
+	/// <summary>Every <c>secret</c> group of the pattern, one per alternative, or the whole pattern when the whole match is the secret.</summary>
+	private static string SecretParts(string pattern)
 	{
-		int start = pattern.IndexOf("(?<secret>", StringComparison.Ordinal);
-		if (start < 0)
+		StringBuilder parts = new();
+		for (int start = pattern.IndexOf(SecretGroup, StringComparison.Ordinal); start >= 0; start = pattern.IndexOf(SecretGroup, start + 1, StringComparison.Ordinal))
 		{
-			return pattern;
+			parts.Append(SecretPart(pattern, start));
 		}
 
+		return parts.Length == 0 ? pattern : parts.ToString();
+	}
+
+	private const string SecretGroup = "(?<secret>";
+
+	/// <summary>The group that opens at <paramref name="start"/>, through its closing parenthesis.</summary>
+	private static string SecretPart(string pattern, int start)
+	{
 		int depth = 0;
 		bool inClass = false;
 		for (int i = start; i < pattern.Length; i++)
