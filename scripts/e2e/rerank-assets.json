@@ -1,0 +1,28 @@
+{
+  "about": "What the rerank e2e downloads, pinned by revision and SHA-256. CI caches it under a key made from this file, so changing an entry is what fetches anew.",
+  "assets": [
+    {
+      "name": "llama.cpp b12110, CPU, Linux x64",
+      "file": "llama-b12110-bin-ubuntu-x64.tar.gz",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12110/llama-b12110-bin-ubuntu-x64.tar.gz",
+      "sha256": "368227edcc229be5f9bed16a2223d79b5e41d0ac2e19bcf5825e82291c060e55",
+      "bytes": 23051958,
+      "platform": "linux-x64",
+      "extract": true
+    },
+    {
+      "name": "embeddinggemma-300M Q8_0, QMD's default embedding model",
+      "file": "embeddinggemma-300M-Q8_0.gguf",
+      "url": "https://huggingface.co/ggml-org/embeddinggemma-300M-GGUF/resolve/0f741b5a6585bd53aeb15cd1372c56f2a0f65e12/embeddinggemma-300M-Q8_0.gguf",
+      "sha256": "b5ce9d77a3fc4b3b39ccb5643c36777911cc4eb46a66962eadfa3f5f60490d63",
+      "bytes": 333590944
+    },
+    {
+      "name": "Qwen3-Reranker-0.6B Q8_0, QMD's default reranker",
+      "file": "qwen3-reranker-0.6b-q8_0.gguf",
+      "url": "https://huggingface.co/ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF/resolve/a02f48bb4f057028298c21fa033da2b30d7742d5/qwen3-reranker-0.6b-q8_0.gguf",
+      "sha256": "22c9979ce4fbcdc5acdc310c6641c32797eff1aa980b8f7a2db8a8ea23429a48",
+      "bytes": 639153184
+    }
+  ]
+}

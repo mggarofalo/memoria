@@ -319,6 +319,54 @@ jobs:
       - name: Run the tunnel checks
         run: node scripts/e2e/wireguard.ts
 
+  # Not required. The rest of the suite has no models, so its searches are degraded BM25. This runs reranked and
+  # filtered search through REST, MCP and the CLI against a real worker: llama.cpp on the runner's CPU, with QMD's
+  # embeddinggemma and 0.6B reranker. The files are pinned by SHA-256 in scripts/e2e/rerank-assets.json and cached
+  # under a key made from it. On main the cache is saved as soon as they are fetched, so a failing check never costs
+  # a download, and a download that fails says so. See scripts/e2e/README.md.
+  e2e-rerank:
+    name: End-to-end (real reranker on CPU)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup .NET
+        uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        with:
+          dotnet-version: "10.0.x"
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: cli/go.mod
+          cache-dependency-path: cli/go.sum
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: sidecar/package-lock.json
+      - name: Install
+        run: npm ci --no-fund --no-audit
+        working-directory: sidecar
+      - name: Restore the models and llama.cpp
+        id: models
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/memoria-e2e-rerank
+          key: e2e-rerank-${{ hashFiles('scripts/e2e/rerank-assets.json') }}
+      - name: Fetch what the cache lacks, checked by SHA-256
+        run: node scripts/e2e/rerank-assets.ts "$HOME/.cache/memoria-e2e-rerank"
+      # Saved from main only: every branch can read main's cache, and a copy saved per pull request would be
+      # about 1 GB each, pushing older entries out of the repository's 10 GB.
+      - name: Save them before any check can fail
+        if: steps.models.outputs.cache-hit != 'true' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/memoria-e2e-rerank
+          key: e2e-rerank-${{ hashFiles('scripts/e2e/rerank-assets.json') }}
+      - name: Run the reranked checks
+        run: node scripts/e2e/rerank.ts --assets "$HOME/.cache/memoria-e2e-rerank"
+
   worker:
     name: Worker Build & Test
     needs: changes

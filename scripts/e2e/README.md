@@ -38,6 +38,20 @@ It checks:
 
 Containers and the network are named `wg-*`, and the run removes them by name, and the image, pass or fail. `MEMORIA_WIREGUARD_KEEP=1` leaves them up for a look. It needs Docker on a kernel with WireGuard, which GitHub's runners and Docker Desktop have. It takes about two minutes.
 
+## Reranked search on a real worker
+
+The suite has no models, so its searches are degraded BM25. `scripts/e2e/rerank.ts` is the one place a reranker scores them. It starts a real worker on the CPU, serving QMD's embeddinggemma-300M and Qwen3-Reranker-0.6B, and a real API and sidecar that reach it. It ingests six short documents on unrelated topics, embeds them through the worker, and runs reranked searches through REST, MCP and the CLI, some filtered by project and date. Each search must be reranked and degraded by nothing but `no_expansion`, since no worker serves expansion here. Each must put the right document first, given a paraphrase that shares few words with it, and keep to the filter. The worker must have been asked to rerank, and the sidecar must have loaded no model of its own.
+
+```sh
+node scripts/e2e/rerank-assets.ts ~/.cache/memoria-e2e-rerank        # about 970 MiB, checked by SHA-256, kept if already there
+node scripts/e2e/rerank.ts --assets ~/.cache/memoria-e2e-rerank      # Linux x64
+node scripts/e2e/rerank.ts --assets <dir> --llama-server <path>      # elsewhere, with a local llama-server; it runs on the CPU either way
+```
+
+`rerank-assets.json` pins llama.cpp b12110's Linux CPU build and both models, by Hugging Face revision and SHA-256. A download is tried four times, with backoff, and a file is kept only once its hash matches. When it still fails, the run stops before any check, with an error naming the file and saying it was the download.
+
+**In CI** it is `End-to-end (real reranker on CPU)`, not required. The files are cached under a key made from `rerank-assets.json`. A push to main saves the cache straight after fetching them, so a failing check never costs another download there. Pull requests read main's cache and save none of their own, as each copy is about 1 GB. On this desktop the whole run takes 13 s after the build, with each reranked search 0.6 to 1.3 s on the CPU. A GitHub runner has fewer cores, so allow a few seconds a search. The job's timeout is 15 minutes, and most of its time is the .NET, Go and sidecar builds. The cost is about 1 GB of the repository's 10 GB Actions cache, and the minutes of one more Ubuntu job per run.
+
 ## Running the suite
 
 It needs Node 26.13+, Go and the .NET SDK. It exits non-zero if any check fails. It connects from loopback addresses such as `127.0.0.2`, which Linux and Windows answer without setup. macOS does not, so the auth checks fail there.

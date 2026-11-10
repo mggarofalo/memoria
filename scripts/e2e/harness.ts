@@ -85,6 +85,8 @@ export interface HarnessOptions {
   filledCollections?: readonly string[];
   apiEnv?: NodeJS.ProcessEnv;
   sidecarEnv?: NodeJS.ProcessEnv;
+  /** Leave out the default fixtures, so a run with real models embeds only what it seeds itself. */
+  bareIndex?: boolean;
 }
 
 /** Makes a key on this run's server. A key has a budget of requests, so a check that makes many takes its own. */
@@ -230,17 +232,19 @@ export class Harness {
 
   /** The real SDK indexes two collections, so scope has something to separate. */
   seedIndex(): void {
-    for (const [collection, file, text] of [
+    const fixtures = this.options.bareIndex ? [] : [
       ["notes", "hello.md", "# Hello\n\nThe zebrafish protocol lives here.\n\x1b]52;c;ZXZpbA==\x07 stored escape\n"],
       ["secret", "hidden.md", "# Hidden\n\nThe zebrafish hidden ledger.\n"],
       ...bulkFixtures(),
       ...manyFixtures(),
-    ] as const) {
+    ] as const;
+    for (const [collection, file, text] of fixtures) {
       const folder = path.join(this.dir, "corpus", collection);
       mkdirSync(folder, { recursive: true });
       writeFileSync(path.join(folder, file), text);
     }
-    const collections: Collections = Object.fromEntries(["notes", "secret", "bulk", "many"].map((name) => [name, { path: path.join(this.dir, "corpus", name), pattern: "**/*.md" }]));
+    const names = this.options.bareIndex ? [] : ["notes", "secret", "bulk", "many"];
+    const collections: Collections = Object.fromEntries(names.map((name) => [name, { path: path.join(this.dir, "corpus", name), pattern: "**/*.md" }]));
     for (const name of this.options.extraCollections ?? []) {
       const folder = path.join(this.dir, "corpus", name);
       mkdirSync(folder, { recursive: true });
