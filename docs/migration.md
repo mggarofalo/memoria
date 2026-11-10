@@ -236,6 +236,8 @@ Do the same, with one report and one verify of its own, as its files are not the
 
 This is a separate step, and no command does it. Leave local QMD and its index alone until you have used the server for long enough to trust it.
 
+**Keep `~/.config/qmd/index.yml` where it is until then.** Local QMD is stock. With that file missing, any `qmd` command, even `qmd status`, deletes every collection record from its index, with their contexts. The documents and vectors stay, but `qmd update` no longer scans those collections, so local QMD falls behind and is less of a way back. Putting the file back and running `qmd status` once brings the records back. The server's own SDK does not do this; see [lost collection records](deployment.md#lost-collection-records).
+
 ## What the hook has to do
 
 The hook that pushes sessions is not in this repository, and `cutover` does not add or change one. It reports what is set for `SessionEnd`. For a migrated session to be replaced rather than doubled, the hook has to:

@@ -5,7 +5,9 @@
  * original's output. Drop this when the SDK has the fixes.
  *
  * Also carries the reranker blend fix from upstream tobi/qmd#1032, which does change
- * results, on purpose: test/rerank-blend.test.ts.
+ * results, on purpose: test/rerank-blend.test.ts. And it stops the config sync deleting
+ * collection records a config does not name, which a missing config did to all of them
+ * (upstream tobi/qmd#1048): test/integration-collections.test.ts.
  *
  * A plain script rather than patch-package, which would add a dozen runtime dependencies
  * to run one replacement. It stops the install if the SDK's text has moved, so a version
@@ -94,8 +96,42 @@ ${BEFORE_BLEND}${FIXED_BLEND}`,
   },
 ];
 
+// Every qmd CLI command, and createStore with a config, first copies the config into the
+// index. A missing file reads as an empty config, so stock QMD then deletes every collection
+// record, and the global context, while their documents stay (upstream tobi/qmd#1048). In the
+// image the config directory is always empty, because nothing writes a config there.
+const CONFIG_SYNC_EDIT = {
+  why: "A missing or partial config deletes the index's collection records.",
+  from: `    // Delete collections not in config
+    const dbCollections = db.prepare(\`SELECT name FROM store_collections\`).all();
+    for (const row of dbCollections) {
+        if (!configNames.has(row.name)) {
+            db.prepare(\`DELETE FROM store_collections WHERE name = ?\`).run(row.name);
+        }
+    }
+    // Sync global context
+    if (config.global_context !== undefined) {
+        setStoreGlobalContext(db, config.global_context);
+    }
+    else {
+        setStoreGlobalContext(db, undefined);
+    }`,
+  to: `    // Memoria: a collection the config does not name keeps its record. A missing config reads
+    // as naming nothing, so stock QMD deleted them all here. \`qmd collection remove\` still
+    // removes a collection. A config that names collections and no global context clears it,
+    // which is how \`qmd context rm /\` works; one naming no collection, as a missing file
+    // reads, leaves it.
+    if (config.global_context !== undefined) {
+        setStoreGlobalContext(db, config.global_context);
+    }
+    else if (configNames.size > 0) {
+        setStoreGlobalContext(db, undefined);
+    }`,
+};
+
 const EDITS = [
   ...BLEND_EDITS,
+  CONFIG_SYNC_EDIT,
   {
     why: "A linear search of every fence, for every break point: fences are sorted and do not overlap.",
     from: `export function isInsideCodeFence(pos, fences) {
