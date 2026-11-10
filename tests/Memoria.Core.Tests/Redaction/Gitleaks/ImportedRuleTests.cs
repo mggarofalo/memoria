@@ -171,7 +171,7 @@ public sealed partial class ImportedRuleTests
 	public void Imported_rules_run_after_every_rule_of_ours()
 	{
 		int firstImported = RedactionRules.All.ToList().FindIndex(static rule => rule.Backstop);
-		int lastOurs = RedactionRules.All.ToList().FindLastIndex(static rule => !rule.Backstop && rule.Name is not ("percent-encoded-token" or "base64-token"));
+		int lastOurs = RedactionRules.All.ToList().FindLastIndex(static rule => !rule.Backstop && rule.Name is not ("hex-token" or "unicode-escaped-token" or "percent-encoded-token" or "base64-token"));
 
 		Assert.True(firstImported > lastOurs);
 		Assert.All(RedactionRules.All.Where(static rule => rule.Backstop), static rule => Assert.StartsWith(GitleaksRules.Prefix, rule.Name, StringComparison.Ordinal));
