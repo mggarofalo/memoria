@@ -102,7 +102,8 @@ async function readJson(request: IncomingMessage, limit: number, reserve: (bytes
   if (!/^application\/json\s*(;|$)/i.test(request.headers["content-type"] ?? "")) throw new HttpFailure(415, "unsupported_media_type", "The request body must be application/json");
   const chunks: Buffer[] = [];
   let total = 0;
-  for await (const chunk of request) {
+  // Stopping early must not destroy the request: that resets the socket under the answer. `finish` decides what happens to the rest.
+  for await (const chunk of request.iterator({ destroyOnReturn: false })) {
     total += (chunk as Buffer).length;
     if (total > limit) throw new HttpFailure(413, "payload_too_large", "The request body is too large");
     reserve((chunk as Buffer).length);
@@ -287,6 +288,21 @@ export function createWorkerServer(options: WorkerServerOptions): { server: Serv
     return operation(request);
   };
 
+  /**
+   * A request turned away before its body was read. Closing the connection while the client is
+   * still sending resets it, and the reset can reach the client before the answer, which it then
+   * never reads. So the rest is read and dropped and the connection stays open, and only a client
+   * still sending past the body limit is cut off.
+   */
+  const discardRest = (request: IncomingMessage): void => {
+    let dropped = 0;
+    request.on("data", (chunk: Buffer) => {
+      dropped += chunk.length;
+      if (dropped > options.bodyLimitBytes) request.socket.destroy();
+    });
+    request.resume();
+  };
+
   const send = (response: ServerResponse, status: number, body: unknown): void => {
     const text = JSON.stringify(body);
     response.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(text) });
@@ -302,23 +318,16 @@ export function createWorkerServer(options: WorkerServerOptions): { server: Serv
       heldBy.delete(request);
     });
     const finish = (status: number, body: unknown, errorCode?: string): void => {
-      if (!request.complete) {
-        // Turned away before the body was read: discard the rest and end the connection.
-        response.setHeader("connection", "close");
-        request.resume();
-      }
+      if (!request.complete) discardRest(request);
       send(response, status, body);
       log.info({ method: request.method, path, status, durationMs: Date.now() - started, ...(errorCode ? { errorCode } : {}) }, "request");
     };
     const refusal = refuseAtBoundary({ host: request.headers.host, origin: request.headers.origin }, options.allowedHosts ?? LOCALHOST_ONLY);
     if (refusal) {
-      request.resume();
       finish(refusal.status, { error: refusal.error, message: refusal.message }, refusal.error);
       return;
     }
     if (options.token !== undefined && !tokenMatches(request.headers.authorization, options.token)) {
-      // Drain the body so the client gets the response rather than a reset.
-      request.resume();
       response.setHeader("www-authenticate", 'Bearer realm="memoria-worker"');
       finish(401, { error: "unauthorized", message: "Missing or invalid bearer token" }, "unauthorized");
       return;
