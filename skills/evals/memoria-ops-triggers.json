@@ -1,0 +1,28 @@
+{
+  "skill": "memoria-ops",
+  "why": "Prompts for checking the skill's description. Show a reviewer the description and the prompts with no labels, ask which prompts should load the skill, and compare with these lists.",
+  "shouldTrigger": [
+    "Give my laptop a Memoria key that can only search the claude-sessions collection.",
+    "I think the sync key leaked in a screenshot. Rotate it.",
+    "Revoke the Memoria key we issued for the old CI runner.",
+    "I need to reboot the GPU desktop. Take it out of the Memoria worker pool first.",
+    "Why isn't the document I ingested an hour ago showing up in Memoria search yet?",
+    "Memoria search says degraded. What's wrong with the backend?",
+    "Pause Memoria's background indexing while I run a benchmark on the GPU.",
+    "A reindex job failed overnight. Can you retry it?",
+    "memoria query failed with trace 4bf92f3577b34da6a3ce929d0e0e4736. Help me find out why.",
+    "Re-embed the notes collection on Memoria."
+  ],
+  "shouldNotTrigger": [
+    "What did we decide about the uploader's retry behaviour last spring?",
+    "Search my past sessions for the WireGuard setup.",
+    "Set up a Memoria server on a new machine with Docker.",
+    "Rotate the AWS access key in the deploy pipeline.",
+    "Why is this Go test flaky?",
+    "Add a new endpoint to the Memoria API for tags.",
+    "What issues are open in the tracker for this sprint?",
+    "Restart the Postgres container on the homelab.",
+    "Write a commit message for the staged changes.",
+    "Explain how QMD's reranker scores documents."
+  ]
+}
