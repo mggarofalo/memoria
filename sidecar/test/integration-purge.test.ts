@@ -11,6 +11,7 @@ import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { test } from "node:test";
 import type { PoolWorkerConfig } from "../src/llm/types.ts";
+import { ROOT_MARKER } from "../src/collection-roots.ts";
 import { purgeDeleted } from "../src/purge.ts";
 import { openBackend } from "../src/store.ts";
 import { tempDir } from "./helpers.ts";
@@ -131,21 +132,92 @@ test("a deleted document leaves no content, vectors, full text or set-aside in t
   assert.equal(bytes.indexOf(Buffer.from(TINY)), -1, "a short deleted text is still in index.sqlite");
 });
 
-test("a scan that finds a collection's folder gone keeps its vectors, so its return re-embeds nothing", { skip }, async () => {
+/** Rows left in the index of every kind, whatever their collection. */
+async function rowCounts(dbPath: string): Promise<{ documents: number; inactive: number; content: number; contentVectors: number }> {
+  const qmd = await import("@tobilu/qmd");
+  const reader = await qmd.createStore({ dbPath });
+  try {
+    const db = reader.internal.db as unknown as Db;
+    const count = (sql: string): number => (db.prepare(sql).get() as { n: number }).n;
+    return {
+      documents: count("SELECT COUNT(*) AS n FROM documents"),
+      inactive: count("SELECT COUNT(*) AS n FROM documents WHERE active = 0"),
+      content: count("SELECT COUNT(*) AS n FROM content"),
+      contentVectors: count("SELECT COUNT(*) AS n FROM content_vectors"),
+    };
+  } finally {
+    await reader.close();
+  }
+}
+
+async function remoteBackend(dbPath: string, mock: MockWorker, warnings: string[]): Promise<Awaited<ReturnType<typeof openBackend>>> {
+  return openBackend({ dbPath, keepWarm: false, llm: { mode: "remote", workers: [worker(mock)], embedDimensions: 8, fallback: false, statusPollMs: 0, embedBatchBytes: 2048 }, onLlmWarning: (m) => warnings.push(m) });
+}
+
+const ALL = ["secret.md", "shared.md", "copies/shared.md", "kept.md", "tiny.md"];
+
+test("a collection's folder gone for a scan keeps everything, says so, and its return re-embeds nothing", { skip }, async () => {
   const { corpus, dbPath } = await index();
   const mock = await new MockWorker(8).start();
-  const backend = await openBackend({ dbPath, keepWarm: false, llm: { mode: "remote", workers: [worker(mock)], embedDimensions: 8, fallback: false, statusPollMs: 0, embedBatchBytes: 2048 } });
+  const warnings: string[] = [];
+  const backend = await remoteBackend(dbPath, mock, warnings);
   try {
     await backend.embed({ force: false });
     const embeds = mock.count("/v1/embed");
     const away = corpus + "-away";
     await rename(corpus, away);
     assert.equal((await backend.update({})).removed, 5, "the scan found every document gone");
+    assert.ok(warnings.some((w) => w.startsWith("Collection notes:") && /missing or cannot be read/.test(w)), warnings.join("\n"));
     await rename(away, corpus);
     const back = await backend.update({});
     assert.equal(back.needsEmbedding, 0, "every vector was still there");
     assert.equal((await backend.embed({ force: false })).docsProcessed, 0);
     assert.equal(mock.count("/v1/embed"), embeds, "no worker was asked to embed again");
+  } finally {
+    await backend.close();
+    await mock.stop();
+  }
+});
+
+test("a folder that is there but whose last document was deleted keeps no content or vectors", { skip }, async () => {
+  const { corpus, dbPath } = await index();
+  const mock = await new MockWorker(8).start();
+  const warnings: string[] = [];
+  const backend = await remoteBackend(dbPath, mock, warnings);
+  try {
+    await backend.embed({ force: false });
+    // A scan that sees its documents marks the root as the real one.
+    await backend.update({});
+    assert.ok(existsSync(path.join(corpus, ROOT_MARKER)));
+    for (const file of ALL) await rm(path.join(corpus, file));
+    assert.equal((await backend.update({})).removed, 5);
+    assert.deepEqual(await rowCounts(dbPath), { documents: 0, inactive: 0, content: 0, contentVectors: 0 });
+    assert.deepEqual(warnings, []);
+  } finally {
+    await backend.close();
+    await mock.stop();
+  }
+});
+
+test("an empty folder with no marker, as under a mount that failed, keeps everything and says so", { skip }, async () => {
+  const { corpus, dbPath } = await index();
+  const mock = await new MockWorker(8).start();
+  const warnings: string[] = [];
+  const backend = await remoteBackend(dbPath, mock, warnings);
+  try {
+    await backend.embed({ force: false });
+    await backend.update({});
+    const before = await rowCounts(dbPath);
+    // The mount fails: what was on it is elsewhere, and an empty folder stands in its place.
+    const mounted = corpus + "-mounted";
+    await rename(corpus, mounted);
+    await mkdir(corpus);
+    assert.equal((await backend.update({})).removed, 5);
+    assert.deepEqual(await rowCounts(dbPath), { ...before, inactive: before.documents }, "only marked inactive");
+    assert.ok(warnings.some((w) => w.startsWith("Collection notes:") && w.includes(ROOT_MARKER)), warnings.join("\n"));
+    await rm(corpus, { recursive: true });
+    await rename(mounted, corpus);
+    assert.equal((await backend.update({})).needsEmbedding, 0, "the mount back, nothing needs embedding");
   } finally {
     await backend.close();
     await mock.stop();

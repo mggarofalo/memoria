@@ -9,10 +9,10 @@ import { isBusy, withShortBusyTimeout } from "./sqlite-busy.ts";
  *
  * This runs after every scan, in one transaction:
  *
- * 1. Inactive document rows go, except in a collection the scan found with no
- *    document at all. That is what a missing or not yet mounted folder looks like,
- *    and its rows coming back would otherwise cost every vector of it a re-embed.
- *    They wait until the collection holds a document again.
+ * 1. Inactive document rows go, except in the collections the caller names to keep:
+ *    those the scan found with no document whose root is missing, unreadable, or
+ *    not shown to be the real one (see collection-roots.ts). Their rows coming back
+ *    would otherwise cost every vector of them a re-embed.
  * 2. Then whatever no remaining row holds: vectors and set-asides by hash, and by
  *    hash and path, and content by hash. Content is shared by hash, so text that
  *    another document also holds stays, with its vectors, for that one.
@@ -32,8 +32,15 @@ export interface PurgeCounts {
   deadLetters: number;
 }
 
-/** Collections with document rows and not one of them active: the scan found the folder empty. */
-const EMPTIED = "SELECT collection FROM documents GROUP BY collection HAVING MAX(active) = 0";
+/** Collections with document rows and not one of them active: the scan found no document in them. */
+export function collectionsWithoutDocuments(db: PurgeDb): string[] {
+  return (db.prepare("SELECT collection FROM documents GROUP BY collection HAVING MAX(active) = 0").all() as Array<{ collection: string }>).map((r) => r.collection);
+}
+
+/** Collections holding an active document. */
+export function collectionsWithDocuments(db: PurgeDb): string[] {
+  return (db.prepare("SELECT DISTINCT collection FROM documents WHERE active = 1").all() as Array<{ collection: string }>).map((r) => r.collection);
+}
 /** Hashes some remaining row still holds, once step 1 is done. */
 const HELD = "SELECT hash FROM documents";
 
@@ -69,8 +76,8 @@ function removeVectors(db: PurgeDb): number {
   return changes(db, `DELETE FROM content_vectors WHERE hash NOT IN (${HELD})`);
 }
 
-function removeAll(db: PurgeDb): PurgeCounts {
-  const documents = changes(db, `DELETE FROM documents WHERE active = 0 AND collection NOT IN (${EMPTIED})`);
+function removeAll(db: PurgeDb, keep: readonly string[]): PurgeCounts {
+  const documents = Number(db.prepare("DELETE FROM documents WHERE active = 0 AND collection NOT IN (SELECT value FROM json_each(?))").run(JSON.stringify(keep)).changes);
   const vectors = removeVectors(db);
   const deadLetters = hasTable(db, "memoria_dead_letters")
     ? changes(db, "DELETE FROM memoria_dead_letters WHERE NOT EXISTS (SELECT 1 FROM documents d WHERE d.hash = memoria_dead_letters.hash AND d.path = memoria_dead_letters.path)")
@@ -100,9 +107,9 @@ function inTransaction<T>(db: PurgeDb, work: () => T): T {
  * Remove what deleted documents left. Null if the index was busy, as when an operator's
  * own `qmd` holds it: nothing is changed, and the next scan tries again.
  */
-export function purgeDeleted(db: PurgeDb): PurgeCounts | null {
+export function purgeDeleted(db: PurgeDb, keep: readonly string[] = []): PurgeCounts | null {
   try {
-    return withShortBusyTimeout(db as never, () => inTransaction(db, () => removeAll(db)));
+    return withShortBusyTimeout(db as never, () => inTransaction(db, () => removeAll(db, keep)));
   } catch (err) {
     if (isBusy(err)) return null;
     throw err;

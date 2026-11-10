@@ -815,7 +815,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       schema: {
         tags: ["collections"],
         summary: "Whether a collection's directory is empty",
-        description: "Reads the directory and keeps no record. The API asks this once, before opening a collection to ingest. A directory that does not exist is not empty.",
+        description: "Reads the directory and keeps no record. The API asks this once, before opening a collection to ingest. A directory that does not exist is not empty. The sidecar's own `.memoria-root` marker and leftover temp files do not count.",
         params: { type: "object", required: ["name"], properties: { name: { type: "string", minLength: 1 } } },
         response: {
           200: {
@@ -857,7 +857,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
                     path: { type: "string", description: "Collection root on the sidecar host." },
                     pattern: { type: "string" },
                     documents: { type: "integer", description: "Active (indexed, not removed) documents." },
-                    totalDocuments: { type: "integer", description: "Including inactive rows, which the sidecar's scan removes, except in a collection it found empty or when the index was busy." },
+                    totalDocuments: { type: "integer", description: "Including inactive rows, which the sidecar's scan removes, except in a collection whose folder it found missing or unmarked, or when the index was busy." },
                     lastModified: { type: "string", nullable: true },
                     includeByDefault: { type: "boolean" },
                     context: { type: "string", nullable: true, description: "Root-level context text, if configured." },

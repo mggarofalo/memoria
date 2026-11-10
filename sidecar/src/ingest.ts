@@ -3,6 +3,7 @@ import { constants, type Stats } from "node:fs";
 import { lstat, mkdir, open, readdir, realpath, rename, unlink } from "node:fs/promises";
 import path from "node:path";
 import picomatch from "picomatch";
+import { ROOT_MARKER } from "./collection-roots.ts";
 import { HttpError } from "./errors.ts";
 import { MAX_PATH_SEGMENTS, deleteSegmentProblem, foldName, matchesIgnorePattern, segmentProblem, unindexableProblem, unsupportedIgnorePattern } from "./path-rules.ts";
 
@@ -412,10 +413,10 @@ export async function writeDocument(target: ResolvedTarget, content: string, hoo
   return { bytes: Buffer.byteLength(content, "utf8"), created: existing === undefined };
 }
 
-/** Whether a collection's directory exists and holds nothing but our own leftover temp files. A missing one is not empty: it may be a volume not mounted yet, with real files to come. */
+/** Whether a collection's directory exists and holds nothing but our own leftover temp files and root marker. A missing one is not empty: it may be a volume not mounted yet, with real files to come. */
 export async function isRootEmpty(root: string): Promise<boolean> {
   const names = await namesIn(root);
-  return names !== undefined && names.every((name) => SCRATCH_NAME.test(name));
+  return names !== undefined && names.every((name) => SCRATCH_NAME.test(name) || name === ROOT_MARKER);
 }
 
 /**

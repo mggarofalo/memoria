@@ -4,6 +4,7 @@ import type { EmbedSummary, UpdateSummary } from "./jobs.ts";
 import type { BreakerOptions } from "./llm/pool.ts";
 import type { RemoteLlm } from "./llm/remote.ts";
 import { requireSdkFixes, type SdkStoreFunctions } from "./sdk-check.ts";
+import { collectionsToKeep, type CollectionRoot } from "./collection-roots.ts";
 import { purgeDeleted, removedAny, truncateLog } from "./purge.ts";
 import { withShortBusyTimeout } from "./sqlite-busy.ts";
 import type { DeadLetter, DegradedReason, EmbeddingResult, LlmCallSink, LlmHealth, LlmSurface, PoolLoad, PoolWorkerConfig, Queryable, RerankDocument, RerankResult, WorkerView } from "./llm/types.ts";
@@ -447,6 +448,7 @@ export async function openBackend(options: OpenBackendOptions): Promise<OpenedBa
      WHERE d.active = 1`,
   );
   // store.listCollections() drops this column. The integration test pins it to the SDK.
+  const rootsStatement = db.prepare("SELECT name, path FROM store_collections");
   const ignoreStatement = db.prepare(`SELECT ignore_patterns AS patterns FROM store_collections WHERE name = ?`);
 
   const runSearch = async (o: BackendSearchOptions): Promise<SearchHit[]> => {
@@ -508,7 +510,8 @@ export async function openBackend(options: OpenBackendOptions): Promise<OpenedBa
   update: async (o) => {
     const r = await store.update(o.collections ? { collections: o.collections } : {});
     // What the scan found deleted leaves nothing behind it: see purge.ts. Any scan can find one.
-    const purged = purgeDeleted(db as never);
+    const keep = collectionsToKeep(db as never, rootsStatement.all() as CollectionRoot[], (message) => options.onLlmWarning?.(message));
+    const purged = purgeDeleted(db as never, keep);
     if (purged === null) options.onLlmWarning?.("The index was busy, so what deleted documents left in it waits for the next scan to remove it.");
     if (removedAny(purged)) truncateLog(db as never);
     return {

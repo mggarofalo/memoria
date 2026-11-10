@@ -2182,7 +2182,7 @@
         "tags": [
           "collections"
         ],
-        "description": "Reads the directory and keeps no record. The API asks this once, before opening a collection to ingest. A directory that does not exist is not empty.",
+        "description": "Reads the directory and keeps no record. The API asks this once, before opening a collection to ingest. A directory that does not exist is not empty. The sidecar's own `.memoria-root` marker and leftover temp files do not count.",
         "parameters": [
           {
             "schema": {
@@ -2319,7 +2319,7 @@
                           },
                           "totalDocuments": {
                             "type": "integer",
-                            "description": "Including inactive rows, which the sidecar's scan removes, except in a collection it found empty or when the index was busy."
+                            "description": "Including inactive rows, which the sidecar's scan removes, except in a collection whose folder it found missing or unmarked, or when the index was busy."
                           },
                           "lastModified": {
                             "type": [

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createRequire } from "node:module";
-import { purgeDeleted, removedAny, truncateLog, type PurgeDb } from "../src/purge.ts";
+import { collectionsWithDocuments, collectionsWithoutDocuments, purgeDeleted, removedAny, truncateLog, type PurgeDb } from "../src/purge.ts";
 
 interface Statement {
   run(...args: unknown[]): { changes: number };
@@ -64,18 +64,20 @@ test("a deleted document's row, content, vectors and set-aside go, and nothing a
   assert.equal(removedAny(again), false);
 });
 
-test("a collection the scan found empty, as a folder not mounted, keeps everything until it holds a document again", () => {
+test("a collection named to keep keeps every row, and what only it holds; any other is purged", () => {
   const db = index();
   db.prepare("INSERT INTO content VALUES ('away', 'text of away')").run();
   db.prepare("INSERT INTO content_vectors VALUES ('away', 0)").run();
   db.prepare("INSERT INTO vectors_vec VALUES ('away_0')").run();
-  doc(db, 5, "mounted-late", "a.md", "away", 0);
-  doc(db, 6, "mounted-late", "b.md", "kept", 0);
-  assert.deepEqual(purgeDeleted(db as unknown as PurgeDb), { documents: 2, content: 1, vectors: 2, deadLetters: 2 }, "only collection c's deletes go");
-  assert.deepEqual(rows(db, "SELECT path FROM documents WHERE collection = 'mounted-late' ORDER BY id"), ["a.md", "b.md"]);
+  doc(db, 5, "unmounted", "a.md", "away", 0);
+  doc(db, 6, "unmounted", "b.md", "kept", 0);
+  doc(db, 7, "emptied", "c.md", "kept", 0);
+  assert.deepEqual(collectionsWithoutDocuments(db as unknown as PurgeDb).sort(), ["emptied", "unmounted"]);
+  assert.deepEqual(collectionsWithDocuments(db as unknown as PurgeDb), ["c"]);
+  assert.deepEqual(purgeDeleted(db as unknown as PurgeDb, ["unmounted"]), { documents: 3, content: 1, vectors: 2, deadLetters: 2 }, "c's and emptied's deletes go");
+  assert.deepEqual(rows(db, "SELECT collection || '/' || path FROM documents WHERE active = 0 ORDER BY id"), ["unmounted/a.md", "unmounted/b.md"]);
   assert.deepEqual(rows(db, "SELECT hash_seq FROM vectors_vec WHERE hash_seq = 'away_0'"), ["away_0"]);
-  db.prepare("UPDATE documents SET active = 1 WHERE path = 'b.md'").run();
-  assert.deepEqual(purgeDeleted(db as unknown as PurgeDb), { documents: 1, content: 1, vectors: 1, deadLetters: 0 }, "once it has a document, its deletes go too");
+  assert.deepEqual(purgeDeleted(db as unknown as PurgeDb), { documents: 2, content: 1, vectors: 1, deadLetters: 0 }, "kept no longer, its deletes go too");
 });
 
 test("an index with nothing embedded, or no set-aside table, is purged all the same", () => {

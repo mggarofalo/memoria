@@ -6,7 +6,7 @@
 // no config file is read or written. No model is involved.
 //
 // MEMORIA_QMD_INIT_CORPUS moves the parent of the roots from /corpus, for tests.
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { createStore } from "@tobilu/qmd";
 
@@ -48,7 +48,11 @@ try {
     if (!existsSync(known.get(name))) console.warn(`${name}'s root ${known.get(name)} does not exist. Is the corpus volume mounted?`);
   }
   // Every root first, so a failure here leaves no collection recorded and never scanned.
-  for (const { root } of missing) mkdirSync(root, { recursive: true });
+  // Each new root gets the sidecar's marker (src/collection-roots.ts), so a scan can tell it emptied by deletes from a mount that failed.
+  for (const { root } of missing) {
+    mkdirSync(root, { recursive: true });
+    writeFileSync(path.join(root, ".memoria-root"), "This folder is a Memoria collection root. The sidecar keeps this file to tell a folder emptied by deletes from a mount that is missing. Leave it here.\n", { flag: "wx" });
+  }
   for (const { name, root } of missing) {
     await store.addCollection(name, { path: root, pattern: "**/*.md" });
     added.push(name);

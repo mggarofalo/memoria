@@ -264,6 +264,8 @@ Layout:
 | `src/app.ts` | Builds the Fastify app: auth hook, error envelope, swagger, job runner. |
 | `src/routes.ts` | Every route and its JSON schema. |
 | `src/store.ts` | The `QmdBackend` interface and the only import of `@tobilu/qmd`. |
+| `src/purge.ts` | What a deleted document leaves in the index, removed after every scan. |
+| `src/collection-roots.ts` | The root marker that tells a folder emptied by deletes from a mount that went away. |
 | `src/metadata.ts` | Frontmatter parsing, filter matching, the in-memory metadata index. |
 | `src/jobs.ts` | Single-worker reindex queue with an injectable debounce clock. |
 | `src/queue-store.ts` | The queue's own SQLite file, beside the index. |
