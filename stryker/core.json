@@ -5,7 +5,7 @@
       "tests/Memoria.Core.Tests/Memoria.Core.Tests.csproj",
       "tests/Memoria.Api.Tests/Memoria.Api.Tests.csproj"
     ],
-    "test-case-filter": "FullyQualifiedName!~Adversarial_input&FullyQualifiedName!~Large_transcript&FullyQualifiedName!~Repeated_flags&FullyQualifiedName!~Curly_apostrophes",
+    "test-case-filter": "Category!=Timing&FullyQualifiedName!~Curly_apostrophes",
     "reporters": ["cleartext", "html", "json"],
     "thresholds": { "high": 95, "low": 90, "break": 90 }
   }

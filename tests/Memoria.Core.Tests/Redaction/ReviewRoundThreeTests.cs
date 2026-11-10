@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Text;
 using Memoria.Core.Redaction;
 
@@ -87,10 +86,13 @@ public sealed class ReviewRoundThreeTests
 	[InlineData("cu" + "rl -u a:password ", 150_000)]
 	[InlineData("cu" + "rl -u a:Hunter2x9 ", 150_000)]
 	[InlineData("x -u a:Hunter2x9 ", 200_000)]
+	[Trait("Category", RedactorSafetyTests.TimingCategory)]
 	public void Repeated_flags_on_one_line_stay_linear(string unit, int repeats)
 	{
+		// About 4 times the slowest case, curl -u a:Hunter2x9, which took 2.1 s of this thread's CPU on a plain Debug run.
+		TimeSpan budget = TimeSpan.FromSeconds(8);
 		string input = new StringBuilder(unit.Length * repeats).Insert(0, unit, repeats).ToString();
-		Stopwatch clock = Stopwatch.StartNew();
+		TimeSpan started = ThreadCpuTime.Now();
 
 		try
 		{
@@ -101,7 +103,8 @@ public sealed class ReviewRoundThreeTests
 			Assert.Equal(RedactionFailure.ScanBudgetExhausted, exception.Failure);
 		}
 
-		Assert.True(clock.Elapsed < TimeSpan.FromSeconds(45), "Repeated flags took too long.");
+		TimeSpan spent = ThreadCpuTime.Now() - started;
+		Assert.True(spent < budget, $"Repeated flags took {spent.TotalSeconds:F1} s of CPU, over the budget of {budget.TotalSeconds:F0} s.");
 	}
 
 	[Theory]

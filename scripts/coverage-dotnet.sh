@@ -10,7 +10,10 @@ MIN_BRANCH_CORE=95
 
 out=TestResults/coverage
 rm -rf TestResults/coverage
+# The timing tests are left out: instrumented code is slower, by a factor that differs from case to case.
+# They run uninstrumented on their own (AGENTS.md, Build and Test).
 dotnet test Memoria.slnx --no-build --nologo --verbosity minimal \
+  --filter "Category!=Timing" \
   --settings coverage.runsettings \
   --collect:"XPlat Code Coverage" \
   --results-directory "$out"
