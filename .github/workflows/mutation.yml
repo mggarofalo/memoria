@@ -10,6 +10,7 @@ on:
     paths:
       - .github/workflows/mutation.yml
       - scripts/mutation-*.sh
+      - scripts/mutation-*.mjs
       - stryker/**
       - dotnet-tools.json
       - src/**
@@ -38,30 +39,32 @@ env:
   MUTATION_BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || '' }}
 
 jobs:
+  dotnet-shards:
+    name: Mutation (.NET shards)
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.shards.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: shards
+        run: echo "matrix=$(node scripts/mutation-dotnet-shards.mjs ${{ github.event_name == 'pull_request' && '--pull-request' || '' }})" >> "$GITHUB_OUTPUT"
+
   dotnet:
     name: Mutation (.NET${{ matrix.shard.name && format(', {0}', matrix.shard.name) || '' }})
+    needs: dotnet-shards
     runs-on: ubuntu-latest
     # A pull request mutates only what changed, in one job, and stops itself at 50
-    # minutes, reporting inconclusive; see scripts/mutation-dotnet.sh. The full run
-    # does not fit one job's 4 hours: Memoria.Core alone has about 5,600 mutants, most
-    # of them covered by thousands of redaction tests. So it runs as shards in parallel,
-    # each with the job limit to itself and its config's thresholds, break included.
-    # Core's shards cover every file once; security-core's files are among them, under
-    # the same 90% break, so the full run does not mutate them a second time.
+    # minutes, reporting inconclusive; see scripts/mutation-dotnet.sh. The full run does
+    # not fit one job's 4 hours: Memoria.Core alone has about 5,600 mutants, most of them
+    # covered by thousands of redaction tests, at several seconds each. So it runs as the
+    # shards in stryker/shards.json, each with the job limit to itself and its config's
+    # thresholds, break included. Core's shards cover every file once; security-core's
+    # files are among them, under the same 90% break, so a full run does not mutate them twice.
     timeout-minutes: ${{ github.event_name == 'pull_request' && 60 || 240 }}
     strategy:
       fail-fast: false
       matrix:
-        shard: >-
-          ${{ fromJSON(github.event_name == 'pull_request' && '[{"name":"","configs":"","mutate":""}]' || '[
-            {"name":"core redaction heuristics","configs":"core","mutate":"**/Redaction/SecretHeuristics.cs **/Redaction/PemBlock.cs **/Redaction/PemSeparators.cs"},
-            {"name":"core redaction shapes","configs":"core","mutate":"**/Redaction/ValueShapes.cs **/Redaction/RedactionRules.cs **/Redaction/SecretKeyNames.cs **/Redaction/DetectionView.cs"},
-            {"name":"core redaction rest","configs":"core","mutate":"**/Redaction/**/*.cs !**/Redaction/SecretHeuristics.cs !**/Redaction/PemBlock.cs !**/Redaction/PemSeparators.cs !**/Redaction/ValueShapes.cs !**/Redaction/RedactionRules.cs !**/Redaction/SecretKeyNames.cs !**/Redaction/DetectionView.cs"},
-            {"name":"core sessions","configs":"core","mutate":"**/Sessions/**/*.cs"},
-            {"name":"core rest","configs":"core","mutate":"**/*.cs !**/Redaction/**/*.cs !**/Sessions/**/*.cs"},
-            {"name":"api","configs":"api","mutate":""},
-            {"name":"security","configs":"security","mutate":""}
-          ]') }}
+        shard: ${{ fromJSON(needs.dotnet-shards.outputs.matrix) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

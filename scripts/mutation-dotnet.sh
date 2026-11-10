@@ -34,6 +34,8 @@ inconclusive() {
 }
 
 dotnet tool restore
+# One test runner per core: Stryker.NET's default is half of them.
+runners=$(nproc 2>/dev/null || echo 2)
 started=$(date +%s)
 status=0
 for config in ${MUTATION_CONFIGS:-core api security security-core}; do
@@ -49,7 +51,7 @@ for config in ${MUTATION_CONFIGS:-core api security security-core}; do
   code=0
   # shellcheck disable=SC2086 # $limiter, $since and $mutate are empty or meant to split
   $limiter dotnet tool run dotnet-stryker --config-file "stryker/$config.json" \
-    --output "StrykerOutput/$config" $since $mutate || code=$?
+    --output "StrykerOutput/$config" --concurrency "$runners" $since $mutate || code=$?
   if [ "$code" -eq 124 ] && [ -n "$limiter" ]; then
     inconclusive "$config"
   elif [ "$code" -ne 0 ]; then
