@@ -40,12 +40,13 @@ public sealed class MemoriaTools(ScopedCorpus corpus, ICallerScope scope, IReque
 		[Description("Frontmatter filter: only documents starting on or after this date (YYYY-MM-DD or ISO timestamp).")] string? since = null,
 		[Description("Frontmatter filter: only documents starting on or before this date.")] string? until = null,
 		[Description("Frontmatter filter: every listed tag must be present.")] string[]? tags = null,
+		[Description("Let QMD's model expand the query into more sub-queries first. Slower, and no better on the measured corpus. Default: the server's setting, usually false.")] bool? expand = null,
 		CancellationToken cancellationToken = default)
 	{
 		audit.SetOperation("mcp.search");
 		return Guarded(async () =>
 		{
-			SearchInput input = new(query, collections, limit, minScore, rerank, intent, null, project, branch, since, until, tags);
+			SearchInput input = new(query, collections, limit, minScore, rerank, intent, null, project, branch, since, until, tags, expand);
 			SidecarSearchRequest? request = SearchRequestFactory.TryBuild(input, options.Value.Search, scope, out Dictionary<string, string[]> errors);
 			if (request is null)
 			{

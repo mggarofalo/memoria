@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync } from "node:fs";
 import type { DocumentHead, MetadataSource } from "./metadata.ts";
 import type { EmbedSummary, UpdateSummary } from "./jobs.ts";
@@ -26,6 +27,12 @@ export interface SearchQuery {
 
 export interface BackendSearchOptions {
   query?: string;
+  /**
+   * `false` searches a plain query without expanding it: QMD's hybrid search runs as it does
+   * when its BM25 probe is strong enough to skip expansion, on the query itself, lexically and
+   * by vector, with no call to the expansion model. Meaningless with `queries`.
+   */
+  expand?: boolean;
   queries?: SearchQuery[];
   intent?: string;
   collections?: string[];
@@ -314,6 +321,25 @@ export function repairVectorRows(db: { prepare(sql: string): { get(...a: unknown
   }
 }
 
+/** The SDK's internal store, as `hybridQuery` reaches its expansion. Pinned by test/llm-surface.test.ts. */
+export interface ExpandingStore {
+  expandQuery(query: string, model?: string): Promise<unknown[]>;
+}
+
+/**
+ * Lets one search go unexpanded. `hybridQuery` asks the store it is given for
+ * `expandQuery(query)`, and its strong-signal path already runs on an empty answer, so
+ * answering that inside the returned scope is QMD's own search without expansion: the
+ * query's own BM25 and vector lists, at their usual weights, and no model call. The scope
+ * is per async context, so searches running together each keep their own.
+ */
+export function withholdExpansion(store: ExpandingStore): AsyncLocalStorage<boolean> {
+  const scope = new AsyncLocalStorage<boolean>();
+  const expand = store.expandQuery.bind(store);
+  store.expandQuery = (query, model) => (scope.getStore() === true ? Promise.resolve([]) : expand(query, model));
+  return scope;
+}
+
 function wantsVectors(o: BackendSearchOptions): boolean {
   return o.query !== undefined || (o.queries ?? []).some((q) => q.type !== "lex");
 }
@@ -446,17 +472,18 @@ export async function openBackend(options: OpenBackendOptions): Promise<OpenedBa
   const db = store.internal.db;
   // A row deleted, a deleted document's text included, is overwritten on disk, not left in free pages.
   db.exec("PRAGMA secure_delete = ON");
+  const unexpanded = withholdExpansion(store.internal as unknown as ExpandingStore);
   const headsStatement = db.prepare(
-    `SELECT d.collection AS collection, d.path AS path, substr(c.doc, 1, ?) AS head
-     FROM documents d JOIN content c ON c.hash = d.hash
-     WHERE d.active = 1`,
-  );
+  `SELECT d.collection AS collection, d.path AS path, substr(c.doc, 1, ?) AS head
+   FROM documents d JOIN content c ON c.hash = d.hash
+   WHERE d.active = 1`,
+);
   // store.listCollections() drops this column. The integration test pins it to the SDK.
   const rootsStatement = db.prepare("SELECT name, path FROM store_collections");
   const ignoreStatement = db.prepare(`SELECT ignore_patterns AS patterns FROM store_collections WHERE name = ?`);
 
   const runSearch = async (o: BackendSearchOptions): Promise<SearchHit[]> => {
-    const results = await store.search({
+    const search = () => store.search({
       ...(o.query !== undefined ? { query: o.query } : {}),
       ...(o.queries !== undefined ? { queries: o.queries } : {}),
       ...(o.intent !== undefined ? { intent: o.intent } : {}),
@@ -466,6 +493,7 @@ export async function openBackend(options: OpenBackendOptions): Promise<OpenedBa
       minScore: o.minScore,
       rerank: o.rerank,
     });
+    const results = o.expand === false && o.query !== undefined ? await unexpanded.run(true, search) : await search();
     return results.map((r) => ({
       file: r.file,
       displayPath: r.displayPath,

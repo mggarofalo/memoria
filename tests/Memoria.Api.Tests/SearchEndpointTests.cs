@@ -37,7 +37,9 @@ public sealed class SearchEndpointTests(MemoriaApiFactory factory) : IClassFixtu
 		Assert.Equal("/search", sent.Uri.AbsolutePath);
 		using JsonDocument body = JsonDocument.Parse(sent.Body!);
 		JsonElement root = body.RootElement;
+		// Unexpanded by default: the plain query, with expansion turned off for it.
 		Assert.Equal("api key auth", root.GetProperty("query").GetString());
+		Assert.False(root.GetProperty("expand").GetBoolean());
 		Assert.True(root.GetProperty("rerank").GetBoolean());
 		Assert.Equal(10, root.GetProperty("limit").GetInt32());
 		Assert.False(root.TryGetProperty("collections", out _));
@@ -45,6 +47,34 @@ public sealed class SearchEndpointTests(MemoriaApiFactory factory) : IClassFixtu
 		Assert.False(root.TryGetProperty("minScore", out _));
 		Assert.False(root.TryGetProperty("intent", out _));
 		Assert.False(root.TryGetProperty("searches", out _));
+	}
+
+	[Fact]
+	public async Task Search_ExpandTrue_LeavesExpandOut_SoAnySidecarTakesIt()
+	{
+		HttpClient client = Client();
+
+		HttpResponseMessage response = await client.GetAsync("/v1/search?query=api%20key%20auth&expand=true");
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		using JsonDocument body = JsonDocument.Parse(factory.Sidecar.Single().Body!);
+		Assert.Equal("api key auth", body.RootElement.GetProperty("query").GetString());
+		Assert.False(body.RootElement.TryGetProperty("expand", out _));
+	}
+
+	[Fact]
+	public async Task Search_ExpandFalse_KeepsEverythingElseAsItWas()
+	{
+		HttpClient client = Client();
+
+		HttpResponseMessage response = await client.GetAsync("/v1/search?query=docker%20-compose&expand=false&intent=deploy&rerank=false");
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		using JsonDocument body = JsonDocument.Parse(factory.Sidecar.Single().Body!);
+		Assert.Equal("docker -compose", body.RootElement.GetProperty("query").GetString());
+		Assert.False(body.RootElement.GetProperty("expand").GetBoolean());
+		Assert.Equal("deploy", body.RootElement.GetProperty("intent").GetString());
+		Assert.False(body.RootElement.GetProperty("rerank").GetBoolean());
 	}
 
 	[Fact]

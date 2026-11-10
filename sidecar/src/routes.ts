@@ -186,6 +186,7 @@ interface SearchBody {
   minScore: number;
   candidateLimit?: number;
   rerank: boolean;
+  expand?: boolean;
 }
 
 interface DocsQuery {
@@ -476,7 +477,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         summary: "Hybrid search",
         description:
           "Run QMD's hybrid pipeline (BM25 + vectors, RRF fusion, optional LLM rerank). Provide either `query` " +
-          "(auto-expanded into lex/vec/hyde variants by the local expansion model) or `searches` (typed sub-queries " +
+          "(expanded into lex/vec/hyde variants by the expansion model unless `expand` is false) or `searches` (typed sub-queries " +
           "you compose yourself; the first gets 2x weight). `filters` are applied after retrieval on frontmatter, so a " +
           "filtered call fetches extra candidates and may return fewer than `limit`.",
         body: {
@@ -506,6 +507,11 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
             minScore: { type: "number", minimum: 0, maximum: 1, default: 0 },
             candidateLimit: { type: "integer", minimum: 1, maximum: 1000, description: "Candidates passed to the reranker (QMD default 40)." },
             rerank: { type: "boolean", default: true, description: "false skips the LLM reranker for sub-second lex+vec fusion." },
+            expand: {
+              type: "boolean",
+              default: true,
+              description: "false searches `query` without expanding it: the query itself, lexically and by vector, as QMD does when its BM25 probe is strong, with no call to the expansion model. Ignored with `searches`.",
+            },
           },
         },
         response: {
@@ -551,6 +557,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       const started = Date.now();
       const { hits, degradedReasons } = await searchRefusingBadInput(ctx.searchGate, () => backend.searchDetailed({
         ...(text !== null ? { query: text } : { queries: body.searches!.map((s) => ({ type: s.type, query: s.query })) }),
+        ...(text !== null && body.expand === false ? { expand: false } : {}),
         ...(body.intent ? { intent: body.intent } : {}),
         ...(candidateLimit !== undefined ? { candidateLimit } : {}),
         collections,

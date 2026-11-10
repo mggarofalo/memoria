@@ -37,7 +37,7 @@ Use the MCP tools if they are available in this session. Otherwise use the `memo
 The tools take these parameters:
 
 ```text
-search(query, intent, collections, limit, minScore, rerank, project, branch, since, until, tags)
+search(query, intent, collections, limit, minScore, rerank, project, branch, since, until, tags, expand)
 get_document(reference, fromLine, maxLines, lineNumbers, includeBody)
 get_documents(ids, pattern, maxBytes, maxLines, includeBody)
 list_collections()

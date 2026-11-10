@@ -17,7 +17,8 @@ public sealed record SearchInput(
 	IReadOnlyList<string>? Branch = null,
 	string? Since = null,
 	string? Until = null,
-	IReadOnlyList<string>? Tags = null);
+	IReadOnlyList<string>? Tags = null,
+	bool? Expand = null);
 
 /// <summary>
 /// One place that turns a caller's search into a sidecar request: validation
@@ -53,6 +54,8 @@ public static class SearchRequestFactory
 		return new SidecarSearchRequest
 		{
 			Query = input.Query,
+			// Sent only to turn expansion off, so an expanding request is one any sidecar takes.
+			Expand = (input.Expand ?? defaults.ExpandByDefault) ? null : false,
 			Intent = Trimmed(input.Intent),
 			Collections = scope.Resolve(NonEmpty(input.Collections)) ?? defaults.DefaultCollections,
 			Filters = filters.IsEmpty ? null : filters,

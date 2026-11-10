@@ -1239,7 +1239,7 @@
         "tags": [
           "search"
         ],
-        "description": "Run QMD's hybrid pipeline (BM25 + vectors, RRF fusion, optional LLM rerank). Provide either `query` (auto-expanded into lex/vec/hyde variants by the local expansion model) or `searches` (typed sub-queries you compose yourself; the first gets 2x weight). `filters` are applied after retrieval on frontmatter, so a filtered call fetches extra candidates and may return fewer than `limit`.",
+        "description": "Run QMD's hybrid pipeline (BM25 + vectors, RRF fusion, optional LLM rerank). Provide either `query` (expanded into lex/vec/hyde variants by the expansion model unless `expand` is false) or `searches` (typed sub-queries you compose yourself; the first gets 2x weight). `filters` are applied after retrieval on frontmatter, so a filtered call fetches extra candidates and may return fewer than `limit`.",
         "requestBody": {
           "required": true,
           "content": {
@@ -1379,6 +1379,11 @@
                     "type": "boolean",
                     "default": true,
                     "description": "false skips the LLM reranker for sub-second lex+vec fusion."
+                  },
+                  "expand": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "false searches `query` without expanding it: the query itself, lexically and by vector, as QMD does when its BM25 probe is strong, with no call to the expansion model. Ignored with `searches`."
                   }
                 }
               }

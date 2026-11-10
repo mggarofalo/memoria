@@ -139,6 +139,8 @@ memoria collections
 memoria status
 ```
 
+`query` searches the text as itself unless the server is set to expand queries. `--expand` asks QMD's model to expand it into more sub-queries first, which is slower and measured no better; `--expand=false` turns that off on a server that expands.
+
 `--format` takes `json`, `table` or `markdown`. `query`, `collections` and `status` default to a table; `get` and `multi-get` default to markdown.
 
 **Table and markdown output is sanitized.** Document text comes from transcripts, which can hold terminal escape sequences that write your clipboard or rewrite your screen. The CLI strips control and format characters, escape sequences, carriage returns, bidirectional overrides and variation selectors from these formats, whether or not stdout is a terminal. In markdown, snippets and multi-get bodies are fenced so a document cannot forge a result heading. Titles and names are escaped so they cannot become images or links. Zero-width joiners are kept between letters of scripts that need them, such as Persian and Hindi, and removed everywhere else, including in emoji.

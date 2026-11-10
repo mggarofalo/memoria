@@ -361,7 +361,7 @@ The sidecar sends embedding, reranking and query expansion to workers on other m
 
 The host runs no model, so search keeps answering, from BM25 alone, and says so. Measured on this compose file with both workers unreachable:
 
-- A search answered in 5 to 30 ms, with `degraded: true` and `degradedReasons` of `no_expansion`, `no_rerank` and `no_vectors`.
+- A search answered in 5 to 30 ms, with `degraded: true` and `degradedReasons` of `no_rerank` and `no_vectors`, and `no_expansion` too when the search asked for expansion.
 - New documents were found, as a scan needs no model. Embedding waits for a worker and retries; it never falls back to this host.
 - `/ready` answered 200 with `status: "degraded"`, and `/ready?strict=true` answered 503.
 - No llama.cpp library was loaded, no model file existed, and the sidecar's resident memory stayed under 120 MiB.
@@ -560,6 +560,8 @@ with each document read, and the sidecar's strict body schema makes an older sid
 refuse scoped batch reads with `400`. An older sidecar also ignores the allowlist on
 single-document reads and has no glob grammar of its own, so scoped callers would be
 back to QMD's global lookup for as long as the two are mismatched.
+
+An older sidecar also refuses the `expand` field that turns query expansion off, which the API sends on every search by default, so every default search would get `400`. If the API has to run first, set `Memoria__Search__ExpandByDefault=true` until the sidecar is upgraded: the API then sends no `expand` at all.
 
 ## Exposure is gated
 
