@@ -4,7 +4,7 @@
   "description": "Developer tooling only: git hooks, linting, and mutation testing. Nothing here ships.",
   "license": "MIT",
   "engines": {
-    "node": ">=22.18.0"
+    "node": ">=26.13.0"
   },
   "scripts": {
     "lint": "eslint sidecar worker scripts/release scripts/e2e"

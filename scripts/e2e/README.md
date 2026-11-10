@@ -40,7 +40,7 @@ Containers and the network are named `wg-*`, and the run removes them by name, a
 
 ## Running the suite
 
-It needs Node 22.18+, Go and the .NET SDK. It exits non-zero if any check fails. It connects from loopback addresses such as `127.0.0.2`, which Linux and Windows answer without setup. macOS does not, so the auth checks fail there.
+It needs Node 26.13+, Go and the .NET SDK. It exits non-zero if any check fails. It connects from loopback addresses such as `127.0.0.2`, which Linux and Windows answer without setup. macOS does not, so the auth checks fail there.
 
 ## What it touches
 

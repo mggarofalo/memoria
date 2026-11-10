@@ -85,7 +85,7 @@ function prepare(): void {
     ports: !override
       - "127.0.0.1:${PORT}:8080"
   mock-worker:
-    image: node:22-bookworm-slim
+    image: node:26-bookworm-slim
     container_name: memoria-e2e-worker
     command: ["node", "/check/worker-host.mjs"]
     volumes:

@@ -1,5 +1,5 @@
 /**
- * Entry point: `node scripts/release/release.ts <command>`. Needs Node 22.18+,
+ * Entry point: `node scripts/release/release.ts <command>`. Needs Node 26.13+,
  * git, and for some commands gh or go. See docs/releasing.md.
  */
 import { execFileSync } from "node:child_process";

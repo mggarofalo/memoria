@@ -95,7 +95,7 @@ Other tools depend on these names. Changing them is a breaking change.
 
 ## Installing the sidecar and worker
 
-Extract a package into an empty directory, on a host with Node 22.18 or newer. Neither needs git or a checkout once installed.
+Extract a package into an empty directory, on a host with Node 26.13 or newer. Neither needs git or a checkout once installed.
 
 The **worker** has no runtime dependencies, so it is ready as soon as it is extracted: `node src/main.ts`.
 

@@ -9,7 +9,7 @@
 # A user agent rather than a daemon: it runs while you are logged in, under your
 # account, so it finds your QMD cache and uses the GPU in your session.
 #
-# Requires Node 22.18+ and llama-server. The worker has no runtime npm
+# Requires Node 26.13+ and llama-server. The worker has no runtime npm
 # dependencies and runs from source. The token is written to a mode 600 file in
 # a mode 700 directory, and the worker reads it at startup through
 # MEMORIA_WORKER_TOKEN_FILE. The plist holds the file's path, not the token.
