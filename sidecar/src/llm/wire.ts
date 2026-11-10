@@ -212,7 +212,12 @@ function letterParams(llm: RemoteLlm, fingerprint: string): [string, string, str
   return [workerSetOf(llm, fingerprint), new Date(now - DEAD_LETTER_RETRY_MS).toISOString(), new Date(now).toISOString()];
 }
 
-function farmDeps(handles: SdkHandles, llm: RemoteLlm, model: string, fingerprint: string): FarmDeps {
+/** Every free background slot, or fewer when the operator caps it. */
+export function embedCapacity(slots: number, cap: number | undefined): number {
+  return cap ? Math.min(slots, cap) : slots;
+}
+
+function farmDeps(handles: SdkHandles, llm: RemoteLlm, model: string, fingerprint: string, cap: number | undefined): FarmDeps {
   const { db } = handles;
   const pending = (collection: string | undefined, redoBefore: string | undefined): PendingDoc[] => {
     politeWrite(db, () => {
@@ -229,7 +234,7 @@ function farmDeps(handles: SdkHandles, llm: RemoteLlm, model: string, fingerprin
     canEmbed: () => llm.canServe("embed", "background"),
     confirmWorkers: () => llm.pool.confirmDocuments(),
     acceptsFullChunk: () => llm.acceptsFullChunk(),
-    capacity: () => llm.pool.backgroundCapacity("embed"),
+    capacity: () => embedCapacity(llm.pool.backgroundCapacity("embed"), cap),
     pendingDocs: pending,
     readBody: (hash) => (db.prepare("SELECT doc FROM content WHERE hash = ?").get(hash) as { doc?: string } | undefined)?.doc ?? "",
     chunk: async (body, path, signal) => {
@@ -302,7 +307,7 @@ export function wireRemote(handles: SdkHandles, config: RemoteLlmConfig, options
   sweepExpiredCache(db, warn);
   const sweep = setInterval(() => sweepExpiredCache(db, warn), CACHE_SWEEP_MS);
   sweep.unref();
-  const deps = farmDeps(handles, llm, model, fingerprint);
+  const deps = farmDeps(handles, llm, model, fingerprint, config.embedConcurrency);
   return {
     llm,
     embed: (o) =>
@@ -329,6 +334,6 @@ export function wireRemote(handles: SdkHandles, config: RemoteLlmConfig, options
 
 function optionalRemote(config: RemoteLlmConfig, options: OpenBackendOptions) {
   return Object.fromEntries(
-    Object.entries({ probeEveryMs: config.probeEveryMs, breaker: config.breaker, searchDeadlineMs: config.searchDeadlineMs, onCall: options.onLlmCall, onDegraded: options.onLlmDegraded }).filter(([, value]) => value !== undefined),
+    Object.entries({ probeEveryMs: config.probeEveryMs, breaker: config.breaker, interactiveReserve: config.interactiveReserve, searchDeadlineMs: config.searchDeadlineMs, onCall: options.onLlmCall, onDegraded: options.onLlmDegraded }).filter(([, value]) => value !== undefined),
   );
 }

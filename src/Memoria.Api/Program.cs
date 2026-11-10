@@ -99,6 +99,7 @@ app.MapOpenApi().AllowAnonymous();
 app.MapHealth();
 app.MapV1();
 app.MapAdminKeys();
+app.MapAdminControl();
 app.MapIngest();
 if (mcpOptions.Enabled)
 {

@@ -495,6 +495,7 @@ test("GET /queue reports jobs by state, and model calls when there is a pool", a
     await app.inject({ method: "POST", url: "/documents", headers: authHeaders, payload: { collection: "claude-sessions", path: "x.md", content: "# x\n" } });
     const body = (await app.inject({ method: "GET", url: "/queue", headers: authHeaders })).json();
     assert.deepEqual(body, {
+      paused: false,
       persistence: { enabled: false, healthy: false },
       jobs: { queued: 1, held: 1, running: 0, succeeded: 0, failed: 0 },
       classes: { interactive: { inFlight: 0, waiting: 0 }, background: { inFlight: 0, waiting: 0 } },
@@ -572,7 +573,7 @@ test("GET /workers is empty in local mode and passes through only declared field
   try {
     assert.deepEqual((await app.inject({ method: "GET", url: "/workers", headers: authHeaders })).json(), { mode: "local", workers: [] });
     backend.health = { mode: "remote", degraded: false, unavailable: [], workersUp: 1, workersTotal: 1, embedDisagreement: [], documentsSetAside: 0 };
-    const view = { name: "d", host: "h:1", state: "up" as const, circuit: "closed" as const, circuits: { embed: "closed" as const, rerank: "closed" as const, generate: "closed" as const, documents: "closed" as const }, embedDisagrees: false, capabilities: ["embed" as const], priority: 1, maxConcurrent: 2, embedModelCompatible: true, rerankTransport: null, lastHeartbeat: null, inFlight: 0, queueDepth: 0, calls: 0, errorRate: 0 };
+    const view = { name: "d", host: "h:1", state: "up" as const, circuit: "closed" as const, circuits: { embed: "closed" as const, rerank: "closed" as const, generate: "closed" as const, documents: "closed" as const }, embedDisagrees: false, capabilities: ["embed" as const], priority: 1, maxConcurrent: 2, embedModelCompatible: true, rerankTransport: null, lastHeartbeat: null, inFlight: 0, queueDepth: 0, calls: 0, errorRate: 0, drained: false };
     // Even if a token somehow reached the view, the response schema would drop it.
     backend.workerViews = [{ ...view, token: "should-not-appear" } as never];
     const body = (await app.inject({ method: "GET", url: "/workers", headers: authHeaders })).body;
@@ -719,6 +720,111 @@ test("a force job's first attempt redoes everything; only a retry resumes from w
     assert.ok(since.length > 0);
     assert.ok(since.every((s) => s === failing.createdAt));
     assert.ok(job.id !== failing.id);
+  } finally {
+    await app.close();
+  }
+});
+
+// --- pause and drain ---------------------------------------------------------------
+
+test("a paused queue starts nothing, lets a running job finish, keeps accepting, and resumes", async () => {
+  let release = () => {};
+  const runs: string[] = [];
+  const queue = new JobQueue(async (request) => {
+    runs.push(request.reason);
+    if (request.reason === "first") await new Promise<void>((r) => (release = r));
+    return result;
+  });
+  const first = queue.enqueue(req({ reason: "first" }));
+  await new Promise((r) => setImmediate(r));
+  assert.equal(first.state, "running");
+  queue.pause();
+  assert.equal(queue.paused, true);
+  const second = queue.enqueue(req({ collections: ["other"], reason: "second" }));
+  release();
+  await new Promise((r) => setImmediate(r));
+  assert.equal(first.state, "succeeded", "the running job ran to its end");
+  assert.equal(second.state, "queued", "and nothing new started");
+  assert.deepEqual(runs, ["first"]);
+  assert.equal(await queue.drain(60_000), false, "shutdown does not wait on a paused queue");
+
+  queue.resume();
+  assert.equal(queue.paused, false);
+  await queue.idle();
+  assert.equal(second.state, "succeeded");
+  assert.deepEqual(runs, ["first", "second"]);
+  assert.equal(await queue.drain(60_000), true);
+});
+
+test("an idle paused queue drains at once", async () => {
+  const queue = new JobQueue(async () => result);
+  queue.pause();
+  assert.equal(await queue.drain(60_000), true);
+});
+
+test("POST /queue:pause and :resume hold and release background work, and GET /queue says which", async () => {
+  const { app, backend } = await makeApp();
+  const post = (url: string) => app.inject({ method: "POST", url, headers: authHeaders });
+  try {
+    const paused = await post("/queue:pause");
+    assert.equal(paused.statusCode, 200, paused.body);
+    assert.deepEqual(paused.json(), { paused: true, jobs: { queued: 0, held: 0, running: 0, succeeded: 0, failed: 0 } });
+    assert.equal((await post("/queue:pause")).json().paused, true, "pausing twice is the same as once");
+
+    const job = (await app.inject({ method: "POST", url: "/reindex", headers: authHeaders, payload: {} })).json().job;
+    await new Promise((r) => setImmediate(r));
+    assert.equal((await app.inject({ method: "GET", url: `/reindex/jobs/${job.id}`, headers: authHeaders })).json().job.state, "queued");
+    assert.equal(backend.calls.filter((c) => c.method === "update").length, 0);
+    assert.equal((await app.inject({ method: "GET", url: "/queue", headers: authHeaders })).json().paused, true);
+
+    const resumed = await post("/queue:resume");
+    assert.equal(resumed.statusCode, 200);
+    assert.equal(resumed.json().paused, false);
+    await app.ctx.jobs.idle();
+    assert.equal(backend.calls.filter((c) => c.method === "update").length, 1);
+    assert.equal((await app.inject({ method: "GET", url: "/queue", headers: authHeaders })).json().paused, false);
+
+    for (const url of ["/queue:pause", "/queue:resume"]) assert.equal((await app.inject({ method: "POST", url })).statusCode, 401);
+  } finally {
+    await app.close();
+  }
+});
+
+test("POST /workers/{name}:drain and :enable change one worker, and refuse a name not in the pool", async () => {
+  const { app, backend } = await makeApp();
+  const post = (url: string, headers: Record<string, string> = authHeaders) => app.inject({ method: "POST", url, headers });
+  try {
+    const local = await post("/workers/desktop:drain");
+    assert.equal(local.statusCode, 404, "local mode has no workers");
+    assert.equal(local.json().error, "unknown_worker");
+
+    const view = { name: "desktop", host: "h:1", state: "up" as const, circuit: "closed" as const, circuits: { embed: "closed" as const, rerank: "closed" as const, generate: "closed" as const, documents: "closed" as const }, embedDisagrees: false, capabilities: ["embed" as const], priority: 1, maxConcurrent: 2, embedModelCompatible: true, rerankTransport: null, lastHeartbeat: null, inFlight: 0, queueDepth: 0, calls: 0, errorRate: 0, drained: false };
+    backend.workerViews = [view, { ...view, name: "mac.local" }];
+
+    const drained = await post("/workers/desktop:drain");
+    assert.equal(drained.statusCode, 200, drained.body);
+    assert.equal(drained.json().worker.name, "desktop");
+    assert.equal(drained.json().worker.drained, true);
+    const listed = (await app.inject({ method: "GET", url: "/workers", headers: authHeaders })).json().workers;
+    assert.deepEqual(listed.map((w: { name: string; drained: boolean }) => [w.name, w.drained]), [["desktop", true], ["mac.local", false]]);
+
+    const enabled = await post("/workers/desktop:enable");
+    assert.equal(enabled.statusCode, 200);
+    assert.equal(enabled.json().worker.drained, false);
+    assert.equal((await post("/workers/mac.local:drain")).json().worker.drained, true, "dots are allowed in a name");
+
+    backend.workerViews.push({ ...view, name: "127.0.0.1:9" }, { ...view, name: "[::1]:8383" });
+    for (const name of ["127.0.0.1:9", "[::1]:8383"]) {
+      const shorthand = await post(`/workers/${encodeURIComponent(name)}:drain`);
+      assert.equal(shorthand.statusCode, 200, `the URL shorthand's worker, ${name}, can be drained: ${shorthand.body}`);
+      assert.equal(shorthand.json().worker.name, name);
+    }
+
+    assert.equal((await post("/workers/nobody:enable")).json().error, "unknown_worker");
+    const bad = await post("/workers/bad%20name:drain");
+    assert.equal(bad.statusCode, 400, "a name configuration could not hold is refused before the pool");
+    assert.equal((await post("/workers/desktop:drain", {})).statusCode, 401);
+    assert.deepEqual(backend.calls.filter((c) => c.method.endsWith("Worker")).map((c) => c.method), ["drainWorker", "enableWorker", "drainWorker", "drainWorker", "drainWorker"]);
   } finally {
     await app.close();
   }

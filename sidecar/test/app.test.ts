@@ -739,7 +739,7 @@ test("GET /openapi.json describes every route and matches the committed contract
     const spec = r.json();
     assert.equal(spec.openapi, "3.1.0");
     const paths = Object.keys(spec.paths).sort();
-    assert.deepEqual(paths, ["/cache:purge", "/collections", "/collections/{name}/empty", "/docs/{reference}", "/docs:multiGet", "/documents", "/health", "/openapi.json", "/queue", "/queue/dead-letters", "/queue/dead-letters:clear", "/queue/jobs/{id}:cancel", "/queue/jobs/{id}:retry", "/ready", "/reindex", "/reindex/jobs", "/reindex/jobs/{id}", "/search", "/status", "/workers"]);
+    assert.deepEqual(paths, ["/cache:purge", "/collections", "/collections/{name}/empty", "/docs/{reference}", "/docs:multiGet", "/documents", "/health", "/openapi.json", "/queue", "/queue/dead-letters", "/queue/dead-letters:clear", "/queue/jobs/{id}:cancel", "/queue/jobs/{id}:retry", "/queue:pause", "/queue:resume", "/ready", "/reindex", "/reindex/jobs", "/reindex/jobs/{id}", "/search", "/status", "/workers", "/workers/{name}:drain", "/workers/{name}:enable"]);
     assert.ok(spec.components.securitySchemes.bearer);
     assert.deepEqual(spec.paths["/health"].get.security, []);
     assert.equal(spec.paths["/search"].post.security, undefined); // inherits the global requirement

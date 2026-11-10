@@ -11,6 +11,7 @@ import { ComposeHarness } from "./compose-layout.ts";
 import { skillMatchesTheServer } from "./skill.ts";
 import { ingest, INGEST_SERVER, keyMaker } from "./ingest.ts";
 import { migrate } from "./migrate.ts";
+import { operations } from "./ops.ts";
 import { migratePush } from "./migrate-push.ts";
 import { ingestConnection } from "./ingest-connection.ts";
 import { filters } from "./filters.ts";
@@ -33,6 +34,7 @@ async function runAll(h: Harness): Promise<void> {
   skillMatchesTheServer(h, keys.reader);
   login(h, keys);
   await authChecks(h, keys);
+  await operations(h, keys.admin);
   await rateLimits(h, keys);
   noModels(h);
   secretsAbsent(h, keys.reader);

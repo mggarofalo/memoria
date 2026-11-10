@@ -70,6 +70,7 @@ func TestForbiddenHintFollowsTheMissingScope(t *testing.T) {
 		`{"detail":"This API key lacks the 'read' scope.","code":"insufficient_scope"}`:   "by design",
 		`{"detail":"This API key lacks the 'admin' scope.","code":"insufficient_scope"}`:  "--bootstrap-admin-key",
 		`{"detail":"This API key lacks the 'ingest' scope.","code":"insufficient_scope"}`: "lacks the scope or collection",
+		`{"detail":"Operations act on every collection.","code":"collection_scoped_key"}`: "--scope admin",
 		`{"detail":"Not in this key's collections.","code":"collection_forbidden"}`:       "lacks the scope or collection",
 		`{"detail":"lacks the 'read' scope","code":"something_else"}`:                     "lacks the scope or collection",
 	}

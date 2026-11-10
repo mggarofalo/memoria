@@ -47,4 +47,28 @@ public interface IMemoriaQmdClient
 
 	/// <summary>One job by id.</summary>
 	Task<SidecarJob> GetJobAsync(string id, CancellationToken cancellationToken = default);
+
+	/// <summary>Queue a failed job again under the same id. The sidecar answers 409 unless it has failed.</summary>
+	Task<SidecarJob> RetryJobAsync(string id, CancellationToken cancellationToken = default);
+
+	/// <summary>Stop a job that has not finished. The sidecar answers 409 if it already has.</summary>
+	Task<SidecarJob> CancelJobAsync(string id, CancellationToken cancellationToken = default);
+
+	/// <summary>Jobs by state, whether the queue is paused, and model calls by priority class.</summary>
+	Task<SidecarQueue> GetQueueAsync(CancellationToken cancellationToken = default);
+
+	/// <summary>Start no more background jobs until <see cref="ResumeQueueAsync"/>, or a sidecar restart.</summary>
+	Task<SidecarPauseResponse> PauseQueueAsync(CancellationToken cancellationToken = default);
+
+	/// <summary>Let waiting background jobs start again.</summary>
+	Task<SidecarPauseResponse> ResumeQueueAsync(CancellationToken cancellationToken = default);
+
+	/// <summary>The worker pool. Empty in local LLM mode.</summary>
+	Task<SidecarWorkersResponse> ListWorkersAsync(CancellationToken cancellationToken = default);
+
+	/// <summary>Take a worker out of rotation until <see cref="EnableWorkerAsync"/>, or a sidecar restart.</summary>
+	Task<SidecarWorker> DrainWorkerAsync(string name, CancellationToken cancellationToken = default);
+
+	/// <summary>Put a drained worker back in rotation.</summary>
+	Task<SidecarWorker> EnableWorkerAsync(string name, CancellationToken cancellationToken = default);
 }

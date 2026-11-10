@@ -136,6 +136,8 @@ interface Entry {
   inFlight: Record<PriorityClass, number>;
   outcomes: boolean[];
   calls: number;
+  /** Out of rotation by an operator's request. Held in memory only: a restart puts it back. */
+  drained: boolean;
 }
 
 /** What a dispatched call may use. Deliberately not the whole entry. */
@@ -168,6 +170,8 @@ export interface WorkerPoolOptions {
   probeEveryMs?: number;
   /** Told when workers start or stop disagreeing about the same text. */
   onDisagreement?: (workers: readonly string[]) => void;
+  /** Slots per worker that background work may not use, when the worker has more than that. */
+  interactiveReserve?: number;
 }
 
 type Attempt<T> = { ok: true; value: T } | { ok: false; error: WorkerError; retry: boolean };
@@ -186,7 +190,18 @@ function isBodySpecific(err: WorkerError): boolean {
   return err.code === "rejected" && (err.status === 400 || err.status === 413);
 }
 
-function newEntry(config: PoolWorkerConfig, breaker: BreakerOptions, options: WorkerPoolOptions, onCall: LlmCallSink | undefined): Entry {
+/** The pool's breaker, with whatever this worker's own configuration says instead. */
+function breakerFor(config: PoolWorkerConfig, pool: BreakerOptions): BreakerOptions {
+  const own = config.availability ?? {};
+  return {
+    threshold: own.failureThreshold ?? pool.threshold,
+    backoffBaseMs: own.backoffMs ?? pool.backoffBaseMs,
+    backoffMaxMs: own.maxBackoffMs ?? pool.backoffMaxMs,
+  };
+}
+
+function newEntry(config: PoolWorkerConfig, pool: BreakerOptions, options: WorkerPoolOptions, onCall: LlmCallSink | undefined): Entry {
+  const breaker = breakerFor(config, pool);
   return {
     config,
     client: new WorkerClient({
@@ -206,6 +221,7 @@ function newEntry(config: PoolWorkerConfig, breaker: BreakerOptions, options: Wo
     inFlight: { interactive: 0, background: 0 },
     outcomes: [],
     calls: 0,
+    drained: false,
   };
 }
 
@@ -226,6 +242,7 @@ export class WorkerPool {
   readonly #probe: EmbedProbe | undefined;
   readonly #probeEveryMs: number;
   readonly #onDisagreement: ((workers: readonly string[]) => void) | undefined;
+  readonly #interactiveReserve: number;
   #lastProbe: number | null = null;
   #disagreeing: readonly string[] = [];
   readonly #waiters: Array<() => void> = [];
@@ -242,6 +259,7 @@ export class WorkerPool {
     this.#probe = options.probe;
     this.#probeEveryMs = options.probeEveryMs ?? 60_000;
     this.#onDisagreement = options.onDisagreement;
+    this.#interactiveReserve = options.interactiveReserve ?? 1;
     const breaker = { ...DEFAULT_BREAKER, ...options.breaker };
     // Heartbeats would drown the per-call log, and they say nothing about model work.
     const sink = options.onCall;
@@ -373,7 +391,7 @@ export class WorkerPool {
     this.#lastProbe = this.#now();
     const answers: Array<{ name: string; vector: number[] }> = [];
     for (const entry of this.#entries) {
-      if (entry.reachable !== true || !entry.config.capabilities.includes("embed") || entry.modelOk !== true) continue;
+      if (!this.#probeable(entry)) continue;
       const vector = await this.#probeWorker(entry);
       if (vector) answers.push({ name: entry.config.name, vector });
     }
@@ -382,6 +400,11 @@ export class WorkerPool {
     const first = answers[0]!.vector;
     const agreed = answers.every((a) => cosineOf(first, a.vector) >= PROBE_MIN_COSINE);
     this.#setDisagreement(agreed ? [] : answers.map((a) => a.name));
+  }
+
+  /** Up, in rotation, and serving the index's model, so its vector says something. */
+  #probeable(entry: Entry): boolean {
+    return entry.reachable === true && !entry.drained && entry.config.capabilities.includes("embed") && entry.modelOk === true;
   }
 
   #probeDue(): boolean {
@@ -417,7 +440,7 @@ export class WorkerPool {
   // --- routing ---------------------------------------------------------------
 
   #servesRole(entry: Entry, capability: Capability): boolean {
-    if (!entry.config.capabilities.includes(capability)) return false;
+    if (entry.drained || !entry.config.capabilities.includes(capability)) return false;
     if (capability === "embed" && entry.modelOk === false) return false;
     if (entry.capabilities && !entry.capabilities.operations.includes(OPERATIONS[capability])) return false;
     return !entry.health || entry.health.models[capability];
@@ -446,10 +469,33 @@ export class WorkerPool {
     return this.#candidates(capability, circuitFor(capability, "background"), new Set()).reduce((sum, e) => sum + this.#limit(e, "background"), 0);
   }
 
-  /** One slot per worker is kept back from background work, when there is more than one. */
+  /** Slots per worker are kept back from background work, but it always keeps one. */
   #limit(entry: Entry, klass: PriorityClass): number {
     const max = entry.config.maxConcurrent;
-    return klass === "background" && max > 1 ? max - 1 : max;
+    return klass === "background" ? Math.max(1, max - this.#interactiveReserve) : max;
+  }
+
+  // --- operator control ------------------------------------------------------
+
+  /**
+   * Take a worker out of rotation: calls in flight finish, and it gets no new ones.
+   * Heartbeats go on, so its state stays visible. Null for a name not in the pool.
+   */
+  drain(name: string): WorkerView | null {
+    return this.#setDrained(name, true);
+  }
+
+  /** Put a drained worker back. Null for a name not in the pool. */
+  enable(name: string): WorkerView | null {
+    return this.#setDrained(name, false);
+  }
+
+  #setDrained(name: string, drained: boolean): WorkerView | null {
+    const index = this.#entries.findIndex((e) => e.config.name === name);
+    if (index < 0) return null;
+    this.#entries[index]!.drained = drained;
+    this.#wake();
+    return this.workers()[index]!;
   }
 
   #wake(): void {
@@ -649,6 +695,7 @@ export class WorkerPool {
         queueDepth: e.health?.queueDepth ?? 0,
         calls: e.calls,
         errorRate: e.outcomes.length === 0 ? 0 : failures / e.outcomes.length,
+        drained: e.drained,
       };
     });
   }

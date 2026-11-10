@@ -36,6 +36,8 @@ function llmOptionsFrom(config: SidecarConfig): LlmOptions {
     fallback: config.llm.fallback,
     statusPollMs: config.llm.pollMs,
     embedBatchBytes: config.llm.embedBatchBytes,
+    embedConcurrency: config.llm.embedConcurrency,
+    interactiveReserve: config.llm.interactiveReserve,
     rerankTimeoutMs: config.llm.rerankTimeoutMs,
     searchDeadlineMs: config.llm.searchDeadlineMs,
   };

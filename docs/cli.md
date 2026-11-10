@@ -170,6 +170,35 @@ memoria auth login --profile reader --api-url https://memoria.example.com
 
 `revoke` refuses the key the command is using unless you pass `--force`, since that can lock you out. `rotate` on that key warns you to log in again with the new one.
 
+## Operating the backend
+
+All but `ready` need an `admin` key that is not bound to particular collections: an admin-only key, or one with `--all-collections`. They act on every collection at once, so a key that lists collections gets `403`, even with the admin scope. `--format json` prints the server's response.
+
+```sh
+memoria workers list
+memoria workers drain desktop
+memoria workers enable desktop
+memoria queue status
+memoria queue status --jobs 0
+memoria queue retry <id>
+memoria queue cancel <id>
+memoria queue pause
+memoria queue resume
+memoria reindex
+memoria reindex --collection claude-sessions --no-embed
+memoria ready
+```
+
+`ready` works with any key, and answers whether the server can serve. With an admin key it adds the backend's report: workers up, roles no worker can serve, pending and stuck jobs, and documents set aside. It ends with the request's trace id, which finds the request in the API's log and, as `reqId`, in the sidecar's. It exits 0 when the server answers 200 and 5 when it answers 503; `--strict` makes anything but `ready` a 503.
+
+`workers list` shows each inference worker's state, circuits, calls in flight and error rate. `workers drain` takes a worker out of rotation: its calls in flight finish, and it gets no new ones. `workers enable` puts it back.
+
+`queue status` shows jobs by state, whether the queue is paused and persists across restarts, documents set aside, model calls waiting, and the 10 most recent jobs with their ids. `--jobs 0` lists every job the sidecar remembers. `queue retry` runs a failed job again; `queue cancel` stops one that has not finished. `queue pause` starts no more background jobs, and `queue resume` lets them start again. While paused, writes still land but new documents are not searchable.
+
+`reindex` rescans and embeds every collection, or the ones named with `--collection`. `--no-embed` only rescans, and `--force` re-embeds every document, which keeps the workers busy for a long time on a large corpus.
+
+A drain and a pause are held in the sidecar's memory, so restarting the sidecar puts every worker back and resumes the queue. [docs/workers.md](workers.md#draining-a-worker-and-pausing-background-work) says what each one does to search and embedding, and [docs/configuration.md](configuration.md#operations) has the routes.
+
 ## Sync local folders
 
 `sources` keeps local folders of Markdown in the corpus. It needs a key with the `ingest` scope and the target collection in its list, and a collection the operator has opened to ingest, which must be empty when ingest first uses it ([configuration](configuration.md#memoriaingest--writing-to-the-corpus)). The server redacts everything it stores.

@@ -18,7 +18,7 @@ public static class MemoriaScopes
 	/// <summary>Submit documents for indexing.</summary>
 	public const string Ingest = "ingest";
 
-	/// <summary>Manage API keys, and later reindex and worker and queue administration.</summary>
+	/// <summary>Manage API keys, and operate the backend: workers, the background queue, and reindexing.</summary>
 	public const string Admin = "admin";
 
 	public static readonly IReadOnlySet<string> All = new HashSet<string>(StringComparer.Ordinal) { Read, Ingest, Admin };

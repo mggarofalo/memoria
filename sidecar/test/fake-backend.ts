@@ -320,6 +320,22 @@ export class FakeBackend implements QmdBackend {
     return this.load;
   }
 
+  drainWorker(name: string): WorkerView | null {
+    return this.#setDrained(name, true);
+  }
+
+  enableWorker(name: string): WorkerView | null {
+    return this.#setDrained(name, false);
+  }
+
+  #setDrained(name: string, drained: boolean): WorkerView | null {
+    const view = this.workerViews.find((w) => w.name === name);
+    if (!view) return null;
+    this.#record(drained ? "drainWorker" : "enableWorker", { name });
+    view.drained = drained;
+    return view;
+  }
+
   purgeCache(): number {
     this.#record("purgeCache");
     return 3;

@@ -336,6 +336,159 @@
             ]
           }
         }
+      },
+      "Worker": {
+        "type": "object",
+        "description": "One worker in the pool. Never includes its URL path or token.",
+        "required": [
+          "name",
+          "host",
+          "state",
+          "circuit",
+          "circuits",
+          "embedDisagrees",
+          "capabilities",
+          "priority",
+          "maxConcurrent",
+          "embedModelCompatible",
+          "rerankTransport",
+          "lastHeartbeat",
+          "inFlight",
+          "queueDepth",
+          "calls",
+          "errorRate",
+          "drained"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "host": {
+            "type": "string",
+            "description": "Host and port."
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "unknown",
+              "up",
+              "busy",
+              "starting",
+              "down",
+              "circuit_open"
+            ]
+          },
+          "circuit": {
+            "type": "string",
+            "enum": [
+              "closed",
+              "open",
+              "half_open"
+            ],
+            "description": "The worst of `circuits`, over the roles this worker is configured for."
+          },
+          "circuits": {
+            "type": "object",
+            "required": [
+              "embed",
+              "rerank",
+              "generate",
+              "documents"
+            ],
+            "description": "`documents` is document embedding, kept apart from `embed`, which is query vectors.",
+            "properties": {
+              "embed": {
+                "type": "string",
+                "enum": [
+                  "closed",
+                  "open",
+                  "half_open"
+                ]
+              },
+              "rerank": {
+                "type": "string",
+                "enum": [
+                  "closed",
+                  "open",
+                  "half_open"
+                ]
+              },
+              "generate": {
+                "type": "string",
+                "enum": [
+                  "closed",
+                  "open",
+                  "half_open"
+                ]
+              },
+              "documents": {
+                "type": "string",
+                "enum": [
+                  "closed",
+                  "open",
+                  "half_open"
+                ]
+              }
+            }
+          },
+          "embedDisagrees": {
+            "type": "boolean",
+            "description": "This worker embedded the same text differently from another. Reported only: nothing acts on it."
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "embed",
+                "rerank",
+                "generate"
+              ]
+            }
+          },
+          "priority": {
+            "type": "integer"
+          },
+          "maxConcurrent": {
+            "type": "integer"
+          },
+          "embedModelCompatible": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "False keeps this worker off embedding and tokens. Null until checked."
+          },
+          "rerankTransport": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "lastHeartbeat": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "inFlight": {
+            "type": "integer"
+          },
+          "queueDepth": {
+            "type": "number"
+          },
+          "calls": {
+            "type": "integer"
+          },
+          "errorRate": {
+            "type": "number",
+            "description": "Failed share of the last 100 calls."
+          },
+          "drained": {
+            "type": "boolean",
+            "description": "Taken out of rotation by `:drain`. It finishes what it has and gets no new calls. Held in memory: a restart puts it back."
+          }
+        }
       }
     }
   },
@@ -2545,9 +2698,14 @@
                     "classes",
                     "workers",
                     "persistence",
-                    "deadLetters"
+                    "deadLetters",
+                    "paused"
                   ],
                   "properties": {
+                    "paused": {
+                      "type": "boolean",
+                      "description": "No job starts while true. See `POST /queue:pause`."
+                    },
                     "deadLetters": {
                       "type": "integer",
                       "description": "Documents set aside because no worker could embed them. See `GET /queue/dead-letters`."
@@ -2659,6 +2817,222 @@
                             "type": "number",
                             "description": "As the worker last reported it."
                           }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/queue:pause": {
+      "post": {
+        "summary": "Pause background work",
+        "tags": [
+          "index"
+        ],
+        "description": "Start no more reindex or embedding jobs. A running job runs to its end; cancel it to stop it sooner. Writes still land and queue their jobs, which wait, so new documents are not searchable until `POST /queue:resume`. Held in memory: a restart resumes. Pausing a paused queue changes nothing.",
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "paused",
+                    "jobs"
+                  ],
+                  "properties": {
+                    "paused": {
+                      "type": "boolean"
+                    },
+                    "jobs": {
+                      "type": "object",
+                      "required": [
+                        "queued",
+                        "held",
+                        "running",
+                        "succeeded",
+                        "failed"
+                      ],
+                      "properties": {
+                        "queued": {
+                          "type": "integer"
+                        },
+                        "held": {
+                          "type": "integer",
+                          "description": "The queued jobs waiting on the debounce or a retry delay."
+                        },
+                        "running": {
+                          "type": "integer"
+                        },
+                        "succeeded": {
+                          "type": "integer"
+                        },
+                        "failed": {
+                          "type": "integer"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/queue:resume": {
+      "post": {
+        "summary": "Resume background work",
+        "tags": [
+          "index"
+        ],
+        "description": "Let waiting jobs start again. Resuming a queue that is not paused changes nothing.",
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "paused",
+                    "jobs"
+                  ],
+                  "properties": {
+                    "paused": {
+                      "type": "boolean"
+                    },
+                    "jobs": {
+                      "type": "object",
+                      "required": [
+                        "queued",
+                        "held",
+                        "running",
+                        "succeeded",
+                        "failed"
+                      ],
+                      "properties": {
+                        "queued": {
+                          "type": "integer"
+                        },
+                        "held": {
+                          "type": "integer",
+                          "description": "The queued jobs waiting on the debounce or a retry delay."
+                        },
+                        "running": {
+                          "type": "integer"
+                        },
+                        "succeeded": {
+                          "type": "integer"
+                        },
+                        "failed": {
+                          "type": "integer"
                         }
                       }
                     }
@@ -3112,152 +3486,188 @@
                     "workers": {
                       "type": "array",
                       "items": {
-                        "type": "object",
-                        "required": [
-                          "name",
-                          "host",
-                          "state",
-                          "circuit",
-                          "circuits",
-                          "embedDisagrees",
-                          "capabilities",
-                          "priority",
-                          "maxConcurrent",
-                          "embedModelCompatible",
-                          "rerankTransport",
-                          "lastHeartbeat",
-                          "inFlight",
-                          "queueDepth",
-                          "calls",
-                          "errorRate"
-                        ],
-                        "properties": {
-                          "name": {
-                            "type": "string"
-                          },
-                          "host": {
-                            "type": "string",
-                            "description": "Host and port."
-                          },
-                          "state": {
-                            "type": "string",
-                            "enum": [
-                              "unknown",
-                              "up",
-                              "busy",
-                              "starting",
-                              "down",
-                              "circuit_open"
-                            ]
-                          },
-                          "circuit": {
-                            "type": "string",
-                            "enum": [
-                              "closed",
-                              "open",
-                              "half_open"
-                            ],
-                            "description": "The worst of `circuits`, over the roles this worker is configured for."
-                          },
-                          "circuits": {
-                            "type": "object",
-                            "required": [
-                              "embed",
-                              "rerank",
-                              "generate",
-                              "documents"
-                            ],
-                            "description": "`documents` is document embedding, kept apart from `embed`, which is query vectors.",
-                            "properties": {
-                              "embed": {
-                                "type": "string",
-                                "enum": [
-                                  "closed",
-                                  "open",
-                                  "half_open"
-                                ]
-                              },
-                              "rerank": {
-                                "type": "string",
-                                "enum": [
-                                  "closed",
-                                  "open",
-                                  "half_open"
-                                ]
-                              },
-                              "generate": {
-                                "type": "string",
-                                "enum": [
-                                  "closed",
-                                  "open",
-                                  "half_open"
-                                ]
-                              },
-                              "documents": {
-                                "type": "string",
-                                "enum": [
-                                  "closed",
-                                  "open",
-                                  "half_open"
-                                ]
-                              }
-                            }
-                          },
-                          "embedDisagrees": {
-                            "type": "boolean",
-                            "description": "This worker embedded the same text differently from another. Reported only: nothing acts on it."
-                          },
-                          "capabilities": {
-                            "type": "array",
-                            "items": {
-                              "type": "string",
-                              "enum": [
-                                "embed",
-                                "rerank",
-                                "generate"
-                              ]
-                            }
-                          },
-                          "priority": {
-                            "type": "integer"
-                          },
-                          "maxConcurrent": {
-                            "type": "integer"
-                          },
-                          "embedModelCompatible": {
-                            "type": [
-                              "boolean",
-                              "null"
-                            ],
-                            "description": "False keeps this worker off embedding and tokens. Null until checked."
-                          },
-                          "rerankTransport": {
-                            "type": [
-                              "string",
-                              "null"
-                            ]
-                          },
-                          "lastHeartbeat": {
-                            "type": [
-                              "string",
-                              "null"
-                            ]
-                          },
-                          "inFlight": {
-                            "type": "integer"
-                          },
-                          "queueDepth": {
-                            "type": "number"
-                          },
-                          "calls": {
-                            "type": "integer"
-                          },
-                          "errorRate": {
-                            "type": "number",
-                            "description": "Failed share of the last 100 calls."
-                          }
-                        }
+                        "$ref": "#/components/schemas/Worker"
                       }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workers/{name}:drain": {
+      "post": {
+        "summary": "Drain a worker",
+        "tags": [
+          "workers"
+        ],
+        "description": "Take a worker out of rotation. Calls in flight finish, and it gets no new ones; `inFlight` shows them leave. Heartbeats go on, so its state stays visible. Held in memory: a restart puts it back, so remove it from the configuration to keep it out. Draining a drained worker changes nothing. 404 in local LLM mode.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[\\w.:\\[\\]-]{1,64}$"
+            },
+            "in": "path",
+            "name": "name",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "worker"
+                  ],
+                  "properties": {
+                    "worker": {
+                      "$ref": "#/components/schemas/Worker"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workers/{name}:enable": {
+      "post": {
+        "summary": "Put a drained worker back",
+        "tags": [
+          "workers"
+        ],
+        "description": "Return a drained worker to rotation. Enabling a worker that is not drained changes nothing. 404 in local LLM mode.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[\\w.:\\[\\]-]{1,64}$"
+            },
+            "in": "path",
+            "name": "name",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "worker"
+                  ],
+                  "properties": {
+                    "worker": {
+                      "$ref": "#/components/schemas/Worker"
                     }
                   }
                 }

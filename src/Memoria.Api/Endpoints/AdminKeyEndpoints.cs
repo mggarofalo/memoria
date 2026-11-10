@@ -236,7 +236,7 @@ public static partial class AdminKeyEndpoints
 		return collections.All(IsValidCollectionName) ? null : $"Collection names must be 1 to {MaxCollectionNameLength} characters with no slash or surrounding whitespace. They are case-sensitive.";
 	}
 
-	private static bool IsValidCollectionName(string? name)
+	internal static bool IsValidCollectionName(string? name)
 	{
 		return !string.IsNullOrWhiteSpace(name)
 			&& name.Length <= MaxCollectionNameLength

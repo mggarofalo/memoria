@@ -229,6 +229,14 @@ interface ReindexBody {
 
 // --- routes ------------------------------------------------------------------
 
+
+/**
+ * A worker's name as configuration allows it, so a path cannot carry anything else. The
+ * `MEMORIA_QMD_WORKER_URL` shorthand names its worker by host and port, such as
+ * `127.0.0.1:8383` or `[::1]:8383`, so those characters pass too, percent-encoded.
+ */
+const workerParams = { type: "object", required: ["name"], properties: { name: { type: "string", pattern: "^[\\w.:\\[\\]-]{1,64}$" } } } as const;
+
 /** Matches the nine digits a line suffix may have. */
 const MAX_LINE = 999_999_999;
 
@@ -952,6 +960,17 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
 
   // ---- queue -----------------------------------------------------------------
 
+  const jobCounts = {
+    type: "object",
+    required: ["queued", "held", "running", "succeeded", "failed"],
+    properties: {
+      queued: { type: "integer" },
+      held: { type: "integer", description: "The queued jobs waiting on the debounce or a retry delay." },
+      running: { type: "integer" },
+      succeeded: { type: "integer" },
+      failed: { type: "integer" },
+    },
+  } as const;
   const classLoad = { type: "object", required: ["inFlight", "waiting"], properties: { inFlight: { type: "integer" }, waiting: { type: "integer" } } } as const;
 
   app.get(
@@ -966,8 +985,9 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         response: {
           200: {
             type: "object",
-            required: ["jobs", "classes", "workers", "persistence", "deadLetters"],
+            required: ["jobs", "classes", "workers", "persistence", "deadLetters", "paused"],
             properties: {
+              paused: { type: "boolean", description: "No job starts while true. See `POST /queue:pause`." },
               deadLetters: { type: "integer", description: "Documents set aside because no worker could embed them. See `GET /queue/dead-letters`." },
               persistence: {
                 type: "object",
@@ -975,17 +995,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
                 description: "Whether jobs would survive a restart. `healthy: false` means the queue is carrying on in memory.",
                 properties: { enabled: { type: "boolean" }, healthy: { type: "boolean" } },
               },
-              jobs: {
-                type: "object",
-                required: ["queued", "held", "running", "succeeded", "failed"],
-                properties: {
-                  queued: { type: "integer" },
-                  held: { type: "integer", description: "The queued jobs waiting on the debounce or a retry delay." },
-                  running: { type: "integer" },
-                  succeeded: { type: "integer" },
-                  failed: { type: "integer" },
-                },
-              },
+              jobs: jobCounts,
               classes: {
                 type: "object",
                 required: ["interactive", "background"],
@@ -1008,12 +1018,50 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     async () => {
       const load = backend.poolLoad();
       return {
+        paused: ctx.jobs.paused,
         jobs: ctx.jobs.counts(),
         persistence: ctx.jobs.persistence(),
         deadLetters: backend.deadLetters().length,
         classes: load?.classes ?? { interactive: { inFlight: 0, waiting: 0 }, background: { inFlight: 0, waiting: 0 } },
         workers: load?.workers ?? [],
       };
+    },
+  );
+
+  const pauseResponse = { 200: { type: "object", required: ["paused", "jobs"], properties: { paused: { type: "boolean" }, jobs: jobCounts } }, ...errorResponses } as const;
+
+  app.post(
+    "/queue::pause",
+    {
+      schema: {
+        tags: ["index"],
+        summary: "Pause background work",
+        description:
+          "Start no more reindex or embedding jobs. A running job runs to its end; cancel it to stop it sooner. Writes still " +
+          "land and queue their jobs, which wait, so new documents are not searchable until `POST /queue:resume`. Held in " +
+          "memory: a restart resumes. Pausing a paused queue changes nothing.",
+        response: pauseResponse,
+      },
+    },
+    async () => {
+      ctx.jobs.pause();
+      return { paused: true, jobs: ctx.jobs.counts() };
+    },
+  );
+
+  app.post(
+    "/queue::resume",
+    {
+      schema: {
+        tags: ["index"],
+        summary: "Resume background work",
+        description: "Let waiting jobs start again. Resuming a queue that is not paused changes nothing.",
+        response: pauseResponse,
+      },
+    },
+    async () => {
+      ctx.jobs.resume();
+      return { paused: false, jobs: ctx.jobs.counts() };
     },
   );
 
@@ -1122,41 +1170,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
             required: ["mode", "workers"],
             properties: {
               mode: { type: "string", enum: ["local", "remote"] },
-              workers: {
-                type: "array",
-                items: {
-                  type: "object",
-                  required: ["name", "host", "state", "circuit", "circuits", "embedDisagrees", "capabilities", "priority", "maxConcurrent", "embedModelCompatible", "rerankTransport", "lastHeartbeat", "inFlight", "queueDepth", "calls", "errorRate"],
-                  properties: {
-                    name: { type: "string" },
-                    host: { type: "string", description: "Host and port." },
-                    state: { type: "string", enum: ["unknown", "up", "busy", "starting", "down", "circuit_open"] },
-                    circuit: { type: "string", enum: ["closed", "open", "half_open"], description: "The worst of `circuits`, over the roles this worker is configured for." },
-                    circuits: {
-                      type: "object",
-                      required: ["embed", "rerank", "generate", "documents"],
-                      description: "`documents` is document embedding, kept apart from `embed`, which is query vectors.",
-                      properties: {
-                        embed: { type: "string", enum: ["closed", "open", "half_open"] },
-                        rerank: { type: "string", enum: ["closed", "open", "half_open"] },
-                        generate: { type: "string", enum: ["closed", "open", "half_open"] },
-                        documents: { type: "string", enum: ["closed", "open", "half_open"] },
-                      },
-                    },
-                    embedDisagrees: { type: "boolean", description: "This worker embedded the same text differently from another. Reported only: nothing acts on it." },
-                    capabilities: { type: "array", items: { type: "string", enum: ["embed", "rerank", "generate"] } },
-                    priority: { type: "integer" },
-                    maxConcurrent: { type: "integer" },
-                    embedModelCompatible: { type: "boolean", nullable: true, description: "False keeps this worker off embedding and tokens. Null until checked." },
-                    rerankTransport: { type: "string", nullable: true },
-                    lastHeartbeat: { type: "string", nullable: true },
-                    inFlight: { type: "integer" },
-                    queueDepth: { type: "number" },
-                    calls: { type: "integer" },
-                    errorRate: { type: "number", description: "Failed share of the last 100 calls." },
-                  },
-                },
-              },
+              workers: { type: "array", items: { $ref: "Worker#" } },
             },
           },
           ...errorResponses,
@@ -1164,6 +1178,48 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       },
     },
     async () => ({ mode: backend.llmHealth().mode, workers: backend.workers() }),
+  );
+
+  const unknownWorker = (name: string) => new HttpError(404, "unknown_worker", `No worker is named ${name}`);
+  const workerResponse = { 200: { type: "object", required: ["worker"], properties: { worker: { $ref: "Worker#" } } }, ...errorResponses } as const;
+
+  app.post<{ Params: { name: string } }>(
+    "/workers/:name([^/]+)::drain",
+    {
+      schema: {
+        tags: ["workers"],
+        summary: "Drain a worker",
+        description:
+          "Take a worker out of rotation. Calls in flight finish, and it gets no new ones; `inFlight` shows them leave. " +
+          "Heartbeats go on, so its state stays visible. Held in memory: a restart puts it back, so remove it from the " +
+          "configuration to keep it out. Draining a drained worker changes nothing. 404 in local LLM mode.",
+        params: workerParams,
+        response: workerResponse,
+      },
+    },
+    async (request) => {
+      const worker = backend.drainWorker(request.params.name);
+      if (!worker) throw unknownWorker(request.params.name);
+      return { worker };
+    },
+  );
+
+  app.post<{ Params: { name: string } }>(
+    "/workers/:name([^/]+)::enable",
+    {
+      schema: {
+        tags: ["workers"],
+        summary: "Put a drained worker back",
+        description: "Return a drained worker to rotation. Enabling a worker that is not drained changes nothing. 404 in local LLM mode.",
+        params: workerParams,
+        response: workerResponse,
+      },
+    },
+    async (request) => {
+      const worker = backend.enableWorker(request.params.name);
+      if (!worker) throw unknownWorker(request.params.name);
+      return { worker };
+    },
   );
 
   app.post(

@@ -156,6 +156,82 @@ public sealed class MemoriaQmdClient(HttpClient http) : IMemoriaQmdClient
 		return response.Job;
 	}
 
+	public Task<SidecarJob> RetryJobAsync(string id, CancellationToken cancellationToken = default)
+	{
+		return JobActionAsync(id, "retry", cancellationToken);
+	}
+
+	public Task<SidecarJob> CancelJobAsync(string id, CancellationToken cancellationToken = default)
+	{
+		return JobActionAsync(id, "cancel", cancellationToken);
+	}
+
+	private async Task<SidecarJob> JobActionAsync(string id, string action, CancellationToken cancellationToken)
+	{
+		string path = "./queue/jobs/" + PathSegment(id) + ":" + action;
+		SidecarJobResponse response = await PostEmptyAsync(path, SidecarJsonContext.Default.SidecarJobResponse, cancellationToken).ConfigureAwait(false);
+		return response.Job;
+	}
+
+	public Task<SidecarQueue> GetQueueAsync(CancellationToken cancellationToken = default)
+	{
+		return GetAsync("queue", SidecarJsonContext.Default.SidecarQueue, cancellationToken);
+	}
+
+	public Task<SidecarPauseResponse> PauseQueueAsync(CancellationToken cancellationToken = default)
+	{
+		return PostEmptyAsync("./queue:pause", SidecarJsonContext.Default.SidecarPauseResponse, cancellationToken);
+	}
+
+	public Task<SidecarPauseResponse> ResumeQueueAsync(CancellationToken cancellationToken = default)
+	{
+		return PostEmptyAsync("./queue:resume", SidecarJsonContext.Default.SidecarPauseResponse, cancellationToken);
+	}
+
+	public Task<SidecarWorkersResponse> ListWorkersAsync(CancellationToken cancellationToken = default)
+	{
+		return GetAsync("workers", SidecarJsonContext.Default.SidecarWorkersResponse, cancellationToken);
+	}
+
+	public Task<SidecarWorker> DrainWorkerAsync(string name, CancellationToken cancellationToken = default)
+	{
+		return WorkerActionAsync(name, "drain", cancellationToken);
+	}
+
+	public Task<SidecarWorker> EnableWorkerAsync(string name, CancellationToken cancellationToken = default)
+	{
+		return WorkerActionAsync(name, "enable", cancellationToken);
+	}
+
+	private async Task<SidecarWorker> WorkerActionAsync(string name, string action, CancellationToken cancellationToken)
+	{
+		string path = "./workers/" + PathSegment(name) + ":" + action;
+		SidecarWorkerResponse response = await PostEmptyAsync(path, SidecarJsonContext.Default.SidecarWorkerResponse, cancellationToken).ConfigureAwait(false);
+		return response.Worker;
+	}
+
+	/// <summary>
+	/// One path segment. A dot segment would be normalized away by HttpClient and land on
+	/// another route, so it is refused here as the document path is.
+	/// </summary>
+	private static string PathSegment(string value)
+	{
+		ArgumentException.ThrowIfNullOrWhiteSpace(value);
+		if (value is "." or "..")
+		{
+			throw new ArgumentException("A path segment cannot be a dot segment.", nameof(value));
+		}
+
+		return Uri.EscapeDataString(value);
+	}
+
+	private async Task<TResponse> PostEmptyAsync<TResponse>(string path, JsonTypeInfo<TResponse> responseType, CancellationToken cancellationToken)
+	{
+		using HttpRequestMessage request = new(HttpMethod.Post, path);
+		using HttpResponseMessage response = await SendAsync(request, cancellationToken).ConfigureAwait(false);
+		return await ReadSuccessAsync(response, responseType, cancellationToken).ConfigureAwait(false);
+	}
+
 	/// <summary>
 	/// Builds the relative URL for <c>GET /docs/{reference}</c>. Slashes are kept
 	/// so <c>collection/path.md</c> and <c>qmd://</c> URIs route through the

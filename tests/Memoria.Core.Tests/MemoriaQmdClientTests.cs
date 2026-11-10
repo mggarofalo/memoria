@@ -342,4 +342,86 @@ public sealed class MemoriaQmdClientTests
 		Assert.Equal("job-1", job.Id);
 		Assert.Equal(new Uri(BaseAddress, "reindex/jobs/job%201"), handler.Requests[1].Uri);
 	}
+
+	private const string Worker = """
+		{"name":"desktop","host":"10.0.0.2:8383","state":"up","circuit":"closed","circuits":{"embed":"closed","rerank":"closed","generate":"closed","documents":"open"},
+		 "embedDisagrees":false,"capabilities":["embed","rerank"],"priority":1,"maxConcurrent":8,"embedModelCompatible":true,"rerankTransport":"llama-server-qmd-tokens",
+		 "lastHeartbeat":"2026-11-01T10:00:00.000Z","inFlight":2,"queueDepth":0.5,"calls":40,"errorRate":0.025,"drained":true}
+		""";
+
+	[Fact]
+	public async Task Workers_ListDrainAndEnable_PostToTheActionRoutes()
+	{
+		(MemoriaQmdClient client, FakeHttpHandler handler) = Create();
+		handler.Respond(HttpStatusCode.OK, """{"mode":"remote","workers":[""" + Worker + "]}");
+		handler.Respond(HttpStatusCode.OK, """{"worker":""" + Worker + "}");
+		handler.Respond(HttpStatusCode.OK, """{"worker":""" + Worker + "}");
+
+		SidecarWorkersResponse list = await client.ListWorkersAsync();
+		SidecarWorker drained = await client.DrainWorkerAsync("mac.local");
+		await client.EnableWorkerAsync("a b");
+
+		Assert.Equal("remote", list.Mode);
+		SidecarWorker listed = Assert.Single(list.Workers);
+		Assert.Equal("open", listed.Circuits.Documents);
+		Assert.Equal(0.5, listed.QueueDepth);
+		Assert.True(drained.Drained);
+		Assert.Equal(new Uri(BaseAddress, "workers"), handler.Requests[0].Uri);
+		Assert.Equal(HttpMethod.Post, handler.Requests[1].Method);
+		Assert.Equal(new Uri(BaseAddress, "workers/mac.local:drain"), handler.Requests[1].Uri);
+		Assert.Equal(new Uri(BaseAddress, "workers/a%20b:enable"), handler.Requests[2].Uri);
+	}
+
+	[Theory]
+	[InlineData(".")]
+	[InlineData("..")]
+	[InlineData(" ")]
+	public async Task WorkerActions_RefuseADotSegment_BeforeSending(string name)
+	{
+		(MemoriaQmdClient client, FakeHttpHandler handler) = Create();
+
+		await Assert.ThrowsAnyAsync<ArgumentException>(() => client.DrainWorkerAsync(name));
+		await Assert.ThrowsAnyAsync<ArgumentException>(() => client.CancelJobAsync(name));
+		Assert.Empty(handler.Requests);
+	}
+
+	[Fact]
+	public async Task Queue_StatusPauseAndResume()
+	{
+		(MemoriaQmdClient client, FakeHttpHandler handler) = Create();
+		const string counts = """{"queued":2,"held":1,"running":1,"succeeded":5,"failed":0}""";
+		handler.Respond(HttpStatusCode.OK, """{"paused":false,"jobs":""" + counts + ""","persistence":{"enabled":true,"healthy":true},"deadLetters":3,"classes":{"interactive":{"inFlight":1,"waiting":0},"background":{"inFlight":2,"waiting":4}},"workers":[]}""");
+		handler.Respond(HttpStatusCode.OK, """{"paused":true,"jobs":""" + counts + "}");
+		handler.Respond(HttpStatusCode.OK, """{"paused":false,"jobs":""" + counts + "}");
+
+		SidecarQueue queue = await client.GetQueueAsync();
+		SidecarPauseResponse paused = await client.PauseQueueAsync();
+		SidecarPauseResponse resumed = await client.ResumeQueueAsync();
+
+		Assert.Equal(3, queue.DeadLetters);
+		Assert.Equal(4, queue.Classes.Background.Waiting);
+		Assert.Equal(2, queue.Jobs.Queued);
+		Assert.True(paused.Paused);
+		Assert.False(resumed.Paused);
+		Assert.Equal(new Uri(BaseAddress, "./queue:pause"), handler.Requests[1].Uri);
+		Assert.Equal(HttpMethod.Post, handler.Requests[2].Method);
+		Assert.Equal(new Uri(BaseAddress, "./queue:resume"), handler.Requests[2].Uri);
+	}
+
+	[Fact]
+	public async Task Jobs_RetryAndCancel_UnwrapTheJob_AndPassConflictsOn()
+	{
+		(MemoriaQmdClient client, FakeHttpHandler handler) = Create();
+		handler.Respond(HttpStatusCode.Accepted, """{"job":""" + Fixtures.Job + "}");
+		handler.Respond(HttpStatusCode.Conflict, """{"error":"not_cancellable","message":"This job has already finished"}""");
+
+		SidecarJob retried = await client.RetryJobAsync("job-1");
+		SidecarException conflict = await Assert.ThrowsAsync<SidecarException>(() => client.CancelJobAsync("job-1"));
+
+		Assert.Equal("job-1", retried.Id);
+		Assert.Equal(new Uri(BaseAddress, "queue/jobs/job-1:retry"), handler.Requests[0].Uri);
+		Assert.Equal(new Uri(BaseAddress, "queue/jobs/job-1:cancel"), handler.Requests[1].Uri);
+		Assert.Equal("not_cancellable", conflict.Code);
+		Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
+	}
 }

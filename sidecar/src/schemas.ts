@@ -126,3 +126,39 @@ export const errorResponses = {
   409: { $ref: "Error#" },
   500: { $ref: "Error#" },
 } as const;
+
+export const workerSchema = {
+  $id: "Worker",
+  type: "object",
+  description: "One worker in the pool. Never includes its URL path or token.",
+  required: ["name", "host", "state", "circuit", "circuits", "embedDisagrees", "capabilities", "priority", "maxConcurrent", "embedModelCompatible", "rerankTransport", "lastHeartbeat", "inFlight", "queueDepth", "calls", "errorRate", "drained"],
+  properties: {
+    name: { type: "string" },
+    host: { type: "string", description: "Host and port." },
+    state: { type: "string", enum: ["unknown", "up", "busy", "starting", "down", "circuit_open"] },
+    circuit: { type: "string", enum: ["closed", "open", "half_open"], description: "The worst of `circuits`, over the roles this worker is configured for." },
+    circuits: {
+      type: "object",
+      required: ["embed", "rerank", "generate", "documents"],
+      description: "`documents` is document embedding, kept apart from `embed`, which is query vectors.",
+      properties: {
+        embed: { type: "string", enum: ["closed", "open", "half_open"] },
+        rerank: { type: "string", enum: ["closed", "open", "half_open"] },
+        generate: { type: "string", enum: ["closed", "open", "half_open"] },
+        documents: { type: "string", enum: ["closed", "open", "half_open"] },
+      },
+    },
+    embedDisagrees: { type: "boolean", description: "This worker embedded the same text differently from another. Reported only: nothing acts on it." },
+    capabilities: { type: "array", items: { type: "string", enum: ["embed", "rerank", "generate"] } },
+    priority: { type: "integer" },
+    maxConcurrent: { type: "integer" },
+    embedModelCompatible: { type: "boolean", nullable: true, description: "False keeps this worker off embedding and tokens. Null until checked." },
+    rerankTransport: { type: "string", nullable: true },
+    lastHeartbeat: { type: "string", nullable: true },
+    inFlight: { type: "integer" },
+    queueDepth: { type: "number" },
+    calls: { type: "integer" },
+    errorRate: { type: "number", description: "Failed share of the last 100 calls." },
+    drained: { type: "boolean", description: "Taken out of rotation by `:drain`. It finishes what it has and gets no new calls. Held in memory: a restart puts it back." },
+  },
+} as const;

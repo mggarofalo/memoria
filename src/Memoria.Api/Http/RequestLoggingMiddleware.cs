@@ -46,7 +46,7 @@ public sealed partial class RequestLoggingMiddleware(RequestDelegate next, ILogg
 			{
 				LogServerError(logger, method, route, status, elapsedMs, traceId, remote, keyId);
 			}
-			else if (IsProbe(context.Request.Path))
+			else if (IsProbe(context.Request.Path) && keyId is null)
 			{
 				LogProbe(logger, method, route, status, elapsedMs, traceId, remote, keyId);
 			}
@@ -70,6 +70,11 @@ public sealed partial class RequestLoggingMiddleware(RequestDelegate next, ILogg
 		return endpoint?.Metadata.GetMetadata<IRouteDiagnosticsMetadata>()?.Route ?? "(no route)";
 	}
 
+	/// <summary>
+	/// An orchestrator's anonymous probes would fill the log, so they log at debug. A probe
+	/// with a key is a person asking, such as <c>memoria ready</c>, and its trace id has to be
+	/// findable, so it logs like any other request.
+	/// </summary>
 	private static bool IsProbe(PathString path)
 	{
 		return path.Equals("/health", StringComparison.OrdinalIgnoreCase) || path.Equals("/ready", StringComparison.OrdinalIgnoreCase);
