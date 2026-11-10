@@ -56,7 +56,7 @@ dotnet test Memoria.slnx                                  # test
 dotnet format Memoria.slnx --verify-no-changes            # format gate (CI parity)
 sh scripts/redaction-report.sh <corpus-dir>               # local release check: gitleaks and trufflehog over redacted output, counts only. Not for CI
 dotnet test tests/Memoria.Core.Tests --filter "Category=Timing"   # the redaction time budgets, uninstrumented. The coverage and mutation runs leave them out; Build & Test and the pre-commit hook run them on their own
-MEMORIA_REDACTION_REPORT=<dir> dotnet test tests/Memoria.Core.Tests --filter RedactionMeasurement   # opt-in: this repo's lines redaction changes, and sampled tokens caught; compare <dir>/redaction-report.txt before and after a rule change
+MEMORIA_REDACTION_REPORT=<dir> dotnet test tests/Memoria.Core.Tests --filter RedactionMeasurement   # opt-in: this repo's lines redaction changes, the import regression bar (samples drawn from each rule's own pattern), real-format provider tokens caught, and benign transcript lines changed; compare <dir>/redaction-report.txt before and after a rule change
 MEMORIA_WRITE_OPENAPI=1 dotnet test Memoria.slnx --filter OpenApiContract   # refresh src/Memoria.Api/openapi.json after an endpoint change
 npx --yes @stoplight/spectral-cli@6.17.0 lint --fail-severity warn src/Memoria.Api/openapi.json   # lint gate (CI parity)
 

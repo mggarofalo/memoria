@@ -1,0 +1,53 @@
+# Lines of ordinary transcript text that hold no credential and must come through redaction byte for byte.
+# A value is written as a placeholder, {hex:N}, {digits:N}, {uuid}, {base64:N} or {alnum:N}, filled in at run time,
+# so this file holds no value a scanner could take for a secret. Blank lines and lines starting with # are skipped.
+#
+# Commits, hashes and digests
+Merged as {hex:40} on main, then cherry-picked to the release branch.
+git log --oneline shows {hex:7} fix(core): end imported tokens at their real boundary
+- api.d.ts: `{hex:40}`
+"integrity": "sha512-{base64:86}=="
+github.com/stretchr/testify v1.9.0 h1:{base64:43}=
+image: ghcr.io/mggarofalo/memoria@sha256:{hex:64}
+The tarball's checksum is {hex:64}, which matches the release page.
+etag: W/"{hex:32}"
+# Ids of things
+session_id: "{uuid}"
+asana task: {digits:16}
+heroku app id: {uuid}
+plaid item_id: {hex:24}
+datadog trace_id: {hex:40}
+Request {uuid} failed with 503 after 30 s.
+X-Request-Id: {uuid}
+traceparent: 00-{hex:32}-{hex:16}-01
+The Stripe customer is cus_{alnum:14}, and the charge ch_{alnum:24}.
+arn:aws:iam::{digits:12}:role/memoria-deploy
+Slack channel C{alnum:10} and user U{alnum:10} are in the export.
+Twilio account AC{hex:32} sent the message.
+kubernetes uid: {uuid}
+The Notion page id is {hex:32}.
+Linear issue MEM-{digits:3} is linked from the pull request.
+"id": "{alnum:20}", "object": "chat.completion"
+# Prose about credentials, with no value
+Set GITHUB_TOKEN in the repository's secrets, and never paste it into an issue.
+The password policy needs 12 characters and one digit.
+Rotate the API key every 90 days; the old one stays valid for a day.
+Your token is shown once, so copy it before you close the dialog.
+Pass --password-stdin so the password is not in your shell history.
+export ANTHROPIC_API_KEY=
+api_key: ${OPENAI_API_KEY}
+token = os.environ["SLACK_BOT_TOKEN"]
+Authorization: Bearer <token>
+password: <your password here>
+The key is stored in the OS keyring, under the profile memoria.
+max_tokens: 4096, input_tokens: 1234, output_tokens: 567
+const tokenizer = new Tokenizer({ maxTokens: 8192 });
+# Encoded data that is not a secret
+data:image/png;base64,{base64:120}
+The fixture is {base64:44} in base64, a 32-byte block of zeros, once decoded.
+Content-MD5: {base64:22}==
+# Code that names secrets without holding one
+if (password.length < 12) throw new Error("too short");
+const secretName = `memoria/${env}/api-key`;
+SECRET_KEY = config("SECRET_KEY")
+private readonly string _tokenPath = Path.Combine(home, ".memoria", "token");

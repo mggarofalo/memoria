@@ -81,15 +81,28 @@ public sealed class RedactionPinTests
 		Assert.Null(new RedactionRule("y", new System.Text.RegularExpressions.Regex("a")).Literal);
 	}
 
-	[Theory]
-	[InlineData("A", "C")]
-	[InlineData("S", "K")]
-	public void Twilio_key_is_exactly_its_length(string first, string second)
+	[Fact]
+	public void Twilio_key_is_exactly_its_length()
 	{
-		string key = first + second + Synthetic.Hex(32, 1001);
+		string key = "S" + "K" + Synthetic.Hex(32, 1001);
 
 		Assert.Equal("[REDACTED:twilio-key]", Redactor.Redact(key).Text);
 		Assert.Equal(key + "z", Redactor.Redact(key + "z").Text);
+	}
+
+	/// <summary>An account's SID names the account, as a username does, and is no credential. Its auth token, next to it, is.</summary>
+	[Fact]
+	public void A_twilio_account_sid_stays_and_the_token_beside_it_goes()
+	{
+		string sid = "A" + "C" + Synthetic.Hex(32, 1002);
+		string token = Synthetic.Hex(32, 1003);
+
+		Assert.Equal(sid, Redactor.Redact(sid).Text);
+		Assert.Equal($"the account {sid} sent it", Redactor.Redact($"the account {sid} sent it").Text);
+		foreach (string separator in new[] { ":", " ", ", " })
+		{
+			Assert.Equal($"{sid}{separator}[REDACTED:twilio-auth-token]", Redactor.Redact(sid + separator + token).Text);
+		}
 	}
 
 	[Fact]

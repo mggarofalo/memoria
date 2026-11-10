@@ -70,11 +70,46 @@ internal static partial class CodeValues
 	/// <remarks>
 	/// Beside a span, any word of four letters or digits is taken for the secret, as <c>Summerpassword</c> in
 	/// <c>${PREFIX}Summerpassword</c>. A secret-sounding name with a literal beside its span is rarely clean code. Markup tags and
-	/// upper-case names such as <c>MEMORIA_WORKER_TOKEN_FILE</c> are not words here, because they name things.
+	/// upper-case names such as <c>MEMORIA_WORKER_TOKEN_FILE</c> are not words here, because they name things. Words that are a path's
+	/// segments, as in <c>memoria/${env}/api-key</c>, are a place, so they are code too; see <see cref="IsPathOfWords"/>.
 	/// </remarks>
 	public static bool IsInterpolationOnly(string value)
 	{
-		return Remainder(value) is string rest && !HoldsSecretLikePiece(rest) && !HoldsWord(rest);
+		return Remainder(value) is string rest && !HoldsSecretLikePiece(rest) && (!HoldsWord(rest) || IsPathOfWords(rest));
+	}
+
+	/// <summary>
+	/// A template's text, its spans taken out, that divides at <c>/</c> into segments of words, such as <c>memoria/ /api-key</c>: a path, a
+	/// key's name in a vault, or a route. Each segment's parts, between <c>-</c>, <c>_</c>, <c>.</c> and <c>~</c>, must be words, maybe
+	/// capitalised, with at most two digits after them, or a number of at most four, and at most 20 characters, so a random segment such
+	/// as <c>kd8sj2nx…</c> or <c>Pr0dP4ss</c> beside a span is still taken for a secret.
+	/// </summary>
+	internal static bool IsPathOfWords(string rest)
+	{
+		if (!rest.Contains('/', StringComparison.Ordinal))
+		{
+			return false;
+		}
+
+		// One word after a slash, as in ${PREFIX}/Summerpassword, is no path: it takes two segments with words in them.
+		string[] segments = rest.Split('/');
+		if (segments.Count(static segment => segment.Trim().Length > 0) < 2)
+		{
+			return false;
+		}
+
+		foreach (string segment in segments)
+		{
+			foreach (string part in segment.Split(['-', '_', '.', '~', ' '], StringSplitOptions.RemoveEmptyEntries))
+			{
+				if (part.Length > 20 || !PathWord().IsMatch(part))
+				{
+					return false;
+				}
+			}
+		}
+
+		return true;
 	}
 
 	/// <summary>
@@ -357,6 +392,10 @@ internal static partial class CodeValues
 		int close = text.IndexOf('>', 1, Math.Min(LongestTagName + 1, text.Length - 1));
 		return close > 1 && text.AsSpan(1, close - 1).IndexOfAnyExceptInRange('a', 'z') < 0 ? close + 1 : 0;
 	}
+
+	/// <summary>A path's word: letters, maybe capitalised, with at most two digits after them, or a number of at most four.</summary>
+	[GeneratedRegex(@"^(?:[A-Za-z]?[a-z]+[0-9]{0,2}|[0-9]{1,4})$")]
+	private static partial Regex PathWord();
 
 	[GeneratedRegex(@"^(?:\^|~|[<>]=?|=)v?[0-9]+(?:\.(?:[0-9]+|x|\*)){1,3}(?:-[a-z]+(?:\.?[0-9]+)?)?$", RegexOptions.CultureInvariant)]
 	private static partial Regex VersionRange();

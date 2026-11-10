@@ -41,7 +41,6 @@ public sealed class RedactionGapTests
 			{ "Twilio auth token by name", "twilio auth token: " + hex32 },
 			{ "Twilio auth token by name", "\"twilioAuthToken\": \"" + hex32 + "\"" },
 			{ "Twilio auth token by name", "twilio_token = '" + hex32 + "'" },
-			{ "Twilio SID and token together", "AC" + Synthetic.Hex(32, 702) + ":" + hex32 },
 			{ "mysql with an attached password", "mysql -uroot -p" + password + " db" },
 			{ "mysql with an attached password", "mysql -h db.internal -u app -p" + password },
 			{ "mysql with an attached password", "$ mysql -p" + password },

@@ -493,8 +493,12 @@ internal static class RedactionRules
 	public static readonly IReadOnlyList<RedactionRule> ProviderTokens =
 	[
 		Provider("sendgrid-key", "SG.", @"SG\.[A-Za-z0-9_\-]{16,}\.[A-Za-z0-9_\-]{16,}"),
-		Provider("twilio-key", null, @"(?:AC|SK)[0-9a-f]{32}" , fixedLength: true),
+		// An API key's SK. An account's SID, AC and 32 hex, names the account and is no credential, as a publishable key is not.
+		Provider("twilio-key", null, @"SK[0-9a-f]{32}", fixedLength: true),
 		Provider("mailgun-key", "key-", @"key-[0-9a-f]{32}", fixedLength: true, strictLeft: true),
+		// New Relic's keys by their own prefixes, which upstream knows only after a name such as newrelic: a user key NRAK and an admin
+		// key NRAA, each with 27 characters, an insert key NRII with 32, a browser key NRJS with 19 hex, and a license key ending NRAL.
+		Provider("newrelic-key", "NR", @"NRA[AK]-[A-Za-z0-9]{27}|NRII-[A-Za-z0-9\-]{32}|NRJS-[a-f0-9]{19}|[a-f0-9]{36}NRAL", fixedLength: true),
 		Provider("digitalocean-token", "_v1_", @"do[por]_v1_[0-9a-f]{40,}"),
 		Provider("vercel-token", "vcp_", @"vcp_[A-Za-z0-9]{24,}"),
 		Provider("supabase-token", "sbp_", @"sbp_[A-Za-z0-9]{32,}"),
@@ -545,10 +549,13 @@ internal static class RedactionRules
 		Provider("gitlab-feature-flag-token", "glffct-", @"glffct-[A-Za-z0-9_\-]{20,}"),
 	];
 
-	/// <summary>A 32-digit hex value on a line that names Twilio, however it is written. Alone it is only a hash, so the name is what makes it a credential.</summary>
+	/// <summary>
+	/// A 32-digit hex value on a line that names Twilio, however it is written, or just after an account's SID, as in <c>AC…:token</c> for
+	/// basic auth. Alone it is only a hash, so the name or the SID is what makes it a credential. The SID itself stays.
+	/// </summary>
 	public static readonly RedactionRule TwilioAuthToken = new(
 		"twilio-auth-token",
-		Pattern(@"(?i:twilio)[^\r\n]{0,60}?[^A-Za-z0-9](?<secret>[0-9a-fA-F]{32})(?:$|[^A-Za-z0-9])"),
+		Pattern(@"(?i:twilio)[^\r\n]{0,60}?[^A-Za-z0-9](?<secret>[0-9a-fA-F]{32})(?:$|[^A-Za-z0-9])|(?:^|[^A-Za-z0-9])AC[0-9a-f]{32}[:,;=/| \t]{1,3}(?<secret>[0-9a-fA-F]{32})(?:$|[^A-Za-z0-9])"),
 		c => !ValueShapes.IsPlaceholder(c.Value));
 
 	/// <summary>Percent-encoded text whose decoded form holds a credential, such as a token with <c>%5F</c> for its underscore. See <see cref="EncodedTokens"/>.</summary>
