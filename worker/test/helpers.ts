@@ -42,8 +42,12 @@ export const handOverPort: SpawnFn = (command, args, options) => {
     if (!child.connected) return void held.close();
     child.send(message, handle, () => held.close());
   };
+  // A failed bind means something else holds the port. Once bound, any error on the held socket is moot, as it closes at the handover.
   held.once("error", () => tell({ listen: "port" }));
-  held.listen(port, "127.0.0.1", () => tell({ listen: "handle" }, held));
+  held.listen(port, "127.0.0.1", () => {
+    held.on("error", () => {});
+    tell({ listen: "handle" }, held);
+  });
   return child;
 };
 
