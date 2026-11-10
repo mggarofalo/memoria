@@ -5,6 +5,7 @@
  * Opt in with MEMORIA_QMD_INTEGRATION=1 (CI sets it; `npm test` does not).
  */
 import assert from "node:assert/strict";
+import { ROOT_MARKER } from "../src/collection-roots.ts";
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
@@ -95,9 +96,18 @@ test("running the first-run command again with other names, fewer or in another 
   const final = snapshot(dbPath);
   assert.deepEqual(final.collections.map((c) => c.name), ["alpha", "beta", "gamma"]);
   assert.ok(existsSync(path.join(corpus, "gamma")));
+  for (const name of ["alpha", "beta", "gamma"]) assert.ok(existsSync(path.join(corpus, name, ROOT_MARKER)), `${name}'s new root has the sidecar's marker`);
+  // A folder already there is left unmarked, as it may be the one under a mount that is down; one already marked is no failure.
+  await mkdir(path.join(corpus, "delta"));
+  await mkdir(path.join(corpus, "epsilon"));
+  await writeFile(path.join(corpus, "epsilon", ROOT_MARKER), "marked before\n");
+  const existing = init(env, "delta", "epsilon");
+  assert.equal(existing.status, 0, existing.stderr);
+  assert.equal(existsSync(path.join(corpus, "delta", ROOT_MARKER)), false);
+  assert.equal(readFileSync(path.join(corpus, "epsilon", ROOT_MARKER), "utf8"), "marked before\n");
   assert.equal(readFileSync(path.join(configHome, "qmd", "index.yml"), "utf8"), config, "the config file is not read or written");
   const again = init(env, "beta");
-  assert.match(again.stdout, /holds: beta, alpha, gamma\n/);
+  assert.match(again.stdout, /holds: beta, alpha, delta, epsilon, gamma\n/);
   assert.match(again.stdout, /added: none; already there, left as they are: beta/);
 
   // A recorded root elsewhere is kept and named, and a missing one is reported.

@@ -214,6 +214,39 @@ The API runs with a 1 GiB heap (`DOTNET_GCHeapHardLimit`), the least ingest is s
 
 Keep them on a local disk, as SQLite's WAL mode does not work over a network share. A volume's name carries the compose project's, `memoria` here; `docker volume ls` shows it.
 
+### What a delete removes, and when
+
+A delete (`DELETE /v1/documents`, or a session that replaces its own parts) takes the file out of the corpus at once, and every read route stops returning it at once. The index follows at the next scan, which the delete queues. The scan runs once the debounce window ends, or at the next start if shutdown comes first. That scan marks the document's row inactive, which takes it out of the full-text index's own copy of the text. At its end, one transaction removes:
+
+- the document's row;
+- its text, in `content`;
+- its chunks' vectors, in `content_vectors` and `vectors_vec`;
+- any record that it was set aside from embedding.
+
+Text and vectors are kept by content, so when another document holds the same text word for word, that text and its vectors stay, as they are that document's too.
+
+A collection the scan found with no document at all needs one more check, as that is also what a mount that went away looks like. Removing everything then would cost every vector of the collection a re-embed when it comes back. So the sidecar keeps a marker file, `.memoria-root`, in each collection root: `init-index` writes it into each root folder it creates, never into one that was already there, and every scan writes it into each root that holds a document. QMD indexes only `.md` files, so it is never a document, and a root holding only the marker still counts as empty for a first ingest. Then:
+
+- **The folder is missing, or cannot be read.** Nothing of the collection is removed, and each scan logs a warning naming it, until the folder is back.
+- **The folder is there, readable, and has its marker.** Its documents really were deleted, and they are removed as any other delete is, the last one included.
+- **The folder is there and readable but has no marker.** This is what the empty folder under a mount that failed looks like, so nothing is removed, and each scan logs a warning naming the collection and the marker. A root the sidecar never saw holding a document, from before the marker existed, is in the same state: if its documents really were all deleted, put an empty `.memoria-root` in it, and the next scan removes them.
+
+The marker is the only signal, so two things defeat it:
+
+- **A mount that fails underneath a marked root,** as when a marked folder holds a separate mount for its subfolders, is not detected.
+- **A write while the mount is down.** Ingest creates a missing root and writes into it, and the next scan then marks that folder. If the mount comes back over it and later fails again, that marked folder underneath counts as emptied by deletes. Keep the corpus mounted before the sidecar starts, as compose does with a volume.
+
+Deleting the marker turns the safeguard off for that root, and makes nothing unsafe.
+
+A **busy index**, as when a `qmd` run outside the sidecar holds it, also waits: nothing is removed, a warning is logged, and the next scan tries again.
+
+The sidecar writes with SQLite's `secure_delete` on, so what it deletes is overwritten in the file, not left in free pages. After a scan that removed anything, it folds the write-ahead log into the file and empties it, so old versions of those pages do not linger there either. Some places can still hold deleted text for a while:
+
+- **The full-text index's word lists.** FTS5 keeps a removed document's words, with their positions, so their order can be read back, until it merges the segments that hold them. It merges segments of like size as more is written, so a large old segment can keep them for a long time. `qmd cleanup` merges them all.
+- **The write-ahead log, when the empty fails.** A reader in the middle of a long read stops the log from being emptied, and its frames then stay until SQLite reuses them.
+- **An index written before this.** Free pages left by a version that did not use `secure_delete`, or by a `qmd` run outside the sidecar, keep what they held until those pages are reused. `qmd cleanup`, which vacuums the file, or a rebuild of the index removes them.
+- **Backups.** A backup taken before the scan holds the document as it was, until restic's `forget` and `prune` drop that snapshot.
+
 ## Backups
 
 [`deploy/backup.yaml`](../deploy/backup.yaml) backs up everything in [Volumes](#volumes) with [restic](https://restic.net), from its official image, pinned by digest. It is used beside `compose.yaml`, with the services running:

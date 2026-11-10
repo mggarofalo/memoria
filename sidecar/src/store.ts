@@ -4,6 +4,8 @@ import type { EmbedSummary, UpdateSummary } from "./jobs.ts";
 import type { BreakerOptions } from "./llm/pool.ts";
 import type { RemoteLlm } from "./llm/remote.ts";
 import { requireSdkFixes, type SdkStoreFunctions } from "./sdk-check.ts";
+import { collectionsToKeep, type CollectionRoot } from "./collection-roots.ts";
+import { purgeDeleted, removedAny, truncateLog } from "./purge.ts";
 import { withShortBusyTimeout } from "./sqlite-busy.ts";
 import type { DeadLetter, DegradedReason, EmbeddingResult, LlmCallSink, LlmHealth, LlmSurface, PoolLoad, PoolWorkerConfig, Queryable, RerankDocument, RerankResult, WorkerView } from "./llm/types.ts";
 import type { SdkDb, SdkHandles, WiredRemote } from "./llm/wire.ts";
@@ -442,12 +444,15 @@ export async function openBackend(options: OpenBackendOptions): Promise<OpenedBa
   const setAside = (): number => wired?.deadLetters().length ?? 0;
   const active = (remote ?? llm) as unknown as LlmSurface;
   const db = store.internal.db;
+  // A row deleted, a deleted document's text included, is overwritten on disk, not left in free pages.
+  db.exec("PRAGMA secure_delete = ON");
   const headsStatement = db.prepare(
     `SELECT d.collection AS collection, d.path AS path, substr(c.doc, 1, ?) AS head
      FROM documents d JOIN content c ON c.hash = d.hash
      WHERE d.active = 1`,
   );
   // store.listCollections() drops this column. The integration test pins it to the SDK.
+  const rootsStatement = db.prepare("SELECT name, path FROM store_collections");
   const ignoreStatement = db.prepare(`SELECT ignore_patterns AS patterns FROM store_collections WHERE name = ?`);
 
   const runSearch = async (o: BackendSearchOptions): Promise<SearchHit[]> => {
@@ -508,6 +513,10 @@ export async function openBackend(options: OpenBackendOptions): Promise<OpenedBa
   getDefaultCollectionNames: () => store.getDefaultCollectionNames(),
   update: async (o) => {
     const r = await store.update(o.collections ? { collections: o.collections } : {});
+    // What the scan found deleted leaves nothing behind it: see purge.ts. Any scan can find one.
+    const purged = purgeDeleted(db as never, () => collectionsToKeep(db as never, rootsStatement.all() as CollectionRoot[], (message) => options.onLlmWarning?.(message)));
+    if (purged === null) options.onLlmWarning?.("The index was busy, so what deleted documents left in it waits for the next scan to remove it.");
+    if (removedAny(purged)) truncateLog(db as never);
     return {
       collections: r.collections,
       indexed: r.indexed,
