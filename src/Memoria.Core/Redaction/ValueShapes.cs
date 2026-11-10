@@ -78,7 +78,8 @@ internal static class ValueShapes
 			}
 		}
 
-		return name.Length <= 40;
+		// The longest rule name is an imported one, gitleaks- and a 43-character id.
+		return name.Length <= 64;
 	}
 
 	/// <summary>The value plus the closer of its last unclosed opener, when one follows on the same line. A quoted value is already whole.</summary>

@@ -16,8 +16,11 @@ namespace Memoria.Core.Redaction;
 /// </summary>
 internal static class RedactionRules
 {
-	/// <summary>Per-call cap. The engine is linear, so this only trips on pathological machine load, and tripping refuses the document.</summary>
-	private static readonly TimeSpan MatchTimeout = TimeSpan.FromSeconds(120);
+	/// <summary>
+	/// Per-call cap. The engine is linear, so this only trips on pathological machine load, and tripping refuses the document.
+	/// A property, not a field, so <see cref="GitleaksRules"/> can build patterns while this class is still initializing.
+	/// </summary>
+	private static TimeSpan MatchTimeout => TimeSpan.FromSeconds(120);
 
 	/// <summary>
 	/// What may precede a token. Plain <c>\b</c> would miss the most common
@@ -461,7 +464,7 @@ internal static class RedactionRules
 		Provider("plane-token", "plane_api_", @"plane_api_[A-Za-z0-9]{24,}"),
 		Provider("age-secret-key", "AGE-SECRET-KEY-1", @"AGE-SECRET-KEY-1[A-Z0-9]{40,}"),
 		Provider("vault-token", null, @"hv[sbr]\.[A-Za-z0-9_\-]{20,}"),
-		Provider("databricks-token", "dapi", @"dapi[0-9a-f]{32}", fixedLength: true),
+		Provider("databricks-token", "dapi", @"dapi[0-9a-f]{32}(?:-[0-9])?", fixedLength: true),
 		Provider("shopify-token", "shp", @"shp(?:at|ss|ca|pa)_[0-9a-fA-F]{32}"),
 		Provider("tailscale-key", "tskey-", @"tskey-[A-Za-z0-9\-]{20,}"),
 		Provider("atlassian-token", "ATATT3", @"ATATT3[A-Za-z0-9_=\-]{32,}"),
@@ -470,7 +473,8 @@ internal static class RedactionRules
 		Provider("langsmith-key", "lsv2_", @"lsv2_[A-Za-z0-9_]{32,}"),
 		Provider("onepassword-token", "ops_", @"ops_[A-Za-z0-9_\-]{32,}"),
 		Provider("cloudflare-token", "cfut_", @"cfut_[A-Za-z0-9_\-]{32,}"),
-		Provider("sentry-token", "sntrys_", @"sntrys_[A-Za-z0-9_\-]{32,}"),
+		// An organization token's body is base64 with a second base64 part after an underscore, so + / = are inside it.
+		Provider("sentry-token", "sntrys_", @"sntrys_[A-Za-z0-9_+/=\-]{32,}"),
 		Provider("grafana-token", null, @"(?:glsa_|glc_)[A-Za-z0-9_+/=\-]{32,}"),
 		Provider("figma-token", "figd_", @"figd_[A-Za-z0-9_\-]{32,}"),
 		Provider("tavily-key", "tvly-", @"tvly-[A-Za-z0-9_\-]{24,}"),
@@ -595,6 +599,7 @@ internal static class RedactionRules
 		SqlPassword,
 		SecretFlag,
 		SecretAssignment,
+		.. GitleaksRules.All,
 		HexEncodedToken,
 		UnicodeEscapedToken,
 		PercentEncodedToken,
@@ -618,6 +623,7 @@ internal static class RedactionRules
 		GitLabToken,
 		MemoriaApiKey,
 		.. ProviderTokens,
+		.. GitleaksRules.SelfEvident,
 		HexEncodedToken,
 		UnicodeEscapedToken,
 		PercentEncodedToken,

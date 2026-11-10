@@ -33,6 +33,8 @@ public sealed class Redactor : IRedactor
 	private readonly IReadOnlyList<RedactionRule> _rules;
 	private readonly IReadOnlyList<RedactionRule> _lineRules;
 	private readonly IReadOnlyList<RedactionRule> _tokenRules;
+	private readonly IReadOnlyList<RedactionRule> _backstopRules;
+	private readonly IReadOnlyList<RedactionRule> _ownRules;
 	private readonly TimeSpan _budget;
 
 	/// <summary>Creates a redactor over the built-in rules.</summary>
@@ -46,7 +48,9 @@ public sealed class Redactor : IRedactor
 	{
 		_rules = rules;
 		_lineRules = [.. rules.Where(static rule => rule.LinesMatter)];
-		_tokenRules = [.. rules.Where(static rule => !rule.LinesMatter)];
+		_tokenRules = [.. rules.Where(static rule => !rule.LinesMatter && !rule.Backstop)];
+		_backstopRules = [.. rules.Where(static rule => rule.Backstop)];
+		_ownRules = [.. rules.Where(static rule => !rule.Backstop)];
 		_budget = budget;
 	}
 
@@ -108,11 +112,13 @@ public sealed class Redactor : IRedactor
 	{
 		Stopwatch clock = Stopwatch.StartNew();
 		ViewBuffers buffers = new();
-		foreach (bool join in new[] { false, true })
+
+		// With no wrapped line the joined view is the plain one, which the first round has already read with every rule.
+		foreach (bool join in LineWraps.Any(text) ? new[] { false, true } : [false])
 		{
 			Dictionary<string, int> unused = [];
 			ViewCache views = new(join, buffers);
-			foreach (RedactionRule rule in join ? _tokenRules : _rules)
+			foreach (RedactionRule rule in join ? _tokenRules.Concat(_backstopRules) : _rules)
 			{
 				GateHit? hit = FindGuarded(rule, text, views, clock);
 				if (hit is not null)
@@ -164,13 +170,22 @@ public sealed class Redactor : IRedactor
 	/// <summary>
 	/// Rules that read lines first. Then the view with wrapped lines joined, while a wrapped token is still
 	/// whole: replacing its first line alone would move the line off its column and strand the tail. Then every
-	/// rule on the noise-free view, and quoting.
+	/// rule of ours on the noise-free view. Then the imported rules, once every rule of ours has had both views: on the joined view
+	/// first, so a wrapped token only they know goes whole, then on the plain one, for a token a wrong join hid. Then quoting.
 	/// </summary>
 	private string RunPass(string text, bool quoteFrontmatter, Stopwatch clock, Dictionary<string, int> counts, ViewBuffers buffers)
 	{
 		string current = Sweep(_lineRules, text, joinWrappedLines: false, clock, counts, buffers);
 		current = Sweep(_tokenRules, current, joinWrappedLines: true, clock, counts, buffers);
-		current = Sweep(_rules, current, joinWrappedLines: false, clock, counts, buffers);
+		current = Sweep(_ownRules, current, joinWrappedLines: false, clock, counts, buffers);
+
+		// With no wrapped line the joined view is the plain one, and reading it twice would only double the cost.
+		if (LineWraps.Any(current))
+		{
+			current = Sweep(_backstopRules, current, joinWrappedLines: true, clock, counts, buffers);
+		}
+
+		current = Sweep(_backstopRules, current, joinWrappedLines: false, clock, counts, buffers);
 		string quoted = quoteFrontmatter ? YamlFrontmatter.QuotePlaceholders(current) : current;
 		return quoted == text ? text : quoted;
 	}
