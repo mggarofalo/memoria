@@ -1797,7 +1797,7 @@
     {
       "id": "perplexity-api-key",
       "description": "Detected a Perplexity API key, which could lead to unauthorized access to Perplexity AI services and data exposure.",
-      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>pplx-[a-zA-Z0-9]{48})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z|\\b)",
+      "pattern": "(?:^|[^0-9A-Za-z_])(?<secret>pplx-[a-zA-Z0-9]{48})(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z|(?:[^0-9A-Za-z_]|\\z))",
       "upstreamPattern": "\\b(pplx-[a-zA-Z0-9]{48})(?:[\\x60'\"\\s;]|\\\\[nr]|$|\\b)",
       "keywords": [
         "pplx-"
@@ -2300,7 +2300,7 @@
     {
       "id": "sourcegraph-access-token",
       "description": "Sourcegraph is a code search and navigation engine.",
-      "pattern": "(?i)(?:^|[^0-9A-Za-z_])(?<secret>\\b(?:sgp_(?:[a-fA-F0-9]{16}|local)_[a-fA-F0-9]{40}|sgp_[a-fA-F0-9]{40}|[a-fA-F0-9]{40})\\b)(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?i)(?:^|[^0-9A-Za-z_])(?<secret>(?:sgp_(?:[a-fA-F0-9]{16}|local)_[a-fA-F0-9]{40}|sgp_[a-fA-F0-9]{40}|[a-fA-F0-9]{40}))(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "(?i)\\b(\\b(sgp_(?:[a-fA-F0-9]{16}|local)_[a-fA-F0-9]{40}|sgp_[a-fA-F0-9]{40}|[a-fA-F0-9]{40})\\b)(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "sgp_",

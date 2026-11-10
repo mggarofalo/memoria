@@ -413,14 +413,46 @@ public sealed class Re2Translator
 	private void MarkBoundaries(HashSet<int> secret, int first, bool leading, bool trailing)
 	{
 		Capture[] groups = [.. _captures.Where(capture => secret.Contains(capture.Token))];
-		if (leading && groups.Any(capture => capture.Token == first + 1))
+		bool lead = leading && groups.Any(capture => capture.Token == first + 1);
+		bool trail = trailing && groups.Any(capture => capture.CloseToken == _output.Count - 2);
+		if (lead)
 		{
 			_output[first] = "(?:^|[^0-9A-Za-z_])";
 		}
 
-		if (trailing && groups.Any(capture => capture.CloseToken == _output.Count - 2))
+		if (trail)
 		{
 			_output[^1] = "(?:[^0-9A-Za-z_]|\\z)";
+		}
+
+		foreach (Capture group in groups)
+		{
+			DropInnerBoundaries(group, lead, trail);
+		}
+	}
+
+	/// <summary>
+	/// A <c>\b</c> just inside the secret, as in <c>\b(\bsgp_…\b)</c>, is Unicode-aware too, and would undo an ASCII boundary outside it.
+	/// It goes when the outside already gives the boundary: a converted <c>\b</c>, or a final terminator, whose branches are all
+	/// delimiters. A <c>\b</c> branch of that terminator becomes an ASCII one.
+	/// </summary>
+	private void DropInnerBoundaries(Capture group, bool lead, bool trail)
+	{
+		if (lead && _output[group.Token + 1] == "\\b")
+		{
+			_output[group.Token + 1] = "";
+		}
+
+		int terminator = Terminator();
+		bool terminated = terminator >= 0 && terminator == group.CloseToken + 1;
+		for (int i = terminator + 1; terminated && i < _output.Count - 1; i++)
+		{
+			_output[i] = _output[i] == "\\b" ? "(?:[^0-9A-Za-z_]|\\z)" : _output[i];
+		}
+
+		if ((trail || terminated) && _output[group.CloseToken - 1] == "\\b")
+		{
+			_output[group.CloseToken - 1] = "";
 		}
 	}
 

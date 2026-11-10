@@ -144,6 +144,49 @@ public sealed class GitleaksRuleDataTests
 		Assert.DoesNotMatch(pattern, token + "x");
 	}
 
+	/// <summary>
+	/// A boundary or terminator outside the secret takes a character, so the data assumes the next search starts where the secret
+	/// ended, not where the match did, as the engine's does. Then the separator between two tokens is read again.
+	/// </summary>
+	[Theory]
+	[InlineData("aws-access-token", " ")]
+	[InlineData("aws-access-token", ",")]
+	[InlineData("aws-access-token", "\n")]
+	[InlineData("stripe-access-token", " ")]
+	[InlineData("stripe-access-token", "\n")]
+	[InlineData("perplexity-api-key", " ")]
+	public void Tokens_one_separator_apart_are_each_found_when_the_search_resumes_at_the_secret_s_end(string id, string separator)
+	{
+		string[] tokens = id switch
+		{
+			"aws-access-token" => ["AK" + "IAQWERTYUIOPASDFGH", "AK" + "IAZXCVBNMLKJHGFDSQ"],
+			"stripe-access-token" => ["sk" + "_live_51Hq2xYzAbCdEfGhIjKlMnOp", "sk" + "_live_61Zq2xYzAbCdEfGhIjKlMnOq"],
+			_ => ["pp" + "lx-" + Synthetic.Body(48, 4102), "pp" + "lx-" + Synthetic.Body(48, 4103)],
+		};
+		Regex pattern = RedactionRules.Pattern(GitleaksRuleData.BuiltIn.Rules.Single(rule => rule.Id == id).Pattern);
+		string text = string.Join(separator, tokens);
+
+		List<string> found = [];
+		for (Match match = pattern.Match(text); match.Success; match = pattern.Match(text, match.Groups["secret"].Index + match.Groups["secret"].Length))
+		{
+			found.Add(match.Groups["secret"].Value);
+		}
+
+		Assert.Equal(tokens, found);
+	}
+
+	/// <summary>
+	/// A <c>\b</c> left in a pattern is Unicode-aware, so it is allowed only away from the secret's edges, where it reads a keyword
+	/// or a command name. Any new one is a decision to make, not an accident.
+	/// </summary>
+	[Fact]
+	public void Only_these_rules_keep_a_unicode_word_boundary()
+	{
+		string[] kept = [.. GitleaksRuleData.BuiltIn.Rules.Where(static rule => rule.Pattern.Contains(@"\b", StringComparison.Ordinal)).Select(static rule => rule.Id).Order(StringComparer.Ordinal)];
+
+		Assert.Equal(["atlassian-api-token", "curl-auth-header", "curl-auth-user", "openai-api-key", "sidekiq-sensitive-url"], kept);
+	}
+
 	[Fact]
 	public void A_token_that_ends_with_a_terminator_does_not_take_it()
 	{

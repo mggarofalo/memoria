@@ -52,6 +52,8 @@ public sealed class Re2TranslatorTests
 	[InlineData(@"key=\b(x)", @"key=\b(?<secret>x)", 0)]
 	[InlineData(@"\ba|b\b", @"\ba|b\b", 0)]
 	[InlineData(@"\bA[0-9]{4}", @"(?:^|[^0-9A-Za-z_])(?<secret>A[0-9]{4})", 0)]
+	[InlineData(@"\b(\bsgp_[a-f]{4}\b)(?:[;]|$)", @"(?:^|[^0-9A-Za-z_])(?<secret>sgp_[a-f]{4})(?:[;]|\z)", 0)]
+	[InlineData(@"(pplx-[a-z]{4})(?:[;]|$|\b)", @"(?<secret>pplx-[a-z]{4})(?:[;]|\z|(?:[^0-9A-Za-z_]|\z))", 0)]
 	public void The_secret_is_the_group_upstream_reports(string re2, string dotnet, int secretGroup)
 	{
 		Assert.Equal(dotnet, Re2Translator.TranslateRule(re2, secretGroup));
