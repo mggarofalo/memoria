@@ -712,7 +712,23 @@ func TestACompressedThreadOverTheLimitIsNamed(t *testing.T) {
 	if code != apperr.ExitGeneric || summary.TooLarge != 1 || !strings.Contains(f.h.stdout.String(), "transcriptTooLarge") {
 		t.Fatalf("code = %d, summary = %+v", code, summary)
 	}
-	checkThreadProblem(t, report, subagentID, strconv.Itoa(len(sub))+" bytes, over the "+limit+" byte limit")
+	checkThreadProblem(t, report, subagentID, "more than "+limit+" bytes decompressed, over the limit")
+	// On --accept-uncounted, one too large to send is not counted as sent on the owner's word.
+	writeFile(t, f.big, strings.Replace(mustRead(t, f.big), "sub done", "sub done, and text no thread holds", 1))
+	summary, _, report = f.run(t, nil, "--codex-sessions", archived, "--max-session-bytes", limit, "--accept-uncounted")
+	if summary.TooLarge != 1 || summary.AcceptedUncounted != 0 || strings.Contains(f.h.stdout.String(), "on your word") {
+		t.Fatalf("summary = %+v", summary)
+	}
+	checkThreadProblem(t, report, subagentID, "more than "+limit+" bytes decompressed, over the limit")
+}
+
+func mustRead(t *testing.T, file string) string {
+	t.Helper()
+	data, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
 }
 
 func TestASubagentThreadThatCannotBeReadStopsItsExport(t *testing.T) {

@@ -287,6 +287,10 @@ func (g *rerendering) match(root *os.Root, name string, transcripts *migrate.Tra
 // check sends nothing a transcript cannot fully stand in for. An over-cap export was never stored, so the server cannot refuse a
 // shorter transcript for it: this is the only place that sees those messages would be lost.
 func (g *rerendering) check(root *os.Root, item rerenderItem, exports *sessionExports, transcripts *migrate.Transcripts) {
+	// Sized first, so a transcript too large to send is not read whole only to be turned away.
+	if !g.fitsUpload(item, []migrate.Thread{{ID: item.sessionID, File: item.transcript}}) {
+		return
+	}
 	messages, err := migrate.TranscriptMessages(item.transcript)
 	count := int64(len(messages))
 	switch {
@@ -320,14 +324,14 @@ func (g *rerendering) checkUncounted(root *os.Root, item rerenderItem, exports *
 			g.problem(item.name, migrate.RerenderUncounted, "")
 			return
 		}
+		item.threads = withoutMessages(family, item.transcript)
+		if !g.fitsUpload(item, othersOf(item.threads, item.transcript)) {
+			return
+		}
 		if !covered {
 			g.summary.AcceptedUncounted++
 			g.problem(item.name, migrate.RerenderAcceptedUncounted, "")
 		}
-		item.threads = withoutMessages(family, item.transcript)
-	}
-	if !g.fitsUpload(item) {
-		return
 	}
 	item.newest = exports.newest
 	g.summary.Threads += len(item.threads)
@@ -337,9 +341,9 @@ func (g *rerendering) checkUncounted(root *os.Root, item rerenderItem, exports *
 // fitsUpload says whether every thread of a document is within the server's limit on one session upload, counted as it would be
 // sent, decompressed. One over it is not sent, and nor is the rest of the document: the server would refuse it whole, so its
 // export would still be the only copy of its messages. Sending it anyway would only be cut off.
-func (g *rerendering) fitsUpload(item rerenderItem) bool {
-	for _, thread := range item.threads {
-		size, err := migrate.TranscriptSize(thread.File)
+func (g *rerendering) fitsUpload(item rerenderItem, threads []migrate.Thread) bool {
+	for _, thread := range threads {
+		size, exact, err := migrate.TranscriptSizeUpTo(thread.File, g.maxSessionBytes)
 		if err != nil {
 			g.summary.Unreadable++
 			g.threadProblem(item.name, migrate.RerenderUnreadable, "transcript", otherThread(item, thread.ID))
@@ -347,11 +351,30 @@ func (g *rerendering) fitsUpload(item rerenderItem) bool {
 		}
 		if size > g.maxSessionBytes {
 			g.summary.TooLarge++
-			g.threadProblem(item.name, migrate.RerenderTooLarge, fmt.Sprintf("%d bytes, over the %d byte limit", size, g.maxSessionBytes), otherThread(item, thread.ID))
+			g.threadProblem(item.name, migrate.RerenderTooLarge, tooLargeReason(size, exact, g.maxSessionBytes), otherThread(item, thread.ID))
 			return false
 		}
 	}
 	return true
+}
+
+// tooLargeReason says how large, for the report. A compressed one is decompressed only as far as one byte past the limit.
+func tooLargeReason(size int64, exact bool, limit int64) string {
+	if exact {
+		return fmt.Sprintf("%d bytes, over the %d byte limit", size, limit)
+	}
+	return fmt.Sprintf("more than %d bytes decompressed, over the limit", limit)
+}
+
+// othersOf is a document's threads other than the session's own.
+func othersOf(threads []migrate.Thread, own string) []migrate.Thread {
+	var others []migrate.Thread
+	for _, thread := range threads {
+		if thread.File != own {
+			others = append(others, thread)
+		}
+	}
+	return others
 }
 
 // otherThread is a thread's id for the report, or "" for the session's own.

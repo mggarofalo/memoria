@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -160,6 +161,23 @@ func TestATranscriptIsSizedAsItIsSent(t *testing.T) {
 		if _, err := TranscriptSize(file); err == nil {
 			t.Fatalf("%s was sized", filepath.Base(file))
 		}
+	}
+}
+
+func TestACompressedTranscriptIsDecompressedOnlyPastTheLimit(t *testing.T) {
+	text := rollout(testID, "", "2026-09-12T10:15:09Z", strings.Repeat("words ", 50000))
+	packed := put(t, filepath.Join(t.TempDir(), "rollout-"+testID+".jsonl.zst"), compressed(t, text))
+	for limit, want := range map[int64][2]any{int64(len(text)): {int64(len(text)), true}, int64(len(text)) - 1: {int64(len(text)), false}, 10: {int64(11), false}} {
+		size, exact, err := TranscriptSizeUpTo(packed, limit)
+		if err != nil || size != want[0] || exact != want[1] {
+			t.Errorf("limit %d: %d %v %v, want %v", limit, size, exact, err, want)
+		}
+	}
+	if size, exact, err := TranscriptSizeUpTo(packed, math.MaxInt64); err != nil || !exact || size != int64(len(text)) {
+		t.Fatalf("no limit: %d %v %v", size, exact, err)
+	}
+	if _, _, err := TranscriptSizeUpTo(filepath.Join(t.TempDir(), "absent.jsonl.zst"), 10); err == nil {
+		t.Fatal("a missing file was sized")
 	}
 }
 

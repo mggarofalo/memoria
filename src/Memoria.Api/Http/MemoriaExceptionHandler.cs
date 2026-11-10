@@ -54,6 +54,12 @@ public sealed partial class MemoriaExceptionHandler(IProblemDetailsService probl
 			httpContext.Response.Headers.Connection = "close";
 		}
 
+		// The caller may still be sending the body that was too large. Reading the rest first lets it read this answer.
+		if (exception is IngestRefusedException { Code: "payload_too_large" })
+		{
+			await RequestBody.DiscardRestAsync(httpContext, RequestBody.DiscardDeadline, httpContext.RequestAborted);
+		}
+
 		httpContext.Response.StatusCode = problem.Status ?? StatusCodes.Status500InternalServerError;
 		return await problemDetails.TryWriteAsync(new ProblemDetailsContext
 		{

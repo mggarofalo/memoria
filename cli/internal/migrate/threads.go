@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"sort"
 	"strings"
@@ -93,6 +94,25 @@ func TranscriptSize(file string) (int64, error) {
 	}
 	defer func() { _ = stream.Close() }()
 	return io.Copy(io.Discard, stream)
+}
+
+// TranscriptSizeUpTo is TranscriptSize, without decompressing more than one byte past limit. exact is false when a compressed
+// one was cut short there, and then the size is limit plus one: all that is known is that it is over.
+func TranscriptSizeUpTo(file string, limit int64) (int64, bool, error) {
+	if !strings.HasSuffix(strings.ToLower(file), compressedSuffix) || limit >= math.MaxInt64-1 {
+		size, err := TranscriptSize(file)
+		return size, true, err
+	}
+	stream, err := OpenTranscript(file)
+	if err != nil {
+		return 0, false, err
+	}
+	defer func() { _ = stream.Close() }()
+	size, err := io.CopyN(io.Discard, stream, max(limit, 0)+1)
+	if errors.Is(err, io.EOF) {
+		return size, true, nil
+	}
+	return size, false, err
 }
 
 // ErrSeveralThreads is two files holding the same thread of a session, which this does not choose between.
