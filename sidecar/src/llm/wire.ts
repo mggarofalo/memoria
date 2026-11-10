@@ -118,12 +118,15 @@ function politeWrite<T>(db: SdkDb, work: () => T): T {
   }
 }
 
-function deleteVectors(db: SdkDb, hash: string): void {
+/** A document's vectors, or with `fingerprint` only those carrying it. */
+function deleteVectors(db: SdkDb, hash: string, fingerprint?: string): void {
+  const only = fingerprint === undefined ? "" : " AND embed_fingerprint = ?";
+  const args = fingerprint === undefined ? [hash] : [hash, fingerprint];
   if (indexDimensions(db) !== null) {
     const remove = db.prepare("DELETE FROM vectors_vec WHERE hash_seq = ?");
-    for (const row of db.prepare("SELECT seq FROM content_vectors WHERE hash = ?").all(hash) as Array<{ seq: number }>) remove.run(`${hash}_${row.seq}`);
+    for (const row of db.prepare(`SELECT seq FROM content_vectors WHERE hash = ?${only}`).all(...args) as Array<{ seq: number }>) remove.run(`${hash}_${row.seq}`);
   }
-  db.prepare("DELETE FROM content_vectors WHERE hash = ?").run(hash);
+  db.prepare(`DELETE FROM content_vectors WHERE hash = ?${only}`).run(...args);
 }
 
 /**
@@ -248,7 +251,9 @@ function farmDeps(handles: SdkHandles, llm: RemoteLlm, model: string, fingerprin
       politeWrite(db, () =>
         inTransaction(db, () => {
           // During a force job this document may hold vectors from the worker being replaced.
-          deleteVectors(db, hash);
+          // Those carry this fingerprint. Vectors under another, such as stock QMD's, no
+          // worker of this build made, so they keep serving search until it embeds.
+          deleteVectors(db, hash, fingerprint);
           db.prepare("INSERT OR REPLACE INTO memoria_dead_letters (hash, path, reason, at, worker_set) VALUES (?, ?, ?, ?, ?)").run(hash, path, reason, new Date().toISOString(), workerSetOf(llm, fingerprint));
         }),
       );

@@ -250,7 +250,9 @@ Gaps of more than 5 seconds between embedding calls fell from 746 s to 65 s. The
 | 513 to 1,024 tokens | 43 | mean 0.760, lowest 0.143 | mean 0.9997, lowest 0.9996 |
 | 1,025 to 1,118 tokens | 4 | mean 0.468, lowest 0.204 | mean 0.9997 |
 
-**Whole-chunk vectors carry a fingerprint of their own,** because the two kinds are not interchangeable and QMD could not tell them apart. The same patch adds a line to QMD's embedding fingerprint, so the default model's is `824af1` where stock QMD's is `c37385`. Every vector this sidecar writes, through a worker or in-process, carries it. A vector with the stock fingerprint reads as pending, and the next embed job embeds its document again. Until then the old vector stays and is still searched, so nothing is lost while a large index catches up. `/status` counts those documents in `needsEmbedding`.
+**Whole-chunk vectors carry a fingerprint of their own,** because the two kinds are not interchangeable and QMD could not tell them apart. The same patch adds a line to QMD's embedding fingerprint, so the default model's is `824af1` where stock QMD's is `c37385`. Every vector this sidecar writes, through a worker or in-process, carries it. A vector with the stock fingerprint reads as pending, and the next embed job embeds its document again. Until then the old vector stays and is still searched, so nothing is lost while a large index catches up. A document [set aside](#embedding-jobs-in-remote-mode) loses only vectors under the new fingerprint, which a worker of this build made, and keeps stock ones. `/status` counts those documents in `needsEmbedding`.
+
+In-process, each embedding context now needs room for a 2,048-token batch. node-llama-cpp estimates about 110 MB a context for the default model, or 61 MB with flash attention, against about 13 MB before. QMD still plans 150 MB a context when it decides how many to open, and a context that fails to open is skipped.
 
 This means:
 
