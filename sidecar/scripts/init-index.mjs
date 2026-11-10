@@ -6,7 +6,7 @@
 // no config file is read or written. No model is involved.
 //
 // MEMORIA_QMD_INIT_CORPUS moves the parent of the roots from /corpus, for tests.
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { createStore } from "@tobilu/qmd";
 
@@ -16,9 +16,9 @@ if (names.length === 0) {
   process.exit(2);
 }
 // A name becomes a folder under the corpus, so it may not leave it or hide in it.
-const unsafe = names.filter((name) => !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name));
+const unsafe = names.filter((name) => !/^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$/.test(name));
 if (unsafe.length > 0) {
-  console.error(`Not a collection name: ${unsafe.join(", ")}. Use letters, digits, '.', '_' and '-', starting with a letter or digit.`);
+  console.error(`Not a collection name: ${unsafe.join(", ")}. Use up to 64 letters, digits, '.', '_' and '-', not starting with '.' or '-'.`);
   process.exit(2);
 }
 const dbPath = process.env.MEMORIA_QMD_DB_PATH;
@@ -31,24 +31,34 @@ const corpus = process.env.MEMORIA_QMD_INIT_CORPUS || "/corpus";
 // No config here: given one, QMD rewrites every record it names and deletes every record it
 // does not, contexts and ignore rules included.
 const store = await createStore({ dbPath });
+const added = [];
 try {
   const before = await store.listCollections();
   const known = new Map(before.map((c) => [c.name, c.pwd]));
-  const added = [];
+  const missing = [];
   for (const name of names) {
     const root = path.join(corpus, name);
-    if (known.has(name)) {
-      if (known.get(name) !== root) console.warn(`${name} is kept at ${known.get(name)}, not moved to ${root}.`);
+    if (!known.has(name)) {
+      missing.push({ name, root });
       continue;
     }
-    mkdirSync(root, { recursive: true });
+    if (known.get(name) !== root) console.warn(`${name} is kept at ${known.get(name)}, not moved to ${root}.`);
+    if (!existsSync(known.get(name))) console.warn(`${name}'s root ${known.get(name)} does not exist. Is the corpus volume mounted?`);
+  }
+  // Every root first, so a failure here leaves no collection recorded and never scanned.
+  for (const { root } of missing) mkdirSync(root, { recursive: true });
+  for (const { name, root } of missing) {
     await store.addCollection(name, { path: root, pattern: "**/*.md" });
     added.push(name);
   }
-  if (added.length > 0) await store.update({ collections: added });
   const others = before.map((c) => c.name).filter((name) => !names.includes(name)).sort();
   console.log(`index at ${dbPath} holds: ${[...names, ...others].join(", ")}`);
   console.log(`added: ${added.join(", ") || "none"}; already there, left as they are: ${names.filter((n) => !added.includes(n)).join(", ") || "none"}`);
 } finally {
-  await store.close();
+  // Whatever was recorded is scanned, even if a later step failed.
+  try {
+    if (added.length > 0) await store.update({ collections: added });
+  } finally {
+    await store.close();
+  }
 }

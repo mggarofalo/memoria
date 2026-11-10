@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { test } from "node:test";
@@ -24,7 +24,7 @@ const Database = createRequire(import.meta.url)("better-sqlite3") as new (file: 
 };
 
 interface Snapshot {
-  collections: Array<{ name: string; path: string; pattern: string; ignore: string | null; context: string | null }>;
+  collections: Array<{ name: string; path: string; pattern: string; ignore: string | null; context: string | null; byDefault: number; update: string | null }>;
   documents: Array<{ collection: string; path: string; active: number }>;
   globalContext: string | null;
 }
@@ -33,7 +33,7 @@ function snapshot(dbPath: string): Snapshot {
   const db = new Database(dbPath, { readonly: true });
   try {
     return {
-      collections: db.prepare("SELECT name, path, pattern, ignore_patterns AS ignore, context FROM store_collections ORDER BY name").all() as Snapshot["collections"],
+      collections: db.prepare("SELECT name, path, pattern, ignore_patterns AS ignore, context, include_by_default AS byDefault, update_command AS \"update\" FROM store_collections ORDER BY name").all() as Snapshot["collections"],
       documents: db.prepare("SELECT collection, path, active FROM documents ORDER BY collection, path").all() as Snapshot["documents"],
       globalContext: (db.prepare("SELECT value FROM store_config WHERE key = 'global_context'").get() as { value: string } | undefined)?.value ?? null,
     };
@@ -71,13 +71,17 @@ test("running the first-run command again with other names, fewer or in another 
   await writeFile(path.join(corpus, "beta", "drafts", "secret.md"), "# Draft\n\ndraftmarker\n", "utf8");
   const qmd = await import("@tobilu/qmd");
   const store = await qmd.createStore({ dbPath });
-  (store.internal.db as unknown as { prepare(sql: string): { run(...a: unknown[]): unknown } }).prepare("UPDATE store_collections SET ignore_patterns = ? WHERE name = 'beta'").run(JSON.stringify(["drafts/**"]));
+  (store.internal.db as unknown as { prepare(sql: string): { run(...a: unknown[]): unknown } })
+    .prepare("UPDATE store_collections SET ignore_patterns = ?, include_by_default = 0, update_command = 'git pull' WHERE name = 'beta'")
+    .run(JSON.stringify(["drafts/**"]));
   await store.update();
   await store.addContext("beta", "/", "beta context");
   await store.setGlobalContext("global context");
   await store.close();
   const lived = snapshot(dbPath);
   assert.deepEqual(lived.documents, [{ collection: "beta", path: "kept.md", active: 1 }], "the ignore rule keeps the draft out");
+  // A scan of beta from here on would mark this document gone, so it shows whether one ran.
+  await rm(path.join(corpus, "beta", "kept.md"));
 
   // Fewer names, then the same names in another order, then a new one among them.
   for (const names of [["alpha"], ["beta", "alpha"], ["gamma", "alpha"]]) {
@@ -95,18 +99,29 @@ test("running the first-run command again with other names, fewer or in another 
   const again = init(env, "beta");
   assert.match(again.stdout, /holds: beta, alpha, gamma\n/);
   assert.match(again.stdout, /added: none; already there, left as they are: beta/);
+
+  // A recorded root elsewhere is kept and named, and a missing one is reported.
+  const moved = init({ ...env, MEMORIA_QMD_INIT_CORPUS: path.join(root, "elsewhere") }, "alpha");
+  assert.equal(moved.status, 0, moved.stderr);
+  assert.match(moved.stderr, /alpha is kept at .*corpus.alpha, not moved to .*elsewhere.alpha\./);
+  await rm(path.join(corpus, "alpha"), { recursive: true });
+  const unmounted = init(env, "alpha");
+  assert.equal(unmounted.status, 0, unmounted.stderr);
+  assert.match(unmounted.stderr, /alpha's root .* does not exist\. Is the corpus volume mounted\?/);
+  assert.deepEqual(snapshot(dbPath).collections.find((c) => c.name === "alpha"), lived.collections.find((c) => c.name === "alpha"));
 });
 
 test("the first-run command refuses a name that is not a plain folder name, and changes nothing", { skip }, async () => {
   const root = await tempDir("memoria-qmd-it-");
   const dbPath = path.join(root, "index.sqlite");
   const env: NodeJS.ProcessEnv = { ...process.env, MEMORIA_QMD_DB_PATH: dbPath, MEMORIA_QMD_INIT_CORPUS: path.join(root, "corpus") };
-  for (const bad of ["../escape", ".hidden", "a/b", "a\\b", ""]) {
+  for (const bad of ["../escape", ".hidden", "-dash", "a/b", "a\\b", "", "x".repeat(65)]) {
     const run = init(env, "fine", bad);
     assert.equal(run.status, 2, bad);
     assert.match(run.stderr, /Not a collection name/);
   }
   assert.equal(existsSync(dbPath), false);
+  assert.equal(existsSync(path.join(root, "corpus", "fine")), false, "no root is made either");
   assert.equal(init({ ...env, MEMORIA_QMD_DB_PATH: "" }, "fine").status, 2);
   assert.equal(init(env).status, 2);
 });
