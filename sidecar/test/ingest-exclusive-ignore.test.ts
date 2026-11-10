@@ -51,17 +51,17 @@ type FsCall = (...args: unknown[]) => Promise<unknown>;
 
 /**
  * Holds a write just before its last check, by holding the real-path lookup of its temp file, so a real socket can close during it.
- * It also counts temp files: each one a write opens ends in a rename or an unlink, so `settled` can tell when every write that began is over.
+ * It also tracks temp files: each one a write opens ends in a rename or an unlink of it that succeeds, so `settled` can tell when every write that
+ * opened one is over. Only files opened here count, so a stale file swept away or a retried rename cannot end another write's file early.
  */
 function stallWrites(ms: number, onStall: () => void): { restore: () => void; settled: (dir: string) => Promise<string[]> } {
   const patchable = fsPromises as unknown as Record<"realpath" | "open" | "rename" | "unlink", FsCall>;
   const real = { realpath: patchable.realpath, open: patchable.open, rename: patchable.rename, unlink: patchable.unlink };
   const isScratch = (file: unknown) => path.basename(String(file)).startsWith(".memoria-");
-  let open = 0;
+  const open = new Set<string>();
   let wake = () => {};
-  const ended = () => {
-    open--;
-    wake();
+  const ended = (file: unknown) => {
+    if (open.delete(String(file))) wake();
   };
   patchable.realpath = async (...args) => {
     if (isScratch(args[0])) {
@@ -71,16 +71,18 @@ function stallWrites(ms: number, onStall: () => void): { restore: () => void; se
     return real.realpath(...args);
   };
   patchable.open = async (...args) => {
-    if (!isScratch(args[0])) return real.open(...args);
-    open++;
-    return real.open(...args).catch((err: unknown) => {
-      ended();
-      throw err;
-    });
+    const handle = await real.open(...args);
+    if (isScratch(args[0])) open.add(String(args[0]));
+    return handle;
   };
-  for (const name of ["rename", "unlink"] as const) {
-    patchable[name] = async (...args) => (isScratch(args[0]) ? real[name](...args).finally(ended) : real[name](...args));
-  }
+  // A failed rename may be retried, and is followed by the write's cleanup unlink, so only a rename that succeeds ends the file. That unlink is
+  // the write's last word whatever it answers: if it fails, the file stays, `settled` returns, and the test sees what was left behind.
+  patchable.rename = async (...args) => {
+    const done = await real.rename(...args);
+    ended(args[0]);
+    return done;
+  };
+  patchable.unlink = async (...args) => real.unlink(...args).finally(() => ended(args[0]));
   syncBuiltinESMExports();
   return {
     restore: () => {
@@ -89,7 +91,7 @@ function stallWrites(ms: number, onStall: () => void): { restore: () => void; se
     },
     /** What a directory holds once every temp file a write opened has been renamed or removed, however long the stalls took. */
     settled: async (dir) => {
-      while (open > 0) await new Promise<void>((resolve) => (wake = resolve));
+      while (open.size > 0) await new Promise<void>((resolve) => (wake = resolve));
       return readdir(dir);
     },
   };
