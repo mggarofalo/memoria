@@ -57,14 +57,45 @@ internal static class GitleaksRules
 		bool padded = secret.Contains("={0,", StringComparison.Ordinal);
 		string pattern = IsAssignmentTemplate(spec) || separators.Contains('_', StringComparison.Ordinal) ? spec.Pattern : EndingAtUnderscore(spec.Pattern);
 		bool underscoreEnds = !string.Equals(pattern, spec.Pattern, StringComparison.Ordinal);
+		bool assignment = IsAssignmentTemplate(spec);
 		return new RedactionRule(
 			Prefix + spec.Id,
 			null,
-			candidate => Accept(candidate, spec.Entropy, global, own) && !(underscoreEnds && IsNameBeforeUnderscore(candidate)),
+			candidate => Accept(candidate, spec.Entropy, global, own) && !(underscoreEnds && IsNameBeforeUnderscore(candidate)) && !(assignment && NamesAnIdentifier(candidate, spec.Keywords)),
 			extend: candidate => ThroughGluedText(candidate, separators, new Ending(fixedToken, padded, underscoreEnds)),
 			keywords: spec.Keywords,
 			backstop: true,
 			buildPattern: () => RedactionRules.Pattern(pattern));
+	}
+
+	/// <summary>Words that name a thing with an id of its own. In an assignment rule's name, after its keyword, they say the value is that id.</summary>
+	private static readonly HashSet<string> IdentifierWords = new(StringComparer.OrdinalIgnoreCase)
+	{
+		"task", "tasks", "item", "items", "trace", "span", "app", "apps", "application", "project", "projects", "account", "accounts", "user", "users",
+		"org", "organization", "team", "workspace", "issue", "ticket", "order", "job", "build", "run", "commit", "page", "document", "file", "folder",
+		"channel", "thread", "message", "event", "request", "record", "customer", "invoice", "deployment", "release", "device", "node", "site",
+	};
+
+	/// <summary>
+	/// An assignment rule matches a name, its keyword, up to 20 more name characters, then an operator and the value, and accepts the
+	/// value by its shape alone: 24 of upstream's accept only digits, hex or a UUID. When the words after the keyword name a thing, as in
+	/// <c>heroku app id: </c> before a UUID or <c>plaid item_id: </c> before hex, and no word of the name is a credential's, the value is
+	/// that thing's id. <c>heroku app token</c> and <c>datadog app key</c> are credentials' names, so their values still go.
+	/// </summary>
+	internal static bool NamesAnIdentifier(SecretCandidate candidate, IReadOnlyList<string> keywords)
+	{
+		string before = candidate.Input[candidate.Match.Index..candidate.Secret.Index];
+		int operatorAt = before.IndexOfAny(['=', ':', '>', '|', '?', ',', '\'', '"', '`']);
+		string name = (operatorAt < 0 ? before : before[..operatorAt]).Trim();
+		int keywordEnd = keywords
+			.Select(keyword => (At: name.LastIndexOf(keyword, StringComparison.OrdinalIgnoreCase), keyword.Length))
+			.Where(static found => found.At >= 0)
+			.Select(static found => found.At + found.Length)
+			.DefaultIfEmpty(-1)
+			.Max();
+		return keywordEnd >= 0
+			&& SecretKeyNames.SplitWords(name[keywordEnd..]).Any(IdentifierWords.Contains)
+			&& SecretKeyNames.Classify(name) == KeyKind.NotSecret;
 	}
 
 	/// <summary>The ending the translator draws for upstream's <c>\b</c> or common ending: any character but a letter, a digit or <c>_</c>.</summary>
