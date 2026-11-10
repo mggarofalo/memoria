@@ -33,8 +33,6 @@ function runPowerShell(args: string[], env: NodeJS.ProcessEnv = {}) {
 }
 
 const scripts = [
-  at("sidecar", "scripts", "install-service.ps1"),
-  at("sidecar", "scripts", "uninstall-service.ps1"),
   at("worker", "scripts", "install-service.ps1"),
   at("worker", "scripts", "uninstall-service.ps1"),
   at("deploy", "windows", "MemoriaService.psm1"),
@@ -57,28 +55,9 @@ test("the service module's checks pass, including real ACLs on Windows", { skip:
 
 const dirs = ["-InstallDir", "/pf/svc", "-StateDir", "/pd/svc"];
 
-function sidecarDryRun(extra: string[] = [], env: NodeJS.ProcessEnv = {}) {
-  return runPowerShell(["-File", at("sidecar", "scripts", "install-service.ps1"), "-WhatIf", ...dirs, "-CacheHome", "/home/u/.cache", "-ConfigHome", "/home/u/.config", "-CollectionRoot", "/corpus", ...extra], { MEMORIA_QMD_SECRET: "", MEMORIA_QMD_DB_PATH: "", ...env });
-}
-
 function workerDryRun(extra: string[] = [], env: NodeJS.ProcessEnv = {}) {
   return runPowerShell(["-File", at("worker", "scripts", "install-service.ps1"), "-WhatIf", ...dirs, "-LlamaServer", "/pf/llama/llama-server", "-ModelDir", "/models", ...extra], { MEMORIA_WORKER_TOKEN: "", ...env });
 }
-
-test("the sidecar's dry run keeps the secret out of the plan and out of the registry environment", { skip: needsPowerShell }, () => {
-  const run = sidecarDryRun(["-BindHost", "192.168.1.20", "-AllowHttpOnPrivateNetwork"], { MEMORIA_QMD_SECRET: SECRET_CANARY });
-  assert.equal(run.status, 0, run.stdout + run.stderr);
-  assert.ok(!(run.stdout + run.stderr).includes(SECRET_CANARY), "the secret must not appear anywhere in the output");
-  assert.match(run.stdout, /AppEnvironmentExtra .*MEMORIA_QMD_SECRET_FILE=/);
-  assert.doesNotMatch(run.stdout, /MEMORIA_QMD_SECRET=/);
-  assert.match(run.stdout, /sc\.exe config memoria-qmd obj= "?NT SERVICE\\memoria-qmd/);
-  assert.match(run.stdout, /Verify nobody else can read/);
-  assert.match(run.stdout, /AppRotateOnline 1/);
-  assert.match(run.stdout, /\/corpus \/grant .*NT SERVICE\\memoria-qmd/);
-  assert.match(run.stdout, /npm ci --omit=dev/);
-  assert.doesNotMatch(run.stdout, /\b(?:USERPROFILE|HOME)=/);
-  assert.doesNotMatch(run.stdout, /LocalSystem/i);
-});
 
 test("the worker's dry run keeps the token out, and grants read on models and llama-server", { skip: needsPowerShell }, () => {
   const refused = workerDryRun(["-BindHost", "192.168.1.20"], { MEMORIA_WORKER_TOKEN: SECRET_CANARY });
@@ -98,28 +77,14 @@ test("the worker's dry run keeps the token out, and grants read on models and ll
   assert.match(run.stdout, /[\\/]pf[\\/]llama \/grant .*RX/);
 });
 
-test("the sidecar's service runs with the heap limit and the SDK patch's script, and says so in its plan", { skip: needsPowerShell }, () => {
-  const run = sidecarDryRun();
-  assert.equal(run.status, 0, run.stdout + run.stderr);
-  assert.match(run.stdout, /AppParameters .*--max-old-space-size=4096/);
-  assert.match(run.stdout, /scripts/);
-  assert.doesNotMatch(run.stdout, /MEMORIA_QMD_ALLOW_HTTP_ON_PRIVATE_NETWORK/, "on loopback, no opt-in");
+test("the worker's service runs with no heap limit of its own", { skip: needsPowerShell }, () => {
   const worker = workerDryRun();
   assert.equal(worker.status, 0, worker.stdout + worker.stderr);
   assert.doesNotMatch(worker.stdout, /--max-old-space-size/);
 });
 
-test("a LAN bind needs the plaintext opt-in, and the service gets it when given", { skip: needsPowerShell }, () => {
-  const refused = sidecarDryRun(["-BindHost", "192.168.1.20"], { MEMORIA_QMD_SECRET: SECRET_CANARY });
-  assert.notEqual(refused.status, 0);
-  assert.match(refused.stdout + refused.stderr, /AllowHttpOnPrivateNetwork/);
-  const allowed = sidecarDryRun(["-BindHost", "192.168.1.20", "-AllowHttpOnPrivateNetwork"], { MEMORIA_QMD_SECRET: SECRET_CANARY });
-  assert.equal(allowed.status, 0, allowed.stdout + allowed.stderr);
-  assert.match(allowed.stdout, /MEMORIA_QMD_ALLOW_HTTP_ON_PRIVATE_NETWORK=1/);
-});
-
 test("no install script offers a secret as a parameter, and no comment claims the old behaviour", async () => {
-  for (const file of [at("sidecar", "scripts", "install-service.ps1"), at("worker", "scripts", "install-service.ps1")]) {
+  for (const file of [at("worker", "scripts", "install-service.ps1")]) {
     const text = await readFile(file, "utf8");
     assert.doesNotMatch(text, /\[string\]\$(Secret|Token)\b/);
     assert.doesNotMatch(text, /environment block/);
@@ -127,28 +92,21 @@ test("no install script offers a secret as a parameter, and no comment claims th
   }
 });
 
-test("a dry run refuses a LAN bind with no secret, and takes one from a file", { skip: needsPowerShell }, async () => {
-  const sidecar = sidecarDryRun(["-BindHost", "192.168.1.20"]);
-  assert.notEqual(sidecar.status, 0);
-  assert.match(sidecar.stdout + sidecar.stderr, /shared secret is required/);
+test("a dry run refuses a LAN bind with no token, and takes one from a file", { skip: needsPowerShell }, async () => {
   const worker = workerDryRun(["-BindHost", "192.168.1.20"]);
   assert.notEqual(worker.status, 0);
   assert.match(worker.stdout + worker.stderr, /token is required/);
 
-  const file = path.join(await tempDir("memoria-install-"), "s.txt");
+  const file = path.join(await tempDir("memoria-install-"), "t.txt");
   await writeFile(file, `${SECRET_CANARY}\n`);
-  const fromFile = sidecarDryRun(["-BindHost", "192.168.1.20", "-AllowHttpOnPrivateNetwork", "-SecretFile", file]);
+  const fromFile = workerDryRun(["-BindHost", "192.168.1.20", "-AllowHttpOnPrivateNetwork", "-TokenFile", file]);
   assert.equal(fromFile.status, 0, fromFile.stdout + fromFile.stderr);
   assert.ok(!(fromFile.stdout + fromFile.stderr).includes(SECRET_CANARY));
-  assert.match(fromFile.stdout, /MEMORIA_QMD_SECRET_FILE=/);
-
-  const loopback = sidecarDryRun();
-  assert.equal(loopback.status, 0, loopback.stdout + loopback.stderr);
-  assert.doesNotMatch(loopback.stdout, /MEMORIA_QMD_SECRET_FILE=/);
+  assert.match(fromFile.stdout, /MEMORIA_WORKER_TOKEN_FILE=/);
 });
 
-test("uninstall dry runs remove the secret and keep the logs", { skip: needsPowerShell }, () => {
-  for (const [component, service] of [["sidecar", "memoria-qmd"], ["worker", "memoria-worker"]] as const) {
+test("the uninstall dry run removes the token and keeps the logs", { skip: needsPowerShell }, () => {
+  for (const [component, service] of [["worker", "memoria-worker"]] as const) {
     const run = runPowerShell(["-File", at(component, "scripts", "uninstall-service.ps1"), "-WhatIf", ...dirs, "-DataPath", "/data"]);
     assert.equal(run.status, 0, run.stdout + run.stderr);
     assert.match(run.stdout, new RegExp(`icacls\\.exe /data /remove "?NT SERVICE\\\\${service}`));

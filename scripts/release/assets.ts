@@ -34,6 +34,8 @@ export interface Service {
   stampDir: string;
   /** Files and directories to ship, relative to `dir`. */
   include: readonly string[];
+  /** Files from elsewhere in the repository, at the same relative path. */
+  shared?: readonly string[];
 }
 
 export const TARGETS: readonly Target[] = (["windows", "linux", "darwin"] as const).flatMap((os) =>
@@ -46,12 +48,12 @@ export const TARGETS: readonly Target[] = (["windows", "linux", "darwin"] as con
  * that directory: it has to reach an install location that holds no `.git`.
  */
 export const SERVICES: readonly Service[] = [
-  { name: "memoria-sidecar", dir: "sidecar", stampDir: "dist", include: ["dist", "scripts/install-service.ps1", "scripts/uninstall-service.ps1", "scripts/patch-qmd.ts", ".env.example", "README.md", "package.json", "package-lock.json"] },
-  { name: "memoria-worker", dir: "worker", stampDir: "src", include: ["src", "scripts", "README.md", "package.json", "package-lock.json"] },
+  { name: "memoria-sidecar", dir: "sidecar", stampDir: "dist", include: ["dist", "scripts/patch-qmd.ts", ".env.example", "README.md", "package.json", "package-lock.json"] },
+  { name: "memoria-worker", dir: "worker", stampDir: "src", include: ["src", "scripts", "README.md", "package.json", "package-lock.json"], shared: ["deploy/windows/MemoriaService.psm1"] },
 ];
 
-/** In every service package, at the same relative path as in the repository. */
-export const SHARED_FILES: readonly string[] = ["deploy/windows/MemoriaService.psm1"];
+/** Every shared file some service package carries. */
+export const SHARED_FILES: readonly string[] = [...new Set(SERVICES.flatMap((service) => service.shared ?? []))];
 
 const VERSION_VARIABLE = "github.com/mggarofalo/memoria/cli/cmd.Version";
 const SAFE_VERSION = /^[0-9A-Za-z][0-9A-Za-z.+-]*$/;
@@ -159,14 +161,14 @@ function listFiles(root: string, relative: string): string[] {
     .flatMap((name) => listFiles(root, `${relative}/${name}`));
 }
 
-/** Everything in a service package: its allowlisted files, the shared ones, and the VERSION stamp beside the code. */
+/** Everything in a service package: its allowlisted files, the shared files it names, and the VERSION stamp beside the code. */
 export function serviceEntries(service: Service, tree: string, version: string): TarEntry[] {
   const dir = path.join(tree, service.dir);
   const entry = (root: string, name: string): TarEntry => ({ name, data: readFileSync(path.join(root, name)), mode: name.endsWith(".sh") ? 0o755 : 0o644 });
   return [
     { name: `${service.stampDir}/VERSION`, data: Buffer.from(`${version}\n`, "ascii"), mode: 0o644 },
     ...service.include.flatMap((item) => listFiles(dir, item)).map((name) => entry(dir, name)),
-    ...SHARED_FILES.map((name) => entry(tree, name)),
+    ...(service.shared ?? []).map((name) => entry(tree, name)),
   ];
 }
 

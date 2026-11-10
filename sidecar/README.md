@@ -65,19 +65,8 @@ Everything is an environment variable. See [`.env.example`](.env.example) for th
 | `MEMORIA_QMD_LOG_LEVEL` | `info` | pino level. |
 | `MEMORIA_QMD_REINDEX_DEBOUNCE_MS` | `60000` | Quiet period after a document write before its index update runs. `0` turns the debounce off. |
 | `MEMORIA_QMD_REINDEX_MAX_WAIT_MS` | `300000` | Longest an update can wait from its first write, so steady ingest cannot starve the index. |
-| `MEMORIA_QMD_SHUTDOWN_DRAIN_MS` | `10000` | How long shutdown waits for queued jobs. Keep it under the service manager's stop timeout (15 s in `install-service.ps1`). |
+| `MEMORIA_QMD_SHUTDOWN_DRAIN_MS` | `10000` | How long shutdown waits for queued jobs. Keep it under compose's `stop_grace_period` (15 s). |
 | `MEMORIA_QMD_LLM` | `local` | `remote` sends model work to a worker. See [`docs/workers.md`](../docs/workers.md), which has the other worker settings and what has not been verified. |
-
-### As a Windows service
-
-[`scripts/install-service.ps1`](scripts/install-service.ps1) registers the sidecar with [NSSM](https://nssm.cc/) (`winget install NSSM.NSSM`) so it starts at boot and restarts on failure. **It has not been run on a real install.** Print the plan first, which needs no elevation and changes nothing, then run it from an elevated shell:
-
-```powershell
-.\scripts\install-service.ps1 -BindHost 192.168.1.20 -AllowHttpOnPrivateNetwork -SecretFile .\secret.txt -CollectionRoot D:\corpus\sessions -WhatIf
-.\scripts\install-service.ps1 -BindHost 192.168.1.20 -AllowHttpOnPrivateNetwork -SecretFile .\secret.txt -CollectionRoot D:\corpus\sessions
-```
-
-It installs to `%ProgramFiles%\Memoria\memoria-qmd` and runs as `NT SERVICE\memoria-qmd`, with the secret in a file only that account and Administrators can read. Logs land in `%ProgramData%\memoria-qmd\logs` and rotate at 10 MiB. Pass every collection directory as `-CollectionRoot`, or document writes will fail. `scripts/uninstall-service.ps1` removes the service, its files and the secret, and leaves the logs. [`docs/deployment.md`](../docs/deployment.md#running-as-a-service) has the details, including what to do when upgrading an earlier install and what has not been confirmed.
 
 ## The contract
 

@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -45,18 +46,22 @@ allows. Without --apply it sends nothing and needs no key.
 A document is over the cap when it is larger than the server's default of 2 MiB, or when the
 last push to this server reported it over the cap.
 
-A transcript counts only if its session_meta names that session, as the server checks. If none
-does, the over-cap export is that document's only copy, and this says so and exits 1. If more
-than one does, it sends neither and says so.
+A transcript is a .jsonl file, or a .jsonl.zst one Codex has compressed, which is sent
+decompressed. It counts only if its session_meta names that session, as the server checks. If
+none does, the over-cap export is that document's only copy, and this says so and exits 1. If
+more than one does, it sends neither and says so. Give Codex's archived_sessions folder too, as
+it moves transcripts there.
 
 Running it again is safe. It asks the server first, and a session it already holds complete, at
 this transcript's version or later, is not sent again.
 
 Before sending, the transcript's messages are counted as the server counts them. An export that says how far its
-messages reach must be covered by that count. One that does not say must have a body that is, exactly, the transcript's
-first messages as the Codex exporter renders them. If neither shows the transcript holds everything, it is not sent, as the
-export is the only copy of what it would lose. --accept-uncounted sends those anyway, as a last resort after looking, and
-each is named in the report and counted in the summary.
+messages reach must be covered by that count. One that does not say must have a body that is, exactly, the first messages of
+the session's threads, one thread after another, as the Codex exporters render them: its own transcript's, and those of each
+subagent whose transcript names the session as its own. Each of those threads is then sent, as its own session. If neither
+shows the transcripts hold everything, it is not sent, as the export is the only copy of what it would lose.
+--accept-uncounted sends those anyway, as a last resort after looking, and each is named in the report and counted in the
+summary.
 
 A Codex session takes over documents in the collection root whose frontmatter names it, with no
 proof of which copy it is, as the server's rules allow. One that would lose messages is refused
@@ -80,6 +85,9 @@ Only a private report names the files.`,
 // rerenderItem is one over-cap document and what was found for it.
 type rerenderItem struct {
 	name, sessionID, transcript string
+	// threads is what is sent for it, each under its own id: the session's own transcript, and, for a session whose export holds
+	// its subagents' messages too, each subagent's.
+	threads []migrate.Thread
 	// newest is the latest file time among the session's exports here. Stored chunks carry their export's time as their version.
 	newest time.Time
 }
@@ -177,10 +185,39 @@ func (a *app) migrateRerender(ctx context.Context, o migrateRerenderOptions) err
 	if transcripts.Unreadable > 0 {
 		a.warn("some files or folders in the raw sessions folders could not be read, so a transcript there would not be found")
 	}
+	if archive := missingArchive(o.codexDirs); archive != "" {
+		a.warn("Codex also keeps transcripts in " + archive + ", which was not given. Add --codex-sessions " + archive + " so a thread archived there is found")
+	}
 	if !o.apply {
 		return a.rerenderDry(ctx, jobs, transcripts, o.acceptUncounted)
 	}
 	return a.rerenderApply(ctx, jobs, transcripts, o.acceptUncounted)
+}
+
+// missingArchive is Codex's archived_sessions folder beside a sessions folder given, when it is there and was not given too.
+func missingArchive(dirs []string) string {
+	given := map[string]bool{}
+	for _, dir := range dirs {
+		given[strings.ToLower(absolute(dir))] = true
+	}
+	for _, dir := range dirs {
+		clean := absolute(dir)
+		if !strings.EqualFold(filepath.Base(clean), "sessions") {
+			continue
+		}
+		archive := filepath.Join(filepath.Dir(clean), "archived_sessions")
+		if info, err := os.Stat(archive); err == nil && info.IsDir() && !given[strings.ToLower(archive)] {
+			return archive
+		}
+	}
+	return ""
+}
+
+func absolute(dir string) string {
+	if full, err := filepath.Abs(dir); err == nil {
+		return full
+	}
+	return filepath.Clean(dir)
 }
 
 // overCap is what push could not store for size: larger than the default cap, or named over the cap by the last push here.
@@ -235,13 +272,13 @@ func (g *rerendering) match(root *os.Root, name string, transcripts *migrate.Tra
 		g.summary.Several++
 		g.problem(name, migrate.RerenderSeveral, "")
 	default:
-		g.check(root, rerenderItem{name: name, sessionID: id, transcript: matching[0]}, exports[id])
+		g.check(root, rerenderItem{name: name, sessionID: id, transcript: matching[0]}, exports[id], transcripts)
 	}
 }
 
 // check sends nothing a transcript cannot fully stand in for. An over-cap export was never stored, so the server cannot refuse a
 // shorter transcript for it: this is the only place that sees those messages would be lost.
-func (g *rerendering) check(root *os.Root, item rerenderItem, exports *sessionExports) {
+func (g *rerendering) check(root *os.Root, item rerenderItem, exports *sessionExports, transcripts *migrate.Transcripts) {
 	messages, err := migrate.TranscriptMessages(item.transcript)
 	count := int64(len(messages))
 	switch {
@@ -251,24 +288,84 @@ func (g *rerendering) check(root *os.Root, item rerenderItem, exports *sessionEx
 	case count < exports.reach:
 		g.summary.Shorter++
 		g.problem(item.name, migrate.RerenderShorter, strconv.FormatInt(exports.reach-count, 10)+" messages")
-	case !uncountedCovered(root, exports.uncounted, messages) && !g.acceptUncounted:
-		g.summary.Uncounted++
-		g.problem(item.name, migrate.RerenderUncounted, "")
 	default:
-		if !uncountedCovered(root, exports.uncounted, messages) {
-			g.summary.AcceptedUncounted++
-			g.problem(item.name, migrate.RerenderAcceptedUncounted, "")
-		}
-		item.newest = exports.newest
-		g.items = append(g.items, item)
+		g.checkUncounted(root, item, exports, transcripts)
 	}
 }
 
-// uncountedCovered is whether every export of the session that does not count its messages has a body that is the transcript's.
-func uncountedCovered(root *os.Root, names []string, messages []migrate.Message) bool {
+// checkUncounted reads the body of each export that does not count its messages against every thread of the session, as the hook
+// exporter wrote them all into one export. When they cover it, every thread is sent, so each message in the export is in one sent.
+func (g *rerendering) checkUncounted(root *os.Root, item rerenderItem, exports *sessionExports, transcripts *migrate.Transcripts) {
+	item.threads = []migrate.Thread{{ID: item.sessionID, File: item.transcript}}
+	if len(exports.uncounted) > 0 {
+		family, err := transcripts.Family(item.sessionID, item.transcript)
+		if err != nil {
+			family, err = ownCovers(root, item, exports.uncounted, err)
+		}
+		if err != nil {
+			g.familyUnread(item.name, err)
+			return
+		}
+		covered := uncountedCovered(root, exports.uncounted, family)
+		if !covered && !g.acceptUncounted {
+			g.summary.Uncounted++
+			g.problem(item.name, migrate.RerenderUncounted, "")
+			return
+		}
+		if !covered {
+			g.summary.AcceptedUncounted++
+			g.problem(item.name, migrate.RerenderAcceptedUncounted, "")
+		}
+		item.threads = withoutMessages(family, item.transcript)
+	}
+	item.newest = exports.newest
+	g.summary.Threads += len(item.threads)
+	g.items = append(g.items, item)
+}
+
+func (g *rerendering) familyUnread(name string, err error) {
+	if errors.Is(err, migrate.ErrSeveralThreads) {
+		g.summary.Several++
+		g.problem(name, migrate.RerenderSeveral, "thread")
+		return
+	}
+	g.summary.Unreadable++
+	g.problem(name, migrate.RerenderUnreadable, "thread")
+}
+
+// ownCovers is the session's own transcript alone, when a sibling thread cannot be read but the exports hold nothing past it:
+// no other thread is then needed to hold them. Otherwise it is the error that stopped the family.
+func ownCovers(root *os.Root, item rerenderItem, uncounted []string, failed error) ([]migrate.Thread, error) {
+	messages, err := migrate.TranscriptMessages(item.transcript)
+	own := []migrate.Thread{{ID: item.sessionID, File: item.transcript, Messages: messages}}
+	if err != nil || !uncountedCovered(root, uncounted, own) {
+		return nil, failed
+	}
+	return own, nil
+}
+
+// withoutMessages keeps what sending needs, so a session's messages are not held while it is sent. A subagent thread with no
+// messages adds nothing to the export and the server would only answer it as partial, so it is left out. The session's own thread
+// always goes, as it is the session the export names.
+func withoutMessages(threads []migrate.Thread, own string) []migrate.Thread {
+	var kept []migrate.Thread
+	for _, thread := range threads {
+		if thread.File == own || len(thread.Messages) > 0 {
+			kept = append(kept, migrate.Thread{ID: thread.ID, File: thread.File})
+		}
+	}
+	return kept
+}
+
+// uncountedCovered is whether every export of the session that does not count its messages has a body that is its threads'.
+func uncountedCovered(root *os.Root, names []string, family []migrate.Thread) bool {
+	threads := make([][]migrate.Message, len(family))
+	for i := range family {
+		threads[i] = family[i].Messages
+	}
 	for _, name := range names {
 		data, err := root.ReadFile(filepath.FromSlash(name))
-		if err != nil || !migrate.BodyCovered(data, messages) {
+		if err != nil || !migrate.BodyCovered(data, threads...) {
 			return false
 		}
 	}
@@ -352,32 +449,73 @@ func (r *pushRun) rerender(g *rerendering) {
 			}
 			return
 		}
-		status, reason := r.rerenderOne(c, item)
-		g.note(item.name, status, reason)
+		outcome := r.rerenderOne(c, item)
+		g.note(item, outcome)
 	}
 }
 
-func (g *rerendering) note(name, status, reason string) {
-	switch status {
+// threadOutcome is how sending a document's threads ended: the first that did not go, or how they all went.
+type threadOutcome struct {
+	status, reason, thread string
+}
+
+func (g *rerendering) note(item rerenderItem, outcome threadOutcome) {
+	thread := outcome.thread
+	if thread == item.sessionID {
+		thread = ""
+	}
+	switch outcome.status {
 	case migrate.RerenderSent:
 		g.summary.Sent++
 	case migrate.RerenderAlready:
 		g.summary.Already++
 	case migrate.RerenderPartial:
 		g.summary.Partial++
-		g.problem(name, status, reason)
+		g.threadProblem(item.name, outcome.status, outcome.reason, thread)
 	case migrate.RerenderNotReached:
 		g.summary.NotReached++
-		g.problem(name, status, "")
+		g.threadProblem(item.name, outcome.status, "", thread)
 	default:
-		g.summary.Refused[reason]++
-		g.problem(name, migrate.RerenderRefused, reason)
+		g.summary.Refused[outcome.reason]++
+		g.threadProblem(item.name, migrate.RerenderRefused, outcome.reason, thread)
 	}
 }
 
-// rerenderOne sends one transcript unless the server already holds it complete at this version or later.
-func (r *pushRun) rerenderOne(c *pushCollection, item rerenderItem) (string, string) {
-	info, err := os.Stat(item.transcript)
+func (g *rerendering) threadProblem(name, status, reason, thread string) {
+	g.problems = append(g.problems, migrate.RerenderProblem{Collection: g.job.collection.Name, Path: name, Status: status, Reason: reason, Thread: thread})
+}
+
+// rerenderOne sends each of a document's threads. It is held only when all of them are, so the first that is not is what it
+// reports. The rest are still sent, as each is a session of its own, except when the server cannot be reached.
+func (r *pushRun) rerenderOne(c *pushCollection, item rerenderItem) threadOutcome {
+	var failed *threadOutcome
+	sent := false
+	for _, thread := range item.threads {
+		if r.ctx.Err() != nil {
+			return threadOutcome{status: migrate.RerenderNotReached, thread: thread.ID}
+		}
+		status, reason := r.rerenderThread(c, item, thread)
+		switch {
+		case status == migrate.RerenderNotReached:
+			return threadOutcome{status: status, thread: thread.ID}
+		case status == migrate.RerenderSent:
+			sent = true
+		case status != migrate.RerenderAlready && failed == nil:
+			failed = &threadOutcome{status: status, reason: reason, thread: thread.ID}
+		}
+	}
+	switch {
+	case failed != nil:
+		return *failed
+	case sent:
+		return threadOutcome{status: migrate.RerenderSent}
+	}
+	return threadOutcome{status: migrate.RerenderAlready}
+}
+
+// rerenderThread sends one transcript unless the server already holds it complete at this version or later.
+func (r *pushRun) rerenderThread(c *pushCollection, item rerenderItem, thread migrate.Thread) (string, string) {
+	info, err := os.Stat(thread.File)
 	if err != nil {
 		return migrate.RerenderRefused, "transcript_unreadable"
 	}
@@ -387,14 +525,14 @@ func (r *pushRun) rerenderOne(c *pushCollection, item rerenderItem) (string, str
 	if item.newest.After(updated) {
 		updated = item.newest
 	}
-	held, answered := r.sessionHeld(c, item.sessionID)
+	held, answered := r.sessionHeld(c, thread.ID)
 	if !answered {
 		return migrate.RerenderNotReached, ""
 	}
 	if held != nil && !held.Before(updated) {
 		return migrate.RerenderAlready, ""
 	}
-	return r.sendTranscript(c, item, updated)
+	return r.sendTranscript(c, thread, updated)
 }
 
 // sessionHeld is the version the server holds complete for a session, or nil.
@@ -416,10 +554,10 @@ func (r *pushRun) sessionHeld(c *pushCollection, id string) (*time.Time, bool) {
 }
 
 // sendTranscript waits out a write of this session that is still running, as push does, for up to the server's hold.
-func (r *pushRun) sendTranscript(c *pushCollection, item rerenderItem, updated time.Time) (string, string) {
+func (r *pushRun) sendTranscript(c *pushCollection, thread migrate.Thread, updated time.Time) (string, string) {
 	var waited time.Duration
 	for {
-		status, answered, answer := r.postTranscript(c, item, updated)
+		status, answered, answer := r.postTranscript(c, thread, updated)
 		wait := sessionInProgressWait(status, answered, answer)
 		if wait == 0 || waited >= inProgressBudget {
 			return judgeSession(status, answered, answer)
@@ -444,12 +582,13 @@ func sessionInProgressWait(status int, answered bool, answer *api.IngestSessionR
 	return min(max(named, minServerWait), maxRetryWait)
 }
 
-func (r *pushRun) postTranscript(c *pushCollection, item rerenderItem, updated time.Time) (int, bool, *api.IngestSessionResponse) {
+func (r *pushRun) postTranscript(c *pushCollection, thread migrate.Thread, updated time.Time) (int, bool, *api.IngestSessionResponse) {
 	var answer *api.IngestSessionResponse
 	format := codexFormat
-	params := &api.IngestSessionParams{Collection: &c.job.target, Format: &format, SessionId: &item.sessionID, Updated: &updated}
+	params := &api.IngestSessionParams{Collection: &c.job.target, Format: &format, SessionId: &thread.ID, Updated: &updated}
 	status, answered := r.askServer(c, false, func() (*http.Response, []byte, error) {
-		body, err := os.Open(item.transcript)
+		// A compressed transcript goes decompressed, as it is read, since the server reads JSON lines.
+		body, err := migrate.OpenTranscript(thread.File)
 		if err != nil {
 			return nil, nil, err
 		}

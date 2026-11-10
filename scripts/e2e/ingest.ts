@@ -262,6 +262,10 @@ function nothingOnDisk(c: Context, secrets: Record<string, string>): void {
   const found = filesHolding(c.h.dir, Object.values(secrets), (file) => /\.(exe|dll)$/.test(file) || ["memoria", "proxy-records.jsonl"].includes(path.basename(file)));
   c.h.check("ingest: no file of the run holds a credential, in raw bytes, logs and databases included", found.length === 0, found);
 
+  if (!c.h.hasProxy) {
+    console.log("NOT RUN ingest: every write on the wire to the sidecar is free of credentials (needs the recording proxy; the process layout runs it)");
+    return;
+  }
   const writes = c.h.proxied().filter((call) => call.method === "POST" && call.url === "/documents");
   c.h.check("ingest: every write on the wire to the sidecar is free of credentials", writes.length >= 2 && !writes.some((call) => holdsAny(call.body ?? "", Object.values(secrets))), writes.length);
 }

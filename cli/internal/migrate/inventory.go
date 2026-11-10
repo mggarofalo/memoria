@@ -233,7 +233,7 @@ func InventoryRaw(dir, target string) RawSessions {
 	}
 	defer func() { _ = root.Close() }()
 	err = walk(root, func(name string, info fs.FileInfo) {
-		if strings.EqualFold(path.Ext(name), ".jsonl") {
+		if IsTranscriptName(name) {
 			raw.Files++
 			raw.Bytes += info.Size()
 		}

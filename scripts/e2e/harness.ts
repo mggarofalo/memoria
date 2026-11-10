@@ -7,7 +7,6 @@ import { randomBytes } from "node:crypto";
 import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import http from "node:http";
-import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -91,6 +90,9 @@ export interface HarnessOptions {
 /** Makes a key on this run's server. A key has a budget of requests, so a check that makes many takes its own. */
 export type ApiKeyMaker = (label: string, scopes: string[]) => Promise<string>;
 
+/** Collection name to root and pattern, as the SDK takes them. */
+export type Collections = Record<string, { path: string; pattern: string }>;
+
 export class Harness {
   readonly dir = mkdtempSync(path.join(os.tmpdir(), "memoria-e2e-"));
   readonly secrets: string[] = [];
@@ -104,13 +106,15 @@ export class Harness {
   private readonly children: ChildProcess[] = [];
   private readonly fds: number[] = [];
   private readonly cli = path.join(this.dir, process.platform === "win32" ? "memoria.exe" : "memoria");
-  private readonly sidecarSecret = randomBytes(32).toString("base64url");
+  protected readonly sidecarSecret = randomBytes(32).toString("base64url");
+  /** False where the servers run as deployed, with nothing between them to record what the sidecar was asked. */
+  readonly hasProxy: boolean = true;
 
   /** Everything a child sees for home and config points inside the private directory. */
   private readonly isolated: NodeJS.ProcessEnv;
-  private readonly apiEnv: NodeJS.ProcessEnv;
+  protected readonly apiEnv: NodeJS.ProcessEnv;
 
-  private readonly options: HarnessOptions;
+  protected readonly options: HarnessOptions;
   private api: ChildProcess | undefined;
 
   constructor(options: HarnessOptions = {}) {
@@ -204,7 +208,7 @@ export class Harness {
       mkdirSync(folder, { recursive: true });
       writeFileSync(path.join(folder, file), text);
     }
-    const collections: Record<string, { path: string; pattern: string }> = Object.fromEntries(["notes", "secret", "bulk", "many"].map((name) => [name, { path: path.join(this.dir, "corpus", name), pattern: "**/*.md" }]));
+    const collections: Collections = Object.fromEntries(["notes", "secret", "bulk", "many"].map((name) => [name, { path: path.join(this.dir, "corpus", name), pattern: "**/*.md" }]));
     for (const name of this.options.extraCollections ?? []) {
       const folder = path.join(this.dir, "corpus", name);
       mkdirSync(folder, { recursive: true });
@@ -216,12 +220,20 @@ export class Harness {
       writeFileSync(path.join(folder, "seed.md"), `# Seed\n\nSeed text for ${name}.\n`);
       collections[name] = { path: folder, pattern: "**/*.md" };
     }
-    const code = `const qmd = await import("@tobilu/qmd");
-const store = await qmd.createStore({ dbPath: ${JSON.stringify(path.join(this.dir, "index.sqlite"))}, config: { collections: ${JSON.stringify(collections)} } });
+    const seeded = this.createIndex(collections);
+    this.check("seed a throwaway index with the real SDK", seeded.status === 0, seeded.stderr);
+  }
+
+  /** The code that makes the index, for a process that has the SDK. */
+  protected indexCode(dbPath: string, collections: Collections): string {
+    return `const qmd = await import("@tobilu/qmd");
+const store = await qmd.createStore({ dbPath: ${JSON.stringify(dbPath)}, config: { collections: ${JSON.stringify(collections)} } });
 await store.update();
 await store.close();`;
-    const seeded = spawnSync(process.execPath, ["--input-type=module", "-e", code], { cwd: path.join(repo, "sidecar"), env: this.offline(), encoding: "utf8", timeout: 120_000 });
-    this.check("seed a throwaway index with the real SDK", seeded.status === 0, seeded.stderr);
+  }
+
+  protected createIndex(collections: Collections): { status: number | null; stderr: string } {
+    return spawnSync(process.execPath, ["--input-type=module", "-e", this.indexCode(path.join(this.dir, "index.sqlite"), collections)], { cwd: path.join(repo, "sidecar"), env: this.offline(), encoding: "utf8", timeout: 120_000 });
   }
 
   /** Model files in the private cache, which has to stay empty of them. */
@@ -369,7 +381,7 @@ await store.close();`;
     return this.controlReader.prepare(sql).all(...parameters) as T[];
   }
 
-  private controlPath(): string {
+  protected controlPath(): string {
     return path.join(this.dir, "control.sqlite");
   }
 
@@ -386,7 +398,7 @@ await store.close();`;
     return { main: read(this.controlPath()), wal: read(`${this.controlPath()}-wal`) };
   }
 
-  private apiEnvironment(): NodeJS.ProcessEnv {
+  protected apiEnvironment(): NodeJS.ProcessEnv {
     return {
       ...this.isolated,
       ...this.apiEnv,
@@ -505,11 +517,14 @@ function run(command: string, args: string[], cwd: string): void {
   if (result.status !== 0) throw new Error(`${command} ${args.join(" ")} failed`);
 }
 
+// Ports come from the worker tests' helper, which never hands out one that fetch refuses to dial.
+export { freePort };
+
 export function pause(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function waitForHttp(url: string): Promise<boolean> {
+export async function waitForHttp(url: string): Promise<boolean> {
   for (let attempt = 0; attempt < 240; attempt++) {
     try {
       await fetch(url);
