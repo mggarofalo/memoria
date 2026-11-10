@@ -90,6 +90,8 @@ function prepare(): void {
     command: ["node", "/check/worker-host.mjs"]
     volumes:
       - { type: bind, source: ${JSON.stringify(path.join(repo, "sidecar", "test"))}, target: /mock, read_only: true }
+      # mock-worker.ts imports ../../worker/test/ports.ts, which from /mock is this.
+      - { type: bind, source: ${JSON.stringify(path.join(repo, "worker", "test"))}, target: /worker/test, read_only: true }
       - { type: bind, source: ${JSON.stringify(dir)}, target: /check, read_only: true }
     networks: [memoria]
     profiles: [worker]
@@ -160,14 +162,17 @@ async function survivesRestart(key: string): Promise<void> {
   check("compose: a delete is confirmed", gone.status === 202 && gone.body.deleted === true, gone.body);
   const search = (word: string) => () => api(`/v1/search?query=${word}&collection=${COLLECTION}&limit=5&rerank=false`, { key });
   const paths = (r: { body: any }): string[] => (r.body.results ?? []).map((hit: { path: string }) => hit.path);
-  const left = await until(search("zebrafish"), (r) => paths(r).length === 0, 90);
-  check("compose: the deleted document leaves search", paths(left).length === 0, { paths: paths(left), degraded: left.body.degradedReasons });
+  // Vector search returns the nearest documents however far, so once the session is embedded
+  // it can answer "zebrafish" too. What must not come back is the deleted document.
+  const deletedPath = "2026-01-15_compose1.md";
+  const left = await until(search("zebrafish"), (r) => r.status === 200 && !paths(r).includes(deletedPath), 90);
+  check("compose: the deleted document leaves search", left.status === 200 && !paths(left).includes(deletedPath), { paths: paths(left), degraded: left.body.degradedReasons });
   compose("restart");
   await until(() => api("/health").catch(() => ({ status: 0, body: {} })), (r) => r.status === 200, 90);
   const kept = await until(search("axolotl"), (r) => paths(r).length === 1, 60);
   check("compose: after a restart the session is still there", paths(kept).length === 1, paths(kept));
   const deleted = await search("zebrafish")();
-  check("compose: and the deleted document is still gone", paths(deleted).length === 0, { paths: paths(deleted), degraded: deleted.body.degradedReasons });
+  check("compose: and the deleted document is still gone", deleted.status === 200 && !paths(deleted).includes(deletedPath), { paths: paths(deleted), degraded: deleted.body.degradedReasons });
 }
 
 const started = Date.now();
