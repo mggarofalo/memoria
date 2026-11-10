@@ -155,11 +155,14 @@ public sealed class RedactionMeasurementTests
 
 	private static IEnumerable<string> TrackedFiles(string root)
 	{
-		ProcessStartInfo start = new("git", "ls-files") { WorkingDirectory = root, RedirectStandardOutput = true, UseShellExecute = false };
+		// Unquoted, so a path with non-ASCII characters is read rather than skipped.
+		ProcessStartInfo start = new("git", "-c core.quotePath=false ls-files") { WorkingDirectory = root, RedirectStandardOutput = true, UseShellExecute = false };
 		using Process git = Process.Start(start)!;
 		string output = git.StandardOutput.ReadToEnd();
 		git.WaitForExit();
-		return output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+		return git.ExitCode == 0
+			? output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+			: throw new InvalidOperationException("git ls-files failed, so the report would count nothing");
 	}
 
 	/// <summary>The file's text, or null for a binary or very large file.</summary>
