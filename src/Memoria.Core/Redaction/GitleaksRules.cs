@@ -70,8 +70,40 @@ internal static class GitleaksRules
 			return end - 1;
 		}
 
-		return GluedSuffixEnd(input, end);
+		return RandomContinuationEnd(input, end) ?? GluedSuffixEnd(input, end);
 	}
+
+	/// <summary>
+	/// A token longer than its rule allows, with separators in its alphabet, can stop the match at an inner <c>-</c>, <c>.</c> or
+	/// <c>%</c>. When what follows the separator still reads as random, it is the rest of the token, and goes too. Words after a
+	/// separator stay, so <c>-backup-copy</c> is kept.
+	/// </summary>
+	private static int? RandomContinuationEnd(string input, int end)
+	{
+		if (end >= input.Length || input[end] is not ('-' or '.' or '%' or '+' or '/' or '_'))
+		{
+			return null;
+		}
+
+		int runEnd = end;
+		while (runEnd < input.Length && (char.IsAsciiLetterOrDigit(input[runEnd]) || input[runEnd] is '-' or '.' or '%' or '+' or '/' or '_' or '='))
+		{
+			runEnd++;
+		}
+
+		ReadOnlySpan<char> rest = input.AsSpan(end + 1, runEnd - end - 1);
+		foreach (Range piece in rest.SplitAny("-.%+/_="))
+		{
+			if (rest[piece].Length >= MinRandomPiece && ValueShapes.IsRandomSegment(rest[piece]))
+			{
+				return runEnd;
+			}
+		}
+
+		return null;
+	}
+
+	private const int MinRandomPiece = 8;
 
 	/// <summary>Base64 padding goes with its token: a pattern's own ending can match an <c>=</c> too, and would leave the last one behind.</summary>
 	private static int PaddingEnd(string input, int end)

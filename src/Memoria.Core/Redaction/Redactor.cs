@@ -112,7 +112,9 @@ public sealed class Redactor : IRedactor
 	{
 		Stopwatch clock = Stopwatch.StartNew();
 		ViewBuffers buffers = new();
-		foreach (bool join in new[] { false, true })
+
+		// With no wrapped line the joined view is the plain one, which the first round has already read with every rule.
+		foreach (bool join in LineWraps.Any(text) ? new[] { false, true } : [false])
 		{
 			Dictionary<string, int> unused = [];
 			ViewCache views = new(join, buffers);
@@ -176,7 +178,13 @@ public sealed class Redactor : IRedactor
 		string current = Sweep(_lineRules, text, joinWrappedLines: false, clock, counts, buffers);
 		current = Sweep(_tokenRules, current, joinWrappedLines: true, clock, counts, buffers);
 		current = Sweep(_ownRules, current, joinWrappedLines: false, clock, counts, buffers);
-		current = Sweep(_backstopRules, current, joinWrappedLines: true, clock, counts, buffers);
+
+		// With no wrapped line the joined view is the plain one, and reading it twice would only double the cost.
+		if (LineWraps.Any(current))
+		{
+			current = Sweep(_backstopRules, current, joinWrappedLines: true, clock, counts, buffers);
+		}
+
 		current = Sweep(_backstopRules, current, joinWrappedLines: false, clock, counts, buffers);
 		string quoted = quoteFrontmatter ? YamlFrontmatter.QuotePlaceholders(current) : current;
 		return quoted == text ? text : quoted;

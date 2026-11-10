@@ -231,6 +231,16 @@ public sealed partial class ImportedRuleTests
 		Assert.Equal("[REDACTED:gitleaks-flutterwave-encryption-key]-backup-copy and more", Redactor.Shared.RedactFragment(head + "-backup-copy and more").Text);
 	}
 
+	/// <summary>A token longer than its rule allows stops the match at an inner separator. What follows still reads as random, so it goes too.</summary>
+	[Fact]
+	public void The_rest_of_an_overlong_token_goes_with_it()
+	{
+		string body = Synthetic.Body(60, 4112) + "-" + Synthetic.Body(20, 4113);
+		string output = Redactor.Shared.RedactFragment("x pscale" + "_pw_" + body + " y").Text;
+
+		Assert.Equal("x [REDACTED:gitleaks-planetscale-password] y", output);
+	}
+
 	[Fact]
 	public void A_period_ending_the_sentence_stays()
 	{
