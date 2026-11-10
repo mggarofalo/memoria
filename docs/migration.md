@@ -15,7 +15,7 @@ All the commands are in [cli.md](cli.md).
 ## Before you start
 
 - **A target must be empty when it is first opened.** The server checks this only the first time ingest uses a collection, so point `push` only at a target meant for this migration.
-- **The rate limit sets the speed.** A key's default is 120 requests a minute, about 2 documents a second, so 5,000 documents take about 42 minutes. A re-run or a `verify` costs one request a document too. An operator can raise `RateLimit:PermitLimit` for the migration.
+- **The rate limit sets the speed.** A key's default is 120 requests a minute, about 2 documents a second, so 5,000 documents take about 42 minutes. A re-run or a `verify` costs one request a document too. An operator can raise `Memoria:Auth:RateLimit:PermitLimit` for the migration.
 - **Nothing can be sent until you say so.** `push` without `--apply` and `cutover` without `--apply` only show what they would do.
 
 ## The desktop
@@ -151,7 +151,7 @@ memoria migrate cutover --skill skills/memoria/SKILL.md
 
 Read what it shows. It looks for `qmd` in `~/.mcp.json`, `~/.claude.json` and Codex's `config.toml`, swaps it for `memoria` in each that defines it, and backs up each file first. A file that does not define it stays as it is, and it says so. If `qmd` is nowhere, it says where it looked and exits 1. Nothing was changed: find where your entry is before going on.
 
-Where `settings.local.json` allows qmd's tools, it adds `mcp__memoria__*` rules the same way, and `memoria` in `enabledMcpjsonServers` if qmd is there. Without those, your clients would ask about each memoria tool or not load it at all. The old rules stay, and it says how many: they do nothing once qmd is gone, and you can remove them later. It installs the skill in each skills folder it finds. A folder that is a link is skipped and named, as writing there would change the repository it points at: add the skill there yourself if you want it.
+Where `settings.json` or `settings.local.json` allows qmd's tools, it adds `mcp__memoria__*` rules the same way, and `memoria` in `enabledMcpjsonServers` if qmd is there. Without those, your clients would ask about each memoria tool or not load it at all. The old rules stay, and it says how many: they do nothing once qmd is gone, and you can remove them later. It installs the skill in each skills folder it finds. A folder that is a link is skipped and named, as writing there would change the repository it points at: add the skill there yourself if you want it.
 
 It adds no hook. It shows the `SessionEnd` hook you already have, and whether one is there at all. The hook is yours, and has to do what [What the hook has to do](#what-the-hook-has-to-do) says.
 

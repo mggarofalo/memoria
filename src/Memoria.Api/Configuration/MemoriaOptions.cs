@@ -38,7 +38,7 @@ public sealed class IngestOptions
 	/// <summary>Documents over 256 KiB handled at once, from the bytes that cross that line until the request ends. Past it, one gets 503 with <c>Retry-After</c>. Their text waits in memory for a render slot, so without this a burst can run the process out of memory.</summary>
 	public int MaxConcurrentLargeDocuments { get; set; } = 8;
 
-	/// <summary>Redactions and renders run at once, for documents and transcripts together. This is what bounds CPU and most of the memory. Reading a body does not take one.</summary>
+	/// <summary>Redactions and renders run at once, for documents and transcripts together. Jobs of 1 MiB or less have a lane of 2 of their own and do not count against it. This is what bounds CPU and most of the memory. Reading a body does not take one.</summary>
 	public int MaxConcurrentRenders { get; set; } = 2;
 
 	/// <summary>The slowest a body may arrive, after a few seconds' grace. Below it the server cuts the request off with 408.</summary>
@@ -107,7 +107,7 @@ public sealed class AuthOptions
 	/// <summary>True only for the exact opt-out, so an invalid value can never open anything.</summary>
 	public bool IsDisabled => string.Equals(Mode, AuthModes.Disabled, StringComparison.Ordinal);
 
-	/// <summary>The SQLite control database holding keys and audit records. Durable state: put it on a volume, apart from QMD's index. Required in <see cref="AuthMode.ApiKey"/> mode.</summary>
+	/// <summary>The SQLite control database holding keys and audit records. Durable state: put it on a volume, apart from QMD's index. Required in <see cref="AuthModes.ApiKey"/> mode.</summary>
 	public string? DatabasePath { get; set; }
 
 	public RateLimitOptions RateLimit { get; set; } = new();

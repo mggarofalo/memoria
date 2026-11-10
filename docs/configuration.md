@@ -100,7 +100,7 @@ Scopes do not imply one another.
 | Scope | Allows |
 |---|---|
 | `read` | Search, documents, collections, status, and the MCP endpoint. |
-| `ingest` | Reserved for the ingest routes. |
+| `ingest` | The ingest routes: `/v1/documents`, `/v1/ingest/session` and `/v1/ingest/rendered`. |
 | `admin` | Key management and backend detail: the full `/ready` report and how the backend failed. |
 
 `admin` does **not** imply `read`. A key used to manage keys is not a key that
@@ -202,8 +202,9 @@ record the table drops. If you need a record the acting key cannot erase, ship t
 or the rows off the box.
 
 The request log line carries the route template and the key id. Logs never carry
-the query string, request headers, or a key's secret. The JSON console format's
-scopes do include ASP.NET Core's raw `RequestPath`, so a document path requested
+the query string, request headers, or a key's secret. With
+`Memoria:Logging:RequestDetails` set to `Enabled`, the JSON console format's
+scopes include ASP.NET Core's raw `RequestPath`, so a document path requested
 through `GET /v1/docs/{id}` can appear in log output even with
 `Audit:IncludeQueries` off. Rate limits and the audit trail
 key on the API key, not the client address, so they work the same behind the
@@ -219,7 +220,7 @@ configured `TrustedProxies` entry.
 | `MaxSessionBytes` | `268435456` | The largest raw transcript one request may send. It is read as a stream, and past this the request gets 413 or, if the upload has no declared length and the client is still sending, a closed connection. A transcript under this limit whose text passes the renderer's 32 million character budget is stored as far as the budget goes and answered with 207: it stays `partial`, and `read.messagesOverLimit` says how much was left out. |
 | `MaxConcurrentLargeDocuments` | `8` | Documents over 256 KiB handled at once. Past it one gets 503 `ingest_busy` with `Retry-After` and its connection closed, and smaller ones carry on. Their text waits in memory for a render slot, so without this a burst can run the process out of memory, which can kill it. A client should wait before retrying: one that does stores far more than one that does not. |
 | `MaxConcurrentLargeUploads` | `2` | Transcripts over 8 MiB handled at once. Past it a large upload gets 503 `ingest_busy` with `Retry-After`, while documents and smaller transcripts carry on. A slow large upload holds its place until it ends, so two uploads dripping at the rate floor can keep other large uploads out for as long as the upload deadline allows. That is accepted on a private server whose keys all belong to one owner. |
-| `MaxConcurrentRenders` | `2` | Redactions and renders run at once, for documents and transcripts together. Reading a body does not take one. Only one job of 32 MiB or more runs at a time, whatever this says. Under a 512 MiB GC limit (`DOTNET_GCHeapHardLimit`) in the Linux image, one or two 200 MiB transcripts took the API to about 570 MiB of peak memory, all answered 207. Under 1 GiB the peak was about 1 GB. So allow for that much memory or set such a limit. If memory runs out anyway, the request gets 503 `ingest_busy` and can be repeated. |
+| `MaxConcurrentRenders` | `2` | Redactions and renders run at once, for documents and transcripts together. Jobs of 1 MiB or less have a lane of 2 of their own and do not count against it. Reading a body does not take one. Only one job of 32 MiB or more runs at a time, whatever this says. Under a 512 MiB GC limit (`DOTNET_GCHeapHardLimit`) in the Linux image, one or two 200 MiB transcripts took the API to about 570 MiB of peak memory, all answered 207. Under 1 GiB the peak was about 1 GB. So allow for that much memory or set such a limit. If memory runs out anyway, the request gets 503 `ingest_busy` and can be repeated. |
 | `MinUploadBytesPerSecond` | `16384` | The slowest a body may arrive, after 10 seconds' grace. A link slower than this gets 408, so a client on one needs to send less at a time. Above it, a link costs nothing but the time. |
 | `SessionUploadDeadline` | `01:00:00` | The longest a transcript's body may take to arrive, however steadily. Past it the request gets 408 and nothing changes. |
 | `DocumentUploadDeadline` | `00:05:00` | The same for a document. |

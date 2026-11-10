@@ -15,6 +15,7 @@ This has run on a Windows desktop with an RTX 5080 and llama.cpp b12110. [`docs/
 ```bash
 cd worker
 MEMORIA_WORKER_HOST=192.168.1.20 \
+MEMORIA_WORKER_ALLOW_HTTP_ON_PRIVATE_NETWORK=1 \
 MEMORIA_WORKER_TOKEN=$(node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))") \
 MEMORIA_WORKER_LLAMA_SERVER=/path/to/llama-server \
 npm start
@@ -35,8 +36,8 @@ The scripts are provided but have not been run on a real install yet.
 **Windows desktop (NSSM).** The service restarts on failure and takes its `llama-server` children down with it. `-WhatIf` prints the plan, needs no elevation and changes nothing. The real run needs an elevated PowerShell.
 
 ```powershell
-.\scripts\install-service.ps1 -BindHost 192.168.1.20 -LlamaServer "C:\Program Files\llama\llama-server.exe" -TokenFile .\token.txt -WhatIf
-.\scripts\install-service.ps1 -BindHost 192.168.1.20 -LlamaServer "C:\Program Files\llama\llama-server.exe" -TokenFile .\token.txt
+.\scripts\install-service.ps1 -BindHost 192.168.1.20 -AllowHttpOnPrivateNetwork -LlamaServer "C:\Program Files\llama\llama-server.exe" -TokenFile .\token.txt -WhatIf
+.\scripts\install-service.ps1 -BindHost 192.168.1.20 -AllowHttpOnPrivateNetwork -LlamaServer "C:\Program Files\llama\llama-server.exe" -TokenFile .\token.txt
 .\scripts\uninstall-service.ps1
 ```
 
@@ -45,7 +46,7 @@ It installs to `%ProgramFiles%\Memoria\memoria-worker` and runs as `NT SERVICE\m
 **Mac (launchd).** Installs a user agent, which runs while you are logged in. The token goes to a mode 600 file in `~/Library/Application Support/memoria-worker`, and the plist holds only its path. launchd does not rotate logs, so prune `~/Library/Logs/memoria-worker` yourself. The script has not been run on a Mac; its files and modes are checked by tests with `--dry-run`, which loads nothing.
 
 ```bash
-MEMORIA_WORKER_TOKEN=... ./scripts/install-launchd.sh --host 192.168.1.30 --llama-server /opt/homebrew/bin/llama-server
+MEMORIA_WORKER_TOKEN=... ./scripts/install-launchd.sh --host 192.168.1.30 --allow-http-on-private-network --llama-server /opt/homebrew/bin/llama-server
 ./scripts/uninstall-launchd.sh
 ```
 
@@ -98,7 +99,7 @@ Models stay loaded for as long as the worker runs. Nothing unloads them when idl
 
 ## Develop
 
-`npm test` here runs the worker's tests. The sidecar's `npm test` and `npm run typecheck` also cover this directory, which is how CI reaches it. Run `npm install` here only if you want the standalone `npm run typecheck`.
+`npm test` here runs the worker's tests, and `npm run test:coverage` runs them with the coverage gates. The sidecar's `npm test` and `npm run typecheck` also cover this directory. CI runs `npm ci`, `npm run typecheck`, ESLint and `npm run test:coverage` here in its own `Worker Build & Test` job.
 
 Tests launch `test/fixtures/fake-llama-server.ts` as a real child process in place of `llama-server`. That proves supervision, routing and auth, and says nothing about real models.
 

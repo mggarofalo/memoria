@@ -143,7 +143,7 @@ memoria status
 
 **Table and markdown output is sanitized.** Document text comes from transcripts, which can hold terminal escape sequences that write your clipboard or rewrite your screen. The CLI strips control and format characters, escape sequences, carriage returns, bidirectional overrides and variation selectors from these formats, whether or not stdout is a terminal. In markdown, snippets and multi-get bodies are fenced so a document cannot forge a result heading. Titles and names are escaped so they cannot become images or links. Zero-width joiners are kept between letters of scripts that need them, such as Persian and Hindi, and removed everywhere else, including in emoji.
 
-**`--format json` is the server's response, byte for byte, and is not sanitized.** Treat it as data, and do not print it raw to a terminal. There is one exception: if a response contains the key in use, even JSON-escaped, or the secret half of it alone, that text is replaced with `[REDACTED]`, because the key never reaches stdout. This cannot catch a key that has been split across strings or transformed in some other way.
+**`--format json` is the server's response, byte for byte, and is not sanitized.** `sources` and `migrate` print JSON reports of their own instead. Treat it as data, and do not print it raw to a terminal. There is one exception: if a response contains the key in use, even JSON-escaped, or the secret half of it alone, that text is replaced with `[REDACTED]`, because the key never reaches stdout. This cannot catch a key that has been split across strings or transformed in some other way.
 
 ## Manage keys
 
@@ -172,7 +172,7 @@ memoria auth login --profile reader --api-url https://memoria.example.com
 
 ## Sync local folders
 
-`sources` keeps local folders of Markdown in the corpus. It needs a key with the `ingest` scope and the target collection in its list. The server redacts everything it stores.
+`sources` keeps local folders of Markdown in the corpus. It needs a key with the `ingest` scope and the target collection in its list, and a collection the operator has opened to ingest, which must be empty when ingest first uses it ([configuration](configuration.md#memoriaingest--writing-to-the-corpus)). The server redacts everything it stores.
 
 ```sh
 memoria sources add notes --path ~/notes --collection notes
@@ -183,16 +183,16 @@ memoria sources sync notes --apply   # sends, and from now on a plain sync sends
 
 - **The first run for a source on a server is a dry run.** It needs no key and no network, and it records nothing. `--apply` sends. `--dry-run` reports at any time.
 - **Only what changed is sent.** Content is compared by hash, so touching a file sends nothing. The cursor lives in `sources-state/` beside the config, holds paths and hashes and no text, and is kept per server, so another server starts with its own first run.
-- **It is safe to stop.** A run stops at the first sign the server cannot be reached, and at a `401` or `403`, and saves its place. Running it again continues, and sending a file twice does no harm. With nothing to send, it works offline and with no key. A server that asks a client to wait up to 2 minutes is waited for, and a longer wait stops the run with exit code 6.
+- **It is safe to stop.** A run stops at the first sign the server cannot be reached, and at a `401` or `403`, and saves its place. Running it again continues, and sending a file twice does no harm. With nothing to send, it works offline and with no key. A server that asks a client to wait up to 2 minutes is waited for, up to 5 times, and a longer wait stops the run with exit code 6 for a rate limit or 5 for a busy server.
 - **A file the server refuses does not stop the others.** It is named on stderr, tried again next time, and the run exits 1. This happens for a file too large to store, or when the server holds a newer version or has deleted the document. A deleted document stays deleted unless the file changes afterward.
 - **It never deletes anything on the server.** A file gone from the folder counts as `MISSING LOCALLY`, because an unmounted drive looks just like every file deleted. To remove a document, use `DELETE /v1/documents`.
 - **Only Markdown is sent.** Files ending in `.md` are sent. Hidden files and folders are left out without comment. Links are never followed, and those ending in `.md` are named as left out, along with files that are not UTF-8 or are over 16 MiB.
 
 A document's identity is the source's name and the file's path within the folder. Renaming a source or moving a file stores it again under a new identity, and the old copy stays until you delete it. The file's modification time orders versions, so a file edited on another machine with an older time is refused unless this machine's cursor has seen it.
 
-## Plan a migration from QMD
+## Migrate from QMD
 
-These commands look at a local QMD setup before moving it to a server. They only read, and only the paths you give them. They have no default location, need no key or server, and never open QMD's `index.sqlite`. Nothing is sent yet; the push comes later.
+These commands move a local QMD setup to a server. `plan` and `report` only read, and only the paths you give them. They have no default location, need no key or server, and never open QMD's `index.sqlite`. `push` sends, `verify` needs a key, and `cutover` and `rollback` edit client configs, as described below.
 
 ```sh
 memoria migrate plan --qmd-config ~/.config/qmd/index.yml
@@ -210,7 +210,7 @@ Patterns and ignore rules may use names, which may hold `+ & @ # $ ~`, `*`, `?`,
 
 `plan` also counts the selected files a server would always refuse, by reason, and exits 1 for those even with `--accept-skips`: characters or device names Windows forbids, invisible characters, a name not ending in `.md` in that case, a folder QMD excludes, names differing only in case, text that is not valid UTF-8, or a modification time over an hour ahead. To see those it reads each selected file, and keeps none of it. A blank file is left out and counted, as QMD does not index one, and is not an error. A name that looks like a credential needs the server's own rules, so `report` counts those. A decomposed name, as a Mac can hold, is not a problem: it is sent in composed form, the same every time, so it is stored under that spelling.
 
-**`push`** sends exactly those files to the server, through `POST /v1/ingest/rendered`, as they are. Without `--apply` it is a dry run: it sends nothing and needs no key, though it still reads each selected file to judge it, as `plan` does, and keeps none of the text. It uses 4 workers, as the server takes only 8 documents over 256 KiB at once, and `--workers` changes that. A key's rate limit, 120 requests a minute by default, sets the real speed: it holds every worker for the time the server names and carries on.
+**`push`** sends exactly those files to the server, through `POST /v1/ingest/rendered`, as they are. Without `--apply` it is a dry run: it sends nothing and needs no key, though it still reads each selected file to judge it, as `plan` does, and keeps none of the text. It uses 4 workers, as the server takes only 8 documents over 256 KiB at once, and `--workers` changes that, up to 16. A key's rate limit, 120 requests a minute by default, sets the real speed: it holds every worker for the time the server names, up to 2 minutes, and carries on. A longer wait, or one repeated past its budget, stops the run with exit code 5, and running it again continues.
 
 - **It can be interrupted.** Run it again and it continues. Progress is in a private file under the config folder's `migrate-state`, holding paths and progress and no text. Sending a document twice is safe, because its path is its identity and it repeats the same `updated`, the file's modification time. A file changed since it was sent goes again, and each send reads the newest copy. A copy older than one the server confirms it holds is reported as `older_than_sent` and not sent, as it could replace the newer one. `--ignore-state` sends everything again, without that check.
 - **That file is only a note.** Before skipping a document, a run asks the server for its state, one request each, and anything the server does not confirm as `complete` or `taken_over` with the same `updated` goes again. So "already sent" means the server said so. It also means a re-run costs one request a document against the key's rate limit.
@@ -226,7 +226,7 @@ It never changes your files, and never opens QMD's `index.sqlite`.
 
 **`verify`** compares what was pushed with the local setup, and changes nothing on either side. Per collection it compares file and document counts, each path's state and its `updated` against the local file's time, and a sample of documents fetched and compared with the local text apart from redaction. A redacted line must match its local line apart from the marks, in order. One mark covers several local lines only for a key block or a token wrapped over lines with no spaces, and a change inside a mark cannot be seen. A document whose differences all sit beside marks but cannot be lined up is counted as could not compare and named in the report. It does not fail the run, but it may be missing text beside a mark, so a person needs to compare it with its local file. `--sample` takes at least 1, and is spread over the whole list by a seed it prints; `--seed` fetches the same sample again. With `--queries`, a file of one query a line, it reports how many of local QMD's top 10 results the server also returned. A query is always passed as a query, whatever it starts with or holds, and on Windows a `.cmd` launcher cannot read it as a command. A file of queries with a control character inside a line is refused. `verify` exits 1 if the counts differ with no takeover to explain it, a file is not held, is held at another version, or a sampled document differs. A document is counted and fetched only once indexed, so wait for the index after a push. Overlap never fails it, as no threshold has been measured. It needs a key with both the `ingest` and `read` scopes.
 
-**`cutover`** points your clients at the server. It looks for `qmd` in `~/.mcp.json`, `~/.claude.json` and Codex's `config.toml`, and swaps it for `memoria` in each file that defines it, and only those. If none does, it says where it looked and exits 1. Where `settings.local.json` allows qmd's tools or lists it in `enabledMcpjsonServers`, it adds the same for memoria and leaves the old rules, and it installs the skill given by `--skill` in each client's skills folder. It adds no hook: it reports the `SessionEnd` hook you have by program name, with no argument or `VAR=value`, and what a hook needs. Without `--apply` it only shows the change, with no argument, value or URL credential from an entry. With it, it asks first, unless you pass `--yes`.
+**`cutover`** points your clients at the server. It looks for `qmd` in `~/.mcp.json`, `~/.claude.json` and Codex's `config.toml`, and swaps it for `memoria` in each file that defines it, and only those. If none does, it says where it looked and exits 1. Where `settings.json` or `settings.local.json` allows qmd's tools or lists it in `enabledMcpjsonServers`, it adds the same for memoria and leaves the old rules, and it installs the skill given by `--skill` in each client's skills folder. It adds no hook: it reports the `SessionEnd` hook you have by program name, with no argument or `VAR=value`, and what a hook needs. Without `--apply` it only shows the change, with no argument, value or URL credential from an entry. With it, it asks first, unless you pass `--yes`.
 
 It refuses a config it cannot read as a whole (bad JSON, text after it, `null`, a wrong shape, malformed TOML), a TOML form it cannot edit safely (dotted keys or an inline table for qmd), and a config that is a link or read-only, and changes nothing. A skills folder that is a link is skipped and said, as writing there would change whatever it points at. If a file changes after it was shown, it stops. It backs up each file under the CLI's config folder before changing any, and never touches local QMD. Running it again changes only what is left to change, and keeps the first backup.
 
@@ -242,7 +242,7 @@ Both `plan` and `report` exit 1 if anything could not be read: a denied folder, 
 |---|---|
 | 0 | Success |
 | 1 | Other failure |
-| 2 | Bad usage, including a 400 from the server |
+| 2 | Bad usage, including a 400 or 422 from the server |
 | 3 | No usable key, or the server said 401 or 403 |
 | 4 | Not found, including a `multi-get` where any reference failed or nothing was returned |
 | 5 | Server unavailable: 502, 503, 504, a timeout, or no connection |

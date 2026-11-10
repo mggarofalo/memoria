@@ -6,7 +6,7 @@ This runs the real `memoria` CLI against a real `Memoria.Api` and a real `memori
 (cd sidecar && npm ci)
 node scripts/e2e/run.ts              # builds the CLI, API and sidecar first
 node scripts/e2e/run.ts --no-build   # reuses a built API and sidecar
-node scripts/e2e/run.ts --no-build --only-ingest   # only the second server: the redaction proof, for running it many times
+node scripts/e2e/run.ts --no-build --only-ingest   # only the second server: ingest, sources and migrate, for running them many times
 ```
 
 It needs Node 22.18+, Go and the .NET SDK. It exits non-zero if any check fails. It connects from loopback addresses such as `127.0.0.2`, which Linux and Windows answer without setup. macOS does not, so the auth checks fail there.
@@ -31,7 +31,7 @@ The same file then proves the operator's off switch against the collection next 
 
 ## Adding checks
 
-Add a function to `checks.ts`, and call it from `run.ts`, before `rateLimits`. That section must stay last, because it uses up the failed-auth limit for the address.
+Add a function to `checks.ts` or to the file for its area (`auth-*.ts`, `ingest-*.ts`, `migrate*.ts`, `sources.ts`), and call it from `run.ts`, before `rateLimits`. Only the final scans, `noModels` and `secretsAbsent`, may follow it, because it uses up the failed-auth limit for the address.
 
 Keep checks deterministic. The rate limits are fixed and their windows are 30 minutes, so a 429 arrives on an exact request however slow the machine is, and `rateLimits` uses its own key. Other checks can make up to 100 requests with one key before hitting the limit.
 

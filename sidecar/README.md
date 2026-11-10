@@ -36,6 +36,7 @@ Everything is an environment variable. See [`.env.example`](.env.example) for th
 | Variable | Default | Purpose |
 |---|---|---|
 | `MEMORIA_QMD_HOST` | `127.0.0.1` | Bind address. Use the desktop's LAN address for `Memoria.Api`. |
+| `MEMORIA_QMD_ALLOW_HTTP_ON_PRIVATE_NETWORK` | `0` | Required to bind a non-loopback address or use a plain-http worker URL: the sidecar serves plain http, so the network itself must be encrypted (a WireGuard tunnel). See [`docs/deployment.md`](../docs/deployment.md). |
 | `MEMORIA_QMD_PORT` | `8282` | Port. |
 | `MEMORIA_QMD_SECRET` | unset | Bearer secret. Required unless bound to loopback. For development: services use the file below. |
 | `MEMORIA_QMD_SECRET_FILE` | unset | Read the secret from this file at startup: one line of UTF-8, with surrounding whitespace ignored. Setting both this and `MEMORIA_QMD_SECRET` is an error. On POSIX the sidecar refuses to start if group or others have any access to the file (`chmod 600`). `MEMORIA_QMD_WORKER_TOKEN_FILE` works the same way. |
@@ -53,8 +54,8 @@ Everything is an environment variable. See [`.env.example`](.env.example) for th
 [`scripts/install-service.ps1`](scripts/install-service.ps1) registers the sidecar with [NSSM](https://nssm.cc/) (`winget install NSSM.NSSM`) so it starts at boot and restarts on failure. **It has not been run on a real install yet.** Print the plan first, which needs no elevation and changes nothing, then run it from an elevated shell:
 
 ```powershell
-.\scripts\install-service.ps1 -BindHost 192.168.1.20 -SecretFile .\secret.txt -CollectionRoot D:\corpus\sessions -WhatIf
-.\scripts\install-service.ps1 -BindHost 192.168.1.20 -SecretFile .\secret.txt -CollectionRoot D:\corpus\sessions
+.\scripts\install-service.ps1 -BindHost 192.168.1.20 -AllowHttpOnPrivateNetwork -SecretFile .\secret.txt -CollectionRoot D:\corpus\sessions -WhatIf
+.\scripts\install-service.ps1 -BindHost 192.168.1.20 -AllowHttpOnPrivateNetwork -SecretFile .\secret.txt -CollectionRoot D:\corpus\sessions
 ```
 
 It installs to `%ProgramFiles%\Memoria\memoria-qmd` and runs as `NT SERVICE\memoria-qmd`, with the secret in a file only that account and Administrators can read. Logs land in `%ProgramData%\memoria-qmd\logs` and rotate at 10 MiB. Pass every collection directory as `-CollectionRoot`, or document writes will fail. `scripts/uninstall-service.ps1` removes the service, its files and the secret, and leaves the logs. [`docs/deployment.md`](../docs/deployment.md#running-as-a-service) has the details, including what to do when upgrading an earlier install and what has yet to be confirmed.
@@ -74,6 +75,7 @@ Every route except `/health` and `/openapi.json` requires `Authorization: Bearer
 | `GET /docs/{reference}` | One document by `collection/path`, `qmd://` URI or docid, with `:from` / `:from:count` line-range suffixes. |
 | `POST /docs:multiGet` | Several documents by glob and/or a list of references. Each selector resolves separately; results merge, one entry per file. |
 | `GET /collections` | Name, root, pattern, document counts, root context. |
+| `GET /collections/{name}/empty` | Whether a collection's directory is empty. The API asks once, before opening a collection to ingest. |
 | `POST /documents` | Ingest by value: writes markdown into the collection directory and queues a debounced update (and embed) job. Returns 202. |
 | `DELETE /documents?collection=&path=` | Delete by value: removes the file and queues a debounced update. Idempotent; returns 202 with `deleted: false` when no file existed. |
 | `POST /reindex` | Queue `update` (+ `embed`) for some or all collections, without waiting on the debounce. One worker runs one job at a time. |
@@ -150,7 +152,7 @@ These return 409:
 
 - `case_conflict`: the path differs only in case or normalization from an existing entry at some level. Use the existing name. Otherwise `KEEP.md` would overwrite `keep.md` on NTFS and APFS while the metadata index recorded the wrong key. This applies on case-sensitive hosts too.
 - `hard_link`: overwriting a file with more than one hard link. Deleting one is allowed, because it removes that name only and leaves the file's other names alone.
-- `not_a_directory`, `is_directory`, `exists`: what they say.
+- `not_a_directory`, `is_directory`: what they say.
 - `path_changed`: a directory on the path changed during the operation.
 
 A write goes to a hidden temp file in the target's directory, is flushed, and is renamed over the target after containment has been checked again. A reader never sees half a document, and a hard link or symlink at the target is replaced rather than written through. An overwrite keeps the old file's POSIX permission bits. On Windows the new file takes its ACL from the directory, so an ACL set on the old file alone is lost. A delete renames the file aside and checks again before unlinking it.
@@ -237,8 +239,8 @@ Layout:
 ## Security notes
 
 - QMD has no authentication and the corpus contains credentials. The sidecar refuses to start on a non-loopback address without a secret, and compares bearer tokens in constant time.
-- `POST /documents` and `DELETE /documents` change files. Redaction is the caller's job and must happen before the call. Paths must stay inside the collection root and match the collection's glob, and the name rules below apply on every platform, so a path valid on one host is valid on the others. See [Document paths](#document-paths).
-- Write access to a collection root is trust in that account. The checks below shrink what a local user can do by racing the sidecar, but do not remove it (see [Document paths](#document-paths)).
+- `POST /documents` and `DELETE /documents` change files. Redaction is the caller's job and must happen before the call. Paths must stay inside the collection root and match the collection's glob, and the name rules above apply on every platform, so a path valid on one host is valid on the others. See [Document paths](#document-paths).
+- Write access to a collection root is trust in that account. The checks above shrink what a local user can do by racing the sidecar, but do not remove it (see [Document paths](#document-paths)).
 - The sidecar is not a public surface. `Memoria.Api` is the only intended caller; expose nothing beyond the LAN.
 
 ## Dependency audit
