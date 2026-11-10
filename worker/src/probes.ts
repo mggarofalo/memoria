@@ -9,9 +9,10 @@ import os from "node:os";
 
 export type RunCommand = (command: string, args: string[]) => Promise<string>;
 
-export const runCommand: RunCommand = (command, args) =>
+/** A probe that has not answered in `timeoutMs` is killed and counts as failed. 0 waits for as long as it takes. */
+export const runCommand = (command: string, args: string[], timeoutMs = 3_000): Promise<string> =>
   new Promise((resolve, reject) => {
-    execFile(command, args, { timeout: 3_000, windowsHide: true }, (err, stdout) => (err ? reject(err) : resolve(stdout)));
+    execFile(command, args, { timeout: timeoutMs, windowsHide: true }, (err, stdout) => (err ? reject(err) : resolve(stdout)));
   });
 
 export interface VramReading {
