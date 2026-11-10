@@ -6,8 +6,14 @@ using Memoria.Core.Redaction;
 namespace Memoria.Core.Tests.Redaction;
 
 /// <summary>
-/// Fail-closed behavior, idempotence, frontmatter, the public surface, and time budgets. The budgets count this process's CPU time, as wall-clock time on a busy machine says
-/// little about the redactor. That counts every thread in the process, so these tests run apart from the parallel ones.
+/// Fail-closed behavior, idempotence, frontmatter, the public surface, and time budgets.
+/// <para>
+/// The two budget tests time only the redaction call, in the CPU time of the thread that makes it, which is the redactor's own: other tests,
+/// other processes and the garbage collector's background thread do not count. They are in the <see cref="TimingCategory"/> category, which
+/// the coverage run and the mutation runs leave out, as instrumented code is slower by a factor that differs from case to case. They run
+/// on their own, uninstrumented, in Build &amp; Test and the pre-commit hook, so each budget is about 4 times the cost measured there on a
+/// Debug build, and a real regression fails on a fast machine too.
+/// </para>
 /// </summary>
 [Collection(nameof(RedactorBudgetCollection))]
 public sealed class RedactorSafetyTests
@@ -17,6 +23,15 @@ public sealed class RedactorSafetyTests
 	private static readonly Redactor Redactor = new();
 
 	private static readonly TimeSpan Generous = TimeSpan.FromMinutes(1);
+
+	/// <summary>The trait the coverage and mutation runs filter out, and Build &amp; Test runs on its own.</summary>
+	public const string TimingCategory = "Timing";
+
+	/// <summary>The slowest case, a run of <c>a=b;password=</c>, took 5.8 s for both passes. The others take 0.2 to 2.6 s.</summary>
+	private static readonly TimeSpan AdversarialBudget = TimeSpan.FromSeconds(24);
+
+	/// <summary>It took 24.7 s.</summary>
+	private static readonly TimeSpan LargeTranscriptBudget = TimeSpan.FromSeconds(100);
 
 	public static TheoryData<string> Adversarial()
 	{
@@ -63,30 +78,41 @@ public sealed class RedactorSafetyTests
 
 	[Theory]
 	[MemberData(nameof(Adversarial))]
+	[Trait("Category", TimingCategory)]
 	public void Adversarial_input_finishes_within_budget_and_stays_stable(string input)
 	{
-		TimeSpan started = CpuTime();
+		string? once = null;
+		string? twice = null;
+		RedactionException? refused = null;
+		TimeSpan started = ThreadCpuTime.Now();
 
 		// A crafted run may use up the rescan credit, which refuses the document rather than skipping anything.
 		try
 		{
-			string once = Redactor.Redact(input).Text;
-			Assert.Equal(once, Redactor.Redact(once).Text);
+			once = Redactor.Redact(input).Text;
+			twice = Redactor.Redact(once).Text;
 		}
 		catch (RedactionException exception)
 		{
-			Assert.Equal(RedactionFailure.ScanBudgetExhausted, exception.Failure);
+			refused = exception;
 		}
 
-		TimeSpan spent = CpuTime() - started;
-		Assert.True(spent < TimeSpan.FromSeconds(60), $"Two passes over 2 MB took {spent.TotalSeconds:F1} s of CPU, over the budget.");
+		TimeSpan spent = ThreadCpuTime.Now() - started;
+		Assert.True(spent < AdversarialBudget, $"Two passes over 2 MB took {spent.TotalSeconds:F1} s of CPU, over the budget of {AdversarialBudget.TotalSeconds:F0} s.");
+		if (refused is null)
+		{
+			Assert.Equal(once, twice);
+		}
+		else
+		{
+			Assert.Equal(RedactionFailure.ScanBudgetExhausted, refused.Failure);
+		}
 	}
 
-	[Fact]
-	public void Large_transcript_meets_the_time_budget_and_redacts_everything()
+	/// <summary>A transcript of about 50 MB of ordinary session text, with the token once in each block, and how many blocks it has.</summary>
+	internal static (string Text, int Blocks) LargeTranscript(string token)
 	{
 		const int TargetLength = 50 * 1024 * 1024;
-		string token = Synthetic.GitHubClassic('p');
 		StringBuilder builder = new(TargetLength + 8192);
 		int blocks = 0;
 		while (builder.Length < TargetLength)
@@ -99,13 +125,21 @@ public sealed class RedactorSafetyTests
 			blocks++;
 		}
 
-		string input = builder.ToString();
-		TimeSpan started = CpuTime();
+		return (builder.ToString(), blocks);
+	}
+
+	[Fact]
+	[Trait("Category", TimingCategory)]
+	public void Large_transcript_meets_the_time_budget_and_redacts_everything()
+	{
+		string token = Synthetic.GitHubClassic('p');
+		(string input, int blocks) = LargeTranscript(token);
+		TimeSpan started = ThreadCpuTime.Now();
 
 		RedactionResult result = Redactor.Redact(input);
 
-		TimeSpan spent = CpuTime() - started;
-		Assert.True(spent < TimeSpan.FromSeconds(120), $"A 50 MB transcript took {spent.TotalSeconds:F1} s of CPU, over the budget.");
+		TimeSpan spent = ThreadCpuTime.Now() - started;
+		Assert.True(spent < LargeTranscriptBudget, $"A 50 MB transcript took {spent.TotalSeconds:F1} s of CPU, over the budget of {LargeTranscriptBudget.TotalSeconds:F0} s.");
 		Assert.Equal(blocks, result.CountsByRule["github-token"]);
 		Assert.DoesNotContain(token, result.Text, StringComparison.Ordinal);
 		Assert.Equal(new[] { "github-token" }, result.CountsByRule.Keys);
@@ -288,12 +322,6 @@ public sealed class RedactorSafetyTests
 		Assert.All(results, text => Assert.Equal(expected, text));
 	}
 
-	private static TimeSpan CpuTime()
-	{
-		using Process self = Process.GetCurrentProcess();
-		return self.TotalProcessorTime;
-	}
-
 	private static Regex Compile(string pattern) => new(pattern, RegexOptions.None, TimeSpan.FromSeconds(5));
 
 	private static string Repeat(string unit, int size)
@@ -309,6 +337,6 @@ public sealed class RedactorSafetyTests
 	}
 }
 
-/// <summary>Runs <see cref="RedactorSafetyTests"/> after the parallel tests, so their CPU time is not counted against its budgets.</summary>
+/// <summary>Runs <see cref="RedactorSafetyTests"/> after the parallel tests, so its budgets are not measured on a core other tests are sharing.</summary>
 [CollectionDefinition(nameof(RedactorBudgetCollection), DisableParallelization = true)]
 public sealed class RedactorBudgetCollection;

@@ -114,6 +114,9 @@ jobs:
         run: dotnet build tools/RedactionCheck -c Release -p:TreatWarningsAsErrors=true
       - name: Test and branch coverage
         run: sh scripts/coverage-dotnet.sh
+      # Uninstrumented, as their budgets are for plain code. The coverage run leaves them out.
+      - name: Redaction timing budgets
+        run: dotnet test tests/Memoria.Core.Tests --no-build --nologo --verbosity minimal --filter "Category=Timing"
       # The served document is pinned to src/Memoria.Api/openapi.json by
       # OpenApiContractTests above; this lints the committed copy.
       - name: OpenAPI lint

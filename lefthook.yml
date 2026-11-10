@@ -15,7 +15,8 @@ pre-commit:
       run: >-
         dotnet format Memoria.slnx --verify-no-changes &&
         dotnet build Memoria.slnx -p:TreatWarningsAsErrors=true --nologo --verbosity quiet &&
-        node scripts/run-sh.mjs scripts/coverage-dotnet.sh
+        node scripts/run-sh.mjs scripts/coverage-dotnet.sh &&
+        dotnet test tests/Memoria.Core.Tests --no-build --nologo --verbosity quiet --filter "Category=Timing"
 
     - name: sidecar
       root: "sidecar/"
