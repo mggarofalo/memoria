@@ -398,15 +398,13 @@ internal static class RedactionRules
 
 	/// <summary>
 	/// A regex's named group, as in <c>(?&lt;secret&gt;[^\s]+)</c>, and markdown that names a placeholder before prose, as in
-	/// <c>Bearer &lt;token&gt;` when a token is set</c>, are not XML elements. A value of three words or more is prose, unless
-	/// the element closes: <c>&lt;password&gt;correct horse battery staple&lt;/password&gt;</c> is a passphrase.
+	/// <c>Bearer &lt;token&gt;` when a token is set</c>, are not XML elements. Prose there is three words or more that run out of a
+	/// markdown code span, past its closing backtick. A passphrase, as in <c>&lt;password&gt;correct horse battery staple&lt;br&gt;</c>, has none.
 	/// </summary>
 	private static bool IsRegexGroupOrProse(SecretCandidate candidate)
 	{
-		int end = candidate.Match.Index + candidate.Match.Length;
-		bool closes = end < candidate.Input.Length && candidate.Input[end] == '/';
 		return (candidate.Match.Index >= 2 && candidate.Input.AsSpan(candidate.Match.Index - 2, 2) is "(?")
-			|| (!closes && candidate.Value.Count(static c => c == ' ') >= 2);
+			|| (candidate.Value.Contains('`', StringComparison.Ordinal) && candidate.Value.Count(static c => c == ' ') >= 2);
 	}
 
 	/// <summary>SQL that sets a password: <c>IDENTIFIED BY 'x'</c>, <c>IDENTIFIED BY "x"</c>, and <c>WITH PASSWORD 'x'</c>.</summary>

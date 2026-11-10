@@ -97,6 +97,14 @@ public sealed class CodeFalsePositiveTests
 	[InlineData("""PASSWORD="${PREFIX}correcthorsebatterystaple" """, "correcthorse")]
 	[InlineData("""PASSWORD="${PREFIX}Summerpassword" """, "Summerpassword")]
 	[InlineData("password: ${x}Winter!Spring!", "Winter!Spring")]
+	[InlineData("""secret="${PREFIX}Summerpassword" """, "Summerpassword")]
+	[InlineData("""client_secret="${X}hunterhunterhunter" """, "hunterhunter")]
+	[InlineData("""token="${X}Summerpassword!2" """, "Summerpassword")]
+	[InlineData("""api_key="${X}correcthorsebatterystaple" """, "correcthorse")]
+	[InlineData("""db_pass="${PREFIX}Summerpassword" """, "Summerpassword")]
+	[InlineData("<password>correct horse battery staple<\\/password>", "horse battery")]
+	[InlineData("<password>correct horse battery staple < /password>", "horse battery")]
+	[InlineData("<password>correct horse battery staple<br>", "horse battery")]
 	public void A_password_of_words_still_goes(string text, string secret)
 	{
 		string output = Redactor.Shared.RedactFragment(text).Text;
@@ -133,7 +141,9 @@ public sealed class CodeFalsePositiveTests
 
 	[Theory]
 	[InlineData("${name}", true)]
-	[InlineData("${NAME:-default", true)]
+	[InlineData("${NAME:-", true)]
+	[InlineData("${NAME:-default", false)]
+	[InlineData("mem_${\"0\".repeat(16)}_${\"0\".repeat(64)}", true)]
 	[InlineData("${user}:a8F3kQ9zLm2Wx7Vb5Nc1Rt6Y", false)]
 	[InlineData("${\"a8F3kQ9zLm2Wx7Vb5Nc1Rt6Y\"}", false)]
 	[InlineData("${randomBytes(32).toString(", true)]

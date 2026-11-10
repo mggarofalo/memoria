@@ -46,14 +46,10 @@ internal static partial class CodeValues
 	}
 
 	/// <summary>True for a value that only code or a version range could be. <paramref name="unquoted"/> allows the shapes a quoted string can also hold.</summary>
-	/// <remarks>
-	/// For a password's name, <paramref name="password"/> asks more of the text beside a span. Any word left is the password, as
-	/// <c>Summerpassword</c> in <c>${PREFIX}Summerpassword</c>.
-	/// </remarks>
-	public static bool IsCode(string value, bool unquoted, bool password = false)
+	public static bool IsCode(string value, bool unquoted)
 	{
 		return IsVersionRange(value)
-			|| (password ? IsInterpolationWithoutWords(value) : IsInterpolationOnly(value))
+			|| IsInterpolationOnly(value)
 			|| (unquoted && (IsCollectionLiteral(value) || IsCallCutAtLineEnd(value) || IsRegexLiteral(value)));
 	}
 
@@ -71,15 +67,14 @@ internal static partial class CodeValues
 	/// <c>${name}</c>, <c>mem_${"0".repeat(16)}</c>, <c>$(xml "$file")</c>, or <c>${randomBytes(32).toString(</c> where a quote cut it.
 	/// A span that only wraps a quoted literal, as <c>${"a8F3…"}</c>, is the literal.
 	/// </summary>
+	/// <remarks>
+	/// Beside a span, any word of four letters or digits is taken for the secret, as <c>Summerpassword</c> in
+	/// <c>${PREFIX}Summerpassword</c>. A secret-sounding name with a literal beside its span is rarely clean code. Markup tags and
+	/// upper-case names such as <c>MEMORIA_WORKER_TOKEN_FILE</c> are not words here, because they name things.
+	/// </remarks>
 	public static bool IsInterpolationOnly(string value)
 	{
-		return Remainder(value) is string rest && !HoldsSecretLikePiece(rest);
-	}
-
-	/// <summary>Spans with no word of four letters or digits beside them, or in the data they carry.</summary>
-	private static bool IsInterpolationWithoutWords(string value)
-	{
-		return Remainder(value) is string rest && !HoldsWord(rest);
+		return Remainder(value) is string rest && !HoldsSecretLikePiece(rest) && !HoldsWord(rest);
 	}
 
 	/// <summary>
@@ -109,9 +104,12 @@ internal static partial class CodeValues
 
 	private static bool HoldsWord(string text)
 	{
-		foreach (ValueMatch piece in Pieces().EnumerateMatches(text))
+		string words = Tag().Replace(text, " ");
+		foreach (ValueMatch piece in Words().EnumerateMatches(words))
 		{
-			if (piece.Length >= MinWord)
+			ReadOnlySpan<char> word = words.AsSpan(piece.Index, piece.Length);
+			bool name = word.Contains('_') && word.IndexOfAnyInRange('a', 'z') < 0;
+			if (word.Length >= MinWord && !name)
 			{
 				return true;
 			}
@@ -312,4 +310,10 @@ internal static partial class CodeValues
 
 	[GeneratedRegex(@"[A-Za-z0-9]+", RegexOptions.CultureInvariant)]
 	private static partial Regex Pieces();
+
+	[GeneratedRegex(@"[A-Za-z0-9]+(?:_[A-Za-z0-9]+)*", RegexOptions.CultureInvariant)]
+	private static partial Regex Words();
+
+	[GeneratedRegex(@"</?[a-z]{1,8}>", RegexOptions.CultureInvariant)]
+	private static partial Regex Tag();
 }
