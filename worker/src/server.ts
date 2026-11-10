@@ -102,7 +102,8 @@ async function readJson(request: IncomingMessage, limit: number, reserve: (bytes
   if (!/^application\/json\s*(;|$)/i.test(request.headers["content-type"] ?? "")) throw new HttpFailure(415, "unsupported_media_type", "The request body must be application/json");
   const chunks: Buffer[] = [];
   let total = 0;
-  for await (const chunk of request) {
+  // Stopping early must not destroy the request: that resets the socket under the answer. `finish` decides what happens to the rest.
+  for await (const chunk of request.iterator({ destroyOnReturn: false })) {
     total += (chunk as Buffer).length;
     if (total > limit) throw new HttpFailure(413, "payload_too_large", "The request body is too large");
     reserve((chunk as Buffer).length);
@@ -323,13 +324,10 @@ export function createWorkerServer(options: WorkerServerOptions): { server: Serv
     };
     const refusal = refuseAtBoundary({ host: request.headers.host, origin: request.headers.origin }, options.allowedHosts ?? LOCALHOST_ONLY);
     if (refusal) {
-      request.resume();
       finish(refusal.status, { error: refusal.error, message: refusal.message }, refusal.error);
       return;
     }
     if (options.token !== undefined && !tokenMatches(request.headers.authorization, options.token)) {
-      // Drain the body so the client gets the response rather than a reset.
-      request.resume();
       response.setHeader("www-authenticate", 'Bearer realm="memoria-worker"');
       finish(401, { error: "unauthorized", message: "Missing or invalid bearer token" }, "unauthorized");
       return;

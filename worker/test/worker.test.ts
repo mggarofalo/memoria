@@ -452,6 +452,33 @@ test("a client still sending when it is turned away gets the answer, and its con
   );
 });
 
+// Over the limit, the first 2048 bytes are read before the refusal, so what is dropped stays within it. Without the token nothing is read, so that body is within the limit.
+for (const [why, authorization, length, status] of [
+  ["over the body limit", `Bearer ${TOKEN}`, 3000, 413],
+  ["without the token", "Bearer wrong-token-0123456789", 1500, 401],
+] as const) {
+  test(`a client still sending a body ${why} gets its ${status}, and its connection stays usable`, async () => {
+    await withWorker(
+      async (w) => {
+        const body = JSON.stringify({ text: "x".repeat(length) });
+        const head = postHead("/v1/tokenize", body.length).replace(`Authorization: Bearer ${TOKEN}`, `Authorization: ${authorization}`);
+        const split = body.length - 500;
+        const c = rawConnection(w.url);
+        try {
+          await c.write(head + body.slice(0, split));
+          assert.deepEqual(await c.answered(1), { statuses: [status], closed: false });
+          await c.write(body.slice(split));
+          await c.write("GET /health HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer " + TOKEN + "\r\n\r\n");
+          assert.deepEqual(await c.answered(2), { statuses: [status, 200], closed: false });
+        } finally {
+          c.end();
+        }
+      },
+      { bodyLimitBytes: 2048 },
+    );
+  });
+}
+
 test("a client that keeps sending past the body limit after it is turned away is cut off", async () => {
   await withWorker(
     async (w) => {
