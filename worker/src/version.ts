@@ -55,10 +55,10 @@ export function describeToVersion(described: string): string {
   return untagged ? `0.0.0-dev+g${untagged[1]}${untagged[2] ? ".dirty" : ""}` : UNKNOWN_VERSION;
 }
 
-/** The version the checkout at `dir` describes, or UNKNOWN_VERSION when git cannot say. */
-export function describedVersion(dir: string = MODULE_DIR): string {
+/** The version the checkout at `dir` describes, or UNKNOWN_VERSION when git cannot say within `timeoutMs`. 0 waits for git however long it takes. */
+export function describedVersion(dir: string = MODULE_DIR, timeoutMs = 5000): string {
   try {
-    const described = execFileSync("git", DESCRIBE_ARGS, { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5000 });
+    const described = execFileSync("git", DESCRIBE_ARGS, { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: timeoutMs });
     return describeToVersion(described.trim());
   } catch {
     return UNKNOWN_VERSION;
@@ -66,12 +66,12 @@ export function describedVersion(dir: string = MODULE_DIR): string {
 }
 
 /** A stamp wins: installed or built code keeps its version. Without one, this is a development checkout. */
-export function resolveVersion(dir: string = MODULE_DIR): string {
+export function resolveVersion(dir: string = MODULE_DIR, timeoutMs = 5000): string {
   try {
     const stamped = readFileSync(path.join(dir, STAMP_FILE), "utf8").trim();
     if (stamped) return stamped;
   } catch {
     // No stamp.
   }
-  return describedVersion(dir);
+  return describedVersion(dir, timeoutMs);
 }

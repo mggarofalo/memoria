@@ -31,16 +31,16 @@ for (const [name, version] of [["sidecar", sidecarVersion], ["worker", workerVer
   test(`${name}: a real checkout reports its tag, then a dev version, then dirty`, (t) => {
     const repo = tempRepo(t);
     const first = repo.commit("feat: a");
-    assert.equal(version.describedVersion(repo.dir), `0.0.0-dev+g${first.slice(0, 12)}`);
+    assert.equal(version.describedVersion(repo.dir, 0), `0.0.0-dev+g${first.slice(0, 12)}`);
 
     repo.tag("v1.2.3");
-    assert.equal(version.describedVersion(repo.dir), "1.2.3");
+    assert.equal(version.describedVersion(repo.dir, 0), "1.2.3");
 
     const second = repo.commit("fix: b");
-    assert.equal(version.describedVersion(repo.dir), `1.2.4-dev.1+g${second.slice(0, 12)}`);
+    assert.equal(version.describedVersion(repo.dir, 0), `1.2.4-dev.1+g${second.slice(0, 12)}`);
 
     writeFileSync(path.join(repo.dir, "file.txt"), "changed\n");
-    assert.equal(version.describedVersion(repo.dir), `1.2.4-dev.1+g${second.slice(0, 12)}.dirty`);
+    assert.equal(version.describedVersion(repo.dir, 0), `1.2.4-dev.1+g${second.slice(0, 12)}.dirty`);
   });
 
   test(`${name}: tags that are not releases do not count`, (t) => {
@@ -50,7 +50,7 @@ for (const [name, version] of [["sidecar", sidecarVersion], ["worker", workerVer
     const second = repo.commit("fix: b");
     repo.tag("v2.0.0-rc1");
     repo.tag("nightly");
-    assert.equal(version.describedVersion(repo.dir), `1.0.1-dev.1+g${second.slice(0, 12)}`);
+    assert.equal(version.describedVersion(repo.dir, 0), `1.0.1-dev.1+g${second.slice(0, 12)}`);
   });
 
   test(`${name}: a directory with no git and no stamp is plainly unknown`, (t) => {
@@ -63,13 +63,13 @@ for (const [name, version] of [["sidecar", sidecarVersion], ["worker", workerVer
     const repo = tempRepo(t);
     repo.commit("feat: a");
     repo.tag("v1.2.3");
-    assert.equal(version.resolveVersion(repo.dir), "1.2.3");
+    assert.equal(version.resolveVersion(repo.dir, 0), "1.2.3");
 
     writeFileSync(path.join(repo.dir, version.STAMP_FILE), "7.7.7\n");
-    assert.equal(version.resolveVersion(repo.dir), "7.7.7");
+    assert.equal(version.resolveVersion(repo.dir, 0), "7.7.7");
 
     writeFileSync(path.join(repo.dir, version.STAMP_FILE), "  \n");
-    assert.equal(version.resolveVersion(repo.dir), "1.2.3");
+    assert.equal(version.resolveVersion(repo.dir, 0), "1.2.3");
   });
 
   test(`${name}: a stamp is enough, with no git anywhere`, (t) => {

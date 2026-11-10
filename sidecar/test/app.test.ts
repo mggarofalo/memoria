@@ -4,8 +4,7 @@ import path from "node:path";
 import { test } from "node:test";
 import { authHeaders, makeApp, ManualScheduler, sampleDocs, TEST_SECRET, testConfig } from "./helpers.ts";
 import { FRONTMATTER_DOC } from "./fake-backend.ts";
-import { buildApp, warmup } from "../src/app.ts";
-import { resolveVersion } from "../src/version.ts";
+import { buildApp, SIDECAR_VERSION, warmup } from "../src/app.ts";
 import { FakeBackend } from "./fake-backend.ts";
 
 // --- auth ----------------------------------------------------------------------
@@ -45,7 +44,8 @@ test("/health, /ready and /status report process, model and index state", async 
   try {
     const health = (await app.inject({ method: "GET", url: "/health" })).json();
     assert.equal(health.status, "ok");
-    assert.equal(health.version, resolveVersion());
+    // The version the service resolved when it loaded, not a second git call that could time out on a loaded machine and say unknown.
+    assert.equal(health.version, SIDECAR_VERSION);
     assert.equal(typeof health.uptimeSeconds, "number");
 
     let ready = await app.inject({ method: "GET", url: "/ready", headers: authHeaders });
