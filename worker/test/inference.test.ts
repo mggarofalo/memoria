@@ -83,7 +83,12 @@ test("system probes read this machine, and a missing command is a failed probe r
   assert.ok(systemProbes.totalMemoryMb() >= systemProbes.freeMemoryMb());
   assert.ok(systemProbes.loadAverage() >= 0);
   await assert.rejects(runCommand("memoria-no-such-command", []));
-  assert.match(await runCommand(process.execPath, ["--version"]), /^v\d+/);
+  // No deadline here: how long a process takes to start is up to the machine, not the probe.
+  assert.match(await runCommand(process.execPath, ["--version"], 0), /^v\d+/);
+});
+
+test("a probe that never answers is killed at its deadline and counts as failed", async () => {
+  await assert.rejects(runCommand(process.execPath, ["-e", "setInterval(() => {}, 1000)"], 50), (err: NodeJS.ErrnoException & { killed?: boolean }) => err.killed === true);
 });
 
 test("the machine reading tolerates failed probes, and thresholds of zero disable a reason", async () => {

@@ -5,12 +5,11 @@ import { tmpdir } from "node:os";
 import { createServer } from "node:http";
 import path from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { EventEmitter } from "node:events";
 import { runSmoke } from "../scripts/smoke.ts";
 import { Supervisor, type SpawnFn } from "../src/supervisor.ts";
 import type { MachineState } from "../src/probes.ts";
-import { resolveVersion } from "../src/version.ts";
+import { WORKER_VERSION } from "../src/server.ts";
 import { FAST_TIMINGS, fakeSupervisor, fixturePath, handOverPort, quietMachine, roleConfigs, startWorker, TOKEN, type RunningWorker } from "./helpers.ts";
 /**
  * The whole worker over real HTTP, with llama-server played by a fixture launched
@@ -59,7 +58,8 @@ test("every endpoint answers, and the smoke script passes against a running work
 
     const health = await json(fetch(`${w.url}/health`, { headers: auth }));
     assert.equal(health.status, "ok");
-    assert.equal(health.version, resolveVersion(path.dirname(fileURLToPath(new URL("../src/server.ts", import.meta.url)))));
+    // The version the worker resolved when it loaded, not a second git call that could time out on a loaded machine and say unknown.
+    assert.equal(health.version, WORKER_VERSION);
     assert.equal(health.models.rerank.loaded, true);
     assert.equal(health.models.embed.state, "ready");
     assert.equal(health.inFlight, 0);
