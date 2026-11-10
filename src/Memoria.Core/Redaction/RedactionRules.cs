@@ -505,6 +505,24 @@ internal static class RedactionRules
 		literal: "%",
 		skipRejected: true);
 
+	/// <summary>
+	/// Hex whose decoded bytes hold a credential, as in <c>676870…</c> for a GitHub token. A run of hex alone says nothing: a commit
+	/// hash decodes to random bytes, which hold no token. Only an even run of at least 32 digits, standing alone, is decoded.
+	/// </summary>
+	public static readonly RedactionRule HexEncodedToken = new(
+		"hex-token",
+		Pattern(@"(?:^|[^0-9A-Za-z])(?<secret>(?:[0-9A-Fa-f]{2}){16,})(?:$|[^0-9A-Za-z])"),
+		EncodedTokens.IsHexEncodedCredential,
+		skipRejected: true);
+
+	/// <summary>Text with <c>\uXXXX</c> escapes written out, as a JSON encoder writes <c>_</c> or <c>-</c>, whose unescaped form holds a credential.</summary>
+	public static readonly RedactionRule UnicodeEscapedToken = new(
+		"unicode-escaped-token",
+		Pattern(@"(?:[A-Za-z0-9._~+\-]|\\u[0-9A-Fa-f]{4})*\\u[0-9A-Fa-f]{4}(?:[A-Za-z0-9._~+\-]|\\u[0-9A-Fa-f]{4})*"),
+		EncodedTokens.IsUnicodeEscapedCredential,
+		literal: @"\u",
+		skipRejected: true);
+
 	/// <summary>Base64 whose decoded form holds a credential. A run of base64 alone says nothing, so only what it decodes to counts. See <see cref="EncodedTokens"/>.</summary>
 	public static readonly RedactionRule Base64EncodedToken = new(
 		"base64-token",
@@ -573,6 +591,8 @@ internal static class RedactionRules
 		SqlPassword,
 		SecretFlag,
 		SecretAssignment,
+		HexEncodedToken,
+		UnicodeEscapedToken,
 		PercentEncodedToken,
 		Base64EncodedToken,
 	];
@@ -594,6 +614,8 @@ internal static class RedactionRules
 		GitLabToken,
 		MemoriaApiKey,
 		.. ProviderTokens,
+		HexEncodedToken,
+		UnicodeEscapedToken,
 		PercentEncodedToken,
 		Base64EncodedToken,
 	];

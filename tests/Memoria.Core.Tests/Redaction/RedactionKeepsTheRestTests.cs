@@ -61,6 +61,8 @@ public sealed class RedactionKeepsTheRestTests
 		("digest-response", "Authorization: Digest username=\"u\", response=\"{S}\"", Synthetic.Hex(32, 4008)),
 		("base64-token", "{S}", Convert.ToBase64String(System.Text.Encoding.ASCII.GetBytes(Synthetic.GitHubClassic('p')))),
 		("percent-encoded-token", "{S}", string.Concat(Synthetic.GitHubClassic('p').Select(static c => $"%{(int)c:X2}"))),
+		("hex-token", "{S}", Convert.ToHexStringLower(System.Text.Encoding.ASCII.GetBytes(Synthetic.GitHubClassic('p')))),
+		("unicode-escaped-token", "{S}", string.Concat(Synthetic.GitHubClassic('p').Select(static c => $@"\u{(int)c:X4}"))),
 	];
 
 	/// <summary>Short values after a bare name, which more words on the line turn into prose.</summary>

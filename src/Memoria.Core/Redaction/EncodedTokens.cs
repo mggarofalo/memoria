@@ -43,6 +43,38 @@ internal static class EncodedTokens
 		return decoded.Length >= MinDecodedChars && HoldsSelfEvidentToken(decoded);
 	}
 
+	public static bool IsHexEncodedCredential(SecretCandidate candidate)
+	{
+		string value = candidate.Value;
+		return value.Length <= MaxEncodedChars && HoldsSelfEvidentToken(Encoding.Latin1.GetString(Convert.FromHexString(value)));
+	}
+
+	public static bool IsUnicodeEscapedCredential(SecretCandidate candidate)
+	{
+		string value = candidate.Value;
+		if (value.Length > MaxEncodedChars)
+		{
+			return false;
+		}
+
+		string decoded = UnescapeUnicode(value);
+		return decoded.Length >= MinDecodedChars && HoldsSelfEvidentToken(decoded);
+	}
+
+	/// <summary>Each <c>\uXXXX</c> as its character. The rule's pattern puts four hex digits after every <c>\u</c> it takes.</summary>
+	private static string UnescapeUnicode(string value)
+	{
+		StringBuilder output = new(value.Length);
+		for (int i = 0; i < value.Length; i++)
+		{
+			bool escape = value[i] == '\\' && i + 5 < value.Length && value[i + 1] == 'u';
+			output.Append(escape ? (char)Convert.ToInt32(value.Substring(i + 2, 4), 16) : value[i]);
+			i += escape ? 5 : 0;
+		}
+
+		return output.ToString();
+	}
+
 	public static bool IsBase64EncodedCredential(SecretCandidate candidate)
 	{
 		string value = candidate.Value;

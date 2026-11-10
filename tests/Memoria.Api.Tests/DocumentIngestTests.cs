@@ -87,7 +87,8 @@ public sealed class DocumentIngestTests(AuthApiFactory factory) : IClassFixture<
 	[InlineData("zero-width-joined", true)]
 	[InlineData("base64", true)]
 	[InlineData("url-encoded", true)]
-	[InlineData("literal-json-escapes", false)]
+	[InlineData("literal-json-escapes", true)]
+	[InlineData("hex", true)]
 	[InlineData("reversed", false)]
 	public async Task What_an_encoding_does_to_redaction_is_pinned(string encoding, bool caught)
 	{
@@ -99,6 +100,7 @@ public sealed class DocumentIngestTests(AuthApiFactory factory) : IClassFixture<
 			"base64" => Convert.ToBase64String(Encoding.UTF8.GetBytes(token)),
 			"url-encoded" => string.Concat(token.Select(static c => $"%{(int)c:X2}")),
 			"literal-json-escapes" => string.Concat(token.Select(static c => $"\\u{(int)c:x4}")),
+			"hex" => Convert.ToHexStringLower(Encoding.UTF8.GetBytes(token)),
 			_ => new string([.. token.Reverse()]),
 		};
 
