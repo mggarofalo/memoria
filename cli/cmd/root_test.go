@@ -84,6 +84,7 @@ type harness struct {
 	checkLists    *[][]string
 	checkArgs     []string
 	checkDuring   func()
+	checkStdin    func([]byte)
 	sleptMu       sync.Mutex
 	localQMD      func(args []string) ([]byte, error)
 }
@@ -134,6 +135,9 @@ func (h *harness) app() *app {
 // fakeRedactionCheck reads the lists of files it was given on its standard input.
 func (h *harness) fakeRedactionCheck(_ context.Context, args []string, stdin []byte) ([]byte, error) {
 	h.checkArgs = args
+	if h.checkStdin != nil {
+		h.checkStdin(stdin)
+	}
 	if h.checkDuring != nil {
 		h.checkDuring()
 	}

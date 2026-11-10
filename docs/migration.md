@@ -53,7 +53,33 @@ memoria migrate report --qmd-config ~/.config/qmd/index.yml --tool tools/Redacti
 
 It exits 1 if a document was refused, gitleaks found something in the redacted text or could not read it, a file's name looks like a credential, or something could not be read. Gitleaks is best effort: it can miss a token at a chunk boundary, so 0 findings is not proof. Text that survives redaction will be stored and searchable.
 
-**Stop or go.** Go on only at exit 0. Exit 1 is a stop: do not push until you have dealt with what it counted, by removing the secret from the file, or by leaving that file out with an ignore rule, and the report comes back clean. If a rule's count looks wrong for your notes, stop and look at the rule, as the report will not show you the text.
+**Stop or go.** Go on only at exit 0. Exit 1 is a stop: do not push until you have dealt with what it counted, by removing the secret from the file, or by leaving that file out with an ignore rule, or by listing a finding you have reviewed (below), and the report comes back clean. If a rule's count looks wrong for your notes, stop and look at the rule, as the report will not show you the text.
+
+#### Findings you have reviewed
+
+Gitleaks can flag text that holds no secret, such as a hash beside the word "api", or prose that reads like an assignment. Once you have looked at a finding and judged it harmless, you can list it by fingerprint, so it no longer fails the run while any other finding still does:
+
+```sh
+mkdir -p ~/.config/memoria/migrate-state
+memoria migrate report --qmd-config ~/.config/qmd/index.yml --tool tools/RedactionCheck/bin/Release/net10.0/RedactionCheck.dll \
+  --gitleaks-findings ~/.config/memoria/migrate-state/findings.txt
+```
+
+`--gitleaks-findings <file>` writes one fingerprint for each finding not already listed, in the form `<collection>/<path>:<rule>:<line>`: the collection's name in your QMD config, the file's path in it, the gitleaks rule, and the line in the redacted document. Open each file at that line, decide, and copy the ones you judge harmless into an ignore file, with a comment line above each saying why:
+
+```text
+# a list of git blob hashes; the keyword is in a file name, and the value is a SHA-1
+notes/build/hashes.md:generic-api-key:12
+```
+
+Then run the report with `--gitleaks-ignore ~/.config/memoria/migrate-state/reviewed.gitleaksignore`. Each listing excuses one finding: it is counted as ignored, and shown as such, and does not fail the run. A new finding, one under another rule, or one that has moved to another line or file still exits 1, and so does a second finding on a listed line, until its fingerprint is listed a second time. The findings file shows such a fingerprint twice. The file is in `.gitleaksignore` form: one fingerprint a line, with blank lines and `#` comments skipped.
+
+The findings file is deleted when the report starts, so a run that cannot finish leaves none behind from an earlier run. An empty findings file does not mean the run was clean, as a document gitleaks could not read has no findings to list: go by the exit code.
+
+- **Keep both files private, and out of any repository.** A fingerprint holds a file's path, and paths can say more than you mean them to. `~/.config/memoria/migrate-state/` is the place for them.
+- **A fingerprint names a line, not a value.** If the text on a listed line changes and gitleaks still flags it under the same rule, it stays listed. This is how gitleaks's own fingerprints work. Review the file again after editing a listed document.
+- **Gitleaks's own `--gitleaks-ignore-path` is not used.** The report sends all the redacted text to gitleaks as one stream, so gitleaks's fingerprints there carry no path, and their line numbers shift whenever an earlier document changes. The tool matches fingerprints itself, against each finding's own document and line.
+- Neither file works with `--no-gitleaks`, and an ignore file that does not exist is a usage error, so a typo cannot pass for a clean run.
 
 ### 3. Push a small part first
 
