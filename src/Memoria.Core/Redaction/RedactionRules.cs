@@ -604,7 +604,8 @@ internal static class RedactionRules
 		return new RedactionRule(name, Pattern(regex), SecretHeuristics.IsPrefixedToken, literal: literal);
 	}
 
-	private static Regex Pattern(string pattern)
+	/// <summary>How every rule's pattern is built, imported ones included.</summary>
+	internal static Regex Pattern(string pattern)
 	{
 		return new Regex(pattern, RegexOptions.NonBacktracking | RegexOptions.CultureInvariant, MatchTimeout);
 	}
