@@ -8,6 +8,10 @@ Retrieval itself is untouched: BM25 and vector search, RRF fusion, AST chunking 
 
 ## Run it
 
+In production it runs from its image, beside `Memoria.Api`, with model work on workers: see [`docs/deployment.md`](../docs/deployment.md). The image is built from [`Dockerfile`](Dockerfile), patches the SDK at install, and holds no llama.cpp binaries, so it cannot run a model. `scripts/init-index.mjs` makes its first index.
+
+From a checkout:
+
 Requirements: Node 22.18 or newer, an existing QMD index (`qmd update` has been run on this host), and the three models in QMD's cache.
 
 ```bash
@@ -35,7 +39,7 @@ Everything is an environment variable. See [`.env.example`](.env.example) for th
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `MEMORIA_QMD_HOST` | `127.0.0.1` | Bind address. Use the desktop's LAN address for `Memoria.Api`. |
+| `MEMORIA_QMD_HOST` | `127.0.0.1` | Bind address. The image sets `0.0.0.0`, which only its bridge network can reach. |
 | `MEMORIA_QMD_ALLOW_HTTP_ON_PRIVATE_NETWORK` | `0` | Required to bind a non-loopback address or use a plain-http worker URL: the sidecar serves plain http, so the network itself must be encrypted (a WireGuard tunnel). See [`docs/deployment.md`](../docs/deployment.md). |
 | `MEMORIA_QMD_PORT` | `8282` | Port. |
 | `MEMORIA_QMD_SECRET` | unset | Bearer secret. Required unless bound to loopback. For development: services use the file below. |

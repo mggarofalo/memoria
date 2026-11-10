@@ -92,7 +92,7 @@ gh run watch <release-run-id> --exit-status
 gh run watch <docker-run-id> --exit-status
 ```
 
-Two runs start from the tag: `Release` and `Docker`. Wait for both. The `Docker` run includes the `Publish Image` and `Attest Image Provenance` jobs, and both must succeed.
+Two runs start from the tag: `Release` and `Docker`. Wait for both. The `Docker` run includes `Publish Image`, `Attest Image Provenance`, `Publish Sidecar Image` and `Attest Sidecar Image Provenance`, and all four must succeed.
 
 ### If a workflow fails
 
@@ -145,13 +145,16 @@ Verify provenance on a CLI archive, on a service package, and on the image:
 gh attestation verify <temp-dir>/<cli-asset> --repo mggarofalo/memoria
 gh attestation verify <temp-dir>/memoria-sidecar_<version>.tar.gz --repo mggarofalo/memoria
 gh attestation verify oci://ghcr.io/mggarofalo/memoria:<version> --repo mggarofalo/memoria
+gh attestation verify oci://ghcr.io/mggarofalo/memoria-qmd:<version> --repo mggarofalo/memoria
 ```
 
-Confirm `latest` and the version tag are the same image:
+Confirm `latest` and the version tag are the same image, for each of the two images:
 
 ```bash
 docker buildx imagetools inspect ghcr.io/mggarofalo/memoria:<version> --format "{{json .Manifest.Digest}}"
 docker buildx imagetools inspect ghcr.io/mggarofalo/memoria:latest --format "{{json .Manifest.Digest}}"
+docker buildx imagetools inspect ghcr.io/mggarofalo/memoria-qmd:<version> --format "{{json .Manifest.Digest}}"
+docker buildx imagetools inspect ghcr.io/mggarofalo/memoria-qmd:latest --format "{{json .Manifest.Digest}}"
 ```
 
 Verify the image reports the same version:
@@ -162,7 +165,11 @@ curl -fsS http://127.0.0.1:18080/health
 docker rm -f memoria-release-check
 ```
 
-`/health` must report `"version":"<version>"`. If Docker is not available here, say so instead of claiming the image was checked, and point to the `Publish Image` job's "Verify the pushed digest" step instead.
+`/health` must report `"version":"<version>"`. Then the sidecar image, which also must hold no llama.cpp binaries:
+
+```bash
+node scripts/release/release.ts verify-sidecar-image ghcr.io/mggarofalo/memoria-qmd:<version> <version>
+``` If Docker is not available here, say so instead of claiming the image was checked, and point to the `Publish Image` job's "Verify the pushed digest" step instead.
 
 ## Step 8: Report
 

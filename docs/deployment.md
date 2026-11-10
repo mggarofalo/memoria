@@ -1,38 +1,32 @@
 # Deploying Memoria
 
-Two processes, two hosts, one ingress.
+One host runs the API and the sidecar, and workers on other machines run the models.
 
 ```
 laptop / desktop / phone / cloud agents
-        │  HTTP, LAN only
+        │  HTTP on the LAN, or HTTPS through the reverse proxy
         ▼
-  Memoria.Api         Docker, ghcr.io/mggarofalo/memoria, port 8080
-        │  plain REST + shared-secret bearer, LAN only
-        ▼
-  memoria-qmd         Node service beside the GGUF models and index.sqlite
+  Memoria.Api         container, ghcr.io/mggarofalo/memoria, port 8080      ┐
+        │  one bridge network, by service name, nothing between          │ the Linux
+        ▼                                                                 │ API host
+  memoria-qmd         container, ghcr.io/mggarofalo/memoria-qmd, no port  │
+        │                                                                 │
+        ├── QMD index, collection roots          volumes                  ┘
         │
+        │  WireGuard
         ▼
-  QMD index + markdown corpus
+  memoria-worker      the GPU PC and the laptop: embedding, reranking, expansion
 ```
 
-## Decision: the image holds the API only
+## Decision: two images, one host
 
-The image holds `Memoria.Api` alone, and the sidecar runs as its own
-service on whichever machine owns the models and index:
+The API and the sidecar are two images and two compose services on the Linux API host:
 
-- The sidecar needs the GGUF models (about 4 GB resident) and, unless model
-  work goes to workers, a GPU. That machine is a Windows desktop; the API host
-  is Linux.
-- The two move independently, so a combined image would have to be rebuilt
-  and redeployed when either does.
-- The sidecar is never a public surface. Keeping it out of the API's
-  container makes "QMD is reachable only through the API" a network fact,
-  not a configuration one.
+- **Nothing may sit between them,** and on one bridge network nothing does. The sidecar publishes no port, so only the API can reach it. See [below](#nothing-may-sit-between-the-api-and-the-sidecar).
+- **The host runs no model.** Model work goes to workers, so the sidecar needs no GPU, and its image holds no llama.cpp binaries. It cannot run a model even if configured to.
+- **The two still move independently.** Each image has its own version tag from the same release.
 
-The sidecar runs under NSSM on Windows (`sidecar/scripts/install-service.ps1`)
-or as a systemd unit on Linux (`node --max-old-space-size=4096 dist/main.js`). See `sidecar/README.md`.
-Install it from its release package; see
-[releasing.md](releasing.md#installing-the-sidecar-and-worker).
+The sidecar's Windows installer, `sidecar/scripts/install-service.ps1`, is not part of this deployment. [Running as a service](#running-as-a-service) covers the workers' installers, which share its module.
 
 ## Running as a service
 
@@ -141,11 +135,16 @@ user can:
 The sidecar's account limits the damage, which is one more reason not to run it
 as LocalSystem. `sidecar/README.md` lists the rules a document path must meet.
 
-## The image
+## The images
 
-`ghcr.io/mggarofalo/memoria` is published by `.github/workflows/docker.yml`.
-Every pull request builds it and publishes nothing. `/health` reports the version
-the image was stamped with; see [releasing.md](releasing.md).
+`.github/workflows/docker.yml` publishes both. Every pull request builds them and publishes nothing. Each reports the version it was stamped with on `/health`; see [releasing.md](releasing.md).
+
+| Image | Holds |
+|---|---|
+| `ghcr.io/mggarofalo/memoria` | `Memoria.Api` |
+| `ghcr.io/mggarofalo/memoria-qmd` | the sidecar, with the QMD SDK patched at install and no llama.cpp binaries |
+
+Both carry the same tags:
 
 | Tag | Published by | Moves? |
 |---|---|---|
@@ -155,93 +154,91 @@ the image was stamped with; see [releasing.md](releasing.md).
 | `edge` | every push to `main` | to the head of `main`, unreleased |
 | `sha-<short>` | every push to `main` | no |
 
-Deploy a specific release. `latest` is there for looking around, and `edge` is
-for trying unreleased work; neither says what is running.
+Deploy a specific release. `latest` is there for looking around, and `edge` is for trying unreleased work; neither says what is running. A failed sidecar image stops the API image publishing too, so a release always has both.
 
-| Property | Value |
-|---|---|
-| Base | `mcr.microsoft.com/dotnet/aspnet:10.0`, non-root (`$APP_UID`) |
-| Port | 8080 (`ASPNETCORE_URLS=http://0.0.0.0:8080`) |
-| Health check | `dotnet Memoria.Api.dll --health-check` probes `/health` |
-| Logs | JSON lines on stdout, one object per line |
-| Configuration | environment variables; see [configuration.md](configuration.md) |
+| Property | API | Sidecar |
+|---|---|---|
+| Base | `mcr.microsoft.com/dotnet/aspnet:10.0` | `node:22-bookworm-slim` |
+| User | non-root (`$APP_UID`) | non-root (`node`, uid 1000) |
+| Port | 8080 | 8282, published by nothing |
+| Health check | `dotnet Memoria.Api.dll --health-check` | `/health` from inside the container |
+| Logs | JSON lines on stdout | JSON lines on stdout |
 
-Build it locally:
+Build them locally:
 
 ```bash
 docker build -t memoria-api:local .
-docker run --rm -p 8080:8080 \
-  -e Memoria__Sidecar__BaseUrl=http://host.docker.internal:8282 \
-  -e Memoria__Sidecar__Secret="$MEMORIA_QMD_SECRET" \
-  -e Memoria__Ingest__DigestKey="$MEMORIA_INGEST_DIGEST_KEY" \
-  -v memoria-data:/data \
-  memoria-api:local
+docker build -t memoria-qmd:local sidecar
 ```
 
-The image sets `Memoria__Auth__DatabasePath=/data/control.db`. Without a volume on
-`/data` the database dies with the container, and every key with it.
+## Compose on the API host
 
-## Compose on the homelab
+[`deploy/compose.yaml`](../deploy/compose.yaml) is the production shape. Put the values below in `deploy/.env`, mode 600, beside it.
 
-[`deploy/compose.yaml`](../deploy/compose.yaml) is the production shape:
+### First run
+
+The sidecar never creates an index, so make one first. This makes an empty collection root under `/corpus` for each name and indexes it, and running it again changes nothing:
 
 ```bash
-MEMORIA_VERSION=0.1.0 \
-MEMORIA_SIDECAR_URL=http://192.168.1.20:8282 \
-MEMORIA_SIDECAR_SECRET=... \
-MEMORIA_INGEST_DIGEST_KEY=... \
+docker compose -f deploy/compose.yaml run --rm --no-deps memoria-qmd \
+  scripts/init-index.mjs claude-sessions codex-sessions
+docker compose -f deploy/compose.yaml run --rm --no-deps memoria-api \
+  --bootstrap-admin-key homelab-admin
 docker compose -f deploy/compose.yaml up -d
 ```
 
-`MEMORIA_VERSION` has no default, so an upgrade happens only when you change it.
-
-It publishes port 8080 on `127.0.0.1` by default so only the reverse proxy on
-the same host can reach it. Set `MEMORIA_BIND_ADDRESS` to the host's LAN
-address to let LAN clients connect directly.
-
-Containers reach the sidecar on the desktop over the LAN with no special
-Docker networking: bridge networks NAT outbound traffic.
-
-### The control database volume
-
-API keys and the audit log live in a SQLite file at `/data/control.db`, on the
-`memoria-data` named volume the compose file declares. **The volume is required.**
-Unlike QMD's index, this is durable state that cannot be rebuilt: losing it revokes
-every key and loses the audit trail. Keep it on a local disk, because SQLite's WAL
-mode does not work over a network share, and include the volume in backups.
-
-### The first admin key
-
-Nothing can call the API until a key exists. Create the first one with a one-off
-container on the same volume. It prints the key once on stdout, and exits without
-starting a host:
-
-```bash
-docker compose -f deploy/compose.yaml run --rm --no-deps memoria-api \
-  --bootstrap-admin-key homelab-admin
-```
-
-The key is never stored in plaintext and cannot be shown again, so copy it into
-your password manager now. The command refuses while an active admin key exists;
-pass `--allow-additional-admin` after the label to add another deliberately. If you
-lose the only admin key, run the command with that flag, then revoke the lost key
-with the new one.
-
-This key has only the `admin` scope and cannot read the corpus. Issue clients their
-own scoped keys with it; see [configuration.md](configuration.md#memoriaauth--api-keys-rate-limits-audit).
+These two collections are the ones the compose file opens to ingest. Each opens only while its root is empty, so move an old corpus in through the API (`memoria migrate push`), not by copying files. An index from another host does not carry over, as it records that host's paths.
 
 ### Required environment
 
 | Variable | Purpose |
 |---|---|
-| `MEMORIA_VERSION` | Compose only: the image tag to run, e.g. `0.1.0`. |
-| `Memoria__Sidecar__BaseUrl` | Where the sidecar listens, e.g. `http://192.168.1.20:8282`. |
-| `Memoria__Sidecar__Secret` | The sidecar's `MEMORIA_QMD_SECRET`. The API refuses to start without it when the sidecar is not on loopback. |
-| `Memoria__Auth__DatabasePath` | Where the control database lives. The image sets it to `/data/control.db`. The API refuses to start without it unless `Memoria__Auth__Mode` is explicitly `Disabled`. |
-| `Memoria__Ingest__DigestKey` | At least 32 random characters, kept outside the database. Compose reads it from `MEMORIA_INGEST_DIGEST_KEY`. The API refuses to start without it unless `Memoria__Auth__Mode` is explicitly `Disabled`. See [configuration](configuration.md#digests-in-the-ledger) for how to change it. |
+| `MEMORIA_VERSION` | The release to run, for both images, e.g. `0.1.0`. No default, so an upgrade happens only when you change it. |
+| `MEMORIA_SIDECAR_SECRET` | The secret the API presents to the sidecar. 16 or more random characters. |
+| `MEMORIA_INGEST_DIGEST_KEY` | 32 or more random characters, kept outside the database. See [configuration](configuration.md#digests-in-the-ledger) for how to change it. |
+| `MEMORIA_QMD_WORKERS` | The workers, as a JSON list. See [the workers](#the-workers). |
 
-Everything else has a default. Pass secrets through the environment or a
-Docker secret; never bake them into the image or commit them.
+### Optional environment
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `MEMORIA_WORKER_TOKEN_GPU` | empty | The token of the worker whose `tokenEnv` names it. |
+| `MEMORIA_WORKER_TOKEN_LAPTOP` | empty | The same, for a second worker. |
+| `MEMORIA_CORPUS` | the `memoria-corpus` volume | A host directory for the collection roots instead, owned by uid 1000. |
+| `MEMORIA_BIND_ADDRESS` | `127.0.0.1` | Where the API's port is published. The host's LAN address lets LAN clients connect directly while the proxy entry does not exist yet. |
+| `MEMORIA_TRUSTED_PROXY` | empty | The reverse proxy's address as the API container sees it. Without it, all clients share one failed-authentication budget. |
+
+The API runs with a 1 GiB heap (`DOTNET_GCHeapHardLimit`), the least ingest is sized for. Pass secrets through `deploy/.env` or a Docker secret; never bake them into an image or commit them.
+
+### Volumes
+
+| Volume | Holds | If it is lost |
+|---|---|---|
+| `memoria-data` | API keys and the audit log, in `control.db` | **Not rebuildable.** Every key is revoked and the audit trail is gone. Back it up. |
+| `memoria-corpus` | the collection roots: every document | **Not rebuildable** unless every source still exists. Back it up. |
+| `memoria-qmd-index` | the QMD index and the job queue | Rebuildable: run the first-run command, then `POST /reindex` with `embed: true` on the sidecar re-embeds everything on the workers, which takes hours on a large corpus. Deletes are kept in `control.db`, not here. |
+| `memoria-qmd-config` | QMD's own config, used only by the `qmd` CLI | Rebuildable. The sidecar reads its collections from the index. |
+
+Keep them on a local disk, as SQLite's WAL mode does not work over a network share. To back up the index without rebuilding it, stop the sidecar first, as a copy of a live SQLite file can be torn:
+
+```bash
+docker compose -f deploy/compose.yaml stop memoria-qmd
+docker run --rm -v memoria_memoria-qmd-index:/index -v "$PWD":/out debian:bookworm-slim \
+  tar -czf /out/qmd-index.tar.gz -C /index .
+docker compose -f deploy/compose.yaml start memoria-qmd
+```
+
+The volume's name carries the compose project's, `memoria` here; `docker volume ls` shows it.
+
+### The control database
+
+API keys and the audit log live in a SQLite file at `/data/control.db`, on the `memoria-data` volume. Restoring it forgets the deletes made since the backup, so deleted content can be sent again and stored; see [the limits](#limits-accepted-for-this-deployment).
+
+### The first admin key
+
+Nothing can call the API until a key exists. The first-run command above prints it once on stdout and exits without starting a host. The key is never stored in plaintext and cannot be shown again, so copy it into your password manager then. The command refuses while an active admin key exists; pass `--allow-additional-admin` after the label to add another deliberately. If you lose the only admin key, run the command with that flag, then revoke the lost key with the new one.
+
+This key has only the `admin` scope and cannot read the corpus. Issue clients their own scoped keys with it; see [configuration.md](configuration.md#memoriaauth--api-keys-rate-limits-audit).
 
 ## Nothing may sit between the API and the sidecar
 
@@ -251,7 +248,7 @@ The rule: **nothing may sit between the API and the sidecar.** No reverse proxy,
 
 Two API instances have the same effect, as the locks that order writes and deletes are in the API's memory.
 
-Reaching the sidecar across a network, as the tunnel below does, still serves search. It weakens ingest: a lost tunnel or a host crash closes nothing until a TCP timeout, so the sidecar cannot tell its caller has gone. On Linux a connection cut off that way still looked open after 75 s.
+Reaching the sidecar across a network instead still serves search, but weakens ingest: a lost tunnel or a host crash closes nothing until a TCP timeout, so the sidecar cannot tell its caller has gone. On Linux a connection cut off that way still looked open after 75 s.
 
 ## Limits accepted for this deployment
 
@@ -261,58 +258,82 @@ Reaching the sidecar across a network, as the tunnel below does, still serves se
 - **Restoring the control database forgets deletes made since the backup.** Deleted content can be sent again and stored. A delete of a newer file still works.
 - **A sidecar crash can leave `.memoria-*.tmp` files holding text,** until a later write in that folder removes them after an hour. They are not indexed, but they may hold secret text, so a credential cleanup should check for them.
 
+## The workers
+
+The sidecar sends embedding, reranking and query expansion to workers on other machines, over WireGuard. List them in `MEMORIA_QMD_WORKERS`, which names the variable holding each token, never the token. For example, with tunnel addresses as in the table below:
+
+```json
+[
+  { "name": "gpu", "url": "http://10.0.0.3:8383", "tokenEnv": "MEMORIA_WORKER_TOKEN_GPU", "priority": 1 },
+  { "name": "laptop", "url": "http://10.0.0.4:8383", "tokenEnv": "MEMORIA_WORKER_TOKEN_LAPTOP", "priority": 2, "capabilities": ["rerank", "generate"] }
+]
+```
+
+[workers.md](workers.md) covers the rest of the list's fields, and setting up a worker.
+
+### With every worker down
+
+The host runs no model, so search keeps answering, from BM25 alone, and says so. Measured on this compose file with both workers unreachable:
+
+- A search answered in 5 to 30 ms, with `degraded: true` and `degradedReasons` of `no_expansion`, `no_rerank` and `no_vectors`.
+- New documents were found, as a scan needs no model. Embedding waits for a worker and retries; it never falls back to this host.
+- `/ready` answered 200 with `status: "degraded"`, and `/ready?strict=true` answered 503.
+- No llama.cpp library was loaded, no model file existed, and the sidecar's resident memory stayed under 120 MiB.
+
+`MEMORIA_QMD_LLM_FALLBACK` is `0` here, and the image holds no llama.cpp binaries, so turning it on does nothing either.
+
 ## Traffic between hosts: WireGuard
 
-Traffic between the API, the sidecar and workers runs over a WireGuard tunnel. The services speak plain http on tunnel addresses, and the tunnel does the encrypting, including of the shared secret and whole transcripts.
+The sidecar and the API share a host and a bridge network, so only traffic to the workers leaves the host. It runs over a WireGuard tunnel: the services speak plain http on tunnel addresses, and the tunnel does the encrypting, including of the worker tokens and whole documents being embedded.
 
 The addresses here are examples:
 
 | Host | Tunnel address | Serves | Port |
 |---|---|---|---|
-| API | `10.0.0.1` | | |
-| Sidecar | `10.0.0.2` | `Memoria.Api` | 8282 |
-| Worker | `10.0.0.3` | the sidecar | 8383 |
+| API host | `10.0.0.1` | nothing to the tunnel | |
+| GPU PC | `10.0.0.3` | the sidecar | 8383 |
+| Laptop | `10.0.0.4` | the sidecar | 8383 |
 
-**Bind each service to its tunnel address, and tell it this is intended.** Nothing detects a tunnel, so the setting is what states it. Without it, a non-loopback bind or a plain http worker URL on another machine stops the start, with a message naming the setting.
+**What the API host needs.** The tunnel up, with a peer for each worker whose allowed IPs cover its tunnel address. The sidecar container reaches workers through the host: Docker masquerades its traffic, so a worker sees it from the host's tunnel address. If the host firewall filters forwarded traffic, as `ufw` does by default, allow the bridge out to the workers' port:
 
 ```sh
-# Sidecar. The install script's -AllowHttpOnPrivateNetwork sets the first of these.
-MEMORIA_QMD_ALLOW_HTTP_ON_PRIVATE_NETWORK=1
-MEMORIA_QMD_HOST=10.0.0.2
-MEMORIA_QMD_WORKER_URL=http://10.0.0.3:8383
-MEMORIA_QMD_API_ADDRESSES=10.0.0.1
-
-# Worker. Its installers take -AllowHttpOnPrivateNetwork or --allow-http-on-private-network.
-MEMORIA_WORKER_ALLOW_HTTP_ON_PRIVATE_NETWORK=1
-MEMORIA_WORKER_HOST=10.0.0.3
-
-# API
-Memoria__Sidecar__BaseUrl=http://10.0.0.2:8282
+ufw route allow out on wg0 to 10.0.0.0/24 port 8383 proto tcp
 ```
 
-**Firewall each port to the tunnel,** so nothing reaches it from the LAN even by mistake. For example:
+**What each worker needs.** Bind its tunnel address, say that plain http there is intended, and accept only the API host:
 
 ```sh
-ufw allow in on wg0 to any port 8282 proto tcp
+MEMORIA_WORKER_ALLOW_HTTP_ON_PRIVATE_NETWORK=1
+MEMORIA_WORKER_HOST=10.0.0.3
 ```
 
 ```powershell
-New-NetFirewallRule -DisplayName "memoria-qmd" -Direction Inbound -Protocol TCP -LocalPort 8282 -LocalAddress 10.0.0.2 -RemoteAddress 10.0.0.1 -Action Allow
+New-NetFirewallRule -DisplayName "memoria-worker" -Direction Inbound -Protocol TCP -LocalPort 8383 -LocalAddress 10.0.0.3 -RemoteAddress 10.0.0.1 -Action Allow
 ```
 
-**Start order.** The tunnel must be up before a service binds its address, or the service fails to start. Make the service depend on the tunnel, or let it restart until the address exists.
-
-**Upgrading a LAN install:** it stops starting until the setting is added. Move it onto the tunnel first, because the setting does not encrypt anything.
+**Start order.** The tunnel must be up before a worker binds its address, or the worker fails to start. Make it depend on the tunnel, or let it restart until the address exists. The sidecar starts without workers and finds them at its next poll.
 
 TLS is not the chosen setup.
 
-**Host names.** A request must arrive under an IP address, `localhost`, or a name in `MEMORIA_QMD_ALLOWED_HOSTS`, and any request carrying an `Origin` is refused. That stops a web page reaching the service through DNS rebinding. Tunnel addresses need no listing. A deployment calling by name, such as `host.docker.internal`, must list it or gets a 421 that says so. The worker has the same rule, with `MEMORIA_WORKER_ALLOWED_HOSTS`.
+**Host names.** A request must arrive under an IP address, `localhost`, or a name in `MEMORIA_QMD_ALLOWED_HOSTS`, and any request carrying an `Origin` is refused. That stops a web page reaching the service through DNS rebinding. Compose lists `memoria-qmd`, the name the API calls it by. The worker has the same rule, with `MEMORIA_WORKER_ALLOWED_HOSTS`.
 
 **Secrets.** With no secret set, each run makes its own and nothing else can call it. Placeholders, the old README example and repeated characters are refused.
 
 ## Memory and large documents
 
-Run the sidecar with `--max-old-space-size=4096`. The install script sets it; elsewhere use `node --max-old-space-size=4096 dist/main.js`. This is a ceiling, not a target. Node's default on a smaller host can be lower, and a search that reaches the limit kills the process.
+### Sizing the host
+
+What the two processes hold is small. What makes `docker stats` look large is the page cache, which it counts and the kernel gives back under pressure. Measured on this compose file with 1,000 documents of 200 KB, every worker down for the writes and scan, then one worker for the embedding:
+
+| | Sidecar | API |
+|---|---|---|
+| Resident memory at its peak | 292 MiB, while embedding 454,000 chunks | 306 MiB, during the writes |
+| Resident memory idle | about 115 MiB | about 110 MiB |
+| `docker stats` during the scan | 520 MiB, of which 89 MiB was the process's own and 406 MiB active page cache | 229 MiB |
+
+The index took 2.1 GB for 192 MB of documents, most of it vectors. Size the host for the two processes' ceilings plus room to cache the index: the sidecar's heap is capped at 4 GiB and the API's at 1 GiB, so 6 GiB covers both at their worst, and the index's size on top keeps searches from reading the disk. Below that, searches still work, more slowly.
+
+Run the sidecar with `--max-old-space-size=4096`. The image sets it. This is a ceiling, not a target. Node's default on a smaller host can be lower, and a search that reaches the limit kills the process.
 
 `sidecar/scripts/patch-qmd.ts` runs on install and fixes the SDK's scans. Without it, one search over six 21 MB documents froze for 35 s and needed over 1 GB of heap. With it, the same search took 2 to 3 s and fitted in 512 MiB. The SDK's functions are checked at start, and a sidecar on an unpatched SDK refuses to start. `/ready` shows `sdk.patched`.
 
@@ -453,16 +474,9 @@ Then check the network boundary, below.
 
 ## The loopback invariant
 
-QMD itself is never reachable from anywhere. The sidecar is the only process
-that opens the index; it binds the model host's LAN address, requires the
-shared secret on every route except `/health` and `/openapi.json`, and compares it in constant
-time. `Memoria.Api` is the only intended caller. If any path exists from a
-client to the sidecar that does not pass through `Memoria.Api`, authentication
-has been bypassed entirely. When auditing the deployment, check that:
+QMD itself is never reachable from anywhere. The sidecar is the only process that opens the index. It requires the shared secret on every route except `/health`, and compares it in constant time. `Memoria.Api` is the only intended caller. If any path exists from a client to the sidecar that does not pass through `Memoria.Api`, authentication has been bypassed entirely. When auditing the deployment, check that:
 
-- the sidecar port (8282) is reachable from the API host and from nowhere
-  outside the LAN;
-- the API host's firewall allows 8080 only from the proxy (or the LAN until the
-  proxy entry exists);
-- the sidecar's `MEMORIA_QMD_HOST` is the LAN address, never `0.0.0.0` on a
-  machine with a public interface.
+- the sidecar container publishes no port: `docker port memoria-qmd` prints nothing;
+- the API and the sidecar are the only containers on their network: `docker network inspect memoria_memoria`;
+- the API host's firewall allows 8080 only from the proxy (or the LAN until the proxy entry exists);
+- each worker's port accepts only the API host's tunnel address.

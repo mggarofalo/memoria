@@ -126,13 +126,13 @@ Memoria is a **front door over QMD**, not a search engine. QMD owns retrieval �
 clients (Claude Code / CLI / scripts)
         │  HTTPS + Bearer API key
         ▼
-   Memoria.Api  (Docker on homelab) ──── auth, scoping, rate limiting, audit
-        │  LAN, plain REST + shared-secret bearer
+   Memoria.Api  (container on the API host) ──── auth, scoping, rate limiting, audit
+        │  one bridge network, plain REST + shared-secret bearer
         ▼
-   memoria-qmd sidecar  (desktop, sidecar/) ── imports the QMD SDK in-process
-        │
-        ▼
-   index.sqlite + GGUF models  ← derived, rebuildable
+   memoria-qmd sidecar  (container on the same host, sidecar/) ── imports the QMD SDK in-process
+        │                                   │  WireGuard
+        ▼                                   ▼
+   index.sqlite  ← derived, rebuildable     memoria-worker (GPU hosts, worker/) ── runs the models
         ▲
    ingest workers ── redaction → document envelope → POST /documents → markdown corpus
 ```
@@ -149,8 +149,8 @@ clients (Claude Code / CLI / scripts)
 | `worker/` | `memoria-worker`: supervises `llama-server` for QMD's models on a GPU host and serves them to the sidecar. No runtime npm dependencies; runs from source. See `docs/workers.md` |
 | `cli/` | Go module `github.com/mggarofalo/memoria/cli`, binary `memoria`; `internal/api` is the client oapi-codegen generates from `src/Memoria.Api/openapi.json` |
 | `scripts/release/` | Version computation, CLI asset builds, and release gates; no dependencies, runs on Node. See `docs/releasing.md` |
-| `deploy/` | `compose.yaml` for the always-on host; `windows/MemoriaService.psm1`, shared by the sidecar and worker service scripts |
-| `Dockerfile` | `Memoria.Api` only; the sidecar runs as its own service beside the models (docs/deployment.md) |
+| `deploy/` | `compose.yaml` for the API host: the API and the sidecar, with no published sidecar port; `windows/MemoriaService.psm1`, shared by the sidecar and worker service scripts |
+| `Dockerfile` | `Memoria.Api` only. `sidecar/Dockerfile` is the sidecar's image, with no llama.cpp binaries (docs/deployment.md) |
 | `scripts/e2e/` | The real CLI against a real API and sidecar on a throwaway index. See its README. Extend it when a change crosses those boundaries |
 | `install.sh`, `install.ps1` | CLI installers; they consume the release assets described in `docs/cli.md` |
 | `docs/` | Plane workflow (`plane.md`), API configuration (`configuration.md`), deployment (`deployment.md`), inference workers (`workers.md`), releases (`releasing.md`), the CLI (`cli.md`), migrating a local QMD setup (`migration.md`) |

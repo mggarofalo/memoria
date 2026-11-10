@@ -1,8 +1,7 @@
 # syntax=docker/dockerfile:1
 
-# Memoria.Api only. The memoria-qmd sidecar is deliberately not in this image:
-# it needs the GGUF models, the SQLite index and a GPU-equipped Windows
-# host, and runs as its own service there. See docs/deployment.md.
+# Memoria.Api only. The memoria-qmd sidecar has its own image, sidecar/Dockerfile,
+# and compose runs the two side by side. See docs/deployment.md.
 
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
