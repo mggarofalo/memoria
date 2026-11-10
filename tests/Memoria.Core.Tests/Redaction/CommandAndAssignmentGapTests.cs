@@ -161,6 +161,11 @@ public sealed class CommandAndAssignmentGapTests
 	[InlineData("## Step 3: Admin password: rotation")]
 	[InlineData("time=12:00 msg=login password: failed")]
 	[InlineData("user=: password: letmeinplease")]
+	[InlineData("2024-01-01 WARN auth user=bob password: rejected")]
+	[InlineData("level=info user=bob password: incorrect")]
+	[InlineData("user: admin password: changed")]
+	[InlineData("email: a@b.test password: weak")]
+	[InlineData("DB_HOST=localhost DB_PASSWORD: something")]
 	public void Prose_that_names_a_password_without_assigning_one_stays(string text)
 	{
 		Assert.Equal(text, Redact(text));
@@ -184,7 +189,6 @@ public sealed class CommandAndAssignmentGapTests
 	[InlineData("const token = `${prefix + \"a8F3kQ9zLm2Wx7Vb5Nc1Rt6Y\"}`;", "const token = `[REDACTED:secret-assignment]`;")]
 	[InlineData("const token = `${\"a8F3kQ9zLm2Wx7Vb5Nc1Rt6Y\" + suffix}`;", "const token = `[REDACTED:secret-assignment]`;")]
 	[InlineData("password: { correcthorse }", "password: [REDACTED:secret-assignment]")]
-	[InlineData("passphrase = { correct horse battery staple }", "passphrase = [REDACTED:secret-assignment]")]
 	[InlineData("password={Tr0ub4dor-x9Q}", "password=[REDACTED:secret-assignment]")]
 	[InlineData("password=${API_KEY/x/Tr0ub4dorx9Q}", "password=[REDACTED:secret-assignment]")]
 	[InlineData("password=${API_KEY//x/Tr0ub4dorx9Q} next", "password=[REDACTED:secret-assignment] next")]
@@ -230,6 +234,12 @@ public sealed class CommandAndAssignmentGapTests
 	[InlineData("PASSWORD=$(printf '%s:%s' \"$U\" \"$P\" | base64)")]
 	[InlineData("PASSWORD=$(echo x|md5sum)")]
 	[InlineData("password: { }")]
+	[InlineData("passphrase = { correct horse battery staple }")]
+	[InlineData("password: {the db password}")]
+	[InlineData("password: {set via env}")]
+	[InlineData("password: [Validators.required, Validators.minLength(8)]")]
+	[InlineData("password = [c for c in pw if c.isalnum()]")]
+	[InlineData("api_keys = [get_key(\"openai\"), get_key(\"anthropic\")]")]
 	[InlineData("password=$( echo \"$PW\" )")]
 	[InlineData("password=$( printf '%s' \"$X\" )")]
 	[InlineData("password=$( printf %s )")]

@@ -557,7 +557,14 @@ internal static class SecretHeuristics
 		}
 
 		// A list is a secret when any of its items is one: ["x", "y"] under a token's name holds tokens. So is a template that joins one to code.
-		return (ListItems(value) ?? CodeValues.JoinedLiteralsOf(value)) is { } items
+		// A list of calls or members, or a comprehension, is code.
+		string[]? list = ListItems(value);
+		if (IsCodeList(list, value))
+		{
+			return false;
+		}
+
+		return (list ?? CodeValues.JoinedLiteralsOf(value)) is { } items
 			? items.Any(item => !IsBenignValue(item, keyGroup.Value, readAsCode: false) && JudgeByKind(candidate, keyGroup, kind, item, valueEnd))
 			: JudgeByKind(candidate, keyGroup, kind, value, valueEnd);
 	}
@@ -573,12 +580,20 @@ internal static class SecretHeuristics
 		return keyGroup.Index > 0 && candidate.Input[keyGroup.Index - 1] == '$' && !separator.Contains('=');
 	}
 
+	/// <summary>A list of calls or members, as <c>[Validators.required]</c>, or a comprehension, is code.</summary>
+	private static bool IsCodeList(string[]? items, string value)
+	{
+		return items is not null && (items.Any(ValueShapes.IsCallOrMember) || value.Contains(" for ", StringComparison.Ordinal));
+	}
+
 	/// <summary><c>{ correcthorse }</c> is the braced value itself. With a colon, comma, equals sign or quote inside, it is an object literal and stays whole.</summary>
 	private static string UnwrapBraces(string value)
 	{
 		bool braced = value.Length > 2 && value[0] == '{' && value[^1] == '}' && value.AsSpan(1, value.Length - 2).IndexOfAny(":,=;()\"'`{}") < 0;
 		string inner = braced ? value[1..^1].Trim() : value;
-		return inner.Length > 0 ? inner : value;
+
+		// Words with spaces between them in braces are prose, as {set via env} is.
+		return inner.Length > 0 && !inner.Any(char.IsWhiteSpace) ? inner : value;
 	}
 
 	/// <summary>The items of a list literal such as <c>["a", 'b', c]</c>, unquoted, or null for a value that is not one.</summary>
@@ -589,7 +604,7 @@ internal static class SecretHeuristics
 			return null;
 		}
 
-		return [.. value[1..^1].Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).Select(static item => item.Trim('"', '\'', '`', '[', ']', ' '))];
+		return [.. value[1..^1].Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).Select(static item => item.Trim('"', '\'', '`', '[', ']', ' ')).Where(static item => item.Length > 0)];
 	}
 
 	/// <summary>
@@ -663,8 +678,11 @@ internal static class SecretHeuristics
 	{
 		bool labelled = separator.Contains(':') && IsLineBlankFrom(candidate.Input, valueEnd);
 		return IsQuoted(candidate.Input, candidate.Secret.Index)
-			|| (labelled && (IsAtLineStart(candidate.Input, keyStart) || FollowsPair(candidate.Input, keyStart)));
+			|| (labelled && (IsAtLineStart(candidate.Input, keyStart) || (valueEnd - candidate.Secret.Index >= PairedPasswordLength && FollowsPair(candidate.Input, keyStart))));
 	}
+
+	/// <summary>After another pair, a shorter bare word is as likely a log's status, as <c>user=bob password: rejected</c>, as a password.</summary>
+	private const int PairedPasswordLength = 10;
 
 	/// <summary>
 	/// True when the key comes straight after another name and its value, as <c>app</c> in <c>user: app password:</c>, or the whole
