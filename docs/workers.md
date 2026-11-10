@@ -233,18 +233,34 @@ A full re-embed of a copy of the index through the pool: 1,568 documents and 46,
 
 Gaps of more than 5 seconds between embedding calls fell from 746 s to 65 s. The remaining single calls are for text the chunker has to re-split. Machine load differed between the two runs, so treat the ratio as approximate.
 
-### Existing vectors do not match the worker's
+### Vectors made by stock QMD are embedded again
 
-**Most vectors in an index built in-process cover only the end of their chunk.** node-llama-cpp's embedding context evaluates 512 tokens at a time, and the pooled result reflects only the final batch. So a chunk over 512 tokens is represented by its tail. This is QMD's open upstream fix, tobi/qmd#993. The worker sends the whole chunk at once. On 120 chunks of the real index:
+**Stock QMD's in-process vectors cover only the end of a long chunk.** node-llama-cpp's embedding context evaluates 512 tokens at a time unless told otherwise, and the pooled result reflects only the final batch. So a chunk over 512 tokens is represented by its last 512. This is QMD's open upstream fix, tobi/qmd#993. llama-server evaluates the whole chunk at once, or, with a batch smaller than the chunk, refuses it with "input is too large to process": it never pools a tail. On 120 chunks of the real index:
 
 | Chunk length | Chunks | Stored vector against the whole chunk | Stored vector against the final batch alone |
 |---|---|---|---|
 | Up to 512 tokens | 34 | 0.9997 | 0.9997 |
 | 513 to 1,024 tokens | 86 | 0.716 | 0.9996 |
 
-Stored vectors match in-process QMD today at 0.99999, so nothing is corrupt. The re-embed above matched the stored chunk positions exactly on all 1,492 documents they had in common. Its 46,347 chunks are the stored index's 44,767 live ones plus the 76 documents that were pending; the other 13,662 stored vectors are orphans.
+**The sidecar's SDK now evaluates each chunk whole in-process too.** `sidecar/scripts/patch-qmd.ts` sets the embedding context's batch to its context size, 2,048 tokens. Measured against a llama-server worker on CUDA, with in-process on Vulkan, on 60 chunks of this repository's documentation:
 
-Both kinds of vector carry the same model name and fingerprint, so **QMD cannot tell them apart, and a worker embedding part of an index built in-process leaves it mixed.** Re-embed the whole index through the worker when switching, rather than letting one fill in pending documents. Whether whole-chunk vectors search better has not been measured.
+| Chunk length | Chunks | Stock in-process against the worker | Patched in-process against the worker |
+|---|---|---|---|
+| Up to 512 tokens | 13 | mean 0.9998 | mean 0.9998 |
+| 513 to 1,024 tokens | 43 | mean 0.760, lowest 0.143 | mean 0.9997, lowest 0.9996 |
+| 1,025 to 1,118 tokens | 4 | mean 0.468, lowest 0.204 | mean 0.9997 |
+
+**Whole-chunk vectors carry a fingerprint of their own,** because the two kinds are not interchangeable and QMD could not tell them apart. The same patch adds a line to QMD's embedding fingerprint, so the default model's is `824af1` where stock QMD's is `c37385`. Every vector this sidecar writes, through a worker or in-process, carries it. A vector with the stock fingerprint reads as pending, and the next embed job embeds its document again. Until then the old vector stays and is still searched, so nothing is lost while a large index catches up. A document [set aside](#embedding-jobs-in-remote-mode) loses only vectors under the new fingerprint, which a worker of this build made, and keeps stock ones. `/status` counts those documents in `needsEmbedding`.
+
+In-process, each embedding context now needs room for a 2,048-token batch. node-llama-cpp estimates about 110 MB a context for the default model, or 61 MB with flash attention, against about 13 MB before. QMD still plans 150 MB a context when it decides how many to open, and a context that fails to open is skipped.
+
+This means:
+
+- **Updating to this build re-embeds every index once,** including one built entirely by workers, whose vectors were already whole-chunk. A full re-embed of 46,347 chunks took 9 min 34 s on an RTX 5080.
+- **A stock `qmd` and this sidecar on one index each see the other's vectors as pending.** If both embed, they take turns re-embedding it, and neither leaves it mixed. Do not run `qmd embed` on an index the sidecar serves.
+- **Workers agree with each other.** Every worker is llama-server, so each evaluates the chunk whole, and two workers differ only by their GPU backend. The [comparison between workers](#how-calls-are-routed) embeds a short text, which cannot show this difference, but llama-server cannot produce it.
+
+The sidecar's start-up check requires both halves of the patch, as either alone would mix vectors: whole-chunk ones under the stock fingerprint, or last-batch ones under the new one. Whether whole-chunk vectors search better has not been measured.
 
 ### Seams
 
@@ -264,7 +280,7 @@ Sampling is random on both sides, so the number to read is how much runs agree a
 
 Across-sides agreement now sits between the two within-side figures, so the remote path no longer behaves differently. node-llama-cpp also leaves newlines out of penalties, which no longer matters with penalties off.
 
-**Embeddings.** On short text, such as queries, cosine against in-process is 0.9998 on CUDA and 0.999997 on a Vulkan llama-server, so this is the GPU backend and too small to matter. Long chunks are a different matter, as [above](#existing-vectors-do-not-match-the-workers). The server's vectors are normalized and in-process ones are not, which cosine distance ignores.
+**Embeddings.** On short text, such as queries, cosine against in-process is 0.9998 on CUDA and 0.999997 on a Vulkan llama-server, so this is the GPU backend and too small to matter. Long chunks matched only once in-process embedding evaluated them whole, as [above](#vectors-made-by-stock-qmd-are-embedded-again). The server's vectors are normalized and in-process ones are not, which cosine distance ignores.
 
 **Control tokens in document text.** llama-server parses them in strings. On synthetic text, a document with `<|im_end|>` and a fake answer scored 0.64 through `/rerank`, against 0.49 with the same text kept as text, and 0.03 for the same words with the markers removed. `/v1/embeddings` parses them too, moving the vector to a cosine of 0.92. In-process QMD keeps them as text, and the worker now does as well for both, by sending tokens. A document can still argue for itself in plain words, in-process or not.
 
@@ -321,7 +337,7 @@ With no worker URL it does nothing and exits 0.
 | Measurement | How | Reading it |
 |---|---|---|
 | Rerank scores | The same candidate chunks go to both sides, bypassing the cache. Reports mean and largest score difference, rank correlation, and top-10 overlap. | The direct test of the main risk. Rank correlation and overlap matter most, because results are ordered by score. Large score differences with good rank agreement would still affect `minScore` users. |
-| Embeddings | The same text through both sides. | Cosine should be very near 1. |
+| Embeddings | A query's text through both sides, and its first five candidate chunks. Reports the query's cosine, and the lowest of the chunks'. | Both should be very near 1. Only the chunks are long enough to show a difference past one 512-token batch. |
 | End to end | Typed sub-queries through each side's own pipeline, caches cleared. Reports top-10 overlap, correlation and latency. | What a caller would see, without expansion's randomness. |
 | Expansion | Five runs per side per query. Reports overlap of sub-queries within and across sides, and the exact-match rate. | Compare local-versus-remote with local-versus-local. Only a gap between those two means the remote path behaves differently. |
 

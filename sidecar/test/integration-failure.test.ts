@@ -1224,6 +1224,26 @@ test("a document set aside during a force loses its old vectors, so the docs are
   }
 });
 
+test("a document set aside while it holds stock QMD's vectors keeps them, as no worker made them", { skip }, async () => {
+  const o = await opened();
+  try {
+    await o.backend.embed({ force: false });
+    // As an index embedded by stock QMD holds them, under its fingerprint: pending here.
+    await withSdk(o.dbPath, (db) => db.prepare("UPDATE content_vectors SET embed_fingerprint = 'c37385' WHERE hash IN (SELECT hash FROM documents WHERE path LIKE '%delta%')").run());
+    const before = await counts(o.dbPath);
+    refuseText(o.mock, 400, "Nested document");
+    const out = await o.backend.embed({ force: false });
+    assert.equal(out.docsDeadLettered, 1);
+    assert.deepEqual(await counts(o.dbPath), before, "nothing was dropped");
+    // Not the refused words, which the mock would refuse as a query too.
+    const search = await o.backend.searchDetailed({ queries: [{ type: "vec", query: "something else entirely" }], limit: 10, minScore: 0, rerank: false });
+    assert.deepEqual(search.degradedReasons, []);
+    assert.ok(search.hits.some((h) => h.displayPath.includes("delta")), "still searched by its old vectors");
+  } finally {
+    await o.done();
+  }
+});
+
 test("a partial force removes a deleted document's vectors, so restoring it embeds it afresh", { skip }, async () => {
   const { dbPath, corpus } = await fixture();
   const mock = await new MockWorker(8).start();

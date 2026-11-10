@@ -7,7 +7,8 @@ import { cosine, expansionKey, jaccard, meanPairwiseJaccard, scoreDelta, spearma
  *
  * - **Rerank:** the same candidate chunks go to both sides, bypassing the cache.
  *   This is the direct test of the main risk.
- * - **Embedding:** the same query text through both sides.
+ * - **Embedding:** the same query text through both sides, and the first candidate
+ *   chunks, which are as long as stored ones.
  * - **End to end:** typed sub-queries through each side's own full pipeline, with
  *   its cache cleared. Typed queries skip expansion, whose sampling is random and
  *   would swamp everything else.
@@ -46,6 +47,8 @@ export interface QueryReport {
   candidates: number;
   rerank: { delta: ScoreDelta; spearman: number | null; top10Overlap: number; localMs: number; remoteMs: number } | null;
   embedCosine: number | null;
+  /** The lowest cosine over the first candidate chunks, embedded on both sides. */
+  chunkEmbedCosine: number | null;
   endToEnd: { top10Overlap: number; spearman: number | null; delta: ScoreDelta; localMs: number; remoteMs: number; localHits: number; remoteHits: number } | null;
   expansion: { localVsLocal: number | null; localVsRemote: number | null; remoteVsRemote: number | null; exactMatchRate: number };
   errors: string[];
@@ -59,6 +62,7 @@ export interface ParityReport {
     rerankSpearman: Summary;
     rerankTop10Overlap: Summary;
     embedCosine: Summary;
+    chunkEmbedCosine: Summary;
     endToEndTop10Overlap: Summary;
     endToEndSpearman: Summary;
     latencyMs: { rerankLocal: Summary; rerankRemote: Summary; searchLocal: Summary; searchRemote: Summary };
@@ -142,6 +146,23 @@ async function compareEmbed({ query, local, remote, attempt }: QueryRun): Promis
   return vectors?.[0] && vectors[1] ? cosine(vectors[0], vectors[1]) : null;
 }
 
+/** Chunks compared per query. Each is embedded on both sides. */
+const CHUNKS_EMBEDDED = 5;
+
+/**
+ * The worst agreement over a query's first candidate chunks, which are as long as stored ones.
+ * A query is too short to show a difference that only appears past one 512-token batch.
+ */
+async function compareChunkEmbeds({ local, remote, attempt }: QueryRun, candidates: Parameters<ParitySide["rerank"]>[1]): Promise<number | null> {
+  const agreement: number[] = [];
+  for (const { text } of candidates.slice(0, CHUNKS_EMBEDDED)) {
+    const vectors = await attempt("embed chunk", async () => [await local.embed(text), await remote.embed(text)] as const);
+    const value = vectors?.[0] && vectors[1] ? cosine(vectors[0], vectors[1]) : null;
+    if (value !== null) agreement.push(value);
+  }
+  return agreement.length > 0 ? Math.min(...agreement) : null;
+}
+
 async function compareSearch({ query, local, remote, timed, attempt }: QueryRun): Promise<QueryReport["endToEnd"]> {
   local.clearCache();
   remote.clearCache();
@@ -189,9 +210,10 @@ async function reportQuery(query: BenchQuery, local: ParitySide, remote: ParityS
   const candidates = (await run.attempt("candidates", () => local.candidates(query, options.candidateLimit))) ?? [];
   const rerank = await compareRerank(run, candidates);
   const embedCosine = await compareEmbed(run);
+  const chunkEmbedCosine = await compareChunkEmbeds(run, candidates);
   const endToEnd = await compareSearch(run);
   const expansion = await compareExpansion(run);
-  return { id: query.id, collection: query.collection, candidates: candidates.length, rerank, embedCosine, endToEnd, expansion, errors };
+  return { id: query.id, collection: query.collection, candidates: candidates.length, rerank, embedCosine, chunkEmbedCosine, endToEnd, expansion, errors };
 }
 
 export async function runParity(queries: readonly BenchQuery[], local: ParitySide, remote: ParitySide, options: ParityOptions): Promise<ParityReport> {
@@ -216,6 +238,7 @@ export async function runParity(queries: readonly BenchQuery[], local: ParitySid
       rerankSpearman: summarize(reports.map((q) => q.rerank?.spearman ?? null)),
       rerankTop10Overlap: summarize(reports.map((q) => q.rerank?.top10Overlap ?? null)),
       embedCosine: summarize(reports.map((q) => q.embedCosine)),
+      chunkEmbedCosine: summarize(reports.map((q) => q.chunkEmbedCosine)),
       endToEndTop10Overlap: summarize(reports.map((q) => q.endToEnd?.top10Overlap ?? null)),
       endToEndSpearman: summarize(reports.map((q) => q.endToEnd?.spearman ?? null)),
       latencyMs: {

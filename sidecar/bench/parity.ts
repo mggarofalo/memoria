@@ -97,7 +97,7 @@ async function main(): Promise<number> {
   try {
     // Opened local first: remote mode replaces the SDK's process-wide default,
     // which the local side's document path would otherwise share. These runs
-    // embed queries only, through each store's own instance, so that is safe.
+    // embed queries and candidate chunks through each store's own instance, so that is safe.
     local = await openBackend({ dbPath: await copyIndex(db, workspace, "local.sqlite"), keepWarm: true, llm: { mode: "local" } });
     remote = await openBackend({
       dbPath: await copyIndex(db, workspace, "remote.sqlite"),

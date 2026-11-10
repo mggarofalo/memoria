@@ -23,6 +23,9 @@ export interface SdkStoreFunctions {
   hybridQuery(...args: never[]): unknown;
   structuredSearch(...args: never[]): unknown;
   syncConfigToDb(db: unknown, config: { collections: Record<string, unknown> }): void;
+  getEmbeddingFingerprint(model?: string): string;
+  /** `LlamaCpp.prototype.ensureEmbedContexts`, from the SDK's dist/llm.js. */
+  ensureEmbedContexts(...args: never[]): unknown;
 }
 
 /** A binary search over this many items reads a few dozen. A walk reads them all. */
@@ -111,6 +114,10 @@ export function missingSdkFixes(sdk: SdkStoreFunctions): string[] {
     ["structuredSearch has the stock rerank blend", !ordersByReranker(sdk.structuredSearch)],
     ["syncConfigToDb deletes collections a config does not name", deletes === null || deletes.some((sql) => sql.includes("store_collections"))],
     ["syncConfigToDb clears a global context a config does not set", deletes === null || deletes.some((sql) => sql.includes("store_config"))],
+    // Both or neither: whole-chunk vectors under the stock fingerprint would mix with old ones,
+    // and last-batch vectors under the new one would pass for whole ones.
+    ["in-process embedding evaluates 512 tokens at a time", !String(sdk.ensureEmbedContexts).includes("batchSize: LlamaCpp.EMBED_CONTEXT_SIZE")],
+    ["getEmbeddingFingerprint does not mark whole-chunk vectors", !String(sdk.getEmbeddingFingerprint).includes('"embed_batch:whole_chunk"')],
   ];
   return checks.filter(([, missing]) => missing).map(([name]) => name);
 }

@@ -485,6 +485,8 @@ status word. Point a health check that should fail on degradation at `/ready?str
 
 ## Upgrade order
 
+**The first build with whole-chunk embedding re-embeds every index once.** Its vectors carry a new fingerprint, so every document reads as pending, and the next embed job for its collection redoes all of it, on the workers here. Until it finishes, that job holds the one job queue, so the ingest behind it waits. `POST /reindex` with `embed: true` on the sidecar does every collection at once, which took under 10 minutes for 46,000 chunks on one RTX 5080. Search keeps using the old vectors until each document's new ones are written, and a document set aside keeps them. Never run a stock `qmd embed` on an index the sidecar serves: it writes vectors under the old fingerprint, which the sidecar then embeds all over again. [workers.md](workers.md#vectors-made-by-stock-qmd-are-embedded-again) explains why.
+
 Upgrade the sidecar before the API. The API sends a collection-scoped key's allowlist
 with each document read, and the sidecar's strict body schema makes an older sidecar
 refuse scoped batch reads with `400`. An older sidecar also ignores the allowlist on
