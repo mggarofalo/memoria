@@ -50,11 +50,52 @@ public sealed class CodeFalsePositiveTests
 		Assert.Equal(expected, Redactor.Shared.RedactFragment(text).Text);
 	}
 
+	/// <summary>Code beside a literal secret, a version-looking password, and XML that closes in another way all still give the secret up.</summary>
+	[Theory]
+	[InlineData("""PASSWORD="${PREFIX}Tr0ub4dor-x9Q" """)]
+	[InlineData("""const token = `${user}:a8F3kQ9zLm2Wx7Vb5Nc1Rt6Y`;""")]
+	[InlineData("""API_TOKEN="$(whoami)-a8F3kQ9zLm2Wx7Vb5Nc1Rt6Y" """)]
+	[InlineData("""client_secret: "${TENANT}.a8F3kQ9zLm2Wx7Vb5Nc1Rt6Y" """)]
+	[InlineData("""api_key=sk_${env}_a8F3kQ9zLm2Wx7Vb5Nc1Rt6Y""")]
+	[InlineData("""headers.authorization = `Bearer ${"a8F3kQ9zLm2Wx7Vb5Nc1Rt6Y"}`;""")]
+	[InlineData("""Authorization: Bearer ${'a8F3kQ9zLm2Wx7Vb5Nc1Rt6Y'}""")]
+	[InlineData("""password: Xk9${a}Qz7mLp""")]
+	[InlineData("""DB=${DB_PASSWORD:-Pr0dP4ssw0rd!x}""")]
+	[InlineData("""password: 2024.11-Winter!""")]
+	[InlineData("""password=1.2.3-Xk9fQ2mLp7Rz""")]
+	[InlineData(""" "password": "2.0.1-Kq8vZ3xLm9" """)]
+	[InlineData("""password=v1.0-Xk9fQ2mLp7Rz""")]
+	[InlineData("""{"body":"<password>Tr0ub4dor-x9Q<\/password>"}""")]
+	[InlineData("""<client_secret>a8F3kQ9zLm2Wx7Vb5Nc1Rt6Y<!-- rotated -->""")]
+	[InlineData("""<password>Tr0ub4dor-x9Q<br>""")]
+	[InlineData("""<secret>Tr0ub4dor-x9Q< /secret>""")]
+	[InlineData("""password=p<ss>w0rd!X""")]
+	[InlineData("""api_key=mem_<id>_hunterhunter""")]
+	[InlineData("""sshpass -p '<Q7v!x2Lr9Kp' ssh host""")]
+	[InlineData("""password=%APPDATA%\Tr0ub4dor-x9Q""")]
+	[InlineData("""MEMORIA_QMD_SECRET=letmeinplease -d""")]
+	[InlineData("""password=Tr0ub4dor9(""")]
+	[InlineData("""password=Summer2024(""")]
+	[InlineData("""password=/^Tr0ub4dor/""")]
+	[InlineData("""password: Tr0ub4dor</x9Q""")]
+	[InlineData("""PASSWORD="$(printf "Tr0ub4dor-x9Q")" """)]
+	public void A_secret_beside_code_still_goes(string text)
+	{
+		string output = Redactor.Shared.RedactFragment(text).Text;
+
+		Assert.Contains("[REDACTED:", output, StringComparison.Ordinal);
+		Assert.DoesNotContain("Tr0ub4dor", output, StringComparison.Ordinal);
+		Assert.DoesNotContain("a8F3kQ9zLm2Wx7Vb5Nc1Rt6Y", output, StringComparison.Ordinal);
+		Assert.DoesNotContain("Xk9fQ2mLp7Rz", output, StringComparison.Ordinal);
+	}
+
 	[Theory]
 	[InlineData("^5.2.5", true)]
 	[InlineData("~1.2.x", true)]
 	[InlineData(">=2.0.1-beta.1", true)]
-	[InlineData("5.2", true)]
+	[InlineData("5.2", false)]
+	[InlineData("2024.11-Winter!", false)]
+	[InlineData("^1.2.3-Xk9fQ2mLp7Rz", false)]
 	[InlineData("hunter2.5", false)]
 	[InlineData("^a.b", false)]
 	public void A_version_range_is_known(string value, bool range)
@@ -65,11 +106,19 @@ public sealed class CodeFalsePositiveTests
 	[Theory]
 	[InlineData("${name}", true)]
 	[InlineData("${NAME:-default", true)]
+	[InlineData("${user}:a8F3kQ9zLm2Wx7Vb5Nc1Rt6Y", false)]
+	[InlineData("${\"a8F3kQ9zLm2Wx7Vb5Nc1Rt6Y\"}", false)]
 	[InlineData("${randomBytes(32).toString(", true)]
 	[InlineData("$(cat file)", true)]
 	[InlineData("${Secret123", false)]
 	[InlineData("$(Secret123", false)]
 	[InlineData("pa$$word", false)]
+	[InlineData("<string>$(xml ", true)]
+	[InlineData("<string>$(xml", true)]
+	[InlineData("$(printf ", false)]
+	[InlineData("${randomBytes(32).toString(\"base64url\")}", true)]
+	[InlineData("$(printf 'Tr0ub4dor-x9Q')", false)]
+	[InlineData("${DB_PASSWORD:-Pr0dP4ssw0rd}", false)]
 	public void An_interpolation_is_known(string value, bool code)
 	{
 		Assert.Equal(code, CodeValues.HasInterpolation(value));
@@ -81,8 +130,20 @@ public sealed class CodeFalsePositiveTests
 	[InlineData("<code>value", "value")]
 	[InlineData("a<b", "a<b")]
 	[InlineData("x</", "x</")]
+	[InlineData("</c>, <c>", "")]
+	[InlineData("/var/run/secrets/token</c>.</summary", "/var/run/secrets/token")]
 	public void Markup_glued_to_a_value_is_set_aside(string value, string expected)
 	{
 		Assert.Equal(expected, CodeValues.WithoutMarkup(value));
+	}
+
+	[Theory]
+	[InlineData("${\"a8F3kQ9zLm2Wx7Vb5Nc1Rt6Y\"}", "a8F3kQ9zLm2Wx7Vb5Nc1Rt6Y")]
+	[InlineData("${ 'a8F3kQ9z' }", "a8F3kQ9z")]
+	[InlineData("${token}", "${token}")]
+	[InlineData("${\"a\" + \"b\"}", "${\"a\" + \"b\"}")]
+	public void A_template_that_only_wraps_a_literal_is_the_literal(string value, string expected)
+	{
+		Assert.Equal(expected, CodeValues.UnwrapLiteral(value));
 	}
 }

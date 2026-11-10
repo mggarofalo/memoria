@@ -315,8 +315,8 @@ internal static class RedactionRules
 	/// <summary><c>Authorization</c> and <c>Proxy-Authorization</c> headers with a Bearer, Basic, Token, or ApiKey scheme, in shell, JSON at any escaping depth, and URL-encoded form.</summary>
 	public static readonly RedactionRule AuthorizationHeader = new(
 		"authorization-header",
-		Pattern(@"(?i:authorization)" + Close + Operator + @"(?:\\*[""'`]|%2[27])?(?:[ \t]|%20|\+)*(?i:bearer|basic|token|apikey)(?:[ \t]|%20|\+)+(?<secret>[^\s""'`\\,;<>&]+(?:[,;]+[^\s""'`\\,;<>&]+)*)"),
-		c => SecretHeuristics.IsExplicitCredential(c.JudgedValue) && !CodeValues.HasInterpolation(c.JudgedValue));
+		Pattern(@"(?i:authorization)" + Close + Operator + @"(?:\\*[""'`]|%2[27])?(?:[ \t]|%20|\+)*(?i:bearer|basic|token|apikey)(?:[ \t]|%20|\+)+(?<secret>\$\{[ \t]*(?:""[^""\r\n]*""|'[^'\r\n]*')[ \t]*\}|[^\s""'`\\,;<>&]+(?:[,;]+[^\s""'`\\,;<>&]+)*)"),
+		c => SecretHeuristics.IsExplicitCredential(CodeValues.UnwrapLiteral(c.JudgedValue)) && !CodeValues.HasInterpolation(c.JudgedValue));
 
 	/// <summary>A bearer token with no header name around it, such as a value in a config or a log line. Stricter than <see cref="AuthorizationHeader"/>, because prose says "bearer" too.</summary>
 	public static readonly RedactionRule BearerToken = new(
@@ -386,15 +386,25 @@ internal static class RedactionRules
 
 	/// <summary>
 	/// Secrets in XML: <c>&lt;password&gt;x&lt;/password&gt;</c>, and <c>&lt;add key="ApiKey" value="x"/&gt;</c> from .NET configuration.
-	/// The element must close, so a regex's named group <c>(?&lt;secret&gt;…)</c> and markdown's <c>&lt;token&gt;</c> placeholder are not elements.
+	/// A regex's named group <c>(?&lt;secret&gt;…)</c> and markdown's <c>&lt;token&gt;</c> before prose are not elements.
 	/// </summary>
 	public static readonly RedactionRule XmlSecret = new(
 		"xml-secret",
 		Pattern(
-			@"(?i:<(?:password|passwd|secret|token|api[_\-]?key|access[_\-]?key|secret[_\-]?key|client[_\-]?secret)>)(?<secret>[^<\r\n]+)</"
+			@"(?i:<(?:password|passwd|secret|token|api[_\-]?key|access[_\-]?key|secret[_\-]?key|client[_\-]?secret)>)(?<secret>[^<\r\n]+)<"
 			+ @"|(?i:<add\s+(?:key|name)=[""'][A-Za-z0-9_.:\-]*(?:password|pwd|secret|token|key)[""']\s+value=)[""'](?<secret>[^""'\r\n]+)"
 			+ @"|(?i:<add\s+value=)[""'](?<secret>[^""'\r\n]+)[""'](?i:\s+(?:key|name)=[""'][A-Za-z0-9_.:\-]*(?:password|pwd|secret|token|key)[""'])"),
-		SecretHeuristics.IsCommandCredential);
+		c => !IsRegexGroupOrProse(c) && SecretHeuristics.IsCommandCredential(c));
+
+	/// <summary>
+	/// A regex's named group, as in <c>(?&lt;secret&gt;[^\s]+)</c>, and markdown that names a placeholder before prose, as in
+	/// <c>Bearer &lt;token&gt;` when a token is set</c>, are not XML elements. A value of three words or more is prose.
+	/// </summary>
+	private static bool IsRegexGroupOrProse(SecretCandidate candidate)
+	{
+		return (candidate.Match.Index >= 2 && candidate.Input.AsSpan(candidate.Match.Index - 2, 2) is "(?")
+			|| candidate.Value.Count(static c => c == ' ') >= 2;
+	}
 
 	/// <summary>SQL that sets a password: <c>IDENTIFIED BY 'x'</c>, <c>IDENTIFIED BY "x"</c>, and <c>WITH PASSWORD 'x'</c>.</summary>
 	public static readonly RedactionRule SqlPassword = new(

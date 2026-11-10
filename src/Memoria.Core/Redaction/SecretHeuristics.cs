@@ -287,7 +287,7 @@ internal static class SecretHeuristics
 	{
 		string value = CodeValues.WithoutMarkup(candidate.JudgedValue);
 		return value.Length >= PasswordLength
-			&& value[0] is not ('/' or '<')
+			&& value[0] != '/'
 			&& !ValueShapes.IsPlaceholder(value)
 			&& !Keywords.Contains(value)
 			&& !ValueShapes.IsCodeReference(value)

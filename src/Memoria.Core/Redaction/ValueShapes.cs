@@ -52,14 +52,18 @@ internal static partial class ValueShapes
 	}
 
 	/// <summary>
-	/// A format written with angle-bracket names, as in <c>mem_&lt;id&gt;_&lt;secret&gt;</c> or <c>ghp_&lt;token&gt;</c>, and no random
-	/// text besides. It describes a credential's shape, and holds none.
+	/// A format written with angle-bracket names, as in <c>mem_&lt;id&gt;_&lt;secret&gt;</c> or <c>ghp_&lt;token&gt;</c>, and only a short
+	/// prefix of letters besides. It describes a credential's shape, and holds none. <c>p&lt;ss&gt;w0rd!X</c> and <c>mem_&lt;id&gt;_hunterhunter</c> hold more.
 	/// </summary>
 	private static bool IsFormatWithPlaceholders(string text)
 	{
 		string rest = AngleName().Replace(text, "_");
-		return rest.Length < text.Length && !rest.AsSpan().ContainsAny('<', '>') && rest.Split(['_', '-', '.', '/', ':', ' ']).All(static part => !IsRandomSegment(part));
+		return rest.Length < text.Length
+			&& rest.All(static c => char.IsAsciiLetter(c) || c is '_' or '-')
+			&& rest.Split(['_', '-'], StringSplitOptions.RemoveEmptyEntries).All(static part => part.Length <= ShortPrefix);
 	}
+
+	private const int ShortPrefix = 6;
 
 	[System.Text.RegularExpressions.GeneratedRegex("<[a-z][a-z0-9_-]{0,23}>", System.Text.RegularExpressions.RegexOptions.CultureInvariant)]
 	private static partial System.Text.RegularExpressions.Regex AngleName();
@@ -284,9 +288,15 @@ internal static partial class ValueShapes
 			return true;
 		}
 
-		// A Windows path under a variable, as in %ProgramData%\service\secret\.
+		return IsPathUnderVariable(text);
+	}
+
+	/// <summary>A Windows path under a variable, as in <c>%ProgramData%\service\secret\</c>, of folder names: <c>%APPDATA%\Tr0ub4dor-x9Q</c> is a password.</summary>
+	private static bool IsPathUnderVariable(string text)
+	{
 		int close = text.IndexOf('%', 1);
-		return close > 1 && close + 1 < text.Length && text[close + 1] is '\\' or '/' && IsNameBody(text.AsSpan(1, close - 1));
+		return close > 1 && close + 1 < text.Length && text[close + 1] is '\\' or '/' && IsNameBody(text.AsSpan(1, close - 1))
+			&& text[(close + 1)..].Split('\\', '/').All(static part => part.All(static c => char.IsAsciiLetter(c) || c is '<' or '>' or '-' or '_' or '.' or ' '));
 	}
 
 	/// <summary>Words, dotted paths, and simple filters, with nothing that reads as random.</summary>
