@@ -25,6 +25,7 @@ public static partial class AdminKeyEndpoints
 	{
 		RouteGroupBuilder keys = app.MapGroup("/v1/admin/keys")
 			.WithMemoriaScope(MemoriaScopes.Admin)
+			.DecideContentTypeAfterAuthorization()
 			.WithTags("Admin")
 			.AddEndpointFilter(RequireApiKeyModeAsync)
 			.ProducesProblem(StatusCodes.Status401Unauthorized)

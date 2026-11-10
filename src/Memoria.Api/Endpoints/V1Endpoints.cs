@@ -13,6 +13,7 @@ public static class V1Endpoints
 	{
 		RouteGroupBuilder v1 = app.MapGroup("/v1")
 			.WithMemoriaScope(MemoriaScopes.Read)
+			.DecideContentTypeAfterAuthorization()
 			.ProducesProblem(StatusCodes.Status401Unauthorized)
 			.ProducesProblem(StatusCodes.Status403Forbidden)
 			.ProducesProblem(StatusCodes.Status429TooManyRequests)

@@ -161,19 +161,25 @@ public sealed class AdminControlEndpointTests(AuthApiFactory factory) : IClassFi
 	}
 
 	/// <summary>
-	/// A body that is not JSON at all never selects the operation: routing picks its own 415
-	/// endpoint instead, which any valid key gets, and no key gets 401. The operation and the
-	/// sidecar never see it.
+	/// Who may call is decided before what the body is: no key gets 401 and a collection-scoped
+	/// admin key 403, whatever it sends. Only an admin key that may call learns that the body has to
+	/// be JSON, with 415. The sidecar never sees any of it.
 	/// </summary>
 	[Fact]
-	public async Task ANonJsonReindexBody_SelectsNoOperation_AndTheSidecarHearsNothing()
+	public async Task ANonJsonReindexBody_IsJudgedAfterTheKey_AndTheSidecarHearsNothing()
 	{
 		ScriptSidecar();
 		StringContent Body() => new("collections=notes", Encoding.UTF8, "text/plain");
 		HttpClient scoped = await factory.ClientWithScopesAsync([MemoriaScopes.Admin, MemoriaScopes.Read], ["claude-sessions"]);
+		HttpClient reader = await factory.ClientWithScopesAsync([MemoriaScopes.Read], ["claude-sessions"]);
 
-		Assert.Equal(HttpStatusCode.UnsupportedMediaType, (await scoped.PostAsync("/v1/admin/reindex", Body())).StatusCode);
+		HttpResponseMessage refused = await scoped.PostAsync("/v1/admin/reindex", Body());
+		Assert.Equal(HttpStatusCode.Forbidden, refused.StatusCode);
+		Assert.Contains("collection_scoped_key", await refused.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+		Assert.Equal(HttpStatusCode.Forbidden, (await reader.PostAsync("/v1/admin/reindex", Body())).StatusCode);
+		Assert.Equal(HttpStatusCode.Forbidden, (await reader.PostAsync("/v1/admin/keys", Body())).StatusCode);
 		Assert.Equal(HttpStatusCode.UnsupportedMediaType, (await (await factory.AdminAsync()).PostAsync("/v1/admin/reindex", Body())).StatusCode);
+		Assert.Equal(HttpStatusCode.UnsupportedMediaType, (await (await factory.AdminAsync()).PostAsync("/v1/admin/keys", Body())).StatusCode);
 		Assert.Equal(HttpStatusCode.Unauthorized, (await factory.CreateClient().PostAsync("/v1/admin/reindex", Body())).StatusCode);
 		Assert.Empty(factory.Sidecar.Requests);
 	}

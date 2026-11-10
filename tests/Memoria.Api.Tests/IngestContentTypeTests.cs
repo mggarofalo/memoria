@@ -75,9 +75,20 @@ public sealed class IngestContentTypeTests(AuthApiFactory factory) : IClassFixtu
 		Assert.NotEqual(HttpStatusCode.UnsupportedMediaType, response.StatusCode);
 	}
 
+	[Fact]
+	public async Task A_key_without_read_gets_403_from_multiGet_whatever_it_sends()
+	{
+		HttpClient writer = await factory.ClientWithScopesAsync([MemoriaScopes.Ingest], ["c"]);
+		HttpClient reader = await factory.ClientWithScopesAsync([MemoriaScopes.Read], ["c"]);
+
+		Assert.Equal(HttpStatusCode.Forbidden, (await writer.PostAsync("/v1/docs:multiGet", WrongType())).StatusCode);
+		Assert.Equal(HttpStatusCode.UnsupportedMediaType, (await reader.PostAsync("/v1/docs:multiGet", WrongType())).StatusCode);
+	}
+
 	/// <summary>
-	/// Routing still guards the admin routes' JSON bodies, so it is the oracle: the ingest check must
-	/// let through exactly what routing let through, loose headers and structured suffixes included.
+	/// The admin routes judge their JSON bodies by binding them, after authorization too. The ingest check
+	/// must let through exactly what they do, loose headers and structured suffixes included, so every
+	/// route that reads JSON takes the same content types.
 	/// </summary>
 	[Theory]
 	[InlineData("application/json")]
@@ -89,7 +100,7 @@ public sealed class IngestContentTypeTests(AuthApiFactory factory) : IClassFixtu
 	[InlineData("text/json")]
 	[InlineData("text/plain")]
 	[InlineData("multipart/form-data; boundary=x")]
-	public async Task Matches_AgreesWithRoutingsOwnCheck(string contentType)
+	public async Task Matches_AgreesWithTheJsonRoutes(string contentType)
 	{
 		HttpClient admin = await factory.AdminAsync();
 		using StringContent body = new("{}");
@@ -98,8 +109,8 @@ public sealed class IngestContentTypeTests(AuthApiFactory factory) : IClassFixtu
 
 		HttpResponseMessage response = await admin.PostAsync("/v1/admin/reindex", body);
 
-		bool routingAccepted = response.StatusCode != HttpStatusCode.UnsupportedMediaType;
-		Assert.Equal(routingAccepted, IngestBody.Matches(contentType, "application/json"));
+		bool jsonRouteAccepted = response.StatusCode != HttpStatusCode.UnsupportedMediaType;
+		Assert.Equal(jsonRouteAccepted, IngestBody.Matches(contentType, "application/json"));
 	}
 
 	[Theory]

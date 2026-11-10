@@ -20,6 +20,7 @@ public static partial class AdminControlEndpoints
 	{
 		RouteGroupBuilder admin = app.MapGroup("/v1/admin")
 			.WithMemoriaScope(MemoriaScopes.Admin)
+			.DecideContentTypeAfterAuthorization()
 			.WithTags("Operations")
 			.AddEndpointFilter(AdminKeyEndpoints.RequireApiKeyModeAsync)
 			.WithMetadata(new MemoriaUnboundKeyAttribute())
