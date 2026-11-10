@@ -339,9 +339,10 @@ async function realTrufflehog(h: Harness, tool: string): Promise<void> {
     return;
   }
   const folder = h.privatePath("migrate-trufflehog");
-  write(folder, "sub/doc.md", `# Doc\n\nfirst\n${trufflehogOnlyLine(h)}\n`);
+  const lines = [trufflehogOnlyLine(h), trufflehogOnlyLine(h)];
+  write(folder, "sub/doc.md", `# Doc\n\nfirst\n${lines[0]}\n`);
   // Starting like a PDF made trufflehog read no further, behind too few blanks.
-  write(folder, "pdf.md", `%PDF-1.7\n${trufflehogOnlyLine(h)}\n`);
+  write(folder, "pdf.md", `%PDF-1.7\n${lines[1]}\n`);
   const config = planConfig(h, folder, { pattern: "**/*.md" }, 502);
   const findings = h.privatePath("migrate-trufflehog-findings.txt");
   const found = h.memoria(["migrate", "report", "--qmd-config", config, "--tool", tool, "--no-gitleaks", "--gitleaks-findings", findings, "--format", "json"]);
@@ -349,6 +350,8 @@ async function realTrufflehog(h: Harness, tool: string): Promise<void> {
   const row = (JSON.parse(found.out || "[{}]") as Array<{ trufflehogRan?: boolean; trufflehogFindings?: Record<string, number>; trufflehogUnscanned?: number }>)[0];
   h.check("migrate report: real trufflehog reads the redacted text, finds what gitleaks's rules do not, and the run fails", found.code === 1 && row?.trufflehogRan === true && row.trufflehogFindings?.["trufflehog-jdbc"] === 2 && row.trufflehogUnscanned === 0, { code: found.code, row, err: found.err.slice(0, 300) });
   h.check("migrate report: each trufflehog finding is fingerprinted at its document and line, a document starting %PDF included", JSON.stringify(written) === JSON.stringify(["c/pdf.md:trufflehog-jdbc:2", "c/sub/doc.md:trufflehog-jdbc:4"]), written);
+  const said = found.out + found.err + readFileSync(findings, "utf8");
+  h.check("migrate report: what trufflehog matched, and the URL around it, is in none of its output or the findings file", lines.every((line) => !said.includes(line) && !said.includes(line.slice(line.lastIndexOf("=") + 1))), said.length);
   trufflehogIgnore(h, config, tool, written);
   await trufflehogLeavesNothing(h, tool);
 }

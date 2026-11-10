@@ -428,11 +428,12 @@ internal sealed class Trufflehog : IDisposable
 
 	private readonly List<(string Rule, string Text)> _findings = [];
 	private TrufflehogProcess? _batch;
-	private int _batchDocuments;
-	private int _unscanned;
+	private readonly HashSet<int> _batchDocuments = [];
+	private readonly HashSet<int> _unscanned = [];
+	private int _documents;
 
 	/// <summary>The documents in batches it did not read, as it stopped or gave nothing usable.</summary>
-	public int Unscanned => _unscanned;
+	public int Unscanned => _unscanned.Count;
 
 	public static Trufflehog Start()
 	{
@@ -441,8 +442,8 @@ internal sealed class Trufflehog : IDisposable
 
 	public void Write(string text)
 	{
-		// A document is counted in each batch it is in, so a batch that fails counts every document it did not read in full.
-		TrufflehogProcess? countedIn = null;
+		// A document is noted in each batch it is in, so a batch that fails counts every document it did not read in full, each once.
+		int document = _documents++;
 		foreach (string piece in Pieces(text))
 		{
 			if (_batch is not null && _batch.Bytes + Encoding.UTF8.GetByteCount(piece) + 1 + Separator.Length > BatchBytes)
@@ -452,12 +453,11 @@ internal sealed class Trufflehog : IDisposable
 
 			_batch ??= TrufflehogProcess.Start();
 			_batch.Write(piece);
-			_batchDocuments += ReferenceEquals(countedIn, _batch) ? 0 : 1;
-			countedIn = _batch;
+			_batchDocuments.Add(document);
 		}
 	}
 
-	/// <summary>The text, or for a long one, pieces of at most a batch each, split at line breaks, each starting a little before the last ended.</summary>
+	/// <summary>The text, or for a long one, pieces of at most a batch each, each ending at a line break where one is near, and each after the first starting a little before the last ended.</summary>
 	internal static List<string> Pieces(string text)
 	{
 		int room = BatchBytes - TrufflehogProcess.SniffedBytes - Separator.Length - 1;
@@ -488,11 +488,15 @@ internal sealed class Trufflehog : IDisposable
 		}
 
 		List<(string Rule, string Text)>? found = _batch.Finish();
-		_unscanned += found is null ? _batchDocuments : 0;
+		if (found is null)
+		{
+			_unscanned.UnionWith(_batchDocuments);
+		}
+
 		_findings.AddRange(found ?? []);
 		_batch.Dispose();
 		_batch = null;
-		_batchDocuments = 0;
+		_batchDocuments.Clear();
 	}
 
 	/// <summary>Each finding's rule, <c>trufflehog-&lt;detector&gt;</c>, and the text it matched, which stays in memory and is never printed.</summary>
