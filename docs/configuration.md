@@ -288,6 +288,8 @@ configured `TrustedProxies` entry.
 
 Writing needs the `ingest` scope, the target collection in the key's allowlist, and the collection opened to ingest. It is not available when `Memoria:Auth:Mode` is `Disabled`.
 
+The key is judged before the body. A request with no valid key gets `401`, and a key without the `ingest` scope `403`, whatever it sends. Only then does a body of the wrong media type get `415` with code `unsupported_media_type`: `POST /v1/documents` reads `application/json`, `POST /v1/ingest/rendered` reads `text/markdown`, and `POST /v1/ingest/session` reads `application/x-ndjson`. Parameters such as `charset` are allowed, and a request with no `Content-Type` is read as the route's type.
+
 ### Collections belong to ingest or not at all
 
 A collection is opened to ingest by setting `Memoria:Ingest:Collections:<name>:Enabled` to `true`. The first time ingest uses it, the API asks the sidecar whether the collection's directory is empty. If it is not, or the directory does not exist, the request gets 409 `collection_not_empty` and nothing changes. Otherwise the API records that in the control database and never asks again. A collection not enabled gets 409 `ingest_not_enabled`, for writes and deletes alike.

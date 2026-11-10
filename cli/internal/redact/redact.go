@@ -31,9 +31,27 @@ var diagnosticPatterns = []struct {
 	re   *regexp.Regexp
 	repl string
 }{
-	{regexp.MustCompile(`(?i)(authorization["']?\s*[:=]\s*["']?)(?:bearer\s+|basic\s+)?[^\s"',;]+`), "${1}" + Placeholder},
 	{regexp.MustCompile(`(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+`), "${1}" + Placeholder},
 	{regexp.MustCompile(`mem_[A-Za-z0-9]+_[A-Za-z0-9]+`), Placeholder},
+}
+
+// authorizationValue is a header written out in text: its name, an optional scheme, and the value.
+var authorizationValue = regexp.MustCompile(`(?i)(authorization["']?\s*[:=]\s*["']?)(bearer\s+|basic\s+)?([^\s"',;]+)`)
+
+// placeholderValue is what help text writes where a key goes, such as the server's
+// "Authorization: Bearer <key>.". It holds no digit, so a token cannot pass for one,
+// and nothing may follow it but punctuation, so a token run on after it is scrubbed.
+var placeholderValue = regexp.MustCompile(`^<[A-Za-z][A-Za-z_-]{0,30}>[.,)]*$`)
+
+// scrubAuthorization replaces every Authorization value but a literal placeholder.
+func scrubAuthorization(s string) string {
+	return authorizationValue.ReplaceAllStringFunc(s, func(match string) string {
+		parts := authorizationValue.FindStringSubmatch(match)
+		if placeholderValue.MatchString(parts[3]) {
+			return match
+		}
+		return parts[1] + Placeholder
+	})
 }
 
 // Redactor scrubs known secret values from text.
@@ -123,7 +141,7 @@ func (r *Redactor) Bytes(b []byte) []byte {
 
 // Diagnostic removes known secrets and anything shaped like a credential.
 func (r *Redactor) Diagnostic(s string) string {
-	s = r.String(s)
+	s = scrubAuthorization(r.String(s))
 	for _, p := range diagnosticPatterns {
 		s = p.re.ReplaceAllString(s, p.repl)
 	}
