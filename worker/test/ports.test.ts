@@ -48,8 +48,10 @@ test("ports chosen together are all different, and all free again afterwards", a
     const ports = await freePorts(3);
     assert.equal(new Set(ports).size, 3, ports.join(", "));
   }
-  const [port] = await freePorts(1);
-  const server = createServer();
-  await new Promise<void>((resolve) => server.listen(port, "127.0.0.1", resolve));
-  await new Promise((resolve) => server.close(resolve));
+  for (const port of await freePorts(3)) {
+    const server = createServer();
+    await new Promise<void>((resolve) => server.listen(port, "127.0.0.1", resolve));
+    assert.equal((server.address() as { port: number }).port, port);
+    await new Promise((resolve) => server.close(resolve));
+  }
 });
