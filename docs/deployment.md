@@ -380,10 +380,43 @@ The addresses here are examples:
 | GPU PC | `10.0.0.3` | the sidecar | 8383 |
 | Laptop | `10.0.0.4` | the sidecar | 8383 |
 
-**What the API host needs.** The tunnel up, with a peer for each worker whose allowed IPs cover its tunnel address. The sidecar container reaches workers through the host: Docker masquerades its traffic, so a worker sees it from the host's tunnel address. If the host firewall filters forwarded traffic, as `ufw` does by default, allow the bridge out to the workers' port:
+**The tunnel.** Make a key pair on each machine with `wg genkey | tee private.key | wg pubkey > public.key`, or let the WireGuard app make one for a new empty tunnel. Only public keys leave the machine. The API host has a peer for each worker, with that worker's tunnel address alone as its allowed IPs. It needs no `Endpoint`, as each worker dials in:
+
+```ini
+# /etc/wireguard/wg0.conf on the API host
+[Interface]
+Address = 10.0.0.1/24
+ListenPort = 51820
+PrivateKey = <the API host's private key>
+
+[Peer]
+# GPU PC
+PublicKey = <the GPU PC's public key>
+AllowedIPs = 10.0.0.3/32
+```
+
+Each worker has one peer, the API host, at its LAN address. `PersistentKeepalive` makes the worker dial in as soon as its tunnel is up, so the API host learns where it is and can reach it before the worker has sent anything else:
+
+```ini
+# wg0.conf on the GPU PC
+[Interface]
+Address = 10.0.0.3/24
+PrivateKey = <the GPU PC's private key>
+
+[Peer]
+# API host
+PublicKey = <the API host's public key>
+Endpoint = <the API host's LAN address>:51820
+AllowedIPs = 10.0.0.1/32
+PersistentKeepalive = 25
+```
+
+Leave `MTU` unset. The default, 1420 on a network of 1500-byte packets, carries requests of several MiB between the sidecar and a worker.
+
+**What the API host needs.** The sidecar container reaches workers through the host: Docker masquerades its traffic, so a worker sees it from the host's tunnel address. With Docker's default firewall backend, iptables, Docker also accepts its containers' outbound traffic ahead of the host firewall's own rules, so `ufw`'s default of dropping forwarded traffic does not stop it, and no route rule is needed. Docker's opt-in nftables backend keeps its rules in a table of its own, which this has not been tried with. What `ufw`'s default of denying incoming traffic does stop is the workers' handshakes, so allow the tunnel's port:
 
 ```sh
-ufw route allow out on wg0 to 10.0.0.0/24 port 8383 proto tcp
+ufw allow 51820/udp
 ```
 
 **What each worker needs.** Bind its tunnel address, say that plain http there is intended, and accept only the API host:
@@ -397,7 +430,9 @@ MEMORIA_WORKER_HOST=10.0.0.3
 New-NetFirewallRule -DisplayName "memoria-worker" -Direction Inbound -Protocol TCP -LocalPort 8383 -LocalAddress 10.0.0.3 -RemoteAddress 10.0.0.1 -Action Allow
 ```
 
-**Start order.** The tunnel must be up before a worker binds its address, or the worker fails to start. Make it depend on the tunnel, or let it restart until the address exists. The sidecar starts without workers and finds them at its next poll.
+**Start order.** The tunnel must be up before a worker binds its address, or the worker fails to start. Make the worker depend on the tunnel, or let it restart until the address exists. The sidecar starts without workers and finds them at its next poll.
+
+`scripts/e2e/wireguard.ts` runs this setup in Docker: an API host with its own Docker, `ufw` and the tunnel, the sidecar from the compose file, and a worker on its tunnel address. See [its README](../scripts/e2e/README.md#the-tunnel-to-a-worker).
 
 TLS is not the chosen setup.
 

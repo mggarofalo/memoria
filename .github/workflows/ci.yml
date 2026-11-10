@@ -302,6 +302,20 @@ jobs:
       - name: Run the checks on the compose layout
         run: node scripts/e2e/run.ts --layout compose
 
+  # The WireGuard tunnel from the API host to a worker, as docs/deployment.md sets it up, simulated in Docker. Not required.
+  e2e-wireguard:
+    name: End-to-end (WireGuard tunnel)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - name: Run the tunnel checks
+        run: node scripts/e2e/wireguard.ts
+
   worker:
     name: Worker Build & Test
     needs: changes

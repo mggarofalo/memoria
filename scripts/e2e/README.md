@@ -19,6 +19,25 @@ node scripts/e2e/run.ts --no-build --only-ingest   # only the second server: ing
 
 Three groups say NOT RUN there, as they need what this layout forbids: the connection checks and sources sync steer or read the recording proxy, and one ingest check reads what crossed it. The first server's checks are of the API's own surface and connect from chosen loopback addresses, which a published container port rewrites, so they run in the process layout only.
 
+## The tunnel to a worker
+
+`node scripts/e2e/wireguard.ts` runs the WireGuard setup in [deployment.md](../../docs/deployment.md#traffic-between-hosts-wireguard), simulated in Docker. It is a test, and nothing in it ships.
+
+- **The API host** is a Docker host of its own: a `docker:dind` container sharing the network of a `linuxserver/wireguard` container, so its dockerd makes the bridge, the masquerading and the forwarding rules a real host gets, beside `wg0` and `ufw`.
+- **The sidecar** runs on that host from `deploy/compose.yaml` as shipped, on an image built from this checkout.
+- **The worker** is the real worker over the tests' fake llama-server, in the network of a WireGuard container of its own.
+- **The network:** the two hosts share one Docker network, which carries the tunnel's UDP. The worker binds its tunnel address alone, so the sidecar can reach it only through the tunnel.
+
+It checks:
+
+- that the documented configs make a tunnel;
+- that the worker and the sidecar refuse plain http without the opt-in;
+- that the worker sees the sidecar from the host's tunnel address, so its firewall rule can name that address;
+- that a 2 MiB request crosses the tunnel at the default MTU, and a document is embedded through it;
+- what `ufw`'s defaults block and what they do not.
+
+Containers and the network are named `wg-*`, and the run removes them by name, and the image, pass or fail. `MEMORIA_WIREGUARD_KEEP=1` leaves them up for a look. It needs Docker on a kernel with WireGuard, which GitHub's runners and Docker Desktop have. It takes about two minutes.
+
 ## Running the suite
 
 It needs Node 22.18+, Go and the .NET SDK. It exits non-zero if any check fails. It connects from loopback addresses such as `127.0.0.2`, which Linux and Windows answer without setup. macOS does not, so the auth checks fail there.
