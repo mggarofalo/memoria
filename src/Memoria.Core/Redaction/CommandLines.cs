@@ -15,12 +15,18 @@ internal static class CommandLines
 
 	private static readonly HashSet<string> Containers = new(StringComparer.Ordinal) { "docker", "podman", "kubectl", "nerdctl" };
 
-	/// <summary>True when the command holding the position is one of <paramref name="names"/>, directly or run inside a container with <c>exec</c>.</summary>
+	/// <summary>True when the command holding the position is one of <paramref name="names"/>, directly or run inside a container with <c>exec</c>, or quoted mid-sentence.</summary>
 	public static bool IsCommand(string input, int position, params string[] names)
+	{
+		return Place(input, position, names) != CommandPlace.None;
+	}
+
+	/// <summary>Where the command holding the position stands, when it is one of <paramref name="names"/>.</summary>
+	public static CommandPlace Place(string input, int position, params string[] names)
 	{
 		if (!MentionsAny(input, position, names))
 		{
-			return false;
+			return CommandPlace.None;
 		}
 
 		int start = SegmentStart(input, position);
@@ -28,16 +34,71 @@ internal static class CommandLines
 		string? command = NextCommandWord(input, ref cursor, position);
 		if (command is null)
 		{
-			return false;
+			return CommandPlace.None;
 		}
 
 		string name = BaseName(command);
-		if (names.Contains(name, StringComparer.Ordinal))
+		if (names.Contains(name, StringComparer.Ordinal) || (Containers.Contains(name) && RunsInContainer(input, cursor, position, names)))
 		{
-			return true;
+			return CommandPlace.SegmentStart;
 		}
 
-		return Containers.Contains(name) && RunsInContainer(input, cursor, position, names);
+		return EndsInArguments(input, start, position, names) ? CommandPlace.MidSentence : CommandPlace.None;
+	}
+
+	/// <summary>
+	/// A command quoted mid-sentence, as in <c>then I ran curl -u …</c> or <c>ssh box mysql -u app …</c>: one of the names
+	/// is a word of the segment, and every word from it to the position is an argument of it. An argument is a flag, a URL, or the
+	/// word straight after a flag, so <c>after mysql finished I ran tar -pxf</c> is not a MySQL command. A name that is itself a
+	/// flag's value, as in <c>journalctl -u mysql</c> or <c>--name mongo</c>, names a service, not the command. Read back from the
+	/// position over at most <see cref="MaxArguments"/> words, so a line of many flags costs no more than a short one.
+	/// </summary>
+	private static bool EndsInArguments(string input, int start, int position, string[] names)
+	{
+		int cursor = position;
+		string? word = PreviousWord(input, ref cursor, start);
+		for (int read = 0; word is not null && read < MaxArguments; read++)
+		{
+			string? before = PreviousWord(input, ref cursor, start);
+			bool afterFlag = before is not null && IsFlag(before) && !before.Contains('=', StringComparison.Ordinal);
+			if (!afterFlag && names.Contains(BaseName(word), StringComparer.Ordinal))
+			{
+				return true;
+			}
+
+			if (!IsFlag(word) && !afterFlag && !word.Contains("://", StringComparison.Ordinal))
+			{
+				return false;
+			}
+
+			word = before;
+		}
+
+		return false;
+	}
+
+	/// <summary>More arguments than this between a command and its password flag is not a command quoted in a sentence.</summary>
+	private const int MaxArguments = 24;
+
+	private static bool IsFlag(string word)
+	{
+		return word.Length > 1 && word[0] == '-';
+	}
+
+	private static string? PreviousWord(string input, ref int cursor, int start)
+	{
+		while (cursor > start && char.IsWhiteSpace(input[cursor - 1]))
+		{
+			cursor--;
+		}
+
+		int end = cursor;
+		while (cursor > start && !char.IsWhiteSpace(input[cursor - 1]))
+		{
+			cursor--;
+		}
+
+		return end > cursor ? input[cursor..end] : null;
 	}
 
 	/// <summary>Most flags are not on such a command at all, and this costs far less than finding the command.</summary>
@@ -162,4 +223,17 @@ internal static class CommandLines
 		string name = slash >= 0 ? word[(slash + 1)..] : word;
 		return name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? name[..^4] : name;
 	}
+}
+
+/// <summary>Where a known command stands on its line, which says how much its arguments are to be trusted.</summary>
+internal enum CommandPlace
+{
+	/// <summary>Not that command.</summary>
+	None,
+
+	/// <summary>The first word of a shell segment, after any prompt or wrapper, or run inside a container.</summary>
+	SegmentStart,
+
+	/// <summary>After other words, as a command quoted in a sentence. A flag's value there could as well be a word of prose.</summary>
+	MidSentence,
 }

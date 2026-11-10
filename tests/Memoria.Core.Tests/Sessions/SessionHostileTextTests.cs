@@ -10,7 +10,7 @@ public sealed class SessionHostileTextTests
 {
 	private const string Marker = "[REDACTED:refused-message]";
 
-	private static string Hostile => string.Concat(Enumerable.Repeat("mysql -pa ", 1000));
+	private static string Hostile => string.Concat(Enumerable.Repeat("mysql xy -pa ", 1000));
 
 	[Fact]
 	public void The_flood_really_cannot_be_redacted()

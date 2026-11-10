@@ -169,6 +169,8 @@ public static partial class TokenShapes
 		new("session-cookie", "{32}", UrlSafe, "PHPSESSID={S}"),
 		new("command-password", "{24}", UrlSafe, "sshpass -p {S} ssh me@h"),
 		new("mysql-password", "{24}", UrlSafe, "mysql -u root -p{S} db"),
+		new("mongo-password", "{24}", Alnum, "mongosh -u root -p {S} --quiet"),
+		new("basic-auth-literal", "{24}", UrlSafe, "`Basic ${btoa(\"admin:{S}\")}`"),
 		new("securestring-password", "{24}", UrlSafe, "ConvertTo-SecureString \"{S}\" -AsPlainText"),
 		new("credential-argument", "{24}", UrlSafe, "login(\"u\", \"{S}\")"),
 		new("netrc-password", "{24}", UrlSafe, "machine h login u password {S}"),

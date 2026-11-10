@@ -34,8 +34,8 @@ public sealed class RedactionPinRoundThreeTests
 	[InlineData("runner", false)]
 	public void Container_tool_counts_only_with_exec(string tool, bool isContainer)
 	{
-		string withExec = tool + " exec box mysql -pX";
-		string withoutExec = tool + " run box mysql -pX";
+		string withExec = tool + " exec box mysql now -pX";
+		string withoutExec = tool + " run box mysql now -pX";
 
 		Assert.Equal(isContainer, CommandLines.IsCommand(withExec, withExec.Length - 3, "mysql"));
 		Assert.False(CommandLines.IsCommand(withoutExec, withoutExec.Length - 3, "mysql"));
@@ -48,11 +48,12 @@ public sealed class RedactionPinRoundThreeTests
 	[InlineData("mysql.EXE -pX", true)]
 	[InlineData("FOO=1 mysql -pX", true)]
 	[InlineData("F_1=1 G=2 mysql -pX", true)]
-	[InlineData("F-1=1 mysql -pX", false)]
-	[InlineData("=1 mysql -pX", false)]
+	[InlineData("F-1=1 mysql now -pX", false)]
+	[InlineData("=1 mysql now -pX", false)]
 	[InlineData("mysqlx -pX", false)]
 	[InlineData("xmysql -pX", false)]
-	[InlineData("echo mysql -pX", false)]
+	[InlineData("echo mysql now -pX", false)]
+	[InlineData("echo mysql -pX", true)]
 	[InlineData("a; mysql -pX", true)]
 	[InlineData("a | mysql -pX", true)]
 	[InlineData("(mysql -pX", true)]

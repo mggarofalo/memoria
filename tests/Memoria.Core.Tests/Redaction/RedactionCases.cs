@@ -335,6 +335,8 @@ internal static class RedactionCases
 		("session-cookie", "PHPSESSID=short"),
 		("command-password", "sshpass -p $PW ssh me@h"),
 		("mysql-password", "mysql -u root -p db"),
+		("mongo-password", "mongosh -u admin -p --authenticationDatabase admin"),
+		("basic-auth-literal", "const auth = `Basic ${btoa(`${user}:${pass}`)}`;"),
 		("securestring-password", "ConvertTo-SecureString $plain -AsPlainText"),
 		("credential-argument", "login(\"u\", \"password\")"),
 		("netrc-password", "password required"),
