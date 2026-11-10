@@ -43,7 +43,7 @@ ENV NODE_ENV=production \
 COPY --from=build /app/package.json ./
 COPY --from=build /app/node_modules node_modules/
 COPY --from=build /app/dist dist/
-COPY scripts/init-index.mjs scripts/
+COPY scripts/init-index.mjs scripts/snapshot-db.mjs scripts/
 
 # A named volume mounted on one of these takes its ownership on first use, so the
 # non-root user can write to it.

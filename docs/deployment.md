@@ -209,19 +209,64 @@ The API runs with a 1 GiB heap (`DOTNET_GCHeapHardLimit`), the least ingest is s
 |---|---|---|
 | `memoria-data` | API keys and the audit log, in `control.db` | **Not rebuildable.** Every key is revoked and the audit trail is gone. Back it up. |
 | `memoria-corpus` | the collection roots: every document | **Not rebuildable** unless every source still exists. Back it up. |
-| `memoria-qmd-index` | the QMD index and the job queue | Rebuildable: run the first-run command, then `POST /reindex` with `embed: true` on the sidecar re-embeds everything on the workers, which takes hours on a large corpus. Deletes are kept in `control.db`, not here. |
+| `memoria-qmd-index` | the QMD index and the job queue | Rebuildable, by running the first-run command and then `POST /reindex` with `embed: true` on the sidecar, which re-embeds everything on the workers. Backed up anyway, as restoring it is much cheaper: see [Backups](#backups). Deletes are kept in `control.db`, not here. |
 | `memoria-qmd-config` | QMD's own config, used only by the `qmd` CLI. Memoria writes no collection there, so unless you add one it names none, and the CLI writes only its model names | Rebuildable. The sidecar reads its collections from the index, and a missing or empty config removes none of them. See [lost collection records](#lost-collection-records). |
 
-Keep them on a local disk, as SQLite's WAL mode does not work over a network share. To back up the index without rebuilding it, stop the sidecar first, as a copy of a live SQLite file can be torn:
+Keep them on a local disk, as SQLite's WAL mode does not work over a network share. A volume's name carries the compose project's, `memoria` here; `docker volume ls` shows it.
+
+## Backups
+
+[`deploy/backup.yaml`](../deploy/backup.yaml) backs up everything in [Volumes](#volumes) with [restic](https://restic.net), from its official image, pinned by digest. It is used beside `compose.yaml`, with the services running:
+
+| What | How |
+|---|---|
+| The collection roots and QMD's config | restic reads the files. |
+| `control.db`, the index and the job queue | `snapshot` copies each live database with SQLite's online backup, as `sqlite3 .backup` does, and checks each copy, and restic backs up the copies. A plain copy of a database in use can be torn. |
+
+The index is in the backup because restoring it is much cheaper than rebuilding it. Measured with the scripted worker, 300 documents of 20 KB, 13,455 chunks, took 15 s to embed, and their whole backup took 8 s and stored 8.5 MiB. A real worker embeds far more slowly than the scripted one, and a full corpus is far larger, so re-embedding it takes hours where restoring takes minutes. A daily delta of 40 documents embedded in 3 s on the scripted worker, and its backup took 8 s and stored 5.6 MiB: most of a day's new data is the index's pages, which change throughout.
+
+**What is in it.** Only what Memoria stores: the documents, which are redacted before they are written, and the control database, which holds key hashes and the audit log, never a plaintext key. It is still private text, so the backup is encrypted, and the password decides who can read it.
+
+### Backup environment
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `MEMORIA_BACKUP_PASSWORD_FILE` | | Required. A file holding restic's password, one line, mode 600, outside the repository. |
+| `MEMORIA_BACKUP_REPOSITORY` | `memoria-backup-repository` | Where the repository is, as compose mounts it: a host directory on another disk, or that volume's name. |
+| `RESTIC_REPOSITORY` | `/repository` | The repository as restic names it. The default is the mount above. Set a remote one, such as `rest:https://...` or `s3:...`, with the credentials it needs in an override, and the mount goes unused. |
+| `MEMORIA_RESTORE_SNAPSHOT` | `latest` | Which snapshot `restore` restores. `restic snapshots` lists them. |
+
+**Where it goes.** Not this host's disk alone: a backup on the disk it backs up is lost with it. Use a mounted disk or NAS, or a remote repository. With a local repository, copy it off the host too, for example with `restic copy` to a second one.
+
+**The password.** Losing it loses every backup, and nothing can recover them. Keep it in a password manager as well as in the file, and keep `deploy/.env` there too: a restore needs the same `MEMORIA_INGEST_DIGEST_KEY`, or deleted documents stop being recognized when sent again.
+
+### Taking one
 
 ```bash
-docker compose -f deploy/compose.yaml stop memoria-qmd
-docker run --rm -v memoria_memoria-qmd-index:/index -v "$PWD":/out debian:bookworm-slim \
-  tar -czf /out/qmd-index.tar.gz -C /index .
-docker compose -f deploy/compose.yaml start memoria-qmd
+B="docker compose -f deploy/compose.yaml -f deploy/backup.yaml"
+$B run --rm backup init       # once, for a new repository
+$B run --rm snapshot          # daily, then:
+$B run --rm backup
+$B run --rm backup forget --keep-daily 7 --keep-weekly 4 --keep-monthly 12 --prune
+$B run --rm backup check
 ```
 
-The volume's name carries the compose project's, `memoria` here; `docker volume ls` shows it.
+Run it from a systemd timer or cron. `snapshot` fails, and keeps the last good copy, if a copy fails SQLite's integrity check.
+
+### Restore
+
+`restore` writes only into empty volumes, and refuses if any of them holds data, so it cannot overwrite a deployment that is running or was merely stopped:
+
+```bash
+docker compose -f deploy/compose.yaml down
+docker volume rm memoria_memoria-data memoria_memoria-corpus memoria_memoria-qmd-index memoria_memoria-qmd-config
+docker compose -f deploy/compose.yaml -f deploy/backup.yaml run --rm restore
+docker compose -f deploy/compose.yaml up -d
+```
+
+Remove only the volumes you mean to replace, by name, and only once the backup you are restoring has been checked: `restic snapshots` and `restic check`. The restore puts each file back with the owner its service runs as.
+
+`scripts/e2e/backup-restore.ts` proves this path on a throwaway project. It backs up, destroys each data volume by name, restores, and checks that the keys, documents, deletes and search came back. It also checks that a restore into volumes holding data is refused.
 
 ### Lost collection records
 
