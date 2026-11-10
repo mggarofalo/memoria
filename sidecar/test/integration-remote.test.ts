@@ -156,6 +156,30 @@ test("vectors under stock QMD's fingerprint read as pending, stay until replaced
   }
 });
 
+test("an unexpanded search runs QMD's hybrid search on the query alone, with no expansion call", { skip }, async () => {
+  const r = await openRemote();
+  try {
+    await r.backend.embed({ force: false });
+    r.worker.requests.length = 0;
+
+    // An intent turns off QMD's strong-signal shortcut, so only expand=false can skip expansion here.
+    const out = await r.backend.searchDetailed({ query: "AuthenticationHandler", intent: "api key auth", expand: false, limit: 5, minScore: 0, rerank: true });
+    assert.equal(out.hits.length, 2);
+    assert.deepEqual(out.degradedReasons, []);
+    assert.equal(r.worker.count("/v1/complete"), 0, "no expansion");
+    assert.ok(r.worker.count("/v1/embed") >= 1, "the query's own vector");
+    assert.equal(r.worker.count("/v1/rerank"), 1, "still reranked");
+
+    // The same search expanded calls the model, so the switch is what made the difference.
+    r.backend.llm.clearCache();
+    r.worker.requests.length = 0;
+    await r.backend.searchDetailed({ query: "AuthenticationHandler", intent: "api key auth", limit: 5, minScore: 0, rerank: true });
+    assert.equal(r.worker.count("/v1/complete"), 1, "expansion");
+  } finally {
+    await r.done();
+  }
+});
+
 test("a reranked search runs the whole pipeline remotely and caches apart from local results", { skip }, async () => {
   const r = await openRemote();
   try {

@@ -26,8 +26,7 @@ public sealed class ScopedCorpus(IMemoriaQmdClient sidecar, ICallerScope scope, 
 	public async Task<SearchResult> SearchAsync(SidecarSearchRequest request, CancellationToken cancellationToken)
 	{
 		ArgumentNullException.ThrowIfNull(request);
-		// Unexpanded, the caller's text is in the sub-queries, whitespace collapsed.
-		audit.SetQuery(request.Query ?? request.Searches?.FirstOrDefault()?.Query);
+		audit.SetQuery(request.Query);
 
 		// The sidecar reads an empty collection list as "the defaults". A caller
 		// with no collections must get nothing, so the request never leaves.

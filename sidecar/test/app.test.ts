@@ -145,6 +145,28 @@ test("POST /search with a plain query passes it through and honours rerank=false
     assert.equal(opts.rerank, false);
     assert.equal(opts.minScore, 0.5);
     assert.deepEqual(opts.collections, ["codex-sessions"]);
+    assert.equal("expand" in opts, false, "expanded unless asked otherwise");
+  } finally {
+    await app.close();
+  }
+});
+
+test("POST /search passes expand=false with a plain query, and ignores it with typed searches", async () => {
+  const { app, backend } = await makeApp();
+  try {
+    const plain = await app.inject({ method: "POST", url: "/search", headers: authHeaders, payload: { query: "api keys", expand: false } });
+    assert.equal(plain.statusCode, 200, plain.body);
+    const typed = await app.inject({ method: "POST", url: "/search", headers: authHeaders, payload: { searches: [{ type: "lex", query: "api" }], expand: false } });
+    assert.equal(typed.statusCode, 200, typed.body);
+    const expanded = await app.inject({ method: "POST", url: "/search", headers: authHeaders, payload: { query: "api keys", expand: true } });
+    assert.equal(expanded.statusCode, 200, expanded.body);
+    const [first, second, third] = backend.calls.filter((c) => c.method === "search").map((c) => c.args[0] as Record<string, unknown>);
+    assert.equal(first!.expand, false);
+    assert.equal(first!.query, "api keys");
+    assert.equal("expand" in second!, false);
+    assert.equal("expand" in third!, false);
+    const wrong = await app.inject({ method: "POST", url: "/search", headers: authHeaders, payload: { query: "api", expand: "no" } });
+    assert.equal(wrong.statusCode, 400, wrong.body);
   } finally {
     await app.close();
   }

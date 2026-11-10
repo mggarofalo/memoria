@@ -15,6 +15,7 @@ import type { Capability, LocalFallback, PoolWorkerConfig } from "../src/llm/typ
 import { parseEmbeddings, ResponseViolation } from "../src/llm/validate.ts";
 import { embedCapacity, guardedFallback, sdkCacheFileName, type SdkDb } from "../src/llm/wire.ts";
 import { openJobStore, retryJobStore, SqliteJobStore } from "../src/queue-store.ts";
+import type { BackendSearchOptions, SearchHit } from "../src/store.ts";
 import { loadConfig } from "../src/config.ts";
 import { ManualScheduler, tempDir } from "./helpers.ts";
 import { EMBED_FILE, MockWorker, vectorFor } from "./mock-worker.ts";
@@ -532,6 +533,54 @@ test("a search that failed its rerank reruns without expanding or embedding agai
   } finally {
     await a.stop();
   }
+});
+
+test("an unexpanded query keeps its plain form with no expansion worker, and says it went without nothing", async () => {
+  const { searchDegradable } = await import("../src/llm/degraded-search.ts");
+  const a = await new MockWorker(8).start();
+  const llm = new RemoteLlm({ workers: [workerConfig("a", a.url, { capabilities: ["embed", "rerank"] })], embedDimensions: 8, models: MODELS, fallback: null });
+  const validators = { validateLexQuery: () => null, validateSemanticQuery: () => null };
+  try {
+    await llm.refreshStatus();
+    const seen: BackendSearchOptions[] = [];
+    const run = async (o: BackendSearchOptions): Promise<SearchHit[]> => {
+      seen.push(o);
+      return [];
+    };
+    const unexpanded = await searchDegradable(llm, validators, run, { query: "api keys", expand: false, limit: 5, minScore: 0, rerank: false });
+    assert.deepEqual(unexpanded.degradedReasons, []);
+    assert.equal(seen[0]!.query, "api keys");
+    assert.equal(seen[0]!.queries, undefined);
+    // Asked to expand with no worker able to, it still falls back and says so.
+    const expanded = await searchDegradable(llm, validators, run, { query: "api keys", limit: 5, minScore: 0, rerank: false });
+    assert.deepEqual(expanded.degradedReasons, ["no_expansion"]);
+    assert.equal(seen[1]!.query, undefined);
+  } finally {
+    await a.stop();
+  }
+});
+
+test("withholding expansion is per search, so searches running together each keep their own", async () => {
+  const { withholdExpansion } = await import("../src/store.ts");
+  let called = 0;
+  const store = {
+    expandQuery: async (query: string): Promise<unknown[]> => {
+      called++;
+      await new Promise((r) => setTimeout(r, 5));
+      return [{ type: "lex", query }];
+    },
+  };
+  const scope = withholdExpansion(store);
+  const [held, free] = await Promise.all([
+    scope.run(true, async () => {
+      await new Promise((r) => setTimeout(r, 1));
+      return store.expandQuery("a");
+    }),
+    store.expandQuery("b"),
+  ]);
+  assert.deepEqual(held, []);
+  assert.deepEqual(free, [{ type: "lex", query: "b" }]);
+  assert.equal(called, 1, "the withheld search never reached the model");
 });
 
 test("a fallback that hangs cannot hold a query past the deadline", async () => {

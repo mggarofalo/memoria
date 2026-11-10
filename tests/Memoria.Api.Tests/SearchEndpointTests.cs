@@ -37,19 +37,20 @@ public sealed class SearchEndpointTests(MemoriaApiFactory factory) : IClassFixtu
 		Assert.Equal("/search", sent.Uri.AbsolutePath);
 		using JsonDocument body = JsonDocument.Parse(sent.Body!);
 		JsonElement root = body.RootElement;
-		// Unexpanded by default: the query itself, lexically and by vector, and no plain query for QMD to expand.
-		Assert.False(root.TryGetProperty("query", out _));
-		Assert.Equal(["lex:api key auth", "vec:api key auth"], SubQueries(root));
+		// Unexpanded by default: the plain query, with expansion turned off for it.
+		Assert.Equal("api key auth", root.GetProperty("query").GetString());
+		Assert.False(root.GetProperty("expand").GetBoolean());
 		Assert.True(root.GetProperty("rerank").GetBoolean());
 		Assert.Equal(10, root.GetProperty("limit").GetInt32());
 		Assert.False(root.TryGetProperty("collections", out _));
 		Assert.False(root.TryGetProperty("filters", out _));
 		Assert.False(root.TryGetProperty("minScore", out _));
 		Assert.False(root.TryGetProperty("intent", out _));
+		Assert.False(root.TryGetProperty("searches", out _));
 	}
 
 	[Fact]
-	public async Task Search_ExpandTrue_SendsThePlainQueryForQmdToExpand()
+	public async Task Search_ExpandTrue_LeavesExpandOut_SoAnySidecarTakesIt()
 	{
 		HttpClient client = Client();
 
@@ -58,41 +59,22 @@ public sealed class SearchEndpointTests(MemoriaApiFactory factory) : IClassFixtu
 		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
 		using JsonDocument body = JsonDocument.Parse(factory.Sidecar.Single().Body!);
 		Assert.Equal("api key auth", body.RootElement.GetProperty("query").GetString());
-		Assert.False(body.RootElement.TryGetProperty("searches", out _));
+		Assert.False(body.RootElement.TryGetProperty("expand", out _));
 	}
 
 	[Fact]
-	public async Task Search_ExpandFalse_KeepsTheIntentAndDropsSubQueriesQmdWouldRefuse()
+	public async Task Search_ExpandFalse_KeepsEverythingElseAsItWas()
 	{
 		HttpClient client = Client();
 
-		// A leading hyphen reads as negation, which QMD refuses in a vector sub-query.
-		HttpResponseMessage response = await client.GetAsync("/v1/search?query=docker%20-compose&expand=false&intent=deploy");
+		HttpResponseMessage response = await client.GetAsync("/v1/search?query=docker%20-compose&expand=false&intent=deploy&rerank=false");
 
 		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
 		using JsonDocument body = JsonDocument.Parse(factory.Sidecar.Single().Body!);
-		Assert.Equal(["lex:docker -compose"], SubQueries(body.RootElement));
+		Assert.Equal("docker -compose", body.RootElement.GetProperty("query").GetString());
+		Assert.False(body.RootElement.GetProperty("expand").GetBoolean());
 		Assert.Equal("deploy", body.RootElement.GetProperty("intent").GetString());
-	}
-
-	[Theory]
-	[InlineData("/v1/search?query=%22%21%21%22")]
-	[InlineData("/v1/search?query=---&expand=true")]
-	public async Task Search_RefusesAQueryWithNoLetterOrNumber_WhicheverWayItIsSent(string url)
-	{
-		HttpClient client = Client();
-
-		HttpResponseMessage response = await client.GetAsync(url);
-
-		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
-		using JsonDocument body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
-		Assert.True(body.RootElement.GetProperty("errors").TryGetProperty("query", out _), body.RootElement.ToString());
-		Assert.Empty(factory.Sidecar.Requests);
-	}
-
-	internal static string[] SubQueries(JsonElement root)
-	{
-		return root.GetProperty("searches").EnumerateArray().Select(static s => $"{s.GetProperty("type").GetString()}:{s.GetProperty("query").GetString()}").ToArray();
+		Assert.False(body.RootElement.GetProperty("rerank").GetBoolean());
 	}
 
 	[Fact]

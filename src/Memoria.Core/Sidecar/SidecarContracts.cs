@@ -108,6 +108,9 @@ public sealed record SidecarSearchRequest
 	public double? MinScore { get; init; }
 	public int? CandidateLimit { get; init; }
 	public bool? Rerank { get; init; }
+
+	/// <summary><c>false</c> searches <see cref="Query"/> without expanding it. Left out, the sidecar expands, as an older one always did.</summary>
+	public bool? Expand { get; init; }
 }
 
 public sealed record SidecarSearchResponse(

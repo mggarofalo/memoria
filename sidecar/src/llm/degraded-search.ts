@@ -32,7 +32,8 @@ function withoutRerank(options: BackendSearchOptions, reasons: Set<DegradedReaso
 
 function plan(remote: RemoteLlm, validators: QueryValidators, options: BackendSearchOptions, reasons: Set<DegradedReason>): BackendSearchOptions {
   let attempt = options;
-  if (options.query !== undefined && !remote.canServe("generate")) {
+  // An unexpanded query needs no expansion model, so it goes without nothing and stays as it is.
+  if (options.query !== undefined && options.expand !== false && !remote.canServe("generate")) {
     reasons.add("no_expansion");
     const { query, ...rest } = options;
     attempt = { ...rest, queries: plainQueries(validators, query) };

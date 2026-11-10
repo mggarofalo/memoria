@@ -71,6 +71,18 @@ test("the seams remote mode replaces are where it expects them", async () => {
   assert.equal(pkg.exports["."].import, "./dist/index.js");
 });
 
+test("searching unexpanded is QMD's own strong-signal path, reached through the store it is given", async () => {
+  const [store, index] = await Promise.all([read("store.js"), read("index.js")]);
+  // withholdExpansion answers the store's expandQuery with [], which hybridQuery already handles.
+  const hybrid = /export async function hybridQuery\([\s\S]*?\n\}\n/.exec(store)![0];
+  assert.match(hybrid, /const expanded = hasStrongSignal\s+\? \[\]\s+: await store\.expandQuery\(query\);/);
+  assert.match(hybrid, /const weights = getHybridRrfWeights\(rankedListMeta\);/);
+  assert.equal(hybrid.match(/store\.expandQuery\(/g)?.length, 1, "expansion is asked for in one place");
+  // The store hybridQuery gets is the one createStore exposes as `internal`, which the sidecar wraps.
+  assert.match(index, /return hybridQuery\(internal, opts\.query, \{/);
+  assert.match(index, /\n\s+internal,\n/);
+});
+
 test("cache keys and swallowed failures work the way the adapter assumes", async () => {
   const store = await read("store.js");
   // Rerank and expansion cache by the llm's model name, hence the #worker suffix.

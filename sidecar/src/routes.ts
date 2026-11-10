@@ -186,6 +186,7 @@ interface SearchBody {
   minScore: number;
   candidateLimit?: number;
   rerank: boolean;
+  expand?: boolean;
 }
 
 interface DocsQuery {
@@ -506,6 +507,11 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
             minScore: { type: "number", minimum: 0, maximum: 1, default: 0 },
             candidateLimit: { type: "integer", minimum: 1, maximum: 1000, description: "Candidates passed to the reranker (QMD default 40)." },
             rerank: { type: "boolean", default: true, description: "false skips the LLM reranker for sub-second lex+vec fusion." },
+            expand: {
+              type: "boolean",
+              default: true,
+              description: "false searches `query` without expanding it: the query itself, lexically and by vector, as QMD does when its BM25 probe is strong, with no call to the expansion model. Ignored with `searches`.",
+            },
           },
         },
         response: {
@@ -551,6 +557,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       const started = Date.now();
       const { hits, degradedReasons } = await searchRefusingBadInput(ctx.searchGate, () => backend.searchDetailed({
         ...(text !== null ? { query: text } : { queries: body.searches!.map((s) => ({ type: s.type, query: s.query })) }),
+        ...(text !== null && body.expand === false ? { expand: false } : {}),
         ...(body.intent ? { intent: body.intent } : {}),
         ...(candidateLimit !== undefined ? { candidateLimit } : {}),
         collections,

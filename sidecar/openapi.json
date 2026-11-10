@@ -1379,6 +1379,11 @@
                     "type": "boolean",
                     "default": true,
                     "description": "false skips the LLM reranker for sub-second lex+vec fusion."
+                  },
+                  "expand": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "false searches `query` without expanding it: the query itself, lexically and by vector, as QMD does when its BM25 probe is strong, with no call to the expansion model. Ignored with `searches`."
                   }
                 }
               }

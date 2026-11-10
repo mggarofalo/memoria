@@ -64,8 +64,8 @@ public sealed class McpEndpointTests(MemoriaApiFactory factory) : IClassFixture<
 
 		FakeSidecar.RecordedRequest sent = Assert.Single(factory.Sidecar.Requests, r => r.Uri.AbsolutePath == "/search");
 		using JsonDocument body = JsonDocument.Parse(sent.Body!);
-		Assert.False(body.RootElement.TryGetProperty("query", out _));
-		Assert.Equal(["lex:api key auth", "vec:api key auth"], SearchEndpointTests.SubQueries(body.RootElement));
+		Assert.Equal("api key auth", body.RootElement.GetProperty("query").GetString());
+		Assert.False(body.RootElement.GetProperty("expand").GetBoolean());
 		Assert.Equal("asp.net core auth", body.RootElement.GetProperty("intent").GetString());
 		Assert.True(body.RootElement.GetProperty("rerank").GetBoolean());
 		Assert.Equal(10, body.RootElement.GetProperty("limit").GetInt32());
@@ -87,7 +87,7 @@ public sealed class McpEndpointTests(MemoriaApiFactory factory) : IClassFixture<
 		FakeSidecar.RecordedRequest sent = Assert.Single(factory.Sidecar.Requests, r => r.Uri.AbsolutePath == "/search");
 		using JsonDocument body = JsonDocument.Parse(sent.Body!);
 		Assert.Equal("api key auth", body.RootElement.GetProperty("query").GetString());
-		Assert.False(body.RootElement.TryGetProperty("searches", out _));
+		Assert.False(body.RootElement.TryGetProperty("expand", out _));
 	}
 
 	[Fact]
