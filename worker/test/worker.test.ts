@@ -8,10 +8,10 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { EventEmitter } from "node:events";
 import { runSmoke } from "../scripts/smoke.ts";
-import { Supervisor } from "../src/supervisor.ts";
+import { Supervisor, type SpawnFn } from "../src/supervisor.ts";
 import type { MachineState } from "../src/probes.ts";
 import { resolveVersion } from "../src/version.ts";
-import { FAST_TIMINGS, fakeSupervisor, fixturePath, quietMachine, roleConfigs, startWorker, TOKEN, type RunningWorker } from "./helpers.ts";
+import { FAST_TIMINGS, fakeSupervisor, fixturePath, handOverPort, quietMachine, roleConfigs, startWorker, TOKEN, type RunningWorker } from "./helpers.ts";
 /**
  * The whole worker over real HTTP, with llama-server played by a fixture launched
  * as a real child process. This proves supervision, routing, auth and validation.
@@ -277,6 +277,7 @@ test("a health probe in flight when the server dies does not cancel the restart"
   const supervisor = new Supervisor({
     command: process.execPath,
     prefixArgs: [fixturePath],
+    spawn: handOverPort,
     gpuLayers: 0,
     roles,
     modelPaths: { embed: "models/m.gguf" },
@@ -353,6 +354,32 @@ test("something else on the port is never marked ready or sent text", async () =
   } finally {
     await supervisor.stop();
     await new Promise((resolve) => impostor.close(resolve));
+  }
+});
+
+test("a fake llama-server's port cannot be taken while it starts, because it was bound at launch and handed over", async () => {
+  const roles = await roleConfigs(["embed"]);
+  const port = roles[0]!.port;
+  let taken!: Promise<boolean>;
+  // Right after the launch, before the child has even started, something else tries for the port.
+  const launchThenSteal: SpawnFn = (command, args, options) => {
+    const child = handOverPort(command, args, options);
+    const thief = createServer();
+    taken = new Promise((resolve) => {
+      thief.once("error", () => resolve(false));
+      thief.listen(port, "127.0.0.1", () => thief.close(() => resolve(true)));
+    });
+    return child;
+  };
+  const supervisor = new Supervisor({ command: process.execPath, prefixArgs: [fixturePath], gpuLayers: 0, roles, modelPaths: { embed: "models/m.gguf" }, log: { info: () => {}, warn: () => {}, error: () => {} }, timings: FAST_TIMINGS, env: process.env, spawn: launchThenSteal });
+  supervisor.start();
+  try {
+    assert.equal(await taken, false, "the port was already held");
+    assert.equal(await supervisor.waitReady(30_000), true, JSON.stringify(supervisor.status()));
+    assert.equal(supervisor.status()[0]!.restarts, 0);
+    assert.equal((await json(fetch(`http://127.0.0.1:${port}/debug/env`))).listenedBy, "handle");
+  } finally {
+    await supervisor.stop();
   }
 });
 

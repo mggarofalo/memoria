@@ -1,3 +1,5 @@
+import { spawn } from "node:child_process";
+import { createServer, type Server } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Server as HttpServer } from "node:http";
@@ -6,7 +8,7 @@ import { Inference, LlamaServers } from "../src/inference.ts";
 import { createLogger, type Logger } from "../src/log.ts";
 import type { MachineState } from "../src/probes.ts";
 import { createWorkerServer, type Gate } from "../src/server.ts";
-import { Supervisor, type SupervisorTimings } from "../src/supervisor.ts";
+import { Supervisor, type SpawnFn, type SupervisorTimings } from "../src/supervisor.ts";
 import { freePort, listenFetchable } from "./ports.ts";
 
 export const TOKEN = "worker-test-token-0123456789";
@@ -24,6 +26,26 @@ export async function roleConfigs(roles: Role[] = ["embed", "rerank", "generate"
   return out;
 }
 
+/**
+ * Launches the fake llama-server with its port already bound. A child that binds the port itself does so only once it has started, a second
+ * or more on a loaded machine, and anything that takes the port meanwhile leaves it crash-looping on `port_in_use` past the readiness
+ * deadline. So the port is bound here, at launch, and the listening socket handed over. If it cannot be bound, because something else holds
+ * it, the child is told to bind it itself and fails as llama-server would, which is what the impostor test checks.
+ */
+export const handOverPort: SpawnFn = (command, args, options) => {
+  const child = spawn(command, args, { env: options.env, stdio: ["ignore", "ignore", "pipe", "ipc"], windowsHide: options.windowsHide });
+  child.channel?.unref();
+  const port = Number(args[args.indexOf("--port") + 1]);
+  const held = createServer();
+  const tell = (message: { listen: "handle" | "port" }, handle?: Server) => {
+    if (!child.connected) return void held.close();
+    child.send(message, handle, () => held.close());
+  };
+  held.once("error", () => tell({ listen: "port" }));
+  held.listen(port, "127.0.0.1", () => tell({ listen: "handle" }, held));
+  return child;
+};
+
 /** A supervisor that launches the fake llama-server as a real child process. */
 export function fakeSupervisor(roles: RoleConfig[], options: { log?: Logger; env?: NodeJS.ProcessEnv; timings?: Partial<SupervisorTimings> } = {}): Supervisor {
   const modelPaths: Partial<Record<Role, string>> = {};
@@ -37,6 +59,7 @@ export function fakeSupervisor(roles: RoleConfig[], options: { log?: Logger; env
     log: options.log ?? createLogger(undefined, () => {}),
     timings: { ...FAST_TIMINGS, ...options.timings },
     env: options.env ?? process.env,
+    spawn: handOverPort,
   });
 }
 
