@@ -31,7 +31,7 @@ Assert-True (Test-MemoriaLoopback -BindHost "127.0.0.1") "127.0.0.1 is loopback"
 Assert-True (Test-MemoriaLoopback -BindHost "127.8.8.8") "127/8 is loopback"
 Assert-True (Test-MemoriaLoopback -BindHost "localhost") "localhost is loopback"
 Assert-True (-not (Test-MemoriaLoopback -BindHost "192.168.1.20")) "a LAN address is not loopback"
-Assert-True ((Get-MemoriaServiceAccount -ServiceName "memoria-qmd") -eq "NT SERVICE\memoria-qmd") "the account is named after the service"
+Assert-True ((Get-MemoriaServiceAccount -ServiceName "memoria-worker") -eq "NT SERVICE\memoria-worker") "the account is named after the service"
 
 $stable = "NSSM: The non-sucking service manager`nVersion 2.24 64-bit, 2014-08-31"
 $pre = "NSSM: The non-sucking service manager`nVersion 2.24-101-g897c7ad 64-bit, 2017-04-26"

@@ -287,7 +287,7 @@ test("service packages hold what was committed, not the working tree, stamped wi
   assert.equal(tar(["-xzOf", "memoria-worker_1.2.3.tar.gz", "README.md"]), "committed worker/README.md\n");
   assert.equal(tar(["-xzOf", "memoria-sidecar_1.2.3.tar.gz", "dist/VERSION"]), "1.2.3\n");
   assert.equal(tar(["-xzOf", "memoria-sidecar_1.2.3.tar.gz", "dist/main.js"]), "compiled\n");
-  assert.equal(tar(["-xzOf", "memoria-sidecar_1.2.3.tar.gz", "deploy/windows/MemoriaService.psm1"]), "shared\n");
+  assert.equal(tar(["-xzOf", "memoria-worker_1.2.3.tar.gz", "deploy/windows/MemoriaService.psm1"]), "shared\n");
 });
 
 test("a real failure during a build is not swallowed", (t) => {

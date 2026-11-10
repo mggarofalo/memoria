@@ -26,14 +26,14 @@ The API and the sidecar are two images and two compose services on the Linux API
 - **The host runs no model.** Model work goes to workers, so the sidecar needs no GPU, and its image holds no llama.cpp binaries. It cannot run a model even if configured to.
 - **The two still move independently.** Each image has its own version tag from the same release.
 
-The sidecar's Windows installer, `sidecar/scripts/install-service.ps1`, is not part of this deployment. [Running as a service](#running-as-a-service) covers the workers' installers, which share its module.
-
 ## Running as a service
 
-`sidecar/scripts/install-service.ps1` and `worker/scripts/install-service.ps1`
-share `deploy/windows/MemoriaService.psm1`. **Neither has been run on a real
-install.** Both accept `-WhatIf`, which prints every step, needs no elevation
-and changes nothing.
+This section is about the workers. The sidecar runs from its image, under compose.
+
+`worker/scripts/install-service.ps1` installs a worker as a Windows service, using
+`deploy/windows/MemoriaService.psm1`. **It has not been run on a real install.**
+It accepts `-WhatIf`, which prints every step, needs no elevation and changes
+nothing.
 
 | What | Where | Who can use it |
 |---|---|---|
@@ -52,17 +52,14 @@ nothing else:
 
 | Service | Path | Access | Why |
 |---|---|---|---|
-| sidecar | `<CacheHome>\qmd`, by default `%USERPROFILE%\.cache\qmd` | Change | The index and its write-ahead log, and the models. |
-| sidecar | `<ConfigHome>\qmd`, by default `%USERPROFILE%\.config\qmd` | Read | QMD's collection config. |
-| sidecar | each `-CollectionRoot` | Change | `POST` and `DELETE /documents`. Pass all of them; nothing finds them for you. |
 | worker | `-ModelDir`, by default `%USERPROFILE%\.cache\qmd\models` | Read | The models. |
 | worker | the directory holding `llama-server` | Read | The binary and its DLLs. Refused if a non-administrator can change it. |
 
-The defaults leave data in your own profile, so a process running as you can
-still change the models and the index. That cannot reach SYSTEM, but a model file
-is parsed by `llama-server` under the service account, so moving the models and
-index under `%ProgramData%` is the stronger setup. Pass `-CacheHome` and
-`-ModelDir` to do that after copying them.
+The default leaves the models in your own profile, so a process running as you can
+still change them. That cannot reach SYSTEM, but a model file is parsed by
+`llama-server` under the service account, so moving the models under
+`%ProgramData%` is the stronger setup. Pass `-ModelDir` to do that after copying
+them.
 
 **Log rotation.** `AppRotateFiles` and `AppRotateOnline` are on with
 `AppRotateBytes` at 10 MiB, so a log rotates at that size while the service runs,
@@ -72,10 +69,10 @@ the application's next line of output. The documentation describes no deletion o
 old files, so plan on pruning them yourself.
 
 **Upgrading an earlier install.** The script replaces the registry environment,
-which removes a secret stored there, and moves the service off LocalSystem. Treat
-that secret as exposed and rotate it: choose a new one and update
-`Memoria__Sidecar__Secret` on the API host. The old install directory is not
-touched. Its log and data locations are the ones above unless you passed others.
+which removes a token stored there, and moves the service off LocalSystem. Treat
+that token as exposed and rotate it: choose a new one and update the sidecar's
+worker list on the API host. The old install directory is not touched. Its log and
+data locations are the ones above unless you passed others.
 
 **NSSM version.** 2.24, the last stable release, fails to start services on
 Windows 10 Creators Update or newer, according to nssm.cc, which recommends
@@ -95,18 +92,15 @@ These need a real install, and none has been done:
   account. NSSM's documentation describes `ObjectName` as needing a password and
   does not mention virtual accounts, though a commit in its repository appears to
   add them, which is why the script uses `sc.exe`.
-- **GPU access from the virtual account.** CUDA for `llama-server`, and the
-  sidecar's in-process `node-llama-cpp` in local mode, have only ever been used in
-  an interactive session. `nvidia-smi` under the account is also unproven. If it
+- **GPU access from the virtual account.** CUDA for `llama-server` has only ever
+  been used in an interactive session. `nvidia-smi` under the account is also unproven. If it
   fails, this is the one thing that may force a different account.
-- Reading the models and index through a user profile. The account has no rights on
+- Reading the models through a user profile. The account has no rights on
   `C:\Users\<you>` itself and relies on the default "bypass traverse checking"
-  right. Anything that walks the parent directories could fail, which `-CacheHome`
-  and `-ModelDir` under `%ProgramData%` would avoid.
+  right. Anything that walks the parent directories could fail, which `-ModelDir`
+  under `%ProgramData%` would avoid.
 - That the account's own profile, `C:\Windows\ServiceProfiles\<service>`, is created
-  and writable, since `node-llama-cpp` and temp files may use it.
-- That `npm ci --omit=dev` under Program Files produces a working native build, and
-  that nothing tries to write beside it at runtime.
+  and writable, since temp files may use it.
 - The `Log on as a service` right, which virtual accounts normally hold through
   `NT SERVICE\ALL SERVICES`. A group policy can remove it.
 - The launchd script on a Mac: `launchctl bootstrap` with the mode 600 plist, the
@@ -132,8 +126,7 @@ user can:
   one, and a later write in that directory may then remove it if it is over an hour
   old and another swap lands at the right moment.
 
-The sidecar's account limits the damage, which is one more reason not to run it
-as LocalSystem. `sidecar/README.md` lists the rules a document path must meet.
+The sidecar's container runs as a user, not root, which limits the damage. `sidecar/README.md` lists the rules a document path must meet.
 
 ## The images
 

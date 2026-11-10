@@ -272,7 +272,7 @@ Across-sides agreement now sits between the two within-side figures, so the remo
 
 ## Memory
 
-**A search can allocate over 4 GB of JavaScript heap.** QMD's vector lookup reads a document's whole body once per matching chunk, and this corpus has documents up to 21 MB. One query reached 4.1 GB and, at Node's default limit, the benchmark died of it. That is QMD's behaviour, in-process or remote. `bench:parity` now raises the limit to 6 GiB. The sidecar service (`npm start` and the NSSM install) runs with 4 GiB, which is under that 4.1 GB query.
+**A search can allocate over 4 GB of JavaScript heap.** QMD's vector lookup reads a document's whole body once per matching chunk, and this corpus has documents up to 21 MB. One query reached 4.1 GB and, at Node's default limit, the benchmark died of it. That is QMD's behaviour, in-process or remote. `bench:parity` now raises the limit to 6 GiB. The sidecar service (`npm start` and its image) runs with 4 GiB, which is under that 4.1 GB query.
 
 **The benchmark cleans up its index copies.** They hold real transcripts. A normal exit and Ctrl-C remove them. A fatal crash runs no code at all, so the next run removes what a dead run left, recognising its own directories by a marker holding the owner's process ID. `--out` is rewritten after each query and marked `partial` until the run ends, so a crash keeps the results so far.
 

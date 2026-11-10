@@ -149,7 +149,7 @@ clients (Claude Code / CLI / scripts)
 | `worker/` | `memoria-worker`: supervises `llama-server` for QMD's models on a GPU host and serves them to the sidecar. No runtime npm dependencies; runs from source. See `docs/workers.md` |
 | `cli/` | Go module `github.com/mggarofalo/memoria/cli`, binary `memoria`; `internal/api` is the client oapi-codegen generates from `src/Memoria.Api/openapi.json` |
 | `scripts/release/` | Version computation, CLI asset builds, and release gates; no dependencies, runs on Node. See `docs/releasing.md` |
-| `deploy/` | `compose.yaml` for the API host: the API and the sidecar, with no published sidecar port; `windows/MemoriaService.psm1`, shared by the sidecar and worker service scripts |
+| `deploy/` | `compose.yaml` for the API host: the API and the sidecar, with no published sidecar port; `windows/MemoriaService.psm1`, used by the worker's Windows service scripts |
 | `Dockerfile` | `Memoria.Api` only. `sidecar/Dockerfile` is the sidecar's image, with no llama.cpp binaries (docs/deployment.md) |
 | `scripts/e2e/` | The real CLI against a real API and sidecar on a throwaway index. See its README. Extend it when a change crosses those boundaries |
 | `install.sh`, `install.ps1` | CLI installers; they consume the release assets described in `docs/cli.md` |
