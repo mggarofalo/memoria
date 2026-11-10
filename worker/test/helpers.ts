@@ -9,7 +9,7 @@ import { createLogger, type Logger } from "../src/log.ts";
 import type { MachineState } from "../src/probes.ts";
 import { createWorkerServer, type Gate } from "../src/server.ts";
 import { Supervisor, type SpawnFn, type SupervisorTimings } from "../src/supervisor.ts";
-import { freePort, listenFetchable } from "./ports.ts";
+import { freePort, freePorts, listenFetchable } from "./ports.ts";
 
 export const TOKEN = "worker-test-token-0123456789";
 
@@ -21,9 +21,9 @@ export const FAST_TIMINGS: Partial<SupervisorTimings> = { pollMs: 20, healthyPol
 
 export async function roleConfigs(roles: Role[] = ["embed", "rerank", "generate"]): Promise<RoleConfig[]> {
   const files: Record<Role, string> = { embed: "embeddinggemma-300M-Q8_0.gguf", rerank: "qwen3-reranker-0.6b-q8_0.gguf", generate: "qmd-query-expansion-1.7B-q4_k_m.gguf" };
-  const out: RoleConfig[] = [];
-  for (const role of roles) out.push({ role, modelFile: files[role], modelPath: undefined, externalUrl: undefined, port: await freePort(), parallel: 2 });
-  return out;
+  // One port each, all different: two roles on one port leave the second crash-looping on port_in_use.
+  const ports = await freePorts(roles.length);
+  return roles.map((role, i) => ({ role, modelFile: files[role], modelPath: undefined, externalUrl: undefined, port: ports[i]!, parallel: 2 }));
 }
 
 /**
