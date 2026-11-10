@@ -96,9 +96,17 @@
           {
             "name": "query",
             "in": "query",
-            "description": "Plain-text query. QMD expands it into lexical and semantic sub-queries.",
+            "description": "Plain-text query. It is searched as itself, lexically and by vector, unless `expand` asks QMD to expand it.",
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "expand",
+            "in": "query",
+            "description": "Let QMD's model expand the query into more lexical and semantic sub-queries first. Slower, and no better on the measured corpus. The server's default is usually false.",
+            "schema": {
+              "type": "boolean"
             }
           },
           {

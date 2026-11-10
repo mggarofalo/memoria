@@ -1,0 +1,263 @@
+{
+  "about": "A plain query as typed sub-queries: sidecar/src/llm/degraded-search.ts on QMD's own validators, and src/Memoria.Api/Search/PlainSubQueries.cs, must give these. Regenerate the answers from the sidecar's function when QMD's validators change.",
+  "cases": [
+    {
+      "query": "api key rotation",
+      "searches": [
+        {
+          "type": "lex",
+          "query": "api key rotation"
+        },
+        {
+          "type": "vec",
+          "query": "api key rotation"
+        }
+      ]
+    },
+    {
+      "query": "  api   keys \t\n rotation  ",
+      "searches": [
+        {
+          "type": "lex",
+          "query": "api keys rotation"
+        },
+        {
+          "type": "vec",
+          "query": "api keys rotation"
+        }
+      ]
+    },
+    {
+      "query": "real-time write-ahead log",
+      "searches": [
+        {
+          "type": "lex",
+          "query": "real-time write-ahead log"
+        },
+        {
+          "type": "vec",
+          "query": "real-time write-ahead log"
+        }
+      ]
+    },
+    {
+      "query": "docker -compose",
+      "searches": [
+        {
+          "type": "lex",
+          "query": "docker -compose"
+        }
+      ]
+    },
+    {
+      "query": "-v flag",
+      "searches": [
+        {
+          "type": "lex",
+          "query": "-v flag"
+        }
+      ]
+    },
+    {
+      "query": "--force push",
+      "searches": [
+        {
+          "type": "lex",
+          "query": "--force push"
+        },
+        {
+          "type": "vec",
+          "query": "--force push"
+        }
+      ]
+    },
+    {
+      "query": "say \"hello",
+      "searches": [
+        {
+          "type": "vec",
+          "query": "say \"hello"
+        }
+      ]
+    },
+    {
+      "query": "\"exact phrase\" search",
+      "searches": [
+        {
+          "type": "lex",
+          "query": "\"exact phrase\" search"
+        },
+        {
+          "type": "vec",
+          "query": "\"exact phrase\" search"
+        }
+      ]
+    },
+    {
+      "query": "-\"quoted\" phrase",
+      "searches": [
+        {
+          "type": "lex",
+          "query": "-\"quoted\" phrase"
+        }
+      ]
+    },
+    {
+      "query": "\"unbalanced -neg",
+      "searches": [
+        {
+          "type": "lex",
+          "query": "unbalanced neg"
+        }
+      ]
+    },
+    {
+      "query": "über -Ärger",
+      "searches": [
+        {
+          "type": "lex",
+          "query": "über -Ärger"
+        },
+        {
+          "type": "vec",
+          "query": "über -Ärger"
+        }
+      ]
+    },
+    {
+      "query": "café über naïve",
+      "searches": [
+        {
+          "type": "lex",
+          "query": "café über naïve"
+        },
+        {
+          "type": "vec",
+          "query": "café über naïve"
+        }
+      ]
+    },
+    {
+      "query": "日本語 検索",
+      "searches": [
+        {
+          "type": "lex",
+          "query": "日本語 検索"
+        },
+        {
+          "type": "vec",
+          "query": "日本語 検索"
+        }
+      ]
+    },
+    {
+      "query": "emoji 🚀 rocket",
+      "searches": [
+        {
+          "type": "lex",
+          "query": "emoji 🚀 rocket"
+        },
+        {
+          "type": "vec",
+          "query": "emoji 🚀 rocket"
+        }
+      ]
+    },
+    {
+      "query": "𝐀𝐁 math -x and \"",
+      "searches": [
+        {
+          "type": "lex",
+          "query": "𝐀𝐁 math x and"
+        }
+      ]
+    },
+    {
+      "query": "a\u00a0b\u2003c\u3000d",
+      "searches": [
+        {
+          "type": "lex",
+          "query": "a b c d"
+        },
+        {
+          "type": "vec",
+          "query": "a b c d"
+        }
+      ]
+    },
+    {
+      "query": "x\u0085y",
+      "searches": [
+        {
+          "type": "lex",
+          "query": "x\u0085y"
+        },
+        {
+          "type": "vec",
+          "query": "x\u0085y"
+        }
+      ]
+    },
+    {
+      "query": "a\ufeffb",
+      "searches": [
+        {
+          "type": "lex",
+          "query": "a b"
+        },
+        {
+          "type": "vec",
+          "query": "a b"
+        }
+      ]
+    },
+    {
+      "query": "line\r\nbreak",
+      "searches": [
+        {
+          "type": "lex",
+          "query": "line break"
+        },
+        {
+          "type": "vec",
+          "query": "line break"
+        }
+      ]
+    },
+    {
+      "query": "C# vs F#",
+      "searches": [
+        {
+          "type": "lex",
+          "query": "C# vs F#"
+        },
+        {
+          "type": "vec",
+          "query": "C# vs F#"
+        }
+      ]
+    },
+    {
+      "query": "node-llama-cpp -- flags",
+      "searches": [
+        {
+          "type": "lex",
+          "query": "node-llama-cpp -- flags"
+        },
+        {
+          "type": "vec",
+          "query": "node-llama-cpp -- flags"
+        }
+      ]
+    },
+    {
+      "query": "tab\t-\"neg",
+      "searches": [
+        {
+          "type": "lex",
+          "query": "tab neg"
+        }
+      ]
+    }
+  ]
+}

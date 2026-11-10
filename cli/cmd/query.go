@@ -18,6 +18,7 @@ type queryOptions struct {
 	limit          int32
 	minScore       float64
 	noRerank       bool
+	expand         bool
 	intent         string
 	candidateLimit int32
 	projects       []string
@@ -53,6 +54,7 @@ retrieval, so a filtered result can be shorter than --limit.`,
 	f.Int32Var(&o.limit, "limit", 0, "Maximum results")
 	f.Float64Var(&o.minScore, "min-score", 0, "Drop results scoring below this, 0 to 1")
 	f.BoolVar(&o.noRerank, "no-rerank", false, "Skip the reranker: sub-second lexical and vector fusion")
+	f.BoolVar(&o.expand, "expand", false, "Let the server's model expand the query into more sub-queries first: slower, and no better on the measured corpus. Unset, the server decides")
 	f.StringVar(&o.intent, "intent", "", "Background that steers reranking and snippets; does not search on its own")
 	f.Int32Var(&o.candidateLimit, "candidate-limit", 0, "Candidates handed to the reranker")
 	f.StringArrayVar(&o.projects, "project", nil, "Frontmatter filter: project equals any of these; repeatable")
@@ -88,6 +90,10 @@ func buildSearchParams(cmd *cobra.Command, o *queryOptions) *api.SearchParams {
 	if o.noRerank {
 		rerank := false
 		params.Rerank = &rerank
+	}
+	// Sent only when given, so --expand=false can also overrule a server that expands.
+	if changed("expand") {
+		params.Expand = &o.expand
 	}
 	return params
 }

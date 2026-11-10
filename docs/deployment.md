@@ -361,7 +361,7 @@ The sidecar sends embedding, reranking and query expansion to workers on other m
 
 The host runs no model, so search keeps answering, from BM25 alone, and says so. Measured on this compose file with both workers unreachable:
 
-- A search answered in 5 to 30 ms, with `degraded: true` and `degradedReasons` of `no_expansion`, `no_rerank` and `no_vectors`.
+- A search answered in 5 to 30 ms, with `degraded: true` and `degradedReasons` of `no_rerank` and `no_vectors`, and `no_expansion` too when the search asked for expansion.
 - New documents were found, as a scan needs no model. Embedding waits for a worker and retries; it never falls back to this host.
 - `/ready` answered 200 with `status: "degraded"`, and `/ready?strict=true` answered 503.
 - No llama.cpp library was loaded, no model file existed, and the sidecar's resident memory stayed under 120 MiB.

@@ -196,6 +196,13 @@ public sealed class SearchOptions
 	/// <summary>Full reranked hybrid search unless the caller passes <c>rerank=false</c>.</summary>
 	public bool RerankByDefault { get; set; } = true;
 
+	/// <summary>
+	/// Let QMD expand a plain query into its model's sub-queries unless the caller passes
+	/// <c>expand=false</c>. Off by default: the query is searched as itself, lexically and by
+	/// vector, which measured as good and twice as fast. See docs/configuration.md.
+	/// </summary>
+	public bool ExpandByDefault { get; set; }
+
 	/// <summary>Collections searched when the caller names none. Null defers to QMD's default-included set.</summary>
 	public string[]? DefaultCollections { get; set; }
 

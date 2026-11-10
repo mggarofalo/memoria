@@ -56,7 +56,7 @@ func TestQuerySendsEveryFlag(t *testing.T) {
 	code := h.run("query", "api", "key", "rotation",
 		"--collection", "a", "--collection", "b", "--limit", "5", "--min-score", "0.25", "--no-rerank",
 		"--intent", "why", "--candidate-limit", "50", "--project", "P", "--branch", "main", "--tag", "x", "--tag", "y",
-		"--since", "2026-01-01", "--until", "2026-02-01")
+		"--since", "2026-01-01", "--until", "2026-02-01", "--expand")
 	if code != 0 {
 		t.Fatalf("code = %d, stderr = %q", code, h.stderr.String())
 	}
@@ -67,7 +67,7 @@ func TestQuerySendsEveryFlag(t *testing.T) {
 	q := req.URL.Query()
 	for name, want := range map[string]string{
 		"query": "api key rotation", "limit": "5", "minScore": "0.25", "rerank": "false", "intent": "why",
-		"candidateLimit": "50", "project": "P", "branch": "main", "since": "2026-01-01", "until": "2026-02-01",
+		"candidateLimit": "50", "project": "P", "branch": "main", "since": "2026-01-01", "until": "2026-02-01", "expand": "true",
 	} {
 		if q.Get(name) != want {
 			t.Errorf("%s = %q, want %q", name, q.Get(name), want)
@@ -94,8 +94,8 @@ func TestZeroValuedFlagsAreStillSent(t *testing.T) {
 	api := newFakeAPI(t, jsonReply(searchBody()))
 	h := newHarness(t)
 	h.login(api.URL)
-	h.run("query", "x", "--min-score", "0")
-	if api.requests[0].URL.Query().Get("minScore") != "0" {
+	h.run("query", "x", "--min-score", "0", "--expand=false")
+	if q := api.requests[0].URL.Query(); q.Get("minScore") != "0" || q.Get("expand") != "false" {
 		t.Fatalf("query string = %q", api.requests[0].URL.RawQuery)
 	}
 }

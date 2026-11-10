@@ -61,7 +61,12 @@ never starts half-configured.
 | `MaxLimit` | `100` | Largest `limit` accepted; the sidecar caps at 100 regardless. |
 | `MaxMultiGetBytes` | `16777216` | Total bytes of document bodies in one `POST /v1/docs:multiGet` response (16 MiB). The sidecar stops reading at this budget and lists the rest under `skipped`. At most 256 MiB. |
 | `RerankByDefault` | `true` | Full reranked hybrid search unless the caller passes `rerank=false`. Reranked queries were benchmarked as viable on a GPU host. |
+| `ExpandByDefault` | `false` | Let QMD's model expand a plain query into more lexical and semantic sub-queries unless the caller passes `expand=false`. Off, the query is searched as itself, as one lexical and one vector sub-query. See below. |
 | `DefaultCollections` | unset | Collections searched when the caller names none. Unset defers to QMD's default-included set. |
+
+**Expansion is off by default** because it measured as slower and no better. On a redacted copy of the real corpus with 61 known-item questions, expansion doubled median latency, from 1.7 s to 3.3 s, and added nothing to recall or MRR ([docs/workers.md](workers.md#the-models)). `expand=true` on `GET /v1/search`, or `expand: true` on the MCP `search` tool, asks for it on one search.
+
+Unexpanded, the API sends QMD typed `lex` and `vec` sub-queries holding the query with its whitespace collapsed. QMD checks typed sub-queries where it never checks a plain query, so one it would refuse is left out: a `lex` with an unmatched `"`, or a `vec` with a word starting `-`, which QMD reads as negation. When it would refuse both, the letters and numbers alone go as `lex`. A query with no letter or number is a `400` either way. The sidecar does the same when no worker can expand a query, and `sidecar/test/plain-query-cases.json` holds both to the same answers. Because nothing is expanded, such a search never reports `no_expansion`.
 
 ## `Memoria:Mcp` — the outward MCP server
 

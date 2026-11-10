@@ -6,7 +6,7 @@
  * Opt in with MEMORIA_QMD_INTEGRATION=1 (CI sets it; `npm test` does not).
  */
 import assert from "node:assert/strict";
-import { mkdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
 import { buildApp } from "../src/app.ts";
@@ -304,4 +304,13 @@ test("sidecar serves a real QMD index end to end", { skip: enabled ? false : "se
     await app.close();
     await backend.close();
   }
+});
+
+test("a plain query becomes the typed sub-queries plain-query-cases.json gives, on QMD's own validators", { skip: enabled ? false : "set MEMORIA_QMD_INTEGRATION=1" }, async () => {
+  // Memoria.Api builds the same sub-queries in C# when expansion is off, from the same file.
+  const { plainQueries } = await import("../src/llm/degraded-search.ts");
+  const validators = (await import(new URL("./store.js", import.meta.resolve("@tobilu/qmd")).href)) as { validateLexQuery(q: string): string | null; validateSemanticQuery(q: string): string | null };
+  const { cases } = JSON.parse(await readFile(new URL("./plain-query-cases.json", import.meta.url), "utf8")) as { cases: Array<{ query: string; searches: unknown }> };
+  assert.ok(cases.length >= 20);
+  for (const c of cases) assert.deepEqual(plainQueries(validators, c.query), c.searches, JSON.stringify(c.query));
 });

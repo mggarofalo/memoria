@@ -48,7 +48,8 @@ public static class SearchEndpoints
 			parameters.Branch,
 			parameters.Since,
 			parameters.Until,
-			parameters.Tag);
+			parameters.Tag,
+			parameters.Expand);
 
 		SidecarSearchRequest? request = SearchRequestFactory.TryBuild(input, options.Value.Search, scope, out Dictionary<string, string[]> errors);
 		if (request is null)
@@ -64,8 +65,12 @@ public static class SearchEndpoints
 public sealed class SearchParameters
 {
 	[FromQuery(Name = "query")]
-	[Description("Plain-text query. QMD expands it into lexical and semantic sub-queries.")]
+	[Description("Plain-text query. It is searched as itself, lexically and by vector, unless `expand` asks QMD to expand it.")]
 	public string? Query { get; set; }
+
+	[FromQuery(Name = "expand")]
+	[Description("Let QMD's model expand the query into more lexical and semantic sub-queries first. Slower, and no better on the measured corpus. The server's default is usually false.")]
+	public bool? Expand { get; set; }
 
 	[FromQuery(Name = "collection")]
 	[Description("Collection to search. Repeat for several; names are case-sensitive. Omitted, a collection-scoped key searches all its collections; other callers get the configured default set, else QMD's default-included collections. A collection outside the key's scope is refused with 403.")]

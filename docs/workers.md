@@ -170,7 +170,7 @@ When no worker can serve a role, search skips the step that needs it rather than
 | `degradedReasons` | Meaning |
 |---|---|
 | `no_rerank` | Results are in rank-fusion order. Scores are rank-derived, not reranker scores, so `minScore` is not applied. |
-| `no_expansion` | The query ran as plain lexical and vector sub-queries. |
+| `no_expansion` | Expansion was asked for, and the query ran as plain lexical and vector sub-queries instead. Memoria.Api asks for it only when `Memoria:Search:ExpandByDefault` or `expand=true` says so. |
 | `cpu_embedding` | Query vectors came from this host's CPU. |
 | `no_vectors` | There were no query vectors, so vector search contributed nothing. |
 

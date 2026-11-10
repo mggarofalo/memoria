@@ -132,7 +132,10 @@ async function workersDown(key: string): Promise<void> {
   sidecar("/reindex", { embed: false });
   const search = await until(() => api(`/v1/search?query=zebrafish&collection=${COLLECTION}&limit=5`, { key }), (r) => r.status === 200 && r.body.results?.length === 1, 60);
   check("compose: with every worker down, search still finds it, and says it is degraded", search.body.results?.length === 1 && search.body.degraded === true, search.body);
-  check("compose: it says why: no reranking, no expansion, no vectors", ["no_expansion", "no_rerank", "no_vectors"].every((reason) => search.body.degradedReasons?.includes(reason)), search.body.degradedReasons);
+  // Unexpanded by default, so there is no expansion to go without.
+  check("compose: it says why: no reranking and no vectors", ["no_rerank", "no_vectors"].every((reason) => search.body.degradedReasons?.includes(reason)) && !search.body.degradedReasons?.includes("no_expansion"), search.body.degradedReasons);
+  const expanded = await api(`/v1/search?query=zebrafish&collection=${COLLECTION}&limit=5&expand=true`, { key });
+  check("compose: and asked to expand, it says it could not", expanded.body.results?.length === 1 && ["no_expansion", "no_rerank", "no_vectors"].every((reason) => expanded.body.degradedReasons?.includes(reason)), expanded.body);
   const ready = await api("/ready");
   const strict = await api("/ready?strict=true");
   check("compose: the API stays ready, reading degraded, and strict readiness refuses", ready.status === 200 && ready.body.status === "degraded" && strict.status === 503, [ready.body, strict.status]);

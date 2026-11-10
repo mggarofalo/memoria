@@ -608,8 +608,11 @@ type IngestSessionParams struct {
 
 // SearchParams defines parameters for Search.
 type SearchParams struct {
-	// Query Plain-text query. QMD expands it into lexical and semantic sub-queries.
+	// Query Plain-text query. It is searched as itself, lexically and by vector, unless `expand` asks QMD to expand it.
 	Query *string `form:"query,omitempty" json:"query,omitempty"`
+
+	// Expand Let QMD's model expand the query into more lexical and semantic sub-queries first. Slower, and no better on the measured corpus. The server's default is usually false.
+	Expand *bool `form:"expand,omitempty" json:"expand,omitempty"`
 
 	// Collection Collection to search. Repeat for several; names are case-sensitive. Omitted, a collection-scoped key searches all its collections; other callers get the configured default set, else QMD's default-included collections. A collection outside the key's scope is refused with 403.
 	Collection *[]string `form:"collection,omitempty" json:"collection,omitempty"`
@@ -2732,6 +2735,18 @@ func NewSearchRequest(server string, params *SearchParams) (*http.Request, error
 		if params.Query != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "query", *params.Query, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.Expand != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "expand", *params.Expand, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
 				return nil, err
 			} else {
 				for _, qp := range strings.Split(queryFrag, "&") {
