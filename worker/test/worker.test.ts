@@ -424,23 +424,30 @@ test("a batch of texts is tokenized in order, and its size is limited", async ()
 
 test("stopping the worker stops its children", async () => {
   const worker = await startWorker();
-  assert.equal(await worker.supervisor.waitReady(10_000), true);
-  const port = worker.roles[0]!.port;
-  assert.equal((await fetch(`http://127.0.0.1:${port}/health`)).status, 200);
-  await worker.stop();
-  await assert.rejects(fetch(`http://127.0.0.1:${port}/health`));
-  assert.ok(worker.supervisor.status().every((s) => s.state === "stopped" && !s.loaded));
+  let stopped = false;
+  try {
+    assert.equal(await worker.supervisor.waitReady(10_000), true);
+    const port = worker.roles[0]!.port;
+    assert.equal((await fetch(`http://127.0.0.1:${port}/health`)).status, 200);
+    await worker.stop();
+    stopped = true;
+    await assert.rejects(fetch(`http://127.0.0.1:${port}/health`));
+    assert.ok(worker.supervisor.status().every((s) => s.state === "stopped" && !s.loaded));
+  } finally {
+    // A child left running holds this file's process open, so one failure here would hang the whole run.
+    if (!stopped) await worker.stop();
+  }
 });
 
 test("an already-running llama-server can stand in for a launched one", async () => {
   const launched = await roleConfigs(["embed"]);
   const host = fakeSupervisor(launched);
   host.start();
-  assert.equal(await host.waitReady(10_000), true);
   const external = [{ ...launched[0]!, externalUrl: `http://127.0.0.1:${launched[0]!.port}`, port: 1 }];
   const supervisor = fakeSupervisor(external);
-  supervisor.start();
   try {
+    assert.equal(await host.waitReady(10_000), true);
+    supervisor.start();
     assert.equal(await supervisor.waitReady(5_000), true);
     assert.equal(supervisor.baseUrlFor("embed"), `http://127.0.0.1:${launched[0]!.port}/`);
   } finally {

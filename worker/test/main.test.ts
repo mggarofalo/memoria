@@ -20,7 +20,13 @@ test("the entry point starts, warms up, serves every endpoint, keeps the token o
   const roles = await roleConfigs();
   const upstream = fakeSupervisor(roles);
   upstream.start();
-  assert.equal(await upstream.waitReady(10_000), true);
+  try {
+    assert.equal(await upstream.waitReady(10_000), true);
+  } catch (err) {
+    // Its children would hold this file's process open, and hang the run.
+    await upstream.stop();
+    throw err;
+  }
   const port = await freePort();
   const env: NodeJS.ProcessEnv = {
     ...process.env,

@@ -59,11 +59,18 @@ test("the started worker serves, warms up over real requests, and only shuts dow
   const roles = await roleConfigs();
   const upstream = fakeSupervisor(roles);
   upstream.start();
-  assert.equal(await upstream.waitReady(10_000), true);
   const { log, lines } = capturedLog();
-  const config = await externalConfig(roles);
-  for (const role of config.roles) role.externalApiKey = upstream.apiKeyFor(role.role);
-  const worker = await startWorker(config, log, { probes: noProbes });
+  let worker: Awaited<ReturnType<typeof startWorker>>;
+  try {
+    assert.equal(await upstream.waitReady(10_000), true);
+    const config = await externalConfig(roles);
+    for (const role of config.roles) role.externalApiKey = upstream.apiKeyFor(role.role);
+    worker = await startWorker(config, log, { probes: noProbes });
+  } catch (err) {
+    // Its children would hold this file's process open, and hang the run.
+    await upstream.stop();
+    throw err;
+  }
   try {
     await worker.warm();
     assert.ok(lines.some((l) => /"failed":0/.test(l) && l.includes("warm start finished")), lines.join("\n"));
