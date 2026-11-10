@@ -20,7 +20,9 @@ public sealed partial class ImportedRuleTests
 		string output = Redactor.Shared.RedactFragment(form.Text).Text;
 		string kept = s_hostKeptByOurRule.TryGetValue(form.Rule, out string? marker) ? form.Secret[..(form.Secret.IndexOf(marker, StringComparison.Ordinal) + marker.Length)] : "";
 
-		Assert.Matches("^" + Regex.Escape(form.Before + kept) + @"\[REDACTED:[a-z0-9-]+\]" + Regex.Escape(form.After) + "$", output);
+		// What a rule of ours takes after the token, as grafana-token takes a / its alphabet allows, is that rule's own, tested with it.
+		string after = output.Contains("[REDACTED:" + GitleaksRules.Prefix, StringComparison.Ordinal) ? Regex.Escape(form.After) + "$" : "";
+		Assert.Matches("^" + Regex.Escape(form.Before + kept) + @"\[REDACTED:[a-z0-9-]+\]" + after, output);
 		Assert.DoesNotContain(form.Secret, output, StringComparison.Ordinal);
 	}
 
@@ -49,6 +51,120 @@ public sealed partial class ImportedRuleTests
 	public void A_mask_in_the_secret_s_place_survives(ImportedCases.Form form)
 	{
 		Assert.Equal(form.Negative, Redactor.Shared.RedactFragment(form.Negative).Text);
+	}
+
+	/// <summary>Where a transcript puts a token. Each replaces the sampled boundary itself, so the token touches the escape or the punctuation.</summary>
+	private static readonly string[] s_tightContexts =
+	[
+		"{\"out\":\"line1\\n{S}\\nline3\"}",
+		"{\"out\":\"token {S}\\tnext\"}",
+		"{\"cmd\":\"{\\\"t\\\":\\\"{S}\\\"}\"}",
+		"my key is {S}.",
+		"keys: {S}, and more",
+		"[key]({S})",
+		"line1\r\n{S}\r\nline3",
+	];
+
+	/// <summary>A rule that knows a token by its own format, so the token can stand anywhere, with its sampled context only a boundary.</summary>
+	public static TheoryData<ImportedCases.Form> StandaloneForms()
+	{
+		TheoryData<ImportedCases.Form> data = [];
+		foreach (ImportedCases.Form form in Standalone())
+		{
+			data.Add(form);
+		}
+
+		return data;
+	}
+
+	private static IEnumerable<ImportedCases.Form> Standalone()
+	{
+		return ImportedCases.Forms.Where(static form => !form.Before.Any(char.IsAsciiLetterOrDigit) && !form.After.Any(char.IsAsciiLetterOrDigit));
+	}
+
+	[Theory]
+	[MemberData(nameof(StandaloneForms))]
+	public void A_token_touching_an_escape_or_punctuation_goes_and_nothing_else_does(ImportedCases.Form form)
+	{
+		List<string> wrong = [];
+		foreach (string context in s_tightContexts)
+		{
+			string[] sides = context.Split("{S}");
+			string output = Redactor.Shared.RedactFragment(sides[0] + form.Secret + sides[1]).Text;
+
+			// A rule of ours may take the token first. What it keeps or takes around the token is that rule's own, tested with it.
+			bool imported = output.Contains("[REDACTED:" + GitleaksRules.Prefix, StringComparison.Ordinal);
+			bool exact = Regex.IsMatch(output, "^" + Regex.Escape(sides[0]) + @"\[REDACTED:[a-z0-9-]+\]" + Regex.Escape(sides[1]) + "$");
+			if (output.Contains(form.Secret, StringComparison.Ordinal) || (imported && !exact))
+			{
+				wrong.Add(context + " => " + output.Replace(form.Secret, "<secret>", StringComparison.Ordinal));
+			}
+		}
+
+		Assert.True(wrong.Count == 0, string.Join('\n', wrong));
+	}
+
+	/// <summary>A long token wrapped at a terminal's width goes whole, apart from a short tail that reads as a word, as for Memoria's own rules.</summary>
+	public static TheoryData<ImportedCases.Form> LongStandaloneForms()
+	{
+		TheoryData<ImportedCases.Form> data = [];
+		foreach (ImportedCases.Form form in Standalone().Where(static form => form.Secret.Length > 80))
+		{
+			data.Add(form);
+		}
+
+		return data;
+	}
+
+	[Theory]
+	[MemberData(nameof(LongStandaloneForms))]
+	public void A_long_token_wrapped_at_eighty_columns_goes(ImportedCases.Form form)
+	{
+		string wrapped = string.Join('\n', form.Secret.Chunk(80).Select(static chunk => new string(chunk)));
+		string output = Redactor.Shared.RedactFragment("see\n" + wrapped + "\nend").Text;
+		string credential = s_hostKeptByOurRule.TryGetValue(form.Rule, out string? marker)
+			? form.Secret[(form.Secret.IndexOf(marker, StringComparison.Ordinal) + marker.Length)..]
+			: form.Secret;
+
+		Assert.False(LongestCommonRun(output, credential) > 12, output);
+		Assert.EndsWith("\nend", output, StringComparison.Ordinal);
+	}
+
+	/// <summary>Without its keyword an assignment rule has no context, so the same value under another name is left to Memoria's own judges.</summary>
+	[Theory]
+	[MemberData(nameof(ImportedCases.All), MemberType = typeof(ImportedCases))]
+	public void Without_its_keyword_the_rule_does_not_fire(ImportedCases.Form form)
+	{
+		RedactionRule rule = GitleaksRules.All.Single(rule => rule.Name == form.Rule);
+		string text = form.Text;
+		foreach (string keyword in rule.Keywords)
+		{
+			text = Regex.Replace(text, Regex.Escape(keyword), new string('q', keyword.Length), RegexOptions.IgnoreCase);
+		}
+
+		Assert.False(rule.TryFindNext(text, 0, out _, out _));
+	}
+
+	private static int LongestCommonRun(string text, string secret)
+	{
+		int longest = 0;
+		for (int length = 8; length <= secret.Length; length++)
+		{
+			bool any = false;
+			for (int i = 0; i + length <= secret.Length && !any; i++)
+			{
+				any = text.Contains(secret.Substring(i, length), StringComparison.Ordinal);
+			}
+
+			if (!any)
+			{
+				break;
+			}
+
+			longest = length;
+		}
+
+		return longest;
 	}
 
 	[Fact]
@@ -94,6 +210,47 @@ public sealed partial class ImportedRuleTests
 		string head = "FLWSECK" + "_TEST-" + Synthetic.Hex(12, 4107).Replace('9', 'a');
 
 		Assert.Equal("[REDACTED:gitleaks-flutterwave-encryption-key] next", Redactor.Shared.RedactFragment(head + glued + " next").Text);
+	}
+
+	/// <summary>An assignment rule knows a value by its name, so it does not look inside decoded text, where encoded prose would read as one.</summary>
+	[Fact]
+	public void Encoded_prose_naming_a_product_stays()
+	{
+		const string Text = "q=asana%20task%3A%201203456789012345%20is%20blocked%20by%20review";
+
+		Assert.Equal(Text, Redactor.Shared.RedactFragment(Text).Text);
+		Assert.DoesNotContain(RedactionRules.SelfEvident, static rule => rule.Name == "gitleaks-asana-client-id");
+		Assert.Contains(RedactionRules.SelfEvident, static rule => rule.Name == "gitleaks-artifactory-api-key");
+	}
+
+	[Fact]
+	public void Words_after_a_token_s_short_suffix_stay()
+	{
+		string head = "FLWSECK" + "_TEST-" + Synthetic.Hex(12, 4109).Replace('9', 'a');
+
+		Assert.Equal("[REDACTED:gitleaks-flutterwave-encryption-key]-backup-copy and more", Redactor.Shared.RedactFragment(head + "-backup-copy and more").Text);
+	}
+
+	[Fact]
+	public void A_period_ending_the_sentence_stays()
+	{
+		string token = "pscale" + "_oauth_" + Synthetic.Body(43, 4110);
+
+		Assert.Equal("my key is [REDACTED:gitleaks-planetscale-oauth-token].", Redactor.Shared.RedactFragment("my key is " + token + ".").Text);
+	}
+
+	/// <summary>An unclosed placeholder opening before many candidates once made each check read to the far end of the text.</summary>
+	[Fact]
+	public void Many_candidates_after_an_unclosed_placeholder_cost_linear_time()
+	{
+		string token = "AK" + "Cp" + Synthetic.Body(69, 4111);
+		string text = string.Concat(Enumerable.Repeat("see [REDACTED:ab " + token + " ok then. ", 20_000)) + "]";
+		TimeSpan cpu = System.Diagnostics.Process.GetCurrentProcess().TotalProcessorTime;
+
+		RedactionResult result = Redactor.Shared.RedactFragment(text);
+
+		Assert.Equal(20_000, result.CountsByRule["gitleaks-artifactory-api-key"]);
+		Assert.InRange(System.Diagnostics.Process.GetCurrentProcess().TotalProcessorTime - cpu, TimeSpan.Zero, TimeSpan.FromSeconds(60));
 	}
 
 	[Fact]

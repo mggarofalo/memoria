@@ -2,18 +2,23 @@
 
 <!-- Generated from src/Memoria.Core/Redaction/Gitleaks/rules.json by GitleaksRuleDataTests. Do not edit. -->
 
-Memoria's redaction engine also runs gitleaks's default detection rules, from gitleaks v8.30.1 (commit `83d9cd68`, MIT licence). Gitleaks itself never runs. Each rule reads only what Memoria's own rules left, and replaces only its secret, as `[REDACTED:gitleaks-<id>]`. 216 rules are imported and 6 are left out.
+Memoria's redaction engine also runs gitleaks's default detection rules, from gitleaks v8.30.1 (commit `83d9cd68`, MIT licence). Gitleaks itself never runs. Each rule reads only what Memoria's own rules left, and replaces only its secret, as `[REDACTED:gitleaks-<id>]`. 211 rules are imported and 11 are left out.
 
 ## Left out
 
 | Rule | Why |
 |---|---|
+| `curl-auth-user` | Covered by Memoria's curl-user-password. It replaces the user name with the password, and takes a password that reads as a word or a sample, which Memoria's rule leaves. |
 | `freemius-secret-key` | Upstream applies it only to files whose path matches (?i)\.php$. A document has no path, so applying it everywhere would change what it means. |
 | `generic-api-key` | Left out on purpose. Its only judge is entropy, which reads commit hashes, UUIDs and module checksums under a key-like name as secrets. Memoria's secret-assignment rule covers the same assignments with a judge that reads the name and the value. |
 | `hashicorp-tf-password` | Upstream applies it only to files whose path matches (?i)\.(?:tf\|hcl)$. A document has no path, so applying it everywhere would change what it means. |
 | `kubernetes-secret-yaml` | Upstream applies it only to files whose path matches (?i)\.ya?ml$. A document has no path, so applying it everywhere would change what it means. |
 | `nuget-config-password` | Upstream applies it only to files whose path matches (?i)nuget\.config$. A document has no path, so applying it everywhere would change what it means. |
 | `pkcs12-file` | Upstream applies it only to files whose path matches (?i)(?:^\|\/)[^\/]+\.p(?:12\|fx)$. A document has no path, so applying it everywhere would change what it means. |
+| `private-key` | Covered by Memoria's private-key. It replaces a key block that is mostly a mask, such as one of x characters, which Memoria's rule leaves. |
+| `slack-webhook-url` | Covered by Memoria's slack-webhook. It replaces the documentation's sample URL of zeros, and the host with the path, which Memoria's rule keeps readable. |
+| `square-access-token` | Covered by Memoria's square-token and square-production-token. It takes an EAAA value of any length from 26 to 64, which includes Facebook-shaped tokens and samples Memoria's rules leave. |
+| `twilio-api-key` | Covered by Memoria's twilio-key. It has no boundary after its 32 characters, so it takes the head of any longer hex run. |
 
 ## Corrected
 
@@ -67,7 +72,6 @@ Memoria's redaction engine also runs gitleaks's default detection rules, from gi
 | `gitleaks-confluent-secret-key` | Found a Confluent Secret Key, potentially risking unauthorized operations and data access within Confluent services. |
 | `gitleaks-contentful-delivery-api-token` | Discovered a Contentful delivery API token, posing a risk to content management systems and data integrity. |
 | `gitleaks-curl-auth-header` | Discovered a potential authorization token provided in a curl command header, which could compromise the curl accessed resource. |
-| `gitleaks-curl-auth-user` | Discovered a potential basic authorization token provided in a curl command, which could compromise the curl accessed resource. |
 | `gitleaks-databricks-api-token` | Uncovered a Databricks API token, which may compromise big data analytics platforms and sensitive data processing. |
 | `gitleaks-datadog-access-token` | Detected a Datadog Access Token, potentially risking monitoring and analytics data exposure and manipulation. |
 | `gitleaks-defined-networking-api-token` | Identified a Defined Networking API token, which could lead to unauthorized network operations and data breaches. |
@@ -184,7 +188,6 @@ Memoria's redaction engine also runs gitleaks's default detection rules, from gi
 | `gitleaks-planetscale-password` | Discovered a PlanetScale password, which could lead to unauthorized database operations and data breaches. |
 | `gitleaks-postman-api-token` | Uncovered a Postman API token, potentially compromising API testing and development workflows. |
 | `gitleaks-prefect-api-token` | Detected a Prefect API token, risking unauthorized access to workflow management and automation services. |
-| `gitleaks-private-key` | Identified a Private Key, which may compromise cryptographic security and sensitive data encryption. |
 | `gitleaks-privateai-api-token` | Identified a PrivateAI Token, posing a risk of unauthorized access to AI services and data manipulation. |
 | `gitleaks-pulumi-api-token` | Found a Pulumi API token, posing a risk to infrastructure as code services and cloud resource management. |
 | `gitleaks-pypi-upload-token` | Discovered a PyPI upload token, potentially compromising Python package distribution and repository integrity. |
@@ -217,18 +220,15 @@ Memoria's redaction engine also runs gitleaks's default detection rules, from gi
 | `gitleaks-slack-legacy-token` | Detected a Slack Legacy token, risking unauthorized access to older Slack integrations and user data. |
 | `gitleaks-slack-legacy-workspace-token` | Identified a Slack Legacy Workspace token, potentially compromising access to workspace data and legacy features. |
 | `gitleaks-slack-user-token` | Found a Slack User token, posing a risk of unauthorized user impersonation and data access within Slack workspaces. |
-| `gitleaks-slack-webhook-url` | Discovered a Slack Webhook, which could lead to unauthorized message posting and data leakage in Slack channels. |
 | `gitleaks-snyk-api-token` | Uncovered a Snyk API token, potentially compromising software vulnerability scanning and code security. |
 | `gitleaks-sonar-api-token` | Uncovered a Sonar API token, potentially compromising software vulnerability scanning and code security. |
 | `gitleaks-sourcegraph-access-token` | Sourcegraph is a code search and navigation engine. |
-| `gitleaks-square-access-token` | Detected a Square Access Token, risking unauthorized payment processing and financial transaction exposure. |
 | `gitleaks-squarespace-access-token` | Identified a Squarespace Access Token, which may compromise website management and content control on Squarespace. |
 | `gitleaks-stripe-access-token` | Found a Stripe Access Token, posing a risk to payment processing services and sensitive financial data. |
 | `gitleaks-sumologic-access-id` | Discovered a SumoLogic Access ID, potentially compromising log management services and data analytics integrity. |
 | `gitleaks-sumologic-access-token` | Uncovered a SumoLogic Access Token, which could lead to unauthorized access to log data and analytics insights. |
 | `gitleaks-telegram-bot-api-token` | Detected a Telegram Bot API Token, risking unauthorized bot operations and message interception on Telegram. |
 | `gitleaks-travisci-access-token` | Identified a Travis CI Access Token, potentially compromising continuous integration services and codebase security. |
-| `gitleaks-twilio-api-key` | Found a Twilio API Key, posing a risk to communication services and sensitive customer interaction data. |
 | `gitleaks-twitch-api-token` | Discovered a Twitch API token, which could compromise streaming services and account integrations. |
 | `gitleaks-twitter-access-secret` | Uncovered a Twitter Access Secret, potentially risking unauthorized Twitter integrations and data breaches. |
 | `gitleaks-twitter-access-token` | Detected a Twitter Access Token, posing a risk of unauthorized account operations and social media data exposure. |

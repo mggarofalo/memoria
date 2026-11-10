@@ -13,13 +13,33 @@ internal static class GitleaksRules
 {
 	public const string Prefix = "gitleaks-";
 
+	private static readonly (GitleaksRuleSpec Spec, RedactionRule Rule)[] s_builtIn = BuildPairs(GitleaksRuleData.BuiltIn);
+
 	/// <summary>The built-in rules, in upstream's order.</summary>
-	public static IReadOnlyList<RedactionRule> All { get; } = Build(GitleaksRuleData.BuiltIn);
+	public static IReadOnlyList<RedactionRule> All { get; } = [.. s_builtIn.Select(static pair => pair.Rule)];
+
+	/// <summary>
+	/// The rules that know a secret by its own format, which may look inside decoded text. A rule made from upstream's assignment
+	/// template, a keyword then <c>=</c> or <c>:</c> then a value, knows it by what surrounds it, so it stays out: percent-encoded
+	/// prose saying <c>asana task: 1203456789012345</c> is not a token.
+	/// </summary>
+	public static IReadOnlyList<RedactionRule> SelfEvident { get; } = [.. s_builtIn.Where(static pair => !IsAssignmentTemplate(pair.Spec)).Select(static pair => pair.Rule)];
 
 	public static IReadOnlyList<RedactionRule> Build(GitleaksRuleData data)
 	{
+		return [.. BuildPairs(data).Select(static pair => pair.Rule)];
+	}
+
+	/// <summary>Upstream writes every assignment rule from one template, which starts with up to 50 name characters before the keyword.</summary>
+	public static bool IsAssignmentTemplate(GitleaksRuleSpec spec)
+	{
+		return spec.UpstreamPattern.Contains(@"[\w.-]{0,50}?(?:", StringComparison.Ordinal);
+	}
+
+	private static (GitleaksRuleSpec Spec, RedactionRule Rule)[] BuildPairs(GitleaksRuleData data)
+	{
 		CompiledAllowlist global = new(data.GlobalAllowlist);
-		return [.. data.Rules.Select(spec => Rule(spec, global))];
+		return [.. data.Rules.Select(spec => (spec, Rule(spec, global)))];
 	}
 
 	private static RedactionRule Rule(GitleaksRuleSpec spec, CompiledAllowlist global)
@@ -36,15 +56,60 @@ internal static class GitleaksRules
 	}
 
 	/// <summary>
-	/// Letters and digits glued to the end of a match go with it, and so do <c>-</c> and <c>_</c> between them. Some upstream
-	/// patterns have no boundary after a fixed length, so <c>flutterwave-encryption-key</c> matches the head of a longer secret key,
-	/// ending <c>-X</c>, and replacing only the head would leave the rest. A dash or underscore with nothing glued after it stays.
+	/// Letters and digits glued to the end of a match go with it. Some upstream patterns have no boundary after a fixed length, so
+	/// <c>flutterwave-encryption-key</c> matches the head of a longer secret key, and replacing only the head would leave the rest.
+	/// One <c>-</c> or <c>_</c> and a short suffix after the run go too, as the <c>-X</c> that ends that key, but no more, so a
+	/// token followed by <c>-backup-copy</c> keeps its words.
 	/// </summary>
 	private static int ThroughGluedText(SecretCandidate candidate)
 	{
 		string input = candidate.Input;
-		int end = candidate.End;
-		while (end < input.Length && (char.IsAsciiLetterOrDigit(input[end]) || (input[end] is '-' or '_' && end + 1 < input.Length && char.IsAsciiLetterOrDigit(input[end + 1]))))
+		int end = PaddingEnd(input, AlphanumericEnd(input, candidate.End));
+		if (end == candidate.End && EndsWithSentencePeriod(input, candidate.Secret.Index, end))
+		{
+			return end - 1;
+		}
+
+		return GluedSuffixEnd(input, end);
+	}
+
+	/// <summary>Base64 padding goes with its token: a pattern's own ending can match an <c>=</c> too, and would leave the last one behind.</summary>
+	private static int PaddingEnd(string input, int end)
+	{
+		for (int pad = 0; pad < MaxPadding && end < input.Length && input[end] == '='; pad++)
+		{
+			end++;
+		}
+
+		return end;
+	}
+
+	/// <summary>A period that ends a sentence is not the token's, though some alphabets allow one.</summary>
+	private static bool EndsWithSentencePeriod(string input, int start, int end)
+	{
+		return end - 1 > start && input[end - 1] == '.' && (end == input.Length || !char.IsAsciiLetterOrDigit(input[end]));
+	}
+
+	private static int GluedSuffixEnd(string input, int end)
+	{
+		if (end + 1 >= input.Length || input[end] is not ('-' or '_'))
+		{
+			return end;
+		}
+
+		int suffixEnd = AlphanumericEnd(input, end + 1);
+		bool shortSuffix = suffixEnd - end - 1 is >= 1 and <= MaxGluedSuffix && (suffixEnd == input.Length || input[suffixEnd] is not ('-' or '_'));
+		return shortSuffix ? suffixEnd : end;
+	}
+
+	private const int MaxGluedSuffix = 4;
+
+	private const int MaxPadding = 3;
+
+	private static int AlphanumericEnd(string input, int start)
+	{
+		int end = start;
+		while (end < input.Length && char.IsAsciiLetterOrDigit(input[end]))
 		{
 			end++;
 		}

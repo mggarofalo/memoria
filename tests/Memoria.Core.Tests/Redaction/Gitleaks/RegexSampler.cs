@@ -248,7 +248,9 @@ public sealed class RegexSampler
 
 		bool negated = body.StartsWith('^');
 		HashSet<char> chars = Members(negated ? body[1..] : body);
-		string result = negated ? string.Concat(Printable.Where(c => !chars.Contains(c))) : string.Concat(chars.Where(static c => c is >= ' ' and <= '~'));
+
+		// A backslash a class allows is there for JSON's escaped slash, \/, and alone it is no part of a real token.
+		string result = negated ? string.Concat(Printable.Where(c => !chars.Contains(c))) : string.Concat(chars.Where(static c => c is >= ' ' and <= '~' and not '\\'));
 		return result.Length > 0 ? result : string.Concat(chars);
 	}
 

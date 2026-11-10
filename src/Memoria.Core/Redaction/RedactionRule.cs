@@ -107,7 +107,7 @@ internal sealed class RedactionRule
 		Name = name;
 		_pattern = pattern is not null
 			? new Lazy<Regex>(pattern)
-			: new Lazy<Regex>(buildPattern ?? throw new ArgumentNullException(nameof(pattern)), LazyThreadSafetyMode.ExecutionAndPublication);
+			: new Lazy<Regex>(buildPattern ?? throw new ArgumentNullException(nameof(pattern)), LazyThreadSafetyMode.PublicationOnly);
 		Accept = accept;
 		FindSpan = findSpan;
 		Extend = extend;
@@ -147,8 +147,8 @@ internal sealed class RedactionRule
 	public bool SkipRejected { get; }
 
 	/// <summary>
-	/// True for an imported rule, which reads only what this engine's own rules left. It never runs on the view with wrapped lines
-	/// joined, where it could take a token one of our rules would label on the plain text, and it runs after them in each sweep.
+	/// True for an imported rule, which reads only what this engine's own rules left. It runs only once they have had both views,
+	/// joined and plain, so it never takes a token one of ours would label.
 	/// </summary>
 	public bool Backstop { get; }
 
@@ -242,6 +242,8 @@ internal sealed class RedactionRule
 	/// purpose, so a secret around one cannot survive in pieces. An imported rule has no such judgement, and could take a
 	/// placeholder with its neighbour, or split one, as <c>user:pass</c> splits <c>[REDACTED:x]</c>, so it is held to this.
 	/// </summary>
+	private const int MaxPlaceholder = 76;
+
 	private static bool OverlapsPlaceholder(string input, int start, int end)
 	{
 		const string Open = "[REDACTED:";
@@ -250,7 +252,8 @@ internal sealed class RedactionRule
 		int open = input.IndexOf(Open, from, limit - from, StringComparison.Ordinal);
 		while (open >= 0 && open < end)
 		{
-			int close = input.IndexOf(']', open);
+			// A placeholder is at most its opening and a 64-character name, so the close is looked for only that far.
+			int close = input.IndexOf(']', open, Math.Min(MaxPlaceholder, input.Length - open));
 			if (close >= start && ValueShapes.IsRedactedForm(input[open..(close + 1)]))
 			{
 				return true;

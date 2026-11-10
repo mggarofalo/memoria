@@ -114,15 +114,18 @@ public sealed partial class RedactionKeepsTheRestTests
 	{
 		foreach (Gitleaks.ImportedCases.Form form in Gitleaks.ImportedCases.Forms)
 		{
-			string output = Redactor.Shared.RedactFragment(form.Text).Text;
-			Match placed = output.StartsWith(form.Before, StringComparison.Ordinal) && output.EndsWith(form.After, StringComparison.Ordinal)
-				? OnePlaceholder().Match(output[form.Before.Length..^form.After.Length])
+			// A sampled delimiter after the secret is left out, so every context here touches the secret directly. Context the
+			// pattern needs after the secret, such as a host, stays.
+			string after = form.After.Any(char.IsAsciiLetterOrDigit) ? form.After : "";
+			string output = Redactor.Shared.RedactFragment(form.Before + form.Secret + after).Text;
+			Match placed = output.StartsWith(form.Before, StringComparison.Ordinal) && output.EndsWith(after, StringComparison.Ordinal)
+				? OnePlaceholder().Match(output[form.Before.Length..^after.Length])
 				: Match.Empty;
 
 			// A rule of ours may keep the start of the match on purpose, such as a webhook's host. Then that start is context too.
 			string kept = placed.Success && form.Secret.StartsWith(placed.Groups["kept"].Value, StringComparison.Ordinal) ? placed.Groups["kept"].Value : "";
 			string label = placed.Success && kept.Length < form.Secret.Length ? placed.Groups["name"].Value : form.Rule;
-			yield return (label, form.Before + kept + "{S}" + form.After, form.Secret[kept.Length..]);
+			yield return (label, form.Before + kept + "{S}" + after, form.Secret[kept.Length..]);
 		}
 	}
 

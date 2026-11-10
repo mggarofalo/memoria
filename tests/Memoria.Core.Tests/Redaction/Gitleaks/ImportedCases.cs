@@ -68,7 +68,8 @@ public static class ImportedCases
 
 			// A rule fires only beside one of its keywords, which some patterns do not hold, so the keyword goes first.
 			text = rule.Keywords.Any(keyword => text.Contains(keyword, StringComparison.OrdinalIgnoreCase)) ? text : rule.Keywords[0] + " " + text;
-			if (text.Contains("[REDACTED", StringComparison.Ordinal) || !rule.TryFindNext(text, 0, out int start, out int end))
+			// A boundary may be a sampled escape such as %6E, an encoded letter glued to the token. Contexts with escapes have their own tests.
+			if (text.Contains("[REDACTED", StringComparison.Ordinal) || !rule.TryFindNext(text, 0, out int start, out int end) || text[..start].Contains('%') || text[..start].Contains('\\'))
 			{
 				continue;
 			}
