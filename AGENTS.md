@@ -9,7 +9,7 @@ dotnet restore Memoria.slnx     # .NET packages
 (cd cli && go mod download)     # Go CLI dependencies
 ```
 
-Requires **.NET 10 SDK**, **Go 1.27.3+**, and **Node 26.13+** (for `sidecar/`). A running instance additionally needs QMD (`npm i -g @tobilu/qmd`), its models, and an index on the sidecar host.
+Requires **.NET 10 SDK**, **Go 1.27.3+**, and **Node 26.13+** (for `sidecar/`). A running instance additionally needs an index on the sidecar host, and in local LLM mode QMD's models. For the `qmd` CLI, use the one the sidecar installs, patched as its SDK is: `node sidecar/node_modules/@tobilu/qmd/bin/qmd` from a checkout, or `node node_modules/@tobilu/qmd/bin/qmd` inside the image (`docker compose -f deploy/compose.yaml run --rm --no-deps memoria-qmd node node_modules/@tobilu/qmd/bin/qmd status`). Never a global `npm i -g @tobilu/qmd`: it is stock, and a newer one migrates the index to a schema the sidecar refuses to serve.
 
 ```bash
 (cd sidecar && npm ci)          # memoria-qmd sidecar dependencies

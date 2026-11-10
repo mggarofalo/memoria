@@ -12,7 +12,7 @@ In production it runs from its image, beside `Memoria.Api`, with model work on w
 
 From a checkout:
 
-Requirements: Node 26.13 or newer, an existing QMD index (`qmd update` has been run on this host), and the three models in QMD's cache.
+Requirements: Node 26.13 or newer, an existing QMD index, and in local LLM mode the three models in QMD's cache. Make and scan the index with the `qmd` CLI this package installs, which carries the same patches as the SDK the sidecar runs: `node node_modules/@tobilu/qmd/bin/qmd update` from this directory, or `node node_modules/@tobilu/qmd/bin/qmd` inside the image. A global `npm i -g @tobilu/qmd` is stock, and a newer one migrates the index to a schema version the sidecar refuses: it stops at start, saying so, rather than serve it.
 
 ```bash
 cd sidecar

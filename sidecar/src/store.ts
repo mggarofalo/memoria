@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import type { DocumentHead, MetadataSource } from "./metadata.ts";
 import type { EmbedSummary, UpdateSummary } from "./jobs.ts";
 import type { BreakerOptions } from "./llm/pool.ts";
@@ -361,6 +362,35 @@ function requireIndex(dbPath: string): void {
   }
 }
 
+/** The index schema the pinned SDK writes, its `STORE_SCHEMA_VERSION`. test/integration-schema.test.ts holds the two together. */
+export const SUPPORTED_INDEX_SCHEMA = 1;
+
+/**
+ * Refuse an index a newer QMD has migrated: a `user_version` above the SDK's, or the `vector_rows`
+ * table that replaces `vectors_vec` upstream. On one, the startup repair would read every vector row
+ * as having no vector and delete it, and the purge would stop removing vectors, both without a word.
+ * Rolling the image back across a QMD upgrade, or running a stock `qmd` on the index, gets here.
+ * It reads the file before the SDK opens it, as the SDK's own setup writes to the index.
+ */
+export function requireKnownSchema(dbPath: string): void {
+  const db = new DatabaseSync(dbPath, { readOnly: true });
+  let version: number;
+  let vectorRows: boolean;
+  try {
+    version = Number((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version);
+    vectorRows = db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'vector_rows'").get() !== undefined;
+  } finally {
+    db.close();
+  }
+  if (version <= SUPPORTED_INDEX_SCHEMA && !vectorRows) return;
+  const found = vectorRows ? `schema version ${version} and a vector_rows table` : `schema version ${version}`;
+  throw new Error(
+    `The index at ${dbPath} was migrated by a newer QMD: it has ${found}, and this sidecar's SDK writes version ${SUPPORTED_INDEX_SCHEMA}. ` +
+      "Serving it would delete its vector rows at start and leave deleted documents' vectors behind, so the sidecar stops. " +
+      "Run the sidecar release that matches the index, or restore the index from a backup taken before the migration.",
+  );
+}
+
 /**
  * Live documents in a collection the index has no record of. Stock QMD's config sync deletes
  * the record of every collection a config does not name, and a missing config names none,
@@ -425,6 +455,7 @@ export async function openBackend(options: OpenBackendOptions): Promise<OpenedBa
   requireSdkFixes({ ...sdkStore, ensureEmbedContexts: LlamaCpp.prototype.ensureEmbedContexts });
   const dbPath = options.dbPath ?? qmd.getDefaultDbPath();
   requireIndex(dbPath);
+  requireKnownSchema(dbPath);
   // DB-only mode: collections and contexts come from store_collections inside
   // index.sqlite, and no config file is read or written.
   const store = await qmd.createStore({ dbPath });
