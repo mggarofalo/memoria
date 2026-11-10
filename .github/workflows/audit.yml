@@ -14,6 +14,10 @@ on:
       - worker/package-lock.json
       - cli/go.sum
       - "**/*.csproj"
+      - Dockerfile
+      - sidecar/Dockerfile
+      - .dockerignore
+      - sidecar/.dockerignore
   workflow_dispatch:
 
 concurrency:
@@ -84,3 +88,40 @@ jobs:
           if grep -q "has the following vulnerable packages" vulnerable.txt; then
             exit 1
           fi
+
+  # The base images float on their tags, so an image built weeks ago lacks the OS fixes
+  # in one built today. This builds each image afresh, pulling the base images and
+  # skipping the cache, and fails on a HIGH or CRITICAL finding that has a fix.
+  image:
+    name: image scan (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: api
+            context: .
+            file: Dockerfile
+          - image: sidecar
+            context: sidecar
+            file: sidecar/Dockerfile
+    env:
+      TAG: memoria-${{ matrix.image }}:scan
+      TRIVY_VERSION: 0.76.2
+      TRIVY_SHA256: bc0fc726e017b8927a62b2d3531d7a84ee01769daf5c99ed866dced54089fdbf
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build
+        env:
+          CONTEXT: ${{ matrix.context }}
+          FILE: ${{ matrix.file }}
+        run: docker build --pull --no-cache --tag "$TAG" --file "$FILE" "$CONTEXT"
+      - name: Install Trivy
+        run: |
+          curl -fsSLo "$RUNNER_TEMP/trivy.tar.gz" "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          echo "$TRIVY_SHA256  $RUNNER_TEMP/trivy.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/trivy.tar.gz" -C "$RUNNER_TEMP" trivy
+      - name: Scan
+        run: '"$RUNNER_TEMP/trivy" image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --no-progress "$TAG"'

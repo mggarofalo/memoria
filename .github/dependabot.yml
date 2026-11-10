@@ -31,8 +31,13 @@ updates:
         patterns: ["*"]
         update-types: [minor, patch]
 
+  # Every project is named, so one pull request covers a package wherever it is used.
+  # A major version gets one pull request per package, across all the projects.
   - package-ecosystem: nuget
-    directory: /
+    directories:
+      - /src/*
+      - /tests/*
+      - /tools/*
     schedule:
       interval: weekly
     commit-message:
@@ -41,6 +46,30 @@ updates:
       nuget:
         patterns: ["*"]
         update-types: [minor, patch]
+      nuget-major:
+        patterns: ["*"]
+        update-types: [major]
+        group-by: dependency-name
+
+  # The base images float on tags such as aspnet:10.0 and node:26-bookworm-slim. This
+  # catches new tags; the daily image scan in audit.yml catches a stale build of the same tag.
+  - package-ecosystem: docker
+    directories:
+      - /
+      - /sidecar
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+    # A Dockerfile's build and runtime stages share a major version, so its
+    # majors come together in one pull request rather than one per image.
+    groups:
+      docker:
+        patterns: ["*"]
+        update-types: [minor, patch]
+      docker-major:
+        patterns: ["*"]
+        update-types: [major]
 
   - package-ecosystem: gomod
     directory: /cli
