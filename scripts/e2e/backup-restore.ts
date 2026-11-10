@@ -99,6 +99,8 @@ function prepare(): void {
     command: ["node", "/check/worker-host.mjs"]
     volumes:
       - { type: bind, source: ${JSON.stringify(path.join(repo, "sidecar", "test"))}, target: /mock, read_only: true }
+      # mock-worker.ts imports ../../worker/test/ports.ts, which from /mock is this.
+      - { type: bind, source: ${JSON.stringify(path.join(repo, "worker", "test"))}, target: /worker/test, read_only: true }
       - { type: bind, source: ${JSON.stringify(dir)}, target: /check, read_only: true }
     networks: [memoria]
 volumes:
