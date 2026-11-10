@@ -5,7 +5,6 @@
  * The checks that need the recording proxy say NOT RUN here; the process layout runs them.
  */
 import { spawnSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import path from "node:path";
 import { Harness, repo, waitForHttp, type Collections } from "./harness.ts";
@@ -122,9 +121,9 @@ export class ComposeHarness extends Harness {
     writeFileSync(path.join(this.dir, "compose.env"), [
       `MEMORIA_VERSION=${VERSION}`,
       `MEMORIA_SIDECAR_SECRET=${this.sidecarSecret}`,
-      `MEMORIA_INGEST_DIGEST_KEY=${randomBytes(32).toString("base64url")}`,
+      `MEMORIA_INGEST_DIGEST_KEY=${this.digestKey}`,
       `MEMORIA_QMD_WORKERS=${JSON.stringify(workers)}`,
-      `MEMORIA_WORKER_TOKEN_GPU=${randomBytes(24).toString("base64url")}`,
+      `MEMORIA_WORKER_TOKEN_GPU=${this.workerToken}`,
       `MEMORIA_CORPUS=${path.join(this.dir, "corpus")}`,
       "",
     ].join("\n"));
