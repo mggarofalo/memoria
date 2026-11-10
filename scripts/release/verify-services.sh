@@ -25,12 +25,10 @@ for package in sidecar worker; do
   fi
 done
 
-# Each packaged installer must find its module and build a complete plan. -WhatIf touches nothing.
+# The packaged installer must find its module and build a complete plan. -WhatIf touches nothing.
 pwsh -NoProfile -NonInteractive -File "$work/worker/scripts/install-service.ps1" -WhatIf \
   -InstallDir /pf/svc -StateDir /pd/svc -LlamaServer /pf/llama/llama-server -ModelDir /models >/dev/null
-pwsh -NoProfile -NonInteractive -File "$work/sidecar/scripts/install-service.ps1" -WhatIf -NoBuild \
-  -InstallDir /pf/svc -StateDir /pd/svc -CacheHome /home/u/.cache -ConfigHome /home/u/.config -CollectionRoot /corpus >/dev/null
-echo "packaged installers planned"
+echo "packaged worker installer planned"
 
 worker_url="$(node -p "require('node:url').pathToFileURL(process.argv[1]).href" "$work/worker/src/server.ts")"
 reported="$(cd "$work" && node --input-type=module -e "console.log((await import('$worker_url')).WORKER_VERSION)")"

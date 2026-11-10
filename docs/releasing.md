@@ -87,7 +87,7 @@ Other tools depend on these names. Changing them is a breaking change.
 |---|---|
 | `memoria_<version>_{linux,darwin}_{amd64,arm64}.tar.gz` | `memoria` |
 | `memoria_<version>_windows_{amd64,arm64}.zip` | `memoria.exe` |
-| `memoria-sidecar_<version>.tar.gz` | `dist/` including `dist/VERSION`, `package.json`, `package-lock.json`, `.env.example`, `README.md`, `scripts/install-service.ps1`, `scripts/uninstall-service.ps1`, `scripts/patch-qmd.ts`, `deploy/windows/MemoriaService.psm1` |
+| `memoria-sidecar_<version>.tar.gz` | `dist/` including `dist/VERSION`, `package.json`, `package-lock.json`, `.env.example`, `README.md`, `scripts/patch-qmd.ts` |
 | `memoria-worker_<version>.tar.gz` | `src/` including `src/VERSION`, `scripts/`, `package.json`, `package-lock.json`, `README.md`, `deploy/windows/MemoriaService.psm1` |
 | `checksums.txt` | SHA-256 of each archive above, in `sha256sum` format |
 
@@ -107,14 +107,9 @@ npm ci --omit=dev
 node dist/main.js
 ```
 
-**As a Windows service,** run the packaged installer, which copies the service to its read-only location and runs `npm ci --omit=dev` there. The sidecar's installer needs `-NoBuild`, because a package is already built and holds no compiler configuration:
+The sidecar normally runs from its image instead; see [deployment.md](deployment.md).
 
-```powershell
-.\scripts\install-service.ps1 -NoBuild ...   # sidecar
-.\scripts\install-service.ps1 ...            # worker
-```
-
-[deployment.md](deployment.md) covers the other parameters and the service account. Its `npm audit` checklist applies to these directories too.
+**The worker as a Windows service:** run the packaged installer, `.\scripts\install-service.ps1`, which copies the worker to its read-only location. [deployment.md](deployment.md#running-as-a-service) covers its parameters and the service account. Its `npm audit` checklist applies to these directories too.
 
 ## Reproducible builds
 

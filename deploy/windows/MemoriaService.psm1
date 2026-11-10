@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Shared steps for the memoria-qmd and memoria-worker NSSM install scripts.
+    Steps for the memoria-worker NSSM install and uninstall scripts.
 
 .DESCRIPTION
     An install is a plan: an ordered list of plain data steps that holds no

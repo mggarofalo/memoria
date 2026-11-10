@@ -137,18 +137,17 @@ test("a service package holds the VERSION stamp beside its code, its allowlist, 
   assert.ok(workerEntries.has("src/nested/memoria-worker.js"));
   assert.equal(workerEntries.get("scripts/install-launchd.sh")?.mode, 0o755);
   assert.ok(!workerEntries.has("not-shipped.txt"));
-  for (const entries of [sidecarEntries, workerEntries]) {
-    assert.equal(entries.get("deploy/windows/MemoriaService.psm1")?.text, "shared");
-    assert.ok(!entries.has("VERSION"), "one stamp only");
-  }
+  assert.equal(workerEntries.get("deploy/windows/MemoriaService.psm1")?.text, "shared");
+  assert.ok(!sidecarEntries.has("deploy/windows/MemoriaService.psm1"), "the sidecar runs from its image, with no Windows installer");
+  assert.ok(![...sidecarEntries.keys()].some((name) => name.endsWith(".ps1")), "no PowerShell in the sidecar package");
+  for (const entries of [sidecarEntries, workerEntries]) assert.ok(!entries.has("VERSION"), "one stamp only");
 });
 
-test("the stamp sits in a directory the service installers copy to their install location", () => {
+test("the stamp sits in a directory the worker's service installer copies to its install location", () => {
   const copyItems = (file: string): string[] => {
     const match = /CopyItems = @\(([^)]*)\)/.exec(readFileSync(new URL(`../../../${file}`, import.meta.url), "utf8"));
     return [...(match?.[1] ?? "").matchAll(/"([^"]+)"/g)].map((item) => item[1] as string);
   };
-  assert.ok(copyItems("sidecar/scripts/install-service.ps1").includes((SERVICES[0] as Service).stampDir));
   assert.ok(copyItems("worker/scripts/install-service.ps1").includes((SERVICES[1] as Service).stampDir));
 });
 
