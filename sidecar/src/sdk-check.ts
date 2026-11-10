@@ -22,6 +22,7 @@ export interface SdkStoreFunctions {
   searchVec(...args: never[]): unknown;
   hybridQuery(...args: never[]): unknown;
   structuredSearch(...args: never[]): unknown;
+  syncConfigToDb(db: unknown, config: { collections: Record<string, unknown> }): void;
 }
 
 /** A binary search over this many items reads a few dozen. A walk reads them all. */
@@ -73,9 +74,32 @@ function ordersByReranker(fn: unknown): boolean {
   return source.includes("const blendedScore = r.score;") && source.includes("b.score - a.score || (rrfRankMap.get(a.file)");
 }
 
+/**
+ * What the config sync deletes, from an index holding one collection and a global context,
+ * given a config naming neither: what a missing config file reads as. Null if it throws.
+ */
+function syncDeletes(sdk: SdkStoreFunctions): string[] | null {
+  const deletes: string[] = [];
+  const statement = (sql: string) => ({
+    get: () => undefined,
+    all: () => (sql.includes("store_collections") ? [{ name: "kept" }] : []),
+    run: () => {
+      if (/^\s*DELETE\b/i.test(sql)) deletes.push(sql);
+      return { changes: 1 };
+    },
+  });
+  try {
+    sdk.syncConfigToDb({ prepare: statement }, { collections: {} });
+  } catch {
+    return null;
+  }
+  return deletes;
+}
+
 /** Names what is missing. Empty means every fix is in place. */
 export function missingSdkFixes(sdk: SdkStoreFunctions): string[] {
   const vec = String(sdk.searchVec);
+  const deletes = syncDeletes(sdk);
   const checks: Array<[string, boolean]> = [
     ["isInsideCodeFence reads every fence", fenceScanIsLinear(sdk)],
     ["findBestCutoff reads every break point", cutoffScanIsLinear(sdk)],
@@ -85,6 +109,8 @@ export function missingSdkFixes(sdk: SdkStoreFunctions): string[] {
     ["structuredSearch does not yield", !yields(sdk.structuredSearch)],
     ["hybridQuery has the stock rerank blend", !ordersByReranker(sdk.hybridQuery)],
     ["structuredSearch has the stock rerank blend", !ordersByReranker(sdk.structuredSearch)],
+    ["syncConfigToDb deletes collections a config does not name", deletes === null || deletes.some((sql) => sql.includes("store_collections"))],
+    ["syncConfigToDb clears a global context a config does not set", deletes === null || deletes.some((sql) => sql.includes("store_config"))],
   ];
   return checks.filter(([, missing]) => missing).map(([name]) => name);
 }

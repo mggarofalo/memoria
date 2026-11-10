@@ -217,7 +217,7 @@ The API runs with a 1 GiB heap (`DOTNET_GCHeapHardLimit`), the least ingest is s
 | `memoria-data` | API keys and the audit log, in `control.db` | **Not rebuildable.** Every key is revoked and the audit trail is gone. Back it up. |
 | `memoria-corpus` | the collection roots: every document | **Not rebuildable** unless every source still exists. Back it up. |
 | `memoria-qmd-index` | the QMD index and the job queue | Rebuildable: run the first-run command, then `POST /reindex` with `embed: true` on the sidecar re-embeds everything on the workers, which takes hours on a large corpus. Deletes are kept in `control.db`, not here. |
-| `memoria-qmd-config` | QMD's own config, used only by the `qmd` CLI | Rebuildable. The sidecar reads its collections from the index. |
+| `memoria-qmd-config` | QMD's own config, used only by the `qmd` CLI. It names no collection: nothing writes one there, and the CLI writes only its model names | Rebuildable. The sidecar reads its collections from the index, and a missing or empty config removes none of them. See [lost collection records](#lost-collection-records). |
 
 Keep them on a local disk, as SQLite's WAL mode does not work over a network share. To back up the index without rebuilding it, stop the sidecar first, as a copy of a live SQLite file can be torn:
 
@@ -229,6 +229,20 @@ docker compose -f deploy/compose.yaml start memoria-qmd
 ```
 
 The volume's name carries the compose project's, `memoria` here; `docker volume ls` shows it.
+
+### Lost collection records
+
+The index keeps a record of each collection: its root, pattern, ignore rules and contexts. Stock QMD deletes a record whenever its config does not name that collection, and a missing config names none, so any `qmd` command, even `qmd status`, deleted them all while the documents stayed (upstream tobi/qmd#1048). The config volume here never names a collection, so this was every `qmd` command run in the container.
+
+The image's SDK is patched against this (`sidecar/scripts/patch-qmd.ts`). A config now adds and updates records and never deletes one, nor a global context it does not set. `qmd collection remove` still removes a collection, with its documents. The patch covers only the SDK installed with the sidecar: a `qmd` installed anywhere else on the host is stock.
+
+**If records are lost anyway,** the sidecar refuses to start, naming the collections whose documents have no record, and changes nothing. Their documents and vectors are still in the index. To bring the records back:
+
+1. Run the [first-run command](#first-run) again with the name of every collection the index holds, as the error lists them. That records each one again with its root under `/corpus`. Nothing is re-embedded, since the documents are keyed by collection name.
+2. Add back by hand any ignore rules, contexts or global context you had set, as no copy of them survives. An ignore rule matters most: a file it kept out of search comes back at the next scan without it.
+3. Start the sidecar.
+
+On a host where the sidecar serves an index that `qmd` itself maintains, restore `~/.config/qmd/index.yml` from a backup instead, and run `qmd status` once. Its records, contexts included, come back from the file.
 
 ### The control database
 
@@ -338,6 +352,8 @@ Run the sidecar with `--max-old-space-size=4096`. The image sets it. This is a c
 `sidecar/scripts/patch-qmd.ts` runs on install and fixes the SDK's scans. Without it, one search over six 21 MB documents froze for 35 s and needed over 1 GB of heap. With it, the same search took 2 to 3 s and fitted in 512 MiB. The SDK's functions are checked at start, and a sidecar on an unpatched SDK refuses to start. `/ready` shows `sdk.patched`.
 
 The same script carries the fix for QMD's reranker blend (upstream tobi/qmd#1032). A reranked hit's score is now the reranker's own score, and equal scores keep their rank-fusion order. That moves `minScore` too: the top-ranked hits no longer get a score floor from their rank. Stored indexes and cached reranker scores stay valid, so nothing needs re-embedding. Run `npm ci` in `sidecar/` when updating to a build with this fix, or the sidecar refuses to start.
+
+It also carries the config sync fix described under [lost collection records](#lost-collection-records), and the start-up check covers it the same way.
 
 `POST /documents` refuses anything over `MEMORIA_QMD_MAX_DOCUMENT_BYTES` (2 MiB) with a 413 `document_too_large`, and writes nothing. The rest of this section is about stalls, meaning time when the sidecar answers nothing else, including `/health`.
 

@@ -347,6 +347,27 @@ function requireIndex(dbPath: string): void {
   }
 }
 
+/**
+ * Live documents in a collection the index has no record of. Stock QMD's config sync deletes
+ * the record of every collection a config does not name, and a missing config names none,
+ * while the documents stay (upstream tobi/qmd#1048). This SDK is patched against that, but a
+ * `qmd` installed elsewhere on the host is not. Serving such an index would refuse every
+ * search and write naming those collections, and its next scan would not see them, so the
+ * sidecar stops instead. `qmd collection remove` takes the documents with the record, so it
+ * leaves nothing for this to find.
+ */
+export function requireCollectionRecords(db: { prepare(sql: string): { all(): unknown[] } }): void {
+  const orphans = db
+    .prepare("SELECT DISTINCT collection FROM documents WHERE active = 1 AND collection NOT IN (SELECT name FROM store_collections) ORDER BY collection")
+    .all() as Array<{ collection: string }>;
+  if (orphans.length === 0) return;
+  const names = orphans.map((o) => o.collection).join(", ");
+  throw new Error(
+    `The index holds documents for collections it has no record of: ${names}. Their records were deleted, most likely by a qmd command run while its config was missing. ` +
+      "Nothing has been changed. Restore the records, then start again: see \"Lost collection records\" in docs/deployment.md.",
+  );
+}
+
 function reportRepair(rows: number, options: OpenBackendOptions): void {
   if (rows > 0) options.onVectorRepair?.(rows);
 }
@@ -388,8 +409,14 @@ export async function openBackend(options: OpenBackendOptions): Promise<OpenedBa
   const dbPath = options.dbPath ?? qmd.getDefaultDbPath();
   requireIndex(dbPath);
   // DB-only mode: collections and contexts come from store_collections inside
-  // index.sqlite, which `qmd` keeps in sync with ~/.config/qmd/index.yml.
+  // index.sqlite, and no config file is read or written.
   const store = await qmd.createStore({ dbPath });
+  try {
+    requireCollectionRecords(store.internal.db);
+  } catch (err) {
+    await store.close();
+    throw err;
+  }
   // LlamaCpp keeps its model handles private; we only read them for status.
   const internal = store.internal as unknown as { llm?: LlamaLike };
   const llm = internal.llm;

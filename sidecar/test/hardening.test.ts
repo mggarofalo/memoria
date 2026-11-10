@@ -456,18 +456,41 @@ const pristine = (): SdkStoreFunctions => ({
     FROM content_vectors cv`) as never,
   hybridQuery: (() => {}) as never,
   structuredSearch: (() => {}) as never,
+  syncConfigToDb: originalSync,
 });
 
+/** The SDK's config sync before the patch, word for word in what it does to the index. */
+function originalSync(db: unknown, config: { collections: Record<string, unknown>; global_context?: string }): void {
+  const index = db as { prepare(sql: string): { get(...a: unknown[]): unknown; all(): Array<{ name: string }>; run(...a: unknown[]): unknown } };
+  if (index.prepare(`SELECT value FROM store_config WHERE key = 'config_hash'`).get() !== undefined) return;
+  const configNames = new Set(Object.keys(config.collections));
+  for (const row of index.prepare(`SELECT name FROM store_collections`).all()) {
+    if (!configNames.has(row.name)) index.prepare(`DELETE FROM store_collections WHERE name = ?`).run(row.name);
+  }
+  if (config.global_context === undefined) index.prepare(`DELETE FROM store_config WHERE key = 'global_context'`).run();
+}
+
 test("the start-up check names each fix an unpatched SDK lacks, with no marker and no clock", () => {
-  assert.equal(missingSdkFixes(pristine()).length, 8);
+  assert.equal(missingSdkFixes(pristine()).length, 10);
   assert.throws(() => requireSdkFixes(pristine()), /not patched.*findBestCutoff.*scripts\/patch-qmd\.ts/);
   const real = sdk as unknown as SdkStoreFunctions;
   assert.doesNotThrow(() => requireSdkFixes(real));
   for (const key of Object.keys(pristine()) as Array<keyof SdkStoreFunctions>) {
-    // These two carry the yield and the rerank blend.
-    const fixes = key === "hybridQuery" || key === "structuredSearch" ? 2 : 1;
+    // These two carry the yield and the rerank blend, and the sync keeps both records.
+    const fixes = key === "hybridQuery" || key === "structuredSearch" || key === "syncConfigToDb" ? 2 : 1;
     assert.equal(missingSdkFixes({ ...real, [key]: pristine()[key] }).length, fixes, key);
   }
+  const throwing = { ...real, syncConfigToDb: () => {
+    throw new Error("moved");
+  } };
+  assert.deepEqual(missingSdkFixes(throwing).filter((m) => m.startsWith("syncConfigToDb")).length, 2, "a sync it cannot run counts as unpatched");
+});
+
+test("a collection's documents with no record stop the sidecar, naming the collection", async () => {
+  const { requireCollectionRecords } = await import("../src/store.ts");
+  const db = (rows: Array<{ collection: string }>) => ({ prepare: (sql: string) => ({ all: () => (/NOT IN \(SELECT name FROM store_collections\)/.test(sql) && /active = 1/.test(sql) ? rows : []) }) });
+  assert.doesNotThrow(() => requireCollectionRecords(db([])));
+  assert.throws(() => requireCollectionRecords(db([{ collection: "claude-sessions" }, { collection: "codex-sessions" }])), /no record of: claude-sessions, codex-sessions\. .*Nothing has been changed.*Lost collection records.*docs\/deployment\.md/);
 });
 
 test("a sidecar on an unpatched SDK refuses to start", { timeout: 60_000 }, () => {
