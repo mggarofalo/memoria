@@ -111,6 +111,20 @@ test("compose keeps the sidecar unpublished, off the fallback, and the API on it
   assert.match(compose, /DOTNET_GCHeapHardLimit: "0x40000000"/);
 });
 
+test("compose asks for the models the worker serves by default, at the embedding's length", () => {
+  const compose = read("deploy/compose.yaml");
+  const defaults = read("worker/src/config.ts");
+  const fileOf = (name: string): string => {
+    const uri = new RegExp(`^\\s+${name}: (hf:\\S+)$`, "m").exec(compose)?.[1];
+    assert.ok(uri, `${name} is set in compose`);
+    return uri.split("/").pop()!;
+  };
+  // A sidecar asking for one embedding model while workers serve another embeds nothing.
+  assert.ok(defaults.includes(`embed: "${fileOf("QMD_EMBED_MODEL")}"`), "the embed model is the worker's default");
+  assert.ok(defaults.includes(`rerank: "${fileOf("QMD_RERANK_MODEL")}"`), "the rerank model is the worker's default");
+  assert.match(compose, /MEMORIA_QMD_EMBED_DIMENSIONS: "1024"/, "Qwen3-Embedding-0.6B's vectors are 1024 long");
+});
+
 /** A job's text, from its key to the next job or the end of the file. */
 function job(workflow: string, name: string): string {
   const start = workflow.indexOf(`\n  ${name}:\n`);

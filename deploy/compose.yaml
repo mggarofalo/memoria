@@ -31,6 +31,11 @@ services:
       MEMORIA_QMD_LLM_FALLBACK: "0"
       MEMORIA_QMD_WARMUP: "0"
       MEMORIA_QMD_WORKERS: ${MEMORIA_QMD_WORKERS:?set MEMORIA_QMD_WORKERS to the worker list; see docs/deployment.md}
+      # The models the workers serve, by QMD's name for them. The index is keyed by the
+      # embedding model, so changing it means a full re-embed. See docs/workers.md#the-models.
+      QMD_EMBED_MODEL: hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf
+      QMD_RERANK_MODEL: hf:giladgd/Qwen3-Reranker-4B-GGUF/Qwen3-Reranker-4B.Q8_0.gguf
+      MEMORIA_QMD_EMBED_DIMENSIONS: "1024"
       # The names MEMORIA_QMD_WORKERS gives as tokenEnv.
       MEMORIA_WORKER_TOKEN_GPU: ${MEMORIA_WORKER_TOKEN_GPU:-}
       MEMORIA_WORKER_TOKEN_LAPTOP: ${MEMORIA_WORKER_TOKEN_LAPTOP:-}

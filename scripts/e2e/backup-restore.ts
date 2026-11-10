@@ -109,7 +109,7 @@ volumes:
 `);
   writeFileSync(path.join(dir, "worker-host.mjs"), `import { createServer, connect } from "node:net";
 import { MockWorker } from "/mock/mock-worker.ts";
-const worker = await new MockWorker(768).start();
+const worker = await new MockWorker(1024, "Qwen3-Embedding-0.6B-Q8_0.gguf").start();
 const port = Number(new URL(worker.url).port);
 createServer((socket) => { const up = connect(port, "127.0.0.1"); socket.pipe(up).pipe(socket); socket.on("error", () => up.destroy()); up.on("error", () => socket.destroy()); }).listen(8383, "0.0.0.0");
 `);
