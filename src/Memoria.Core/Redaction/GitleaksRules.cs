@@ -16,7 +16,11 @@ internal static class GitleaksRules
 
 	private static readonly (GitleaksRuleSpec Spec, RedactionRule Rule)[] s_builtIn = BuildPairs(GitleaksRuleData.BuiltIn);
 
-	/// <summary>The built-in rules, in upstream's order.</summary>
+	/// <summary>
+	/// The built-in rules: those that know a token by its own format first, then those that know a value by the name before it, each in
+	/// upstream's order. A rule of the second kind can take the head of a longer token that one of the first knows whole, as
+	/// <c>twitter-api-key</c> takes 25 characters of a bearer token after <c>twitter:</c>.
+	/// </summary>
 	public static IReadOnlyList<RedactionRule> All { get; } = [.. s_builtIn.Select(static pair => pair.Rule)];
 
 	/// <summary>
@@ -40,21 +44,86 @@ internal static class GitleaksRules
 	private static (GitleaksRuleSpec Spec, RedactionRule Rule)[] BuildPairs(GitleaksRuleData data)
 	{
 		CompiledAllowlist global = new(data.GlobalAllowlist);
-		return [.. data.Rules.Select(spec => (spec, Rule(spec, global)))];
+		IEnumerable<GitleaksRuleSpec> ordered = data.Rules.Where(static spec => !IsAssignmentTemplate(spec)).Concat(data.Rules.Where(IsAssignmentTemplate));
+		return [.. ordered.Select(spec => (spec, Rule(spec, global)))];
 	}
 
 	private static RedactionRule Rule(GitleaksRuleSpec spec, CompiledAllowlist global)
 	{
 		CompiledAllowlist[] own = [.. spec.Allowlists.Select(static allowlist => new CompiledAllowlist(allowlist))];
-		string separators = SeparatorsIn(SecretParts(spec.Pattern));
+		string secret = SecretParts(spec.Pattern);
+		string separators = SeparatorsIn(secret);
+		bool fixedToken = EndsAtFixedLength(secret) && !IsAssignmentTemplate(spec);
+		bool padded = secret.Contains("={0,", StringComparison.Ordinal);
+		string pattern = IsAssignmentTemplate(spec) || separators.Contains('_', StringComparison.Ordinal) ? spec.Pattern : EndingAtUnderscore(spec.Pattern);
+		bool underscoreEnds = !string.Equals(pattern, spec.Pattern, StringComparison.Ordinal);
 		return new RedactionRule(
 			Prefix + spec.Id,
 			null,
-			candidate => Accept(candidate, spec.Entropy, global, own),
-			extend: candidate => ThroughGluedText(candidate, separators),
+			candidate => Accept(candidate, spec.Entropy, global, own) && !(underscoreEnds && IsNameBeforeUnderscore(candidate)),
+			extend: candidate => ThroughGluedText(candidate, separators, new Ending(fixedToken, padded, underscoreEnds)),
 			keywords: spec.Keywords,
 			backstop: true,
-			buildPattern: () => RedactionRules.Pattern(spec.Pattern));
+			buildPattern: () => RedactionRules.Pattern(pattern));
+	}
+
+	/// <summary>The ending the translator draws for upstream's <c>\b</c> or common ending: any character but a letter, a digit or <c>_</c>.</summary>
+	private const string WordEnd = @"(?:[^0-9A-Za-z_]|\z)";
+
+	/// <summary>
+	/// A token whose alphabet has no <c>_</c> ends at one, as in <c>TOKEN=rdme_…_backup</c> or a file named <c>rdme_…_old.txt</c>. Upstream's
+	/// <c>\b</c> counts <c>_</c> as a letter, so it found no token there. Where the alphabet holds <c>_</c>, the run may go on, so it stays.
+	/// A rule known by the name before its value keeps upstream's ending, since its value is judged only by that name.
+	/// </summary>
+	public static string EndingAtUnderscore(string pattern)
+	{
+		return pattern.EndsWith(WordEnd, StringComparison.Ordinal) ? pattern[..^WordEnd.Length] + @"(?:[^0-9A-Za-z]|\z)" : pattern;
+	}
+
+	/// <summary>
+	/// A match that stops at an underscore, upstream's <c>\b</c> or not, and reads as words, is a snake_case name such as
+	/// <c>sk_test_connection_timeout</c>, not a token followed by one.
+	/// </summary>
+	private static bool IsNameBeforeUnderscore(SecretCandidate candidate)
+	{
+		string value = candidate.Value;
+		return candidate.End < candidate.Input.Length && candidate.Input[candidate.End] == '_'
+			&& (ValueShapes.IsWordy(value) || ValueShapes.ReadsAsIdentifierWithDigits(value) || HasNoRandomPart(value));
+	}
+
+	/// <summary>
+	/// A token's random part between underscores is long and holds digits, as a Stripe key's 24 characters or a MaxMind key's 29 do,
+	/// whatever literal follows it. When every part is short or has fewer than two digits, the parts are words of a name:
+	/// <c>findUserById</c>, <c>v2endpoint</c>.
+	/// </summary>
+	private static bool HasNoRandomPart(string value)
+	{
+		return value.Contains('_', StringComparison.Ordinal) && !value.Split('_').Any(static part => part.Length >= RandomPartLength && part.Count(char.IsAsciiDigit) >= 2);
+	}
+
+	private const int RandomPartLength = 16;
+
+	/// <summary>
+	/// What a rule's format says about where its token ends. <paramref name="FixedToken"/>: a format known by itself, at an exact count.
+	/// <paramref name="Padded"/>: a format that ends in optional <c>=</c> padding. <paramref name="UnderscoreEnds"/>: the rule now ends at an underscore.
+	/// </summary>
+	private readonly record struct Ending(bool FixedToken, bool Padded, bool UnderscoreEnds);
+
+	/// <summary>
+	/// True when the secret ends with an exact count, as <c>[a-z0-9]{64}</c> does: the format has no more to it, so what follows a separator
+	/// is not the rest of it. An ending such as <c>{32,64}</c> or <c>+</c> can be the head of a longer token.
+	/// </summary>
+	public static bool EndsAtFixedLength(string secret)
+	{
+		// With alternatives, the last one's count says nothing of the others, as in vault's hvs.{90,120}|s.{24}.
+		if (secret.Contains('|', StringComparison.Ordinal))
+		{
+			return false;
+		}
+
+		string body = secret.TrimEnd(')');
+		int open = body.LastIndexOf('{');
+		return body.EndsWith('}') && open > 0 && body[open - 1] != '\\' && body.AsSpan(open + 1, body.Length - open - 2).IndexOfAnyExceptInRange('0', '9') < 0 && body.Length - open > 2;
 	}
 
 	/// <summary>
@@ -63,16 +132,33 @@ internal static class GitleaksRules
 	/// One <c>-</c> or <c>_</c> and a short suffix after the run go too, as the <c>-X</c> that ends that key, but no more, so a
 	/// token followed by <c>-backup-copy</c> keeps its words.
 	/// </summary>
-	private static int ThroughGluedText(SecretCandidate candidate, string separators)
+	private static int ThroughGluedText(SecretCandidate candidate, string separators, Ending ending)
 	{
 		string input = candidate.Input;
-		int end = PaddingEnd(input, AlphanumericEnd(input, candidate.End));
+		int glued = AlphanumericEnd(input, candidate.End);
+		int padded = PaddingEnd(input, glued);
+
+		// A token already ended by its format's padding, or by its exact count, takes nothing encoded after it either.
+		bool ended = ending.FixedToken || (ending.Padded && input[padded - 1] == '=');
+		int end = ended ? padded : PaddingEnd(input, EncodedRunEnd(input, glued));
 		if (end == candidate.End && EndsWithSentencePeriod(input, candidate.Secret.Index, end))
 		{
 			return end - 1;
 		}
 
-		return RandomContinuationEnd(input, end, separators) ?? GluedSuffixEnd(input, end);
+		return AfterToken(input, end, separators, ending);
+	}
+
+	/// <summary>
+	/// Padding ends a token, where its format has padding, and so does a format's exact length, so text after a separator is not more of
+	/// it. Where an underscore ends the token, what follows it is a name's next word, as <c>_old</c> in <c>rdme_…_old.txt</c>.
+	/// </summary>
+	private static int AfterToken(string input, int end, string separators, Ending ending)
+	{
+		bool complete = ending.FixedToken || (ending.Padded && input[end - 1] == '=');
+		int? rest = complete ? null : RandomContinuationEnd(input, end, separators);
+		bool atUnderscore = ending.UnderscoreEnds && end < input.Length && input[end] == '_';
+		return rest ?? (atUnderscore ? end : GluedSuffixEnd(input, end));
 	}
 
 	/// <summary>
@@ -203,6 +289,30 @@ internal static class GitleaksRules
 		{
 			found.Add(c);
 		}
+	}
+
+	/// <summary>
+	/// A URL-encoded <c>+</c>, <c>/</c> or <c>=</c> glued to more of the run is more of the same token, as in a Twitter bearer token's
+	/// <c>…0%2BuSeid%2BULv…</c>. Cut at the escape, the rest of the token would be left for a rule that can no longer see its start.
+	/// </summary>
+	private static int EncodedRunEnd(string input, int end)
+	{
+		int runEnd = end;
+		bool random = false;
+		while (runEnd + 3 < input.Length && input[runEnd] == '%' && IsEncodedBase64Symbol(input[runEnd + 1], input[runEnd + 2]) && char.IsAsciiLetterOrDigit(input[runEnd + 3]))
+		{
+			int pieceEnd = AlphanumericEnd(input, runEnd + 3);
+			random |= pieceEnd - runEnd - 3 >= MinRandomPiece && ValueShapes.IsRandomSegment(input.AsSpan(runEnd + 3, pieceEnd - runEnd - 3));
+			runEnd = pieceEnd;
+		}
+
+		// A path or words after an encoded slash, as %2Fhome%2Fuser, are not more of a token: some piece of the rest must read as random.
+		return random ? runEnd : end;
+	}
+
+	private static bool IsEncodedBase64Symbol(char high, char low)
+	{
+		return (high == '2' && low is 'B' or 'b' or 'F' or 'f') || (high == '3' && low is 'D' or 'd');
 	}
 
 	/// <summary>Base64 padding goes with its token: a pattern's own ending can match an <c>=</c> too, and would leave the last one behind.</summary>
