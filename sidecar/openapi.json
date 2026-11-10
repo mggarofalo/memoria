@@ -2319,7 +2319,7 @@
                           },
                           "totalDocuments": {
                             "type": "integer",
-                            "description": "Including inactive rows kept for history."
+                            "description": "Including inactive rows, which remain only when the index was busy as a scan ended."
                           },
                           "lastModified": {
                             "type": [

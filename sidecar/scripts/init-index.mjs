@@ -31,6 +31,8 @@ const corpus = process.env.MEMORIA_QMD_INIT_CORPUS || "/corpus";
 // No config here: given one, QMD rewrites every record it names and deletes every record it
 // does not, contexts and ignore rules included.
 const store = await createStore({ dbPath });
+// As the sidecar does: what a scan later deletes, and what a write moves, is overwritten, not left in free pages.
+store.internal.db.exec("PRAGMA secure_delete = ON");
 const added = [];
 try {
   const before = await store.listCollections();

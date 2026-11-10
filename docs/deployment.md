@@ -214,6 +214,25 @@ The API runs with a 1 GiB heap (`DOTNET_GCHeapHardLimit`), the least ingest is s
 
 Keep them on a local disk, as SQLite's WAL mode does not work over a network share. A volume's name carries the compose project's, `memoria` here; `docker volume ls` shows it.
 
+### What a delete removes, and when
+
+A delete (`DELETE /v1/documents`, or a session that replaces its own parts) takes the file out of the corpus at once, and every read route stops returning it at once. The index follows at the next scan, which the delete queues and which runs once the debounce window ends, or at the next start if shutdown comes first. That scan removes, in one transaction:
+
+- the document's row;
+- its text, in `content` and in the full-text index's own copy of it;
+- its chunks' vectors, in `content_vectors` and `vectors_vec`;
+- any record that it was set aside from embedding.
+
+Text and vectors are kept by content, so when another document holds the same text word for word, that text and its vectors stay, as they are that document's too.
+
+The sidecar writes with SQLite's `secure_delete` on, so what it deletes is overwritten in the file, not left in free pages. Three places can still hold deleted text for a while:
+
+- **The write-ahead log.** `index.sqlite-wal` can hold earlier versions of those pages until SQLite checkpoints them into the file and reuses the log.
+- **The full-text index's word lists.** These can keep a removed document's words, though not its text in order, until SQLite merges those segments, which it does as more is written.
+- **An index written before this.** Free pages left by a version that did not use `secure_delete`, or by a `qmd` run outside the sidecar, keep what they held until those pages are reused. `qmd cleanup`, which vacuums the file, or a rebuild of the index removes them.
+
+A backup taken before the scan holds the document as it was, until restic's `forget` and `prune` drop that snapshot.
+
 ## Backups
 
 [`deploy/backup.yaml`](../deploy/backup.yaml) backs up everything in [Volumes](#volumes) with [restic](https://restic.net), from its official image, pinned by digest. It is used beside `compose.yaml`, with the services running:

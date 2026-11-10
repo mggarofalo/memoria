@@ -4,6 +4,7 @@ import type { EmbedSummary, UpdateSummary } from "./jobs.ts";
 import type { BreakerOptions } from "./llm/pool.ts";
 import type { RemoteLlm } from "./llm/remote.ts";
 import { requireSdkFixes, type SdkStoreFunctions } from "./sdk-check.ts";
+import { purgeDeleted } from "./purge.ts";
 import { withShortBusyTimeout } from "./sqlite-busy.ts";
 import type { DeadLetter, DegradedReason, EmbeddingResult, LlmCallSink, LlmHealth, LlmSurface, PoolLoad, PoolWorkerConfig, Queryable, RerankDocument, RerankResult, WorkerView } from "./llm/types.ts";
 import type { SdkDb, SdkHandles, WiredRemote } from "./llm/wire.ts";
@@ -438,6 +439,8 @@ export async function openBackend(options: OpenBackendOptions): Promise<OpenedBa
   const setAside = (): number => wired?.deadLetters().length ?? 0;
   const active = (remote ?? llm) as unknown as LlmSurface;
   const db = store.internal.db;
+  // A row deleted, a deleted document's text included, is overwritten on disk, not left in free pages.
+  db.exec("PRAGMA secure_delete = ON");
   const headsStatement = db.prepare(
     `SELECT d.collection AS collection, d.path AS path, substr(c.doc, 1, ?) AS head
      FROM documents d JOIN content c ON c.hash = d.hash
@@ -504,6 +507,8 @@ export async function openBackend(options: OpenBackendOptions): Promise<OpenedBa
   getDefaultCollectionNames: () => store.getDefaultCollectionNames(),
   update: async (o) => {
     const r = await store.update(o.collections ? { collections: o.collections } : {});
+    // What the scan found deleted leaves nothing behind it: see purge.ts. Any scan can find one.
+    if (purgeDeleted(db as never) === null) options.onLlmWarning?.("The index was busy, so what deleted documents left in it waits for the next scan to remove it.");
     return {
       collections: r.collections,
       indexed: r.indexed,
