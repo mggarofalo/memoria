@@ -172,7 +172,7 @@ func TestTheRunbookCheckRefusesWhatCobraWould(t *testing.T) {
 
 func TestTheRunbookQuotesWhatRerenderSaysAndUses(t *testing.T) {
 	runbook := readRunbook(t)
-	for _, said := range []string{output.RerenderNoTranscriptNote, output.RerenderShorterNote, output.RerenderShrankNote, output.RerenderUncountedNote, output.RerenderAcceptedNote, "format=codex", "409 `session_shrank`", "`allowShrink`", "`accepted_uncounted`", "`acceptedUncounted`"} {
+	for _, said := range []string{output.RerenderNoTranscriptNote, output.RerenderShorterNote, output.RerenderTooLargeNote, "`transcriptTooLarge`", "`--max-session-bytes`", output.RerenderShrankNote, output.RerenderUncountedNote, output.RerenderAcceptedNote, "format=codex", "409 `session_shrank`", "`allowShrink`", "`accepted_uncounted`", "`acceptedUncounted`"} {
 		if !strings.Contains(runbook, said) {
 			t.Errorf("the runbook does not say %q", said)
 		}

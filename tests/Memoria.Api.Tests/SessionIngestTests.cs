@@ -712,15 +712,17 @@ public sealed class RequestBodyTests
 	}
 
 	[Fact]
-	public void The_servers_own_limit_is_set_to_match()
+	public void The_servers_own_limit_leaves_room_to_read_the_rest_after_refusing()
 	{
 		DefaultHttpContext context = Context(0);
 		LimitFeature feature = new();
 		context.Features.Set<IHttpMaxRequestBodySizeFeature>(feature);
 
 		RequestBody.AllowUpTo(context, 4096);
+		Assert.Equal(8192, feature.MaxRequestBodySize);
 
-		Assert.Equal(4096, feature.MaxRequestBodySize);
+		RequestBody.AllowUpTo(context, long.MaxValue / 2 + 1);
+		Assert.Equal(long.MaxValue, feature.MaxRequestBodySize);
 	}
 
 	private sealed class LimitFeature : IHttpMaxRequestBodySizeFeature

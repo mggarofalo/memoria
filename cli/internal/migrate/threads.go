@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"sort"
 	"strings"
@@ -71,6 +72,47 @@ func (z *zstdTranscript) Close() error {
 	z.closed = true
 	z.decoder.Close()
 	return z.file.Close()
+}
+
+// DefaultMaxSessionBytes is the server's default Memoria:Ingest:MaxSessionBytes: the largest transcript one session upload may
+// send. A larger one is refused with 413, so it is not sent at all.
+const DefaultMaxSessionBytes int64 = 256 << 20
+
+// TranscriptSize is how many bytes sending a transcript sends: its size, or, for a compressed one, what it decompresses to,
+// counted as it streams.
+func TranscriptSize(file string) (int64, error) {
+	if !strings.HasSuffix(strings.ToLower(file), compressedSuffix) {
+		info, err := os.Stat(file)
+		if err != nil {
+			return 0, err
+		}
+		return info.Size(), nil
+	}
+	stream, err := OpenTranscript(file)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = stream.Close() }()
+	return io.Copy(io.Discard, stream)
+}
+
+// TranscriptSizeUpTo is TranscriptSize, without decompressing more than one byte past limit. exact is false when a compressed
+// one was cut short there, and then the size is limit plus one: all that is known is that it is over.
+func TranscriptSizeUpTo(file string, limit int64) (int64, bool, error) {
+	if !strings.HasSuffix(strings.ToLower(file), compressedSuffix) || limit >= math.MaxInt64-1 {
+		size, err := TranscriptSize(file)
+		return size, true, err
+	}
+	stream, err := OpenTranscript(file)
+	if err != nil {
+		return 0, false, err
+	}
+	defer func() { _ = stream.Close() }()
+	size, err := io.CopyN(io.Discard, stream, max(limit, 0)+1)
+	if errors.Is(err, io.EOF) {
+		return size, true, nil
+	}
+	return size, false, err
 }
 
 // ErrSeveralThreads is two files holding the same thread of a session, which this does not choose between.

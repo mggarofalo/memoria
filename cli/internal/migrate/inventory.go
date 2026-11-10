@@ -56,6 +56,26 @@ type RawSessions struct {
 	Bytes      int64  `json:"bytes"`
 	Unreadable int    `json:"unreadable"`
 	Problem    string `json:"problem,omitempty"`
+	// Largest is the largest transcript as a session upload sends it, which for a compressed one is what it decompresses to.
+	Largest int64 `json:"largest"`
+	// OverSessionLimit is the transcripts that, sent so, are larger than the server's default limit on one session upload.
+	OverSessionLimit int `json:"overSessionLimit"`
+}
+
+// sized counts one transcript by what sending it sends. One that cannot be decompressed is counted as unreadable.
+func (r *RawSessions) sized(file string, size int64) {
+	if strings.HasSuffix(strings.ToLower(file), compressedSuffix) {
+		decompressed, err := TranscriptSize(file)
+		if err != nil {
+			r.Unreadable++
+			return
+		}
+		size = decompressed
+	}
+	r.Largest = max(r.Largest, size)
+	if size > DefaultMaxSessionBytes {
+		r.OverSessionLimit++
+	}
 }
 
 // Inventory counts what QMD would index in a collection, and returns those files' paths.
@@ -236,6 +256,7 @@ func InventoryRaw(dir, target string) RawSessions {
 		if IsTranscriptName(name) {
 			raw.Files++
 			raw.Bytes += info.Size()
+			raw.sized(filepath.Join(dir, filepath.FromSlash(name)), info.Size())
 		}
 	}, func(string) { raw.Unreadable++ })
 	if err != nil {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -143,6 +144,59 @@ func TestACompressedUploadTheServerTurnsAwayIsClosedSafely(t *testing.T) {
 		if _, err := body.Read(make([]byte, 8)); !errors.Is(err, os.ErrClosed) {
 			t.Fatalf("a read after close = %v", err)
 		}
+	}
+}
+
+func TestATranscriptIsSizedAsItIsSent(t *testing.T) {
+	dir := t.TempDir()
+	text := rollout(testID, "", "2026-09-12T10:15:09Z", strings.Repeat("words ", 50000))
+	plain := put(t, filepath.Join(dir, "rollout-a-"+testID+".jsonl"), []byte(text))
+	packed := put(t, filepath.Join(dir, "rollout-b-"+childID+".jsonl.zst"), compressed(t, text))
+	for _, file := range []string{plain, packed} {
+		if size, err := TranscriptSize(file); err != nil || size != int64(len(text)) {
+			t.Fatalf("%s: size = %d, err = %v, want %d", filepath.Base(file), size, err, len(text))
+		}
+	}
+	for _, file := range []string{put(t, filepath.Join(dir, "rollout-c-"+laterID+".jsonl.zst"), []byte("damaged")), filepath.Join(dir, "absent.jsonl")} {
+		if _, err := TranscriptSize(file); err == nil {
+			t.Fatalf("%s was sized", filepath.Base(file))
+		}
+	}
+}
+
+func TestACompressedTranscriptIsDecompressedOnlyPastTheLimit(t *testing.T) {
+	text := rollout(testID, "", "2026-09-12T10:15:09Z", strings.Repeat("words ", 50000))
+	packed := put(t, filepath.Join(t.TempDir(), "rollout-"+testID+".jsonl.zst"), compressed(t, text))
+	for limit, want := range map[int64][2]any{int64(len(text)): {int64(len(text)), true}, int64(len(text)) - 1: {int64(len(text)), false}, 10: {int64(11), false}} {
+		size, exact, err := TranscriptSizeUpTo(packed, limit)
+		if err != nil || size != want[0] || exact != want[1] {
+			t.Errorf("limit %d: %d %v %v, want %v", limit, size, exact, err, want)
+		}
+	}
+	if size, exact, err := TranscriptSizeUpTo(packed, math.MaxInt64); err != nil || !exact || size != int64(len(text)) {
+		t.Fatalf("no limit: %d %v %v", size, exact, err)
+	}
+	if _, _, err := TranscriptSizeUpTo(filepath.Join(t.TempDir(), "absent.jsonl.zst"), 10); err == nil {
+		t.Fatal("a missing file was sized")
+	}
+}
+
+// plan sizes each transcript as a session upload sends it, decompressed, and counts those over the server's default limit.
+func TestPlanCountsTranscriptsOverTheSessionLimit(t *testing.T) {
+	dir := t.TempDir()
+	text := rollout(testID, "", "2026-09-12T10:15:09Z", "hi")
+	put(t, filepath.Join(dir, "rollout-a-"+testID+".jsonl.zst"), compressed(t, text))
+	huge := put(t, filepath.Join(dir, "rollout-b-"+childID+".jsonl"), nil)
+	if err := os.Truncate(huge, DefaultMaxSessionBytes+1); err != nil {
+		t.Fatal(err)
+	}
+	put(t, filepath.Join(dir, "rollout-c-"+laterID+".jsonl.zst"), []byte("damaged"))
+	raw := InventoryRaw(dir, "codex-sessions")
+	if raw.Files != 3 || raw.OverSessionLimit != 1 || raw.Largest != DefaultMaxSessionBytes+1 || raw.Unreadable != 1 {
+		t.Fatalf("raw = %+v", raw)
+	}
+	if small := InventoryRaw(filepath.Dir(put(t, filepath.Join(t.TempDir(), "x", "rollout-"+testID+".jsonl.zst"), compressed(t, text))), "c"); small.Largest != int64(len(text)) || small.OverSessionLimit != 0 {
+		t.Fatalf("small = %+v", small)
 	}
 }
 

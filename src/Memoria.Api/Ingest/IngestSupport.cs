@@ -456,15 +456,21 @@ public static class RequestBody
 	}
 
 	/// <summary>
-	/// Raises the server's own limit, which is 30 MB unless told otherwise. Call it before anything can refuse the request: the server
-	/// discards an unread body after an answer, and a body over its limit breaks the connection, so the caller would see a reset instead of the answer.
+	/// Raises the server's own limit, which is 30 MB unless told otherwise. Call it before anything can refuse the request.
+	/// <para>
+	/// The server's limit is set past <paramref name="limit"/>, by as much again, and <see cref="Open"/> enforces the limit itself.
+	/// A body that runs past the server's limit is cut off with a reset, which can reach the caller before the answer does: a
+	/// caller still sending, as one that sends the whole body before reading, sees a broken connection, not the 413 and its code.
+	/// The room past the limit is what <see cref="DiscardRestAsync"/> reads into before the 413 is written. Nothing past the
+	/// limit is kept: it is read only to be thrown away.
+	/// </para>
 	/// </summary>
 	public static void AllowUpTo(HttpContext context, long limit)
 	{
 		ArgumentNullException.ThrowIfNull(context);
 		if (context.Features.Get<IHttpMaxRequestBodySizeFeature>() is { IsReadOnly: false } feature)
 		{
-			feature.MaxRequestBodySize = limit;
+			feature.MaxRequestBodySize = limit > long.MaxValue / 2 ? long.MaxValue : limit * 2;
 		}
 	}
 
@@ -479,6 +485,43 @@ public static class RequestBody
 	}
 
 	private static readonly TimeSpan RateGracePeriod = TimeSpan.FromSeconds(10);
+
+	/// <summary>The longest a refused body is read for, so a slow sender holds the request no longer than this.</summary>
+	public static readonly TimeSpan DiscardDeadline = TimeSpan.FromMinutes(2);
+
+	/// <summary>
+	/// Reads and throws away what is left of a body refused as too large, before the 413 is written, so a caller still sending
+	/// reaches the end of its body and then reads the answer. Kestrel's own reading of the rest, after an answer, stops after a
+	/// few seconds and resets the connection, which a slower link does not outlast. This stops at the server's limit, which
+	/// <see cref="AllowUpTo"/> set to twice the route's, at <see cref="DiscardDeadline"/>, at the request's rate floor, or when
+	/// the request is aborted, and then the answer goes as it would have. A declared length past the server's limit is not
+	/// read at all, as reading it could only end in a reset, and nor is a body the caller sends only once told to continue.
+	/// </summary>
+	public static async Task DiscardRestAsync(HttpContext context, TimeSpan deadline, CancellationToken cancellationToken)
+	{
+		ArgumentNullException.ThrowIfNull(context);
+		// With no limit of the server's own to stop at, as under the test server, or a caller waiting to be told to send, nothing is read.
+		if (context.Features.Get<IHttpMaxRequestBodySizeFeature>()?.MaxRequestBodySize is not long allowed
+			|| context.Request.ContentLength > allowed
+			|| context.Request.Headers.Expect.Count > 0)
+		{
+			return;
+		}
+
+		using CancellationTokenSource stop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+		stop.CancelAfter(deadline);
+		byte[] buffer = new byte[64 * 1024];
+		try
+		{
+			while (await context.Request.Body.ReadAsync(buffer, stop.Token) > 0)
+			{
+			}
+		}
+		catch (Exception exception) when (exception is OperationCanceledException or Microsoft.AspNetCore.Http.BadHttpRequestException or IOException)
+		{
+			// Past the server's limit, too slow, too long, or gone: the answer goes as it is, and the connection may not survive it.
+		}
+	}
 
 	private static IngestRefusedException TooLarge(long limit)
 	{

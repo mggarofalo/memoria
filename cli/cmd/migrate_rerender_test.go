@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -567,11 +568,11 @@ func subagentFixture(t *testing.T) (*rerenderFixture, string, string) {
 	t.Helper()
 	f := newRerenderFixture(t)
 	writeFile(t, f.transcript, codexMeta(rerenderID, rerenderID, "2026-01-01T00:00:00Z")+codexMessage("user", "please\r\nlook")+codexMessage("assistant", "looked"))
-	sub := codexMeta(subagentID, rerenderID, "2026-01-01T00:05:00Z") + codexMessage("user", "sub task") + codexMessage("assistant", "sub done")
+	sub := codexMeta(subagentID, rerenderID, "2026-01-01T00:05:00Z") + codexMessage("user", "a sub task, longer than anything of its session's own") + codexMessage("assistant", "sub done")
 	archived := t.TempDir()
 	writeFile(t, filepath.Join(archived, "rollout-2026-01-01T00-05-00-"+subagentID+".jsonl.zst"), zstdOf(t, sub))
 	body := "---\nsession_id: \"" + rerenderID + "\"\npadding: \"" + strings.Repeat("x", migrate.DefaultMaxDocumentBytes) + "\"\n---\n\n# please\n\n" +
-		"## User\n\nplease\r\nlook\n\n## Assistant\n\nlooked\n\n## User\n\nsub task\n\n## Assistant\n\nsub done\n"
+		"## User\n\nplease\r\nlook\n\n## Assistant\n\nlooked\n\n## User\n\na sub task, longer than anything of its session's own\n\n## Assistant\n\nsub done\n"
 	writeFile(t, f.big, strings.ReplaceAll(body, "\n", "\r\n"))
 	return f, archived, sub
 }
@@ -677,6 +678,57 @@ func TestOnlyTheThreadsAnExportNeedsCanStopIt(t *testing.T) {
 			t.Fatal("a thread with no messages was sent")
 		}
 	}
+}
+
+// A transcript over the server's limit on one session upload is not sent, in a dry run or not: the server would refuse it whole.
+func TestATranscriptOverTheSessionLimitIsNotSent(t *testing.T) {
+	f := newRerenderFixture(t)
+	limit := strconv.Itoa(len(transcriptFor(rerenderID)) - 1)
+	for _, apply := range [][]string{{"--max-session-bytes", limit}, {"--max-session-bytes", limit, "--apply"}} {
+		server := newSessionServer(t)
+		summary, code, report := f.run(t, server, apply...)
+		if code != apperr.ExitGeneric || summary.TooLarge != 1 || len(server.uploads()) != 0 || !summary.Accounted() {
+			t.Fatalf("%v: code = %d, summary = %+v", apply, code, summary)
+		}
+		checkThreadProblem(t, report, "", strconv.Itoa(len(transcriptFor(rerenderID)))+" bytes, over the "+limit+" byte limit")
+	}
+	if summary, code, _ := f.run(t, nil, "--max-session-bytes", strconv.Itoa(len(transcriptFor(rerenderID)))); code != 0 || summary.WouldSend != 1 {
+		t.Fatalf("at the limit: code = %d, summary = %+v", code, summary)
+	}
+	if code := f.h.run("migrate", "rerender", "--qmd-config", f.config, "--codex-sessions", f.codex, "--max-session-bytes", "0"); code != apperr.ExitUsage {
+		t.Fatalf("a zero limit: code = %d", code)
+	}
+}
+
+// The size that counts is a compressed thread's decompressed one, and the thread over it is named.
+func TestACompressedThreadOverTheLimitIsNamed(t *testing.T) {
+	f, archived, sub := subagentFixture(t)
+	own, err := os.ReadFile(f.transcript)
+	if err != nil || len(own) >= len(sub) {
+		t.Fatalf("the fixture's own transcript is not the smaller: %v", err)
+	}
+	limit := strconv.Itoa(len(own))
+	summary, code, report := f.run(t, nil, "--codex-sessions", archived, "--max-session-bytes", limit)
+	if code != apperr.ExitGeneric || summary.TooLarge != 1 || !strings.Contains(f.h.stdout.String(), "transcriptTooLarge") {
+		t.Fatalf("code = %d, summary = %+v", code, summary)
+	}
+	checkThreadProblem(t, report, subagentID, "more than "+limit+" bytes decompressed, over the limit")
+	// On --accept-uncounted, one too large to send is not counted as sent on the owner's word.
+	writeFile(t, f.big, strings.Replace(mustRead(t, f.big), "sub done", "sub done, and text no thread holds", 1))
+	summary, _, report = f.run(t, nil, "--codex-sessions", archived, "--max-session-bytes", limit, "--accept-uncounted")
+	if summary.TooLarge != 1 || summary.AcceptedUncounted != 0 || strings.Contains(f.h.stdout.String(), "on your word") {
+		t.Fatalf("summary = %+v", summary)
+	}
+	checkThreadProblem(t, report, subagentID, "more than "+limit+" bytes decompressed, over the limit")
+}
+
+func mustRead(t *testing.T, file string) string {
+	t.Helper()
+	data, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
 }
 
 func TestASubagentThreadThatCannotBeReadStopsItsExport(t *testing.T) {
