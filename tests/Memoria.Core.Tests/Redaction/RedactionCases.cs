@@ -298,7 +298,7 @@ internal static class RedactionCases
 		("base64-token", "aGVsbG8gd29ybGQsIHRoaXMgaXMgb25seSBwbGFpbiB0ZXh0Lg=="),
 		("hex-token", "commit fd9b778c57587e23e883c887350ea537710bee7c, lock 5f2b9c1d0e8a7b6c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c"),
 		("hex-token", "68656c6c6f20776f726c642c2074686973206973206f6e6c7920706c61696e2074657874"),
-		("unicode-escaped-token", @"café <div> plain text and a name_with_underscores"),
+		("unicode-escaped-token", "caf\\u00e9 \\u003cdiv\\u003e \\ud83d\\ude00 it\\u2019s fine, and a name\\u005fwith\\u005funderscores"),
 		("square-production-token", "EA" + "AA" + Synthetic.Body(59, 292)),
 		("sendgrid-key", "S" + "G.short.short"),
 		("twilio-key", "A" + "C" + Synthetic.Hex(31, 220)),

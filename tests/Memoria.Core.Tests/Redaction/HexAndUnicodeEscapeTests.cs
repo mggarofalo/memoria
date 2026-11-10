@@ -68,22 +68,44 @@ public sealed class HexAndUnicodeEscapeTests
 		Assert.Equal(text, Redactor.Shared.RedactFragment(text).Text);
 	}
 
-	[Fact]
-	public void Hex_glued_to_other_letters_or_of_odd_length_is_not_decoded()
+	/// <summary>A JSON string's <c>\n</c>, PostgreSQL's <c>\x</c> and a <c>0x</c> put a letter before the run, and the run is still read.</summary>
+	[Theory]
+	[InlineData("{\"out\":\"line one\\n{S}\"}", "{\"out\":\"line one\\n[REDACTED:hex-token]\"}")]
+	[InlineData("{\"out\":\"a\\t{S}\"}", "{\"out\":\"a\\t[REDACTED:hex-token]\"}")]
+	[InlineData("select '\\x{S}'::bytea", "select '\\x[REDACTED:hex-token]'::bytea")]
+	[InlineData("0x{S}", "0x[REDACTED:hex-token]")]
+	public void Hex_after_an_escape_or_a_prefix_is_replaced(string template, string expected)
 	{
 		string hex = Convert.ToHexStringLower(Encoding.ASCII.GetBytes(Synthetic.GitHubClassic('p')));
 
-		Assert.Equal("0x" + hex, Redactor.Shared.RedactFragment("0x" + hex).Text);
+		Assert.Equal(expected, Redactor.Shared.RedactFragment(template.Replace("{S}", hex, StringComparison.Ordinal)).Text);
+	}
+
+	[Fact]
+	public void Hex_of_odd_length_or_glued_to_more_hex_is_not_decoded()
+	{
+		string hex = Convert.ToHexStringLower(Encoding.ASCII.GetBytes(Synthetic.GitHubClassic('p')));
+
 		Assert.Equal(hex[..^1], Redactor.Shared.RedactFragment(hex[..^1]).Text);
+		Assert.Equal("a" + hex, Redactor.Shared.RedactFragment("a" + hex).Text);
 	}
 
 	[Theory]
-	[InlineData(@"café au lait")]
+	[InlineData("caf\\u00e9 au lait")]
 	[InlineData("\\u003cdiv class=\\u0022x\\u0022\\u003e")]
-	[InlineData(@"emoji 😀 here")]
+	[InlineData("emoji \\ud83d\\ude00 here, it\\u2019s fine")]
+	[InlineData("C:\\users\\u0041dmin\\notes")]
 	public void Escapes_in_ordinary_text_stay(string text)
 	{
 		Assert.Equal(text, Redactor.Shared.RedactFragment(text).Text);
+	}
+
+	[Fact]
+	public void An_escaped_token_after_a_json_newline_keeps_the_newline_escape()
+	{
+		string escaped = string.Concat(Synthetic.GitHubClassic('p').Select(static c => $"\\u{(int)c:X4}"));
+
+		Assert.Equal("{\"x\":\"a\\n[REDACTED:unicode-escaped-token]\"}", Redactor.Shared.RedactFragment("{\"x\":\"a\\n" + escaped + "\"}").Text);
 	}
 
 	[Fact]
