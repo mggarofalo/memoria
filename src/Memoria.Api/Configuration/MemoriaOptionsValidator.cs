@@ -37,6 +37,7 @@ public sealed class MemoriaOptionsValidator : IValidateOptions<MemoriaOptions>
 
 		Require(sidecar.Timeout > TimeSpan.Zero, "Memoria:Sidecar:Timeout must be positive.", failures);
 		Require(sidecar.ReadinessTimeout > TimeSpan.Zero, "Memoria:Sidecar:ReadinessTimeout must be positive.", failures);
+		Require(sidecar.ReadinessCacheTime >= TimeSpan.Zero && sidecar.ReadinessCacheTime <= TimeSpan.FromMinutes(1), "Memoria:Sidecar:ReadinessCacheTime must be between zero and one minute.", failures);
 	}
 
 	private static void ValidateSearch(SearchOptions search, List<string> failures)

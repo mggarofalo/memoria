@@ -540,7 +540,7 @@
         "tags": [
           "system"
         ],
-        "description": "The index is open and the sidecar can serve. `models.resident` reports whether the embedding, reranking and expansion models are loaded; with `requireModels=true` the route returns 503 until they are.",
+        "description": "The index is open and the sidecar can serve. `models.resident` reports whether the embedding, reranking and expansion models are loaded; with `requireModels=true` the route returns 503 until they are. The `index` counts are shared by callers within 2 s of each other, as each count scans the index.",
         "parameters": [
           {
             "schema": {

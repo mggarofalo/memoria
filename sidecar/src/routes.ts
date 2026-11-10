@@ -9,6 +9,7 @@ import { parseLineRange } from "./line-range.ts";
 import { hasFilters, matchesFilters, parseBound, type DocumentMetadata, type SearchFilters } from "./metadata.ts";
 import { DEFAULT_MAX_TOTAL_BYTES, MAX_BYTES_CEILING, MAX_REFERENCE_LENGTH, MAX_TOTAL_BYTES_CEILING, resolveLookup, resolveMultiGet } from "./multi-get.ts";
 import { errorResponses, metadataOrNull } from "./schemas.ts";
+import { sharedFor } from "./shared-result.ts";
 import type { DocumentInfo, DocumentLookupError, QmdBackend, SearchHit, SearchQuery } from "./store.ts";
 
 // --- helpers -----------------------------------------------------------------
@@ -266,8 +267,12 @@ function multiGetView(doc: Parameters<typeof documentView>[0] & { body?: string 
   });
 }
 
+/** How long one index status serves `/ready`. Each costs scans of the index on this one event loop, and anyone may ask the API's. */
+export const READY_STATUS_TTL_MS = 2_000;
+
 export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Promise<void> {
   const { backend, config } = ctx;
+  const readyStatus = sharedFor(READY_STATUS_TTL_MS, () => backend.getStatus());
 
   // ---- system ----------------------------------------------------------------
 
@@ -383,7 +388,8 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         summary: "Readiness",
         description:
           "The index is open and the sidecar can serve. `models.resident` reports whether the embedding, reranking and " +
-          "expansion models are loaded; with `requireModels=true` the route returns 503 until they are.",
+          "expansion models are loaded; with `requireModels=true` the route returns 503 until they are. The `index` counts " +
+          "are shared by callers within 2 s of each other, as each count scans the index.",
         querystring: {
           type: "object",
           properties: { requireModels: { type: "boolean", default: false } },
@@ -392,7 +398,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       },
     },
     async (request, reply) => {
-      const status = await backend.getStatus();
+      const status = await readyStatus();
       const models = backend.models();
       const llm = backend.llmHealth();
       // In remote mode workers warm themselves, so "warm" can only mean workers

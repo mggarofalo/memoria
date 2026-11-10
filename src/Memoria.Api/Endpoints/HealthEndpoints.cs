@@ -28,7 +28,8 @@ public static class HealthEndpoints
 			.WithName("ready")
 			.WithSummary("Readiness")
 			.WithDescription(
-				"Probes the memoria-qmd sidecar. 200 whenever it answers, with `status` of `ready`, `warming` or `degraded`: "
+				"Probes the memoria-qmd sidecar, at most once per `Memoria:Sidecar:ReadinessCacheTime` (2 s by default): callers in that "
+				+ "time share one answer. 200 whenever it answers, with `status` of `ready`, `warming` or `degraded`: "
 				+ "losing GPU workers makes search rank worse, and must not take the API out of rotation. "
 				+ "503 only when the sidecar cannot be reached, unless `strict=true`, which also answers 503 for anything but `ready`. "
 				+ "Anonymous for orchestrators: without an admin key the body carries only the status word, and `not_ready` for an "
@@ -44,18 +45,18 @@ public static class HealthEndpoints
 	private static async Task<Results<Ok<ReadinessReport>, JsonHttpResult<ReadinessReport>>> ReadyAsync(
 		[FromQuery(Name = "strict")][Description("Answer 503 unless the sidecar is fully ready, with no degradation.")] bool? strict,
 		IMemoriaQmdClient sidecar,
+		ReadinessCache readiness,
 		ICallerScope scope,
 		IOptions<MemoriaOptions> options,
 		HttpContext context)
 	{
 		SidecarOptions settings = options.Value.Sidecar;
-		using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted);
-		timeout.CancelAfter(settings.ReadinessTimeout);
 
 		ReadinessReport report;
 		try
 		{
-			SidecarReadinessResult result = await sidecar.GetReadinessAsync(requireModels: false, timeout.Token);
+			// Shared with every caller in the same moment, as anyone may ask: see ReadinessCache.
+			SidecarReadinessResult result = await readiness.GetAsync(token => sidecar.GetReadinessAsync(requireModels: false, token)).WaitAsync(context.RequestAborted);
 			report = Answered(result.Details, strict == true);
 		}
 		catch (SidecarException ex)

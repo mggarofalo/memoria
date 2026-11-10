@@ -48,7 +48,7 @@
           "Health"
         ],
         "summary": "Readiness",
-        "description": "Probes the memoria-qmd sidecar. 200 whenever it answers, with `status` of `ready`, `warming` or `degraded`: losing GPU workers makes search rank worse, and must not take the API out of rotation. 503 only when the sidecar cannot be reached, unless `strict=true`, which also answers 503 for anything but `ready`. Anonymous for orchestrators: without an admin key the body carries only the status word, and `not_ready` for an unreachable sidecar, with `reason` and `sidecar` null. An admin key gets the full report, including stuck jobs and documents set aside.",
+        "description": "Probes the memoria-qmd sidecar, at most once per `Memoria:Sidecar:ReadinessCacheTime` (2 s by default): callers in that time share one answer. 200 whenever it answers, with `status` of `ready`, `warming` or `degraded`: losing GPU workers makes search rank worse, and must not take the API out of rotation. 503 only when the sidecar cannot be reached, unless `strict=true`, which also answers 503 for anything but `ready`. Anonymous for orchestrators: without an admin key the body carries only the status word, and `not_ready` for an unreachable sidecar, with `reason` and `sidecar` null. An admin key gets the full report, including stuck jobs and documents set aside.",
         "operationId": "ready",
         "parameters": [
           {
