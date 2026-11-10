@@ -510,8 +510,7 @@ export async function openBackend(options: OpenBackendOptions): Promise<OpenedBa
   update: async (o) => {
     const r = await store.update(o.collections ? { collections: o.collections } : {});
     // What the scan found deleted leaves nothing behind it: see purge.ts. Any scan can find one.
-    const keep = collectionsToKeep(db as never, rootsStatement.all() as CollectionRoot[], (message) => options.onLlmWarning?.(message));
-    const purged = purgeDeleted(db as never, keep);
+    const purged = purgeDeleted(db as never, () => collectionsToKeep(db as never, rootsStatement.all() as CollectionRoot[], (message) => options.onLlmWarning?.(message)));
     if (purged === null) options.onLlmWarning?.("The index was busy, so what deleted documents left in it waits for the next scan to remove it.");
     if (removedAny(purged)) truncateLog(db as never);
     return {

@@ -225,13 +225,18 @@ A delete (`DELETE /v1/documents`, or a session that replaces its own parts) take
 
 Text and vectors are kept by content, so when another document holds the same text word for word, that text and its vectors stay, as they are that document's too.
 
-A collection the scan found with no document at all needs one more check, as that is also what a mount that went away looks like. Removing everything then would cost every vector of the collection a re-embed when it comes back. So the sidecar keeps a marker file, `.memoria-root`, in each collection root: `init-index` writes it into each root it creates, and every scan writes it into each root that holds a document. QMD indexes only `.md` files, so it is never a document, and a root holding only the marker still counts as empty for a first ingest. Then:
+A collection the scan found with no document at all needs one more check, as that is also what a mount that went away looks like. Removing everything then would cost every vector of the collection a re-embed when it comes back. So the sidecar keeps a marker file, `.memoria-root`, in each collection root: `init-index` writes it into each root folder it creates, never into one that was already there, and every scan writes it into each root that holds a document. QMD indexes only `.md` files, so it is never a document, and a root holding only the marker still counts as empty for a first ingest. Then:
 
 - **The folder is missing, or cannot be read.** Nothing of the collection is removed, and each scan logs a warning naming it, until the folder is back.
 - **The folder is there, readable, and has its marker.** Its documents really were deleted, and they are removed as any other delete is, the last one included.
 - **The folder is there and readable but has no marker.** This is what the empty folder under a mount that failed looks like, so nothing is removed, and each scan logs a warning naming the collection and the marker. A root the sidecar never saw holding a document, from before the marker existed, is in the same state: if its documents really were all deleted, put an empty `.memoria-root` in it, and the next scan removes them.
 
-The marker is the only signal: a mount that failed underneath a root that is itself marked, as when a marked folder holds a separate mount for its subfolders, is not detected. Deleting the marker turns the safeguard off for that root, and makes nothing unsafe.
+The marker is the only signal, so two things defeat it:
+
+- **A mount that fails underneath a marked root,** as when a marked folder holds a separate mount for its subfolders, is not detected.
+- **A write while the mount is down.** Ingest creates a missing root and writes into it, and the next scan then marks that folder. If the mount comes back over it and later fails again, that marked folder underneath counts as emptied by deletes. Keep the corpus mounted before the sidecar starts, as compose does with a volume.
+
+Deleting the marker turns the safeguard off for that root, and makes nothing unsafe.
 
 A **busy index**, as when a `qmd` run outside the sidecar holds it, also waits: nothing is removed, a warning is logged, and the next scan tries again.
 

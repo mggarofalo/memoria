@@ -76,8 +76,9 @@ function removeVectors(db: PurgeDb): number {
   return changes(db, `DELETE FROM content_vectors WHERE hash NOT IN (${HELD})`);
 }
 
-function removeAll(db: PurgeDb, keep: readonly string[]): PurgeCounts {
-  const documents = Number(db.prepare("DELETE FROM documents WHERE active = 0 AND collection NOT IN (SELECT value FROM json_each(?))").run(JSON.stringify(keep)).changes);
+function removeAll(db: PurgeDb, keep: () => readonly string[]): PurgeCounts {
+  // Decided inside the transaction, so no other writer can empty a collection between the decision and the delete.
+  const documents = Number(db.prepare("DELETE FROM documents WHERE active = 0 AND collection NOT IN (SELECT value FROM json_each(?))").run(JSON.stringify(keep())).changes);
   const vectors = removeVectors(db);
   const deadLetters = hasTable(db, "memoria_dead_letters")
     ? changes(db, "DELETE FROM memoria_dead_letters WHERE NOT EXISTS (SELECT 1 FROM documents d WHERE d.hash = memoria_dead_letters.hash AND d.path = memoria_dead_letters.path)")
@@ -107,7 +108,7 @@ function inTransaction<T>(db: PurgeDb, work: () => T): T {
  * Remove what deleted documents left. Null if the index was busy, as when an operator's
  * own `qmd` holds it: nothing is changed, and the next scan tries again.
  */
-export function purgeDeleted(db: PurgeDb, keep: readonly string[] = []): PurgeCounts | null {
+export function purgeDeleted(db: PurgeDb, keep: () => readonly string[] = () => []): PurgeCounts | null {
   try {
     return withShortBusyTimeout(db as never, () => inTransaction(db, () => removeAll(db, keep)));
   } catch (err) {

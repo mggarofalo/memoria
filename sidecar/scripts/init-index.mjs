@@ -48,8 +48,10 @@ try {
     if (!existsSync(known.get(name))) console.warn(`${name}'s root ${known.get(name)} does not exist. Is the corpus volume mounted?`);
   }
   // Every root first, so a failure here leaves no collection recorded and never scanned.
-  // Each new root gets the sidecar's marker (src/collection-roots.ts), so a scan can tell it emptied by deletes from a mount that failed.
+  // A root made here gets the sidecar's marker (src/collection-roots.ts), so a scan can tell it emptied by deletes from a mount
+  // that failed. One already there is left as it is: it may be the empty folder under a mount that is down right now.
   for (const { root } of missing) {
+    if (existsSync(root)) continue;
     mkdirSync(root, { recursive: true });
     writeFileSync(path.join(root, ".memoria-root"), "This folder is a Memoria collection root. The sidecar keeps this file to tell a folder emptied by deletes from a mount that is missing. Leave it here.\n", { flag: "wx" });
   }

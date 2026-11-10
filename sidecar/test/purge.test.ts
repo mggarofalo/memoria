@@ -74,7 +74,7 @@ test("a collection named to keep keeps every row, and what only it holds; any ot
   doc(db, 7, "emptied", "c.md", "kept", 0);
   assert.deepEqual(collectionsWithoutDocuments(db as unknown as PurgeDb).sort(), ["emptied", "unmounted"]);
   assert.deepEqual(collectionsWithDocuments(db as unknown as PurgeDb), ["c"]);
-  assert.deepEqual(purgeDeleted(db as unknown as PurgeDb, ["unmounted"]), { documents: 3, content: 1, vectors: 2, deadLetters: 2 }, "c's and emptied's deletes go");
+  assert.deepEqual(purgeDeleted(db as unknown as PurgeDb, () => ["unmounted"]), { documents: 3, content: 1, vectors: 2, deadLetters: 2 }, "c's and emptied's deletes go");
   assert.deepEqual(rows(db, "SELECT collection || '/' || path FROM documents WHERE active = 0 ORDER BY id"), ["unmounted/a.md", "unmounted/b.md"]);
   assert.deepEqual(rows(db, "SELECT hash_seq FROM vectors_vec WHERE hash_seq = 'away_0'"), ["away_0"]);
   assert.deepEqual(purgeDeleted(db as unknown as PurgeDb), { documents: 2, content: 1, vectors: 1, deadLetters: 0 }, "kept no longer, its deletes go too");
