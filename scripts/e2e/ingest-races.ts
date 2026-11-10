@@ -129,7 +129,11 @@ async function uploadAfterADeleteAnswered(h: Harness, keys: ApiKeyMaker): Promis
   h.check("races: an upload sent after a delete answered keeps its file", lost.length === 0, lost.join("; "));
 }
 
-/** The delete follows the upload in, so it often lands second. Either answer is honest, and the file agrees with them. */
+/**
+ * The delete follows the upload in, so it often lands second. The upload answers 202 or 409 `deleted_during_upload`, and the file is there exactly
+ * when the upload answered 202 and the delete removed nothing. A delete that stops the upload before its write goes out removes no file, so it answers
+ * `deleted: false` while the upload answers 409, and nothing is stored.
+ */
 async function deleteFollowingAnUpload(h: Harness, keys: ApiKeyMaker): Promise<void> {
   const key = await keys("following", ["ingest", "read"]);
   const wrong: string[] = [];
@@ -139,7 +143,9 @@ async function deleteFollowingAnUpload(h: Harness, keys: ApiKeyMaker): Promise<v
     await pause(round % 4);
     const [newer, deleted] = await Promise.all([sent, deleteById(h, key, sourceId)]);
     const held = existsSync(path.join(folder(h), documentPath(sourceId)));
-    if (held === saidDeleted(deleted) || (newer.status !== 202 && code(newer) !== "deleted_during_upload")) wrong.push(`round ${round}: upload ${newer.status}, delete ${deleted.status} ${deleted.text.slice(0, 120)}, ${held ? "held" : "gone"}`);
+    const honestUpload = newer.status === 202 || (newer.status === 409 && code(newer) === "deleted_during_upload");
+    const shouldHold = newer.status === 202 && !saidDeleted(deleted);
+    if (!honestUpload || deleted.status !== 202 || held !== shouldHold) wrong.push(`round ${round}: upload ${newer.status}${newer.status === 202 ? "" : ` ${code(newer)}`}, delete ${deleted.status} ${deleted.text.slice(0, 120)}, ${held ? "held" : "gone"}`);
   }
 
   h.check("races: a delete says whether it took the file, and the file agrees", wrong.length === 0, wrong.join("; "));
