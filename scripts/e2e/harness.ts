@@ -107,6 +107,9 @@ export class Harness {
   private readonly fds: number[] = [];
   private readonly cli = path.join(this.dir, process.platform === "win32" ? "memoria.exe" : "memoria");
   protected readonly sidecarSecret = randomBytes(32).toString("base64url");
+  /** The API's ingest digest key, and a worker token for layouts that set one: never printed either. */
+  protected readonly digestKey = randomBytes(32).toString("base64url");
+  protected readonly workerToken = randomBytes(24).toString("base64url");
   /** False where the servers run as deployed, with nothing between them to record what the sidecar was asked. */
   readonly hasProxy: boolean = true;
 
@@ -154,7 +157,8 @@ export class Harness {
     for (const [name, text] of this.serviceLogs()) {
       const lines = this.scrub(secrets.reduce((so, far) => so.split(far).join("[SECRET]"), text)).split("\n");
       console.log(`::group::${name} (last ${Math.min(maxLines, lines.length)} of ${lines.length} lines)`);
-      console.log(lines.slice(-maxLines).join("\n"));
+      // Indented, so a line of the log cannot begin with "::" and be read as a workflow command.
+      console.log(lines.slice(-maxLines).map((line) => `  ${line}`).join("\n"));
       console.log("::endgroup::");
     }
   }
@@ -173,9 +177,9 @@ export class Harness {
     return [...logs, ...others.map((file): [string, string] => [file, readFileSync(path.join(this.dir, file), "utf8")])];
   }
 
-  /** The whole key and its secret part alone, plus the sidecar's secret: none may be stored or logged. */
+  /** The whole key and its secret part alone, plus the shared secrets: none may be stored or logged. */
   sensitiveValues(): string[] {
-    return [...this.secrets, ...this.secrets.map((key) => key.split("_")[2] ?? key), this.sidecarSecret];
+    return [...this.secrets, ...this.secrets.map((key) => key.split("_")[2] ?? key), this.sidecarSecret, this.digestKey, this.workerToken];
   }
 
   /** Remembers a key, so nothing printed from here on can repeat it. */
@@ -435,7 +439,7 @@ await store.close();`;
       DOTNET_NOLOGO: "1",
       Memoria__Sidecar__BaseUrl: `http://127.0.0.1:${this.proxyPort}`,
       Memoria__Sidecar__Secret: this.sidecarSecret,
-      Memoria__Ingest__DigestKey: randomBytes(32).toString("base64url"),
+      Memoria__Ingest__DigestKey: this.digestKey,
       Memoria__Sidecar__ReadyRequiresModels: "false",
       Memoria__Search__MaxMultiGetBytes: String(BATCH_BUDGET),
       Memoria__Auth__Mode: "ApiKey",
