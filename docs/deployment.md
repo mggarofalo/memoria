@@ -4,7 +4,7 @@ One host runs the API and the sidecar, and workers on other machines run the mod
 
 ```
 laptop / desktop / phone / cloud agents
-        │  HTTP on the LAN, or HTTPS through the reverse proxy
+        │  HTTPS through the reverse proxy, on its own network
         ▼
   Memoria.Api         container, ghcr.io/mggarofalo/memoria, port 8080      ┐
         │  one bridge network, by service name, nothing between          │ the Linux
@@ -199,10 +199,10 @@ These two collections are the ones the compose file opens to ingest. Each opens 
 | `MEMORIA_WORKER_TOKEN_LAPTOP` | empty | The same, for a second worker. |
 | `MEMORIA_CORPUS` | the `memoria-corpus` volume | A host directory for the collection roots instead, owned by uid 1000. |
 | `MEMORIA_BIND_ADDRESS` | `127.0.0.1` | Where the API's port is published. The host's LAN address lets LAN clients connect directly. `ufw` does not filter a published port: see [published ports and the host firewall](#published-ports-and-the-host-firewall). |
-| `MEMORIA_PROXY_NETWORK` | `memoria-proxy` | The name of the network the reverse proxy reaches the API on. See [the proxy's network](#the-proxys-network). |
+| `MEMORIA_PROXY_NETWORK` | `memoria-proxy` | The name of the network the reverse proxy reaches the API on. Change the proxy's external network name with it. See [the proxy's network](#the-proxys-network). |
 | `MEMORIA_TRUSTED_PROXY` | empty | The reverse proxy's address as the API container sees it. Without it, all clients share one failed-authentication budget. |
 
-Both containers run as a user, not root, with a read-only root filesystem, a `tmpfs` at `/tmp`, every Linux capability dropped and `no-new-privileges`. Everything they write is on the volumes. `scripts/e2e/compose.ts` checks each of these.
+Both containers run as a user, not root, with a read-only root filesystem, a `tmpfs` at `/tmp`, every Linux capability dropped and `no-new-privileges`. Everything they write is on the volumes. `scripts/e2e/compose.ts` checks each of these, for both.
 
 The API runs with a 1 GiB heap (`DOTNET_GCHeapHardLimit`), the least ingest is sized for. Pass secrets through `deploy/.env` or a Docker secret; never bake them into an image or commit them.
 
@@ -512,11 +512,22 @@ networks:
     external: true
 ```
 
-Start Memoria first, as its compose project creates the network. Then the proxy host's
-forward is `memoria-api:8080`, and `MEMORIA_TRUSTED_PROXY` is the proxy's address on
-`memoria-proxy` (`docker network inspect memoria-proxy`). `scripts/e2e/compose.ts` checks
+Memoria's compose project creates the network, so:
+
+- **Start Memoria first.** The proxy refuses to start while the network is missing.
+- **Do not create the network by hand.** One made with `docker network create` lacks
+  compose's label, and Memoria's `up` refuses it. Remove it, and let `up` make it.
+- **Memoria's `down` removes it if nothing else is on it,** as when the proxy is
+  stopped. Bring Memoria up again before the proxy. With the proxy running, `down`
+  leaves the network in place, and the next `up` uses it.
+
+The proxy host's forward is `memoria-api:8080`. Set `MEMORIA_TRUSTED_PROXY` to the
+network's subnet, from `docker network inspect memoria-proxy`, rather than the proxy's
+own address: Docker assigns that address and can give the proxy another, while only the
+API and the proxy are on the network. The subnet stays until the network is made again,
+so check it after a `down` that removed the network. `scripts/e2e/compose.ts` checks
 that the API is the only container there, and that a container there reaches the API
-and cannot reach the sidecar.
+and cannot reach the sidecar, by name or by address.
 
 ### Published ports and the host firewall
 
@@ -526,14 +537,31 @@ address is open to the whole LAN whatever `ufw` says. Keep the API's published p
 `127.0.0.1`, the default, and let the proxy reach the API over its network instead.
 If LAN clients must connect without the proxy, bind `MEMORIA_BIND_ADDRESS` to the LAN
 address and filter in Docker's own `DOCKER-USER` chain, which Docker consults first.
-For example, to let only the LAN's range reach the API's port:
+For example, with the host at `192.168.1.10` on `eth0`, to let only the LAN's range reach
+the API's published port:
 
 ```bash
-iptables -I DOCKER-USER -p tcp -m conntrack --ctorigdstport 8080 ! -s 192.168.1.0/24 -j DROP
+iptables -I DOCKER-USER -i eth0 -p tcp -m conntrack --ctorigdst 192.168.1.10 --ctorigdstport 8080 ! -s 192.168.1.0/24 -j DROP
 ```
 
-Rules in `DOCKER-USER` do not survive a reboot on their own: save them with
-`iptables-persistent` or recreate them at boot.
+Match the interface and the host's address as well as the port. `DOCKER-USER` also
+sees traffic between containers, and without them the rule would drop the proxy
+calling `memoria-api:8080` on its own network.
+
+A rule added this way is gone after a reboot. Keep it in `ufw`'s own file instead,
+`/etc/ufw/after.rules`, at its end, so `ufw` loads it with the rest. Do not install
+`iptables-persistent` for it: it replaces `ufw`, which the tunnel's rule above relies on.
+
+```text
+*filter
+:DOCKER-USER - [0:0]
+-A DOCKER-USER -i eth0 -p tcp -m conntrack --ctorigdst 192.168.1.10 --ctorigdstport 8080 ! -s 192.168.1.0/24 -j DROP
+-A DOCKER-USER -j RETURN
+COMMIT
+```
+
+Then `ufw reload`, and after the next reboot check it is there with
+`iptables -L DOCKER-USER -n`.
 
 `X-Trace-Id` on every response, and `traceId` in every problem-details body,
 are the ids to grep for in the API's and the sidecar's logs.

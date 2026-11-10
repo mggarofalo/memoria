@@ -135,20 +135,24 @@ function boundary(): void {
 function proxyNetwork(): void {
   const members = docker(["network", "inspect", PROXY_NETWORK, "--format", "{{range .Containers}}{{.Name}} {{end}}"]).trim().split(" ");
   check("compose: the API is the only container on the proxy network", JSON.stringify(members) === JSON.stringify(["memoria-e2e-api"]), members);
-  // As the proxy would be: a container on that network alone.
+  // As the proxy would be: a container on that network alone, from the sidecar's own image, so nothing is pulled.
+  // By address as well as by name, as a name that does not resolve proves nothing about the network.
+  const address = docker(["inspect", SIDECAR, "--format", `{{(index .NetworkSettings.Networks "${PROJECT}_memoria").IPAddress}}`]).trim();
   const probe = "const get=(u)=>fetch(u,{signal:AbortSignal.timeout(3000)}).then(r=>r.status,e=>'unreachable');" +
-    "Promise.all([get('http://memoria-api:8080/health'),get('http://memoria-qmd:8282/health'),get('http://" + SIDECAR + ":8282/health')]).then(r=>process.stdout.write(JSON.stringify(r)))";
-  const seen = docker(["run", "--rm", "--network", PROXY_NETWORK, "node:26-bookworm-slim", "node", "-e", probe]).trim();
-  check("compose: from the proxy network the API answers, and the sidecar cannot be reached", seen === JSON.stringify([200, "unreachable", "unreachable"]), seen);
+    `Promise.all([get('http://memoria-api:8080/health'),get('http://memoria-qmd:8282/health'),get('http://${SIDECAR}:8282/health'),get('http://${address}:8282/health')]).then(r=>process.stdout.write(JSON.stringify(r)))`;
+  const seen = docker(["run", "--rm", "--network", PROXY_NETWORK, "--entrypoint", "node", `ghcr.io/mggarofalo/memoria-qmd:${VERSION}`, "-e", probe]).trim();
+  check("compose: from the proxy network the API answers, and the sidecar cannot be reached by name or address", address !== "" && seen === JSON.stringify([200, "unreachable", "unreachable", "unreachable"]), [address, seen]);
 }
 
-/** Both containers: a read-only root, no capabilities, nothing gained by exec, and still a /tmp to write. */
+/** Both containers: a user, a read-only root, no capabilities, nothing gained by exec, and still a /tmp to write. */
 function hardened(): void {
+  check("compose: the API runs as a user, not root", docker(["exec", "memoria-e2e-api", "id", "-u"]).trim() !== "0");
   for (const container of ["memoria-e2e-api", SIDECAR]) {
     const settings = docker(["inspect", container, "--format", "{{.HostConfig.ReadonlyRootfs}} {{json .HostConfig.CapDrop}} {{json .HostConfig.SecurityOpt}}"]).trim();
     check(`compose: ${container} has a read-only root, drops every capability, and gains no privileges`, settings === 'true ["ALL"] ["no-new-privileges:true"]', settings);
-    const writes = docker(["exec", container, "sh", "-c", "touch /app/x 2>/dev/null && echo app; touch /tmp/x && echo tmp"]).trim();
-    check(`compose: ${container} cannot write its image, and can write /tmp`, writes === "tmp", writes);
+    // Its own home, which its user could write but for the read-only root.
+    const writes = docker(["exec", container, "sh", "-c", 'touch "$HOME/x" 2>/dev/null && echo home; touch /tmp/x && echo tmp']).trim();
+    check(`compose: ${container} cannot write even its own home in the image, and can write /tmp`, writes === "tmp", writes);
   }
 }
 
