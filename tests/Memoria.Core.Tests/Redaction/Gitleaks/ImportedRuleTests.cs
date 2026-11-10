@@ -241,6 +241,22 @@ public sealed partial class ImportedRuleTests
 		Assert.Equal("x [REDACTED:gitleaks-planetscale-password] y", output);
 	}
 
+	/// <summary>A complete token keeps what follows a separator its alphabet lacks: <c>rdme_</c> tokens hold no <c>/</c>, <c>-</c> or <c>.</c>.</summary>
+	[Theory]
+	[InlineData("token {R}/{H} done", "token [REDACTED:gitleaks-readme-api-token]/{H} done")]
+	[InlineData("token {R}-{H} done", "token [REDACTED:gitleaks-readme-api-token]-{H} done")]
+	[InlineData("see {R}.{H} done", "see [REDACTED:gitleaks-readme-api-token].{H} done")]
+	[InlineData("GET /v1/{R}/items/a8F3kQ9zX2mP7wLc done", "GET /v1/[REDACTED:gitleaks-readme-api-token]/items/a8F3kQ9zX2mP7wLc done")]
+	public void A_complete_token_keeps_the_text_after_a_separator(string template, string expected)
+	{
+		string token = "rdme" + "_" + Synthetic.Hex(70, 4114);
+		string hex = Synthetic.Hex(40, 4115);
+
+		string Fill(string text) => text.Replace("{R}", token, StringComparison.Ordinal).Replace("{H}", hex, StringComparison.Ordinal);
+
+		Assert.Equal(Fill(expected), Redactor.Shared.RedactFragment(Fill(template)).Text);
+	}
+
 	[Fact]
 	public void A_period_ending_the_sentence_stays()
 	{

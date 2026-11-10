@@ -45,11 +45,12 @@ internal static class GitleaksRules
 	private static RedactionRule Rule(GitleaksRuleSpec spec, CompiledAllowlist global)
 	{
 		CompiledAllowlist[] own = [.. spec.Allowlists.Select(static allowlist => new CompiledAllowlist(allowlist))];
+		string separators = SeparatorsIn(SecretPart(spec.Pattern));
 		return new RedactionRule(
 			Prefix + spec.Id,
 			null,
 			candidate => Accept(candidate, spec.Entropy, global, own),
-			extend: ThroughGluedText,
+			extend: candidate => ThroughGluedText(candidate, separators),
 			keywords: spec.Keywords,
 			backstop: true,
 			buildPattern: () => RedactionRules.Pattern(spec.Pattern));
@@ -61,7 +62,7 @@ internal static class GitleaksRules
 	/// One <c>-</c> or <c>_</c> and a short suffix after the run go too, as the <c>-X</c> that ends that key, but no more, so a
 	/// token followed by <c>-backup-copy</c> keeps its words.
 	/// </summary>
-	private static int ThroughGluedText(SecretCandidate candidate)
+	private static int ThroughGluedText(SecretCandidate candidate, string separators)
 	{
 		string input = candidate.Input;
 		int end = PaddingEnd(input, AlphanumericEnd(input, candidate.End));
@@ -70,17 +71,19 @@ internal static class GitleaksRules
 			return end - 1;
 		}
 
-		return RandomContinuationEnd(input, end) ?? GluedSuffixEnd(input, end);
+		return RandomContinuationEnd(input, end, separators) ?? GluedSuffixEnd(input, end);
 	}
 
 	/// <summary>
 	/// A token longer than its rule allows, with separators in its alphabet, can stop the match at an inner <c>-</c>, <c>.</c> or
 	/// <c>%</c>. When what follows the separator still reads as random, it is the rest of the token, and goes too. Words after a
-	/// separator stay, so <c>-backup-copy</c> is kept.
+	/// separator stay, so <c>-backup-copy</c> is kept. The separator must be one the secret's own alphabet holds: the patterns end
+	/// greedily, so a match that stops at such a character was cut short. A complete <c>rdme_</c> token, whose alphabet has no
+	/// <c>/</c>, keeps the path after it.
 	/// </summary>
-	private static int? RandomContinuationEnd(string input, int end)
+	private static int? RandomContinuationEnd(string input, int end, string separators)
 	{
-		if (end >= input.Length || input[end] is not ('-' or '.' or '%' or '+' or '/' or '_'))
+		if (end >= input.Length || !separators.Contains(input[end], StringComparison.Ordinal))
 		{
 			return null;
 		}
@@ -104,6 +107,94 @@ internal static class GitleaksRules
 	}
 
 	private const int MinRandomPiece = 8;
+
+	private const string Separators = "-.%+/_";
+
+	/// <summary>The pattern's <c>secret</c> group, or the whole pattern when the whole match is the secret.</summary>
+	private static string SecretPart(string pattern)
+	{
+		int start = pattern.IndexOf("(?<secret>", StringComparison.Ordinal);
+		if (start < 0)
+		{
+			return pattern;
+		}
+
+		int depth = 0;
+		bool inClass = false;
+		for (int i = start; i < pattern.Length; i++)
+		{
+			char c = pattern[i];
+			if (c == '\\')
+			{
+				i++;
+			}
+			else if (inClass || c == '[')
+			{
+				inClass = c != ']' || !inClass;
+			}
+			else
+			{
+				depth += c == '(' ? 1 : c == ')' ? -1 : 0;
+				if (depth == 0)
+				{
+					return pattern[start..(i + 1)];
+				}
+			}
+		}
+
+		return pattern[start..];
+	}
+
+	/// <summary>
+	/// The separators a pattern's character classes hold as literals: an escaped one, a <c>-</c> first or last, or any other
+	/// unescaped. The translator writes every class in ASCII, so <c>\w</c> has already become <c>[0-9A-Za-z_]</c>.
+	/// </summary>
+	private static string SeparatorsIn(string pattern)
+	{
+		HashSet<char> found = [];
+		int classStart = -1;
+		for (int i = 0; i < pattern.Length; i++)
+		{
+			char c = pattern[i];
+			if (c == '\\' && i + 1 < pattern.Length)
+			{
+				AddIf(found, classStart >= 0, pattern[++i]);
+			}
+			else if (classStart < 0)
+			{
+				classStart = c == '[' ? i : -1;
+			}
+			else
+			{
+				classStart = ClassCharacter(found, pattern, i, classStart);
+			}
+		}
+
+		return string.Concat(found.Order());
+	}
+
+	/// <summary>Reads one unescaped character inside a class, and returns where the class started, or -1 once it closes.</summary>
+	private static int ClassCharacter(HashSet<char> found, string pattern, int i, int classStart)
+	{
+		char c = pattern[i];
+		bool first = i == classStart + 1 || (i == classStart + 2 && pattern[classStart + 1] == '^');
+		if (c == ']' && !first)
+		{
+			return -1;
+		}
+
+		bool literalDash = c == '-' && (first || (i + 1 < pattern.Length && pattern[i + 1] == ']'));
+		AddIf(found, c != '-' || literalDash, c);
+		return classStart;
+	}
+
+	private static void AddIf(HashSet<char> found, bool condition, char c)
+	{
+		if (condition && Separators.Contains(c, StringComparison.Ordinal))
+		{
+			found.Add(c);
+		}
+	}
 
 	/// <summary>Base64 padding goes with its token: a pattern's own ending can match an <c>=</c> too, and would leave the last one behind.</summary>
 	private static int PaddingEnd(string input, int end)
