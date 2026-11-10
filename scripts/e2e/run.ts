@@ -81,15 +81,24 @@ async function runIngest(h: Harness): Promise<void> {
 }
 
 async function guarded(h: Harness, body: (h: Harness) => Promise<void>): Promise<boolean> {
+  let crashed = false;
   try {
     await body(h);
-    return false;
   } catch (error) {
     console.error(h.scrub(String(error instanceof Error ? error.stack : error)));
-    return true;
+    crashed = true;
   } finally {
+    // The logs go with the cleanup, so a failure shows them first. Reading them must not stop the cleanup.
+    if (crashed || h.results.some((result) => !result.ok)) {
+      try {
+        h.dumpLogs();
+      } catch (error) {
+        console.error(`could not print the service logs: ${h.scrub(String(error))}`);
+      }
+    }
     await h.cleanUp();
   }
+  return crashed;
 }
 
 const started = Date.now();

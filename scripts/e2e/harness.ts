@@ -145,6 +145,34 @@ export class Harness {
     }
   }
 
+  /**
+   * The end of each service's log, for a failed run. They live in the run's directory, or with the compose layout in containers, and cleanUp
+   * removes both. CI logs are public, so every secret the run knows of comes out first.
+   */
+  dumpLogs(maxLines = 200): void {
+    const secrets = this.sensitiveValues().filter((value) => value !== "");
+    for (const [name, text] of this.serviceLogs()) {
+      const lines = this.scrub(secrets.reduce((so, far) => so.split(far).join("[SECRET]"), text)).split("\n");
+      console.log(`::group::${name} (last ${Math.min(maxLines, lines.length)} of ${lines.length} lines)`);
+      console.log(lines.slice(-maxLines).join("\n"));
+      console.log("::endgroup::");
+    }
+  }
+
+  /** The API's and the sidecar's logs, wherever this layout keeps them, and any other log in the run's directory, such as the proxy's. */
+  private serviceLogs(): Array<[string, string]> {
+    const logs: Array<[string, string]> = [];
+    for (const service of ["api", "sidecar"] as const) {
+      try {
+        logs.push([service, this.log(service)]);
+      } catch {
+        // Not started, so nothing to show.
+      }
+    }
+    const others = existsSync(this.dir) ? readdirSync(this.dir).filter((file) => file.endsWith(".log") && file !== "api.log" && file !== "sidecar.log").sort() : [];
+    return [...logs, ...others.map((file): [string, string] => [file, readFileSync(path.join(this.dir, file), "utf8")])];
+  }
+
   /** The whole key and its secret part alone, plus the sidecar's secret: none may be stored or logged. */
   sensitiveValues(): string[] {
     return [...this.secrets, ...this.secrets.map((key) => key.split("_")[2] ?? key), this.sidecarSecret];
