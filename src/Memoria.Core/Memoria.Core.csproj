@@ -10,4 +10,11 @@
     <InternalsVisibleTo Include="Memoria.Core.Tests" />
   </ItemGroup>
 
+  <!-- Gitleaks's rules as data, and the MIT notice that must travel with them. See Redaction/Gitleaks/README.md. -->
+  <ItemGroup>
+    <EmbeddedResource Include="Redaction\Gitleaks\rules.json" LogicalName="Memoria.Core.Redaction.Gitleaks.rules.json" />
+    <None Remove="Redaction\Gitleaks\**" />
+    <None Include="Redaction\Gitleaks\LICENSE" Link="licenses\gitleaks\LICENSE" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

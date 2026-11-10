@@ -36,3 +36,6 @@ Dockerfile text eol=lf
 *.gguf    binary
 *.sqlite  binary
 *.png     binary
+
+# Vendored gitleaks files stay byte for byte as published.
+src/Memoria.Core/Redaction/Gitleaks/LICENSE text eol=lf

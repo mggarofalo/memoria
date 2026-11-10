@@ -14,3 +14,9 @@ paths = [
   '''^tests/''',
   '''^cli/.*_test\.go$''',
 ]
+
+# Gitleaks's own rules, as data. Some patterns hold a literal token prefix, which the rules then match.
+# A test regenerates this file from the pinned upstream gitleaks.toml, which gitleaks already skips.
+[[allowlists]]
+description = "Imported gitleaks rule patterns"
+paths = ['''^src/Memoria\.Core/Redaction/Gitleaks/rules\.json$''']
