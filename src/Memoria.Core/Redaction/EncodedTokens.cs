@@ -58,7 +58,20 @@ internal static class EncodedTokens
 		}
 
 		string decoded = UnescapeUnicode(value);
-		return decoded.Length >= MinDecodedChars && HoldsSelfEvidentToken(decoded);
+		return (decoded.Length >= MinDecodedChars && HoldsSelfEvidentToken(decoded))
+			|| (LetterAfterBackslash(candidate) is char letter && HoldsSelfEvidentToken(letter + decoded));
+	}
+
+	/// <summary>
+	/// The letter of an escape such as <c>\n</c> just before the run. In <c>C:\tools\npm\u005f…</c> it is the token's own first letter, so the
+	/// run is also judged with it. Only the run is replaced, which leaves that one letter showing.
+	/// </summary>
+	private static char? LetterAfterBackslash(SecretCandidate candidate)
+	{
+		int start = candidate.Secret.Index;
+		return start >= 2 && candidate.Input[start - 2] == '\\' && candidate.Input[start - 1] is 'n' or 'r' or 't' or 'f' or 'b' or 'v' or '0'
+			? candidate.Input[start - 1]
+			: null;
 	}
 
 	/// <summary>Each <c>\uXXXX</c> as its character. The rule's pattern puts four hex digits after every <c>\u</c> it takes.</summary>

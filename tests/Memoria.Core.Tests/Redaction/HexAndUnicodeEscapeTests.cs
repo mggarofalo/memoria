@@ -122,6 +122,26 @@ public sealed class HexAndUnicodeEscapeTests
 		Assert.DoesNotContain(token[4..], Redactor.Shared.RedactFragment(template.Replace("{S}", escaped, StringComparison.Ordinal)).Text, StringComparison.Ordinal);
 	}
 
+	/// <summary>
+	/// A token whose first letter follows a backslash, as <c>npm_</c> in <c>C:\tools\npm_…</c>, reads as an escape and the letter. The run
+	/// is judged with that letter too. Only the run is replaced, so the one letter still shows.
+	/// </summary>
+	[Theory]
+	[InlineData("\"C:\\\\tools\\\\{S}\"", "npm")]
+	[InlineData("C:\\tools\\{S}", "npm")]
+	[InlineData("C:\\keys\\{S}", "rk_live")]
+	[InlineData("\"C:\\\\k\\\\{S}\"", "rk_live")]
+	public void An_escaped_token_whose_first_letter_follows_a_backslash_is_replaced(string template, string prefix)
+	{
+		string body = Synthetic.Body(prefix == "npm" ? 36 : 24, 31);
+		string escaped = (prefix + "_").Replace("_", "\\u005f", StringComparison.Ordinal) + body;
+
+		string output = Redactor.Shared.RedactFragment(template.Replace("{S}", escaped, StringComparison.Ordinal)).Text;
+
+		Assert.DoesNotContain(body, output, StringComparison.Ordinal);
+		Assert.Contains("[REDACTED:unicode-escaped-token]", output, StringComparison.Ordinal);
+	}
+
 	[Fact]
 	public void A_mask_written_as_hex_stays()
 	{
