@@ -18,6 +18,8 @@ const API = `http://127.0.0.1:${PORT}`;
 const SIDECAR = "memoria-e2e-qmd";
 const COLLECTION = "claude-sessions";
 const WORKER_TOKEN = "mock-worker-token-0123456789";
+/** The proxy network, under its own name so a deployment on this host keeps its own. */
+const PROXY_NETWORK = `${PROJECT}-proxy`;
 
 const dir = mkdtempSync(path.join(os.tmpdir(), "memoria-compose-"));
 const results: { name: string; ok: boolean }[] = [];
@@ -69,6 +71,7 @@ function prepare(): void {
   writeFileSync(path.join(dir, "check.env"), [
     `MEMORIA_VERSION=${VERSION}`,
     `MEMORIA_SIDECAR_SECRET=${randomBytes(32).toString("base64url")}`,
+    `MEMORIA_PROXY_NETWORK=${PROXY_NETWORK}`,
     `MEMORIA_INGEST_DIGEST_KEY=${randomBytes(32).toString("base64url")}`,
     `MEMORIA_QMD_WORKERS=${JSON.stringify(workers)}`,
     `MEMORIA_WORKER_TOKEN_GPU=${WORKER_TOKEN}`,
@@ -122,8 +125,31 @@ function boundary(): void {
   const networks = docker(["network", "inspect", `${PROJECT}_memoria`, "--format", "{{range .Containers}}{{.Name}} {{end}}"]).trim().split(" ").sort();
   check("compose: the API and the sidecar are the only containers on their network", JSON.stringify(networks) === JSON.stringify(["memoria-e2e-api", SIDECAR]), networks);
   check("compose: the sidecar runs as a user, not root", docker(["exec", SIDECAR, "id", "-u"]).trim() === "1000");
+  proxyNetwork();
+  hardened();
   const llama = docker(["exec", SIDECAR, "sh", "-c", "ls node_modules/@node-llama-cpp 2>/dev/null | wc -l; grep -c -i -E 'llama|cuda|vulkan' /proc/1/maps; find / -xdev -name '*.gguf' 2>/dev/null | wc -l"]).trim().split(/\s+/);
   check("compose: the sidecar holds no llama.cpp binaries, has none loaded, and has no model file", JSON.stringify(llama) === JSON.stringify(["0", "0", "0"]), llama);
+}
+
+/** The reverse proxy's network: the API is on it and the sidecar is not, so a proxy there reaches only the API. */
+function proxyNetwork(): void {
+  const members = docker(["network", "inspect", PROXY_NETWORK, "--format", "{{range .Containers}}{{.Name}} {{end}}"]).trim().split(" ");
+  check("compose: the API is the only container on the proxy network", JSON.stringify(members) === JSON.stringify(["memoria-e2e-api"]), members);
+  // As the proxy would be: a container on that network alone.
+  const probe = "const get=(u)=>fetch(u,{signal:AbortSignal.timeout(3000)}).then(r=>r.status,e=>'unreachable');" +
+    "Promise.all([get('http://memoria-api:8080/health'),get('http://memoria-qmd:8282/health'),get('http://" + SIDECAR + ":8282/health')]).then(r=>process.stdout.write(JSON.stringify(r)))";
+  const seen = docker(["run", "--rm", "--network", PROXY_NETWORK, "node:26-bookworm-slim", "node", "-e", probe]).trim();
+  check("compose: from the proxy network the API answers, and the sidecar cannot be reached", seen === JSON.stringify([200, "unreachable", "unreachable"]), seen);
+}
+
+/** Both containers: a read-only root, no capabilities, nothing gained by exec, and still a /tmp to write. */
+function hardened(): void {
+  for (const container of ["memoria-e2e-api", SIDECAR]) {
+    const settings = docker(["inspect", container, "--format", "{{.HostConfig.ReadonlyRootfs}} {{json .HostConfig.CapDrop}} {{json .HostConfig.SecurityOpt}}"]).trim();
+    check(`compose: ${container} has a read-only root, drops every capability, and gains no privileges`, settings === 'true ["ALL"] ["no-new-privileges:true"]', settings);
+    const writes = docker(["exec", container, "sh", "-c", "touch /app/x 2>/dev/null && echo app; touch /tmp/x && echo tmp"]).trim();
+    check(`compose: ${container} cannot write its image, and can write /tmp`, writes === "tmp", writes);
+  }
 }
 
 async function workersDown(key: string): Promise<void> {

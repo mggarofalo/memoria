@@ -198,8 +198,11 @@ These two collections are the ones the compose file opens to ingest. Each opens 
 | `MEMORIA_WORKER_TOKEN_GPU` | empty | The token of the worker whose `tokenEnv` names it. |
 | `MEMORIA_WORKER_TOKEN_LAPTOP` | empty | The same, for a second worker. |
 | `MEMORIA_CORPUS` | the `memoria-corpus` volume | A host directory for the collection roots instead, owned by uid 1000. |
-| `MEMORIA_BIND_ADDRESS` | `127.0.0.1` | Where the API's port is published. The host's LAN address lets LAN clients connect directly while the proxy entry does not exist yet. |
+| `MEMORIA_BIND_ADDRESS` | `127.0.0.1` | Where the API's port is published. The host's LAN address lets LAN clients connect directly. `ufw` does not filter a published port: see [published ports and the host firewall](#published-ports-and-the-host-firewall). |
+| `MEMORIA_PROXY_NETWORK` | `memoria-proxy` | The name of the network the reverse proxy reaches the API on. See [the proxy's network](#the-proxys-network). |
 | `MEMORIA_TRUSTED_PROXY` | empty | The reverse proxy's address as the API container sees it. Without it, all clients share one failed-authentication budget. |
+
+Both containers run as a user, not root, with a read-only root filesystem, a `tmpfs` at `/tmp`, every Linux capability dropped and `no-new-privileges`. Everything they write is on the volumes. `scripts/e2e/compose.ts` checks each of these.
 
 The API runs with a 1 GiB heap (`DOTNET_GCHeapHardLimit`), the least ingest is sized for. Pass secrets through `deploy/.env` or a Docker secret; never bake them into an image or commit them.
 
@@ -485,10 +488,52 @@ needs one proxy host entry:
 | Setting | Value |
 |---|---|
 | Domain | your chosen hostname |
-| Scheme / forward | `http` to `memoria-api:8080` (same compose network) or `127.0.0.1:8080` |
+| Scheme / forward | `http` to `memoria-api:8080`, over the proxy's network below |
 | SSL | Let's Encrypt, Force SSL, HTTP/2 |
 | Websockets | not needed; MCP uses Streamable HTTP (POST + SSE responses) |
 | Custom config | `proxy_read_timeout 180s;` — reranked searches take seconds, a cold sidecar longer |
+
+### The proxy's network
+
+The reverse proxy reaches the API on a network of its own, `memoria-proxy`, which
+`deploy/compose.yaml` creates and which only `memoria-api` joins. The sidecar is not on
+it, so the proxy cannot reach the sidecar at all, and only the API stands between the
+internet and the index. Never put the proxy on the `memoria` network: anything there
+can call the sidecar directly, with nothing but its shared secret in the way.
+
+Join nginx-proxy-manager to it from its own compose project, as an external network:
+
+```yaml
+services:
+  nginx-proxy-manager:
+    networks: [default, memoria-proxy]
+networks:
+  memoria-proxy:
+    external: true
+```
+
+Start Memoria first, as its compose project creates the network. Then the proxy host's
+forward is `memoria-api:8080`, and `MEMORIA_TRUSTED_PROXY` is the proxy's address on
+`memoria-proxy` (`docker network inspect memoria-proxy`). `scripts/e2e/compose.ts` checks
+that the API is the only container there, and that a container there reaches the API
+and cannot reach the sidecar.
+
+### Published ports and the host firewall
+
+`ufw` does not filter a port Docker publishes. Docker writes its own iptables rules,
+which accept the traffic before `ufw`'s rules see it, so a port published on the LAN
+address is open to the whole LAN whatever `ufw` says. Keep the API's published port on
+`127.0.0.1`, the default, and let the proxy reach the API over its network instead.
+If LAN clients must connect without the proxy, bind `MEMORIA_BIND_ADDRESS` to the LAN
+address and filter in Docker's own `DOCKER-USER` chain, which Docker consults first.
+For example, to let only the LAN's range reach the API's port:
+
+```bash
+iptables -I DOCKER-USER -p tcp -m conntrack --ctorigdstport 8080 ! -s 192.168.1.0/24 -j DROP
+```
+
+Rules in `DOCKER-USER` do not survive a reboot on their own: save them with
+`iptables-persistent` or recreate them at boot.
 
 `X-Trace-Id` on every response, and `traceId` in every problem-details body,
 are the ids to grep for in the API's and the sidecar's logs.
@@ -603,5 +648,6 @@ QMD itself is never reachable from anywhere. The sidecar is the only process tha
 
 - the sidecar container publishes no port: `docker port memoria-qmd` prints nothing;
 - the API and the sidecar are the only containers on their network: `docker network inspect memoria_memoria`;
-- the API host's firewall allows 8080 only from the proxy (or the LAN until the proxy entry exists);
+- the API is the only Memoria container on the proxy's network: `docker network inspect memoria-proxy`;
+- the API's port is published on `127.0.0.1`, or, if on the LAN address, filtered in `DOCKER-USER`, as `ufw` does not filter it: `docker port memoria-api`;
 - each worker's port accepts only the API host's tunnel address.
