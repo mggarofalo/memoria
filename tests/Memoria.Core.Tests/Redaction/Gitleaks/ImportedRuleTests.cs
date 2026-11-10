@@ -267,16 +267,20 @@ public sealed partial class ImportedRuleTests
 
 	/// <summary>An unclosed placeholder opening before many candidates once made each check read to the far end of the text.</summary>
 	[Fact]
+	[Trait("Category", RedactorSafetyTests.TimingCategory)]
 	public void Many_candidates_after_an_unclosed_placeholder_cost_linear_time()
 	{
+		// About 4 times its cost, 1.2 s of this thread's CPU on a plain Debug run.
+		TimeSpan budget = TimeSpan.FromSeconds(5);
 		string token = "AK" + "Cp" + Synthetic.Body(69, 4111);
 		string text = string.Concat(Enumerable.Repeat("see [REDACTED:ab " + token + " ok then. ", 20_000)) + "]";
-		TimeSpan cpu = System.Diagnostics.Process.GetCurrentProcess().TotalProcessorTime;
+		TimeSpan started = ThreadCpuTime.Now();
 
 		RedactionResult result = Redactor.Shared.RedactFragment(text);
 
+		TimeSpan spent = ThreadCpuTime.Now() - started;
+		Assert.True(spent < budget, $"20,000 candidates took {spent.TotalSeconds:F1} s of CPU, over the budget of {budget.TotalSeconds:F0} s.");
 		Assert.Equal(20_000, result.CountsByRule["gitleaks-artifactory-api-key"]);
-		Assert.InRange(System.Diagnostics.Process.GetCurrentProcess().TotalProcessorTime - cpu, TimeSpan.Zero, TimeSpan.FromSeconds(60));
 	}
 
 	[Fact]
