@@ -4,10 +4,18 @@
 pre-commit:
   parallel: true
   jobs:
+    # Says so when this Node is older than package.json's engines, since the hooks run under it. A warning only.
+    - name: node-version
+      run: node scripts/check-node.mjs
+
+    # The tests run without coverage collection, which took four times as long; CI's Build & Test keeps the branch
+    # coverage gate (scripts/coverage-dotnet.sh). The timing tests run on their own, uninstrumented, as in CI.
     - name: dotnet
       glob:
         - "src/**"
         - "tests/**"
+        - "tools/**"
+        - "sidecar/openapi.json"
         - "*.slnx"
         - "Directory.Build.props"
         - "CodeMetricsConfig.txt"
@@ -15,8 +23,22 @@ pre-commit:
       run: >-
         dotnet format Memoria.slnx --verify-no-changes &&
         dotnet build Memoria.slnx -p:TreatWarningsAsErrors=true --nologo --verbosity quiet &&
-        node scripts/run-sh.mjs scripts/coverage-dotnet.sh &&
+        dotnet test Memoria.slnx --no-build --nologo --verbosity quiet --filter "Category!=Timing" &&
         dotnet test tests/Memoria.Core.Tests --no-build --nologo --verbosity quiet --filter "Category=Timing"
+
+    # The tests that hold the docs and the skills to the code, for a commit that changes only those. Go cannot see
+    # skills/ change, as it is outside the module, hence -count=1.
+    - name: docs
+      glob:
+        - "docs/**"
+        - "skills/**"
+        - "README.md"
+        - "sidecar/**/*.md"
+        - "worker/**/*.md"
+      run: >-
+        node --test sidecar/test/docs-match-code.test.ts worker/test/docs-match-code.test.ts &&
+        go -C cli test ./... -count=1 &&
+        dotnet test tests/Memoria.Api.Tests --nologo --verbosity quiet --filter "FullyQualifiedName~DocsMatchCode"
 
     - name: sidecar
       root: "sidecar/"

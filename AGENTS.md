@@ -108,7 +108,7 @@ The only version in this repository is a `vX.Y.Z` tag, computed from Conventiona
 
 ### Git hooks
 
-`lefthook.yml` runs on pre-commit, scoped to the language you staged: format, lint, complexity, and tests with the coverage gate. Mutation testing never runs in a hook. `git commit --no-verify` exists for emergencies; CI runs the same gates.
+`lefthook.yml` runs on pre-commit, scoped to the language you staged: format, lint, complexity, and tests. The TypeScript and Go tests run with their coverage gates. The C# tests run without coverage collection, which made a commit take four minutes, and CI's Build & Test keeps the C# coverage gate. A commit that changes only docs, skills or a package README runs the tests that hold them to the code. The hook warns, without stopping the commit, when the local Node is older than `package.json`'s engines. Mutation testing never runs in a hook. `git commit --no-verify` exists for emergencies; CI runs the same gates.
 
 Hooks work from PowerShell, cmd, and Git Bash: `scripts/run-sh.mjs` finds the `sh` that ships with Git for Windows and says what to do if there is none. Run a script by hand the same way: `node scripts/run-sh.mjs scripts/coverage-dotnet.sh`. `-race` is left to CI because it needs cgo.
 
