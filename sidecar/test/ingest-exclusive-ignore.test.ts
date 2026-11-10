@@ -47,31 +47,52 @@ test("a caller still connected gets its write, replacing what is there", async (
   assert.equal(await readFile(target.absolute, "utf8"), "two");
 });
 
-/** Holds a write just before its last check, by holding the real-path lookup of its temp file, so a real socket can close during it. */
-function stallWrites(ms: number, onStall: () => void): () => void {
-  const patchable = fsPromises as unknown as { realpath: (...args: unknown[]) => Promise<string> };
-  const real = patchable.realpath;
-  patchable.realpath = async (...args: unknown[]) => {
-    if (String(args[0]).includes(".memoria-")) {
+type FsCall = (...args: unknown[]) => Promise<unknown>;
+
+/**
+ * Holds a write just before its last check, by holding the real-path lookup of its temp file, so a real socket can close during it.
+ * It also counts temp files: each one a write opens ends in a rename or an unlink, so `settled` can tell when every write that began is over.
+ */
+function stallWrites(ms: number, onStall: () => void): { restore: () => void; settled: (dir: string) => Promise<string[]> } {
+  const patchable = fsPromises as unknown as Record<"realpath" | "open" | "rename" | "unlink", FsCall>;
+  const real = { realpath: patchable.realpath, open: patchable.open, rename: patchable.rename, unlink: patchable.unlink };
+  const isScratch = (file: unknown) => path.basename(String(file)).startsWith(".memoria-");
+  let open = 0;
+  let wake = () => {};
+  const ended = () => {
+    open--;
+    wake();
+  };
+  patchable.realpath = async (...args) => {
+    if (isScratch(args[0])) {
       onStall();
       await new Promise((resolve) => setTimeout(resolve, ms));
     }
-    return real(...args);
+    return real.realpath(...args);
   };
-  syncBuiltinESMExports();
-  return () => {
-    patchable.realpath = real;
-    syncBuiltinESMExports();
+  patchable.open = async (...args) => {
+    if (!isScratch(args[0])) return real.open(...args);
+    open++;
+    return real.open(...args).catch((err: unknown) => {
+      ended();
+      throw err;
+    });
   };
-}
-
-/** What a directory holds once no write in it is still running, however long the stalls took. */
-async function settled(dir: string): Promise<string[]> {
-  for (let attempt = 0; attempt < 100 && (await readdir(dir)).some((name) => name.startsWith(".memoria-")); attempt++) {
-    await new Promise((resolve) => setTimeout(resolve, 50));
+  for (const name of ["rename", "unlink"] as const) {
+    patchable[name] = async (...args) => (isScratch(args[0]) ? real[name](...args).finally(ended) : real[name](...args));
   }
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  return readdir(dir);
+  syncBuiltinESMExports();
+  return {
+    restore: () => {
+      Object.assign(patchable, real);
+      syncBuiltinESMExports();
+    },
+    /** What a directory holds once every temp file a write opened has been renamed or removed, however long the stalls took. */
+    settled: async (dir) => {
+      while (open > 0) await new Promise<void>((resolve) => (wake = resolve));
+      return readdir(dir);
+    },
+  };
 }
 
 function send(port: number, name: string): { socket: net.Socket; answer: Promise<string> } {
@@ -96,7 +117,7 @@ for (const [how, close] of [
     const { app, roots } = await makeApp();
     const name = "gone.md";
     let closing: net.Socket | undefined;
-    const restore = stallWrites(200, () => {
+    const stall = stallWrites(200, () => {
       if (closing) close(closing);
       closing = undefined;
     });
@@ -105,9 +126,9 @@ for (const [how, close] of [
       const { socket, answer } = send((app.server.address() as net.AddressInfo).port, name);
       closing = socket;
       await answer;
-      assert.deepEqual(await settled(roots.claude), [], "neither the document nor a temp file");
+      assert.deepEqual(await stall.settled(roots.claude), [], "neither the document nor a temp file");
     } finally {
-      restore();
+      stall.restore();
       await app.close();
     }
   });
@@ -115,7 +136,7 @@ for (const [how, close] of [
 
 test("through a real socket: an RST right after the body never stores anything", async () => {
   const { app, roots } = await makeApp();
-  const restore = stallWrites(300, () => undefined);
+  const stall = stallWrites(300, () => undefined);
   try {
     await app.listen({ host: "127.0.0.1", port: 0 });
     const port = (app.server.address() as net.AddressInfo).port;
@@ -124,23 +145,23 @@ test("through a real socket: an RST right after the body never stores anything",
       socket.once("connect", () => setTimeout(() => socket.resetAndDestroy(), round % 3));
       await answer;
     }
-    assert.deepEqual(await settled(roots.claude), [], "neither a document nor a temp file");
+    assert.deepEqual(await stall.settled(roots.claude), [], "neither a document nor a temp file");
   } finally {
-    restore();
+    stall.restore();
     await app.close();
   }
 });
 
 test("through a real socket: a caller that stays connected through a stall gets its document", async () => {
   const { app, roots } = await makeApp();
-  const restore = stallWrites(100, () => undefined);
+  const stall = stallWrites(100, () => undefined);
   try {
     await app.listen({ host: "127.0.0.1", port: 0 });
     const { answer } = send((app.server.address() as net.AddressInfo).port, "kept.md");
     assert.match(await answer, /^HTTP\/1\.1 202/);
     assert.deepEqual(await readdir(roots.claude), ["kept.md"]);
   } finally {
-    restore();
+    stall.restore();
     await app.close();
   }
 });
