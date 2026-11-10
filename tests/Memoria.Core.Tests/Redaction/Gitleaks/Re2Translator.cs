@@ -493,10 +493,11 @@ public sealed class Re2Translator
 	}
 
 	/// <summary>
-	/// What may stand before a token once its <c>\b</c> is drawn in ASCII: the start, any character that cannot be part of a word,
-	/// or an escape a transcript carries in a JSON string or a URL, as <c>\nAKCp…</c> or <c>%3DAKCp…</c>, as Memoria's own rules allow.
+	/// What may stand before a token once its <c>\b</c> is drawn in ASCII: the start, any character but a letter or digit, an
+	/// underscore included, as in <c>TOKEN_AKCp…</c>, or an escape a transcript carries in a JSON string or a URL, as <c>\nAKCp…</c>
+	/// or <c>%3DAKCp…</c>. Memoria's own rules allow the same.
 	/// </summary>
-	private const string LeadingBoundary = "(?:^|[^0-9A-Za-z_]|\\\\+[nrtfbv0]|\\\\u[0-9A-Fa-f]{4}|%[0-9A-Fa-f]{2})";
+	private const string LeadingBoundary = "(?:^|[^0-9A-Za-z]|\\\\+[nrtfbv0]|\\\\u[0-9A-Fa-f]{4}|%[0-9A-Fa-f]{2})";
 
 	/// <summary>The opening token of a final top-level group that only ends the token, such as <c>(?:[^a-z0-9]|\z)</c>, or -1.</summary>
 	private int Terminator()

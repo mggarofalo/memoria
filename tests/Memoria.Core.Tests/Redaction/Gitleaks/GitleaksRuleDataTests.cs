@@ -195,6 +195,7 @@ public sealed class GitleaksRuleDataTests
 	[InlineData("{\"out\":\"token {S}\\tnext\"}")]
 	[InlineData("{\"cmd\":\"{\\\"t\\\":\\\"{S}\\\"}\"}")]
 	[InlineData("q=%3D{S}%26x")]
+	[InlineData("TOKEN_{S}")]
 	public void A_token_in_punctuation_or_json_escapes_is_found(string context)
 	{
 		string token = "AK" + "Cp" + Synthetic.Body(69, 4108);
