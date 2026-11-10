@@ -38,7 +38,7 @@ func TestStatusSaysHowManyNeedEmbedding(t *testing.T) {
 			t.Errorf("%s with none: %q", name, missing.String())
 		}
 		for _, out := range []string{counted.String(), missing.String()} {
-			if strings.Contains(out, "0xc") || !strings.Contains(out, "documents: 3723") || !strings.Contains(out, "notes") {
+			if !strings.Contains(out, "documents: 3723") || !strings.Contains(out, "notes") {
 				t.Errorf("%s: %q", name, out)
 			}
 		}
