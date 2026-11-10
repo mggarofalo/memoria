@@ -126,6 +126,36 @@ test("documents embed through the worker, including the chunker's tokenizer", { 
   }
 });
 
+test("vectors under stock QMD's fingerprint read as pending, stay until replaced, and are replaced", { skip }, async () => {
+  const r = await openRemote();
+  try {
+    await r.backend.embed({ force: false });
+    // A second handle through the SDK, which loads sqlite-vec for vectors_vec.
+    const qmd = await import("@tobilu/qmd");
+    const side = await qmd.createStore({ dbPath: r.dbPath });
+    const db = side.internal.db as unknown as { prepare(sql: string): { all(): unknown[]; get(): unknown; run(): unknown } };
+    const fingerprints = () => db.prepare("SELECT DISTINCT embed_fingerprint AS f FROM content_vectors ORDER BY f").all().map((row) => (row as { f: string }).f);
+    try {
+      const ours = fingerprints();
+      assert.equal(ours.length, 1);
+      assert.notEqual(ours[0], "c37385", "whole-chunk vectors are not written under the stock fingerprint");
+      // As an index built in-process by stock QMD holds them: each covering a chunk's last 512 tokens.
+      db.prepare("UPDATE content_vectors SET embed_fingerprint = 'c37385'").run();
+      const stored = (db.prepare("SELECT COUNT(*) AS n FROM vectors_vec").get() as { n: number }).n;
+      assert.equal((await r.backend.getStatus()).needsEmbedding, 2, "both documents need embedding again");
+      assert.equal((db.prepare("SELECT COUNT(*) AS n FROM vectors_vec").get() as { n: number }).n, stored, "nothing is dropped before it is replaced");
+      const again = await r.backend.embed({ force: false });
+      assert.equal(again.errors, 0);
+      assert.deepEqual(fingerprints(), ours, "every vector was embedded again, none left mixed in");
+      assert.equal((await r.backend.getStatus()).needsEmbedding, 0);
+    } finally {
+      await side.close();
+    }
+  } finally {
+    await r.done();
+  }
+});
+
 test("a reranked search runs the whole pipeline remotely and caches apart from local results", { skip }, async () => {
   const r = await openRemote();
   try {

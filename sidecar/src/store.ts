@@ -405,7 +405,10 @@ export async function openBackend(options: OpenBackendOptions): Promise<OpenedBa
   const llmOptions = options.llm ?? { mode: "local" as const };
   keepFallbackOffGpu(llmOptions);
   const qmd = await import("@tobilu/qmd");
-  requireSdkFixes((await import(new URL("./store.js", import.meta.resolve("@tobilu/qmd")).href)) as SdkStoreFunctions);
+  const entry = import.meta.resolve("@tobilu/qmd");
+  const sdkStore = (await import(new URL("./store.js", entry).href)) as Omit<SdkStoreFunctions, "ensureEmbedContexts">;
+  const { LlamaCpp } = (await import(new URL("./llm.js", entry).href)) as { LlamaCpp: { prototype: Pick<SdkStoreFunctions, "ensureEmbedContexts"> } };
+  requireSdkFixes({ ...sdkStore, ensureEmbedContexts: LlamaCpp.prototype.ensureEmbedContexts });
   const dbPath = options.dbPath ?? qmd.getDefaultDbPath();
   requireIndex(dbPath);
   // DB-only mode: collections and contexts come from store_collections inside

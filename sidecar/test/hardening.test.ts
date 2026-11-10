@@ -11,7 +11,7 @@ import { loggablePath, refuseAtBoundary, validRequestId } from "../src/boundary.
 import { loadConfig } from "../src/config.ts";
 import { parseLineRange } from "../src/line-range.ts";
 import { DEFAULT_HEAD_BYTES, MetadataIndex, parseBound, parseFrontmatter } from "../src/metadata.ts";
-import { patchedStore } from "../scripts/patch-qmd.ts";
+import { patchedLlm, patchedStore } from "../scripts/patch-qmd.ts";
 import { missingSdkFixes, requireSdkFixes, type SdkStoreFunctions } from "../src/sdk-check.ts";
 import { SearchBusy, SearchGate } from "../src/search-gate.ts";
 import { FakeBackend } from "./fake-backend.ts";
@@ -20,10 +20,16 @@ import { authHeaders, makeApp, testConfig } from "./helpers.ts";
 /** Replays of what a review proved: a document or request must not freeze or crash the sidecar. */
 
 const sdkUrl = new URL("./store.js", import.meta.resolve("@tobilu/qmd")).href;
-const sdk = (await import(sdkUrl)) as {
-  chunkDocument(text: string): Array<{ text: string; pos: number }>;
-  findBestCutoff(points: Array<{ pos: number; score: number }>, target: number, window: number, decay: number, fences: Array<{ start: number; end: number }>): number;
-  isInsideCodeFence(pos: number, fences: Array<{ start: number; end: number }>): boolean;
+const llmUrl = new URL("./llm.js", import.meta.resolve("@tobilu/qmd")).href;
+const sdkLlm = (await import(llmUrl)) as { LlamaCpp: { prototype: { ensureEmbedContexts(): unknown } } };
+const sdk = {
+  ...((await import(sdkUrl)) as {
+    chunkDocument(text: string): Array<{ text: string; pos: number }>;
+    findBestCutoff(points: Array<{ pos: number; score: number }>, target: number, window: number, decay: number, fences: Array<{ start: number; end: number }>): number;
+    isInsideCodeFence(pos: number, fences: Array<{ start: number; end: number }>): boolean;
+    getEmbeddingFingerprint(model?: string): string;
+  }),
+  ensureEmbedContexts: sdkLlm.LlamaCpp.prototype.ensureEmbedContexts,
 };
 
 // --- the SDK patch --------------------------------------------------------------------------------
@@ -42,6 +48,20 @@ test("the patch refuses an SDK whose text has moved, and running it twice change
   const once = readFileSync(installedStore, "utf8");
   assert.equal(patchedStore(once), once);
   assert.equal(patchedStore(once.replace(/\n/g, "\r\n")), once, "whatever the line endings");
+  const llm = readFileSync(fileURLToPath(llmUrl), "utf8");
+  assert.equal(patchedLlm(llm), llm);
+  assert.equal(patchedLlm(llm.replace(/\n/g, "\r\n")), llm, "whatever the line endings");
+  assert.throws(() => patchedLlm("export class LlamaCpp {}"), /The QMD SDK has changed.*last 512/);
+});
+
+// The default model's fingerprint as stock QMD 2.8.3 computes it, read from a real index it built.
+const STOCK_FINGERPRINT = "c37385";
+const PATCHED_FINGERPRINT = "824af1";
+
+test("whole-chunk vectors carry a fingerprint of their own", () => {
+  const fingerprint = sdk.getEmbeddingFingerprint();
+  assert.notEqual(fingerprint, STOCK_FINGERPRINT, "stock vectors, which cover a chunk's last 512 tokens, must read as pending");
+  assert.equal(fingerprint, PATCHED_FINGERPRINT, "a new fingerprint re-embeds every index, so change it only on purpose");
 });
 
 /** The SDK's originals, word for word, to hold the patched versions to their answers. */
@@ -457,6 +477,11 @@ const pristine = (): SdkStoreFunctions => ({
   hybridQuery: (() => {}) as never,
   structuredSearch: (() => {}) as never,
   syncConfigToDb: originalSync,
+  getEmbeddingFingerprint: () => "c37385",
+  ensureEmbedContexts: (() => `model.createEmbeddingContext({
+                        contextSize: LlamaCpp.EMBED_CONTEXT_SIZE,
+                        ...(threads > 0 ? { threads } : {}),
+                    })`) as never,
 });
 
 /** The SDK's config sync before the patch, word for word in what it does to the index. */
@@ -471,7 +496,7 @@ function originalSync(db: unknown, config: { collections: Record<string, unknown
 }
 
 test("the start-up check names each fix an unpatched SDK lacks, with no marker and no clock", () => {
-  assert.equal(missingSdkFixes(pristine()).length, 10);
+  assert.equal(missingSdkFixes(pristine()).length, 12);
   assert.throws(() => requireSdkFixes(pristine()), /not patched.*findBestCutoff.*scripts\/patch-qmd\.ts/);
   const real = sdk as unknown as SdkStoreFunctions;
   assert.doesNotThrow(() => requireSdkFixes(real));

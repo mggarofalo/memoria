@@ -84,10 +84,32 @@ test("identical sides report perfect agreement", async () => {
   close(q.rerank!.spearman, 1);
   assert.equal(q.rerank!.top10Overlap, 1);
   close(q.embedCosine, 1);
+  close(q.chunkEmbedCosine, 1);
   assert.equal(q.endToEnd!.top10Overlap, 1);
   assert.equal(q.expansion.localVsRemote, 1);
   assert.equal(q.expansion.exactMatchRate, 1);
   assert.equal(report.summary.rerankTop10Overlap.mean, 1);
+  close(report.summary.chunkEmbedCosine.mean, 1);
+});
+
+test("chunk embeddings are compared apart from the query's, and the worst one is reported", async () => {
+  const embedded: string[] = [];
+  // Agrees on the query and on chunk A, and not on B: a difference only long text shows.
+  const remote = scriptedSide({
+    name: "r",
+    embed: async (text) => {
+      embedded.push(text);
+      return text.startsWith("task: search result") || text === "A" ? [1, 0] : [0.6, 0.8];
+    },
+  });
+  const q = (await runParity([QUERY], scriptedSide({ name: "l" }), remote, { candidateLimit: 40, expansionRuns: 1 })).queries[0]!;
+  close(q.embedCosine, 1);
+  close(q.chunkEmbedCosine, 0.6);
+  assert.deepEqual(embedded.slice(1), ["A", "B", "C"], "the local side's candidates, after the query");
+  const failing = scriptedSide({ name: "r", embed: async (text) => (text.startsWith("task:") ? [1, 0] : Promise.reject(new Error("refused"))) });
+  const none = (await runParity([QUERY], scriptedSide({ name: "l" }), failing, { candidateLimit: 40, expansionRuns: 1 })).queries[0]!;
+  assert.equal(none.chunkEmbedCosine, null);
+  assert.ok(none.errors.some((e) => e.startsWith("embed chunk")));
 });
 
 test("the two sides score the same candidates, with QMD's intent prefix", async () => {

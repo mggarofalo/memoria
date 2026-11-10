@@ -9,6 +9,10 @@
  * collection records a config does not name, which a missing config did to all of them
  * (upstream tobi/qmd#1048): test/integration-collections.test.ts.
  *
+ * And it makes in-process embedding evaluate each chunk whole, as a llama-server worker does,
+ * with a fingerprint of its own so vectors made the stock way are embedded again rather than
+ * mixed in (upstream tobi/qmd#993). That one also edits dist/llm.js.
+ *
  * A plain script rather than patch-package, which would add a dozen runtime dependencies
  * to run one replacement. It stops the install if the SDK's text has moved, so a version
  * bump cannot silently lose the fixes. Running it twice changes nothing. The sidecar also
@@ -224,13 +228,43 @@ const EDITS = [
             if (!existing && seen.size >= MAX_BREAK_POINTS)
                 break;`,
   },
+  // Goes with WHOLE_CHUNK_EDIT in llm.js: the two are applied together or not at all.
+  {
+    why: "Vectors of a whole chunk and of its last 512 tokens carried one fingerprint, so an index could mix them unseen.",
+    from: `        \`chunk_overlap_tokens:\${CHUNK_OVERLAP_TOKENS}\`,
+    ].join("\\n");`,
+    to: `        \`chunk_overlap_tokens:\${CHUNK_OVERLAP_TOKENS}\`,
+        // Memoria: each chunk is evaluated whole, in-process as on a llama-server worker. Stock
+        // QMD's in-process vectors cover a chunk's last 512 tokens (upstream tobi/qmd#993), so
+        // its vectors read as pending here and are embedded again.
+        "embed_batch:whole_chunk",
+    ].join("\\n");`,
+  },
 ];
 
-export function patchedStore(source: string): string {
+/**
+ * node-llama-cpp's embedding context evaluates 512 tokens at a time unless told otherwise, and
+ * its pooled output is the last batch's alone. llama-server evaluates the chunk whole, or
+ * refuses it. Measured on 47 chunks of 513 to 1,118 tokens, against a worker: stock in-process
+ * vectors had a mean cosine of 0.73 and a lowest of 0.14; with this, 0.9996 or better, as short
+ * text always had.
+ */
+const WHOLE_CHUNK_EDIT = {
+  why: "An embedding of more than 512 tokens covered only its last 512.",
+  from: `                    this.embedContexts.push(await model.createEmbeddingContext({
+                        contextSize: LlamaCpp.EMBED_CONTEXT_SIZE,
+`,
+  to: `                    this.embedContexts.push(await model.createEmbeddingContext({
+                        contextSize: LlamaCpp.EMBED_CONTEXT_SIZE,
+                        // Memoria: the whole chunk in one batch, as llama-server evaluates it.
+                        batchSize: LlamaCpp.EMBED_CONTEXT_SIZE,
+`,
+};
+
+function applied(source: string, edits: ReadonlyArray<{ from: string; to: string; why: string }>): string {
   // Git on Windows or a package tool may have changed the line endings.
-  const text = source.replace(/\r\n/g, "\n");
-  let out = text;
-  for (const { from, to, why } of EDITS) {
+  let out = source.replace(/\r\n/g, "\n");
+  for (const { from, to, why } of edits) {
     if (out.includes(to)) continue;
     if (out.split(from).length !== 2) throw new Error(`The QMD SDK has changed, so this fix cannot be applied: ${why} Review sidecar/scripts/patch-qmd.ts.`);
     out = out.replace(from, () => to);
@@ -238,7 +272,20 @@ export function patchedStore(source: string): string {
   return out;
 }
 
+export function patchedStore(source: string): string {
+  return applied(source, EDITS);
+}
+
+export function patchedLlm(source: string): string {
+  return applied(source, [WHOLE_CHUNK_EDIT]);
+}
+
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const file = new URL("../node_modules/@tobilu/qmd/dist/store.js", import.meta.url);
-  writeFileSync(file, patchedStore(readFileSync(file, "utf8")));
+  const store = new URL("../node_modules/@tobilu/qmd/dist/store.js", import.meta.url);
+  const llm = new URL("../node_modules/@tobilu/qmd/dist/llm.js", import.meta.url);
+  // Both are worked out before either is written, so a failure leaves neither file changed.
+  const storeText = patchedStore(readFileSync(store, "utf8"));
+  const llmText = patchedLlm(readFileSync(llm, "utf8"));
+  writeFileSync(llm, llmText);
+  writeFileSync(store, storeText);
 }
