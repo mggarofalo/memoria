@@ -26,7 +26,8 @@ export interface Asset {
 
 export const MANIFEST = path.join(import.meta.dirname, "rerank-assets.json");
 const ATTEMPTS = 4;
-const ATTEMPT_TIMEOUT_MS = 10 * 60_000;
+/** Short enough that all the attempts fit in the CI job; a healthy download of the largest file takes under a minute. */
+const ATTEMPT_TIMEOUT_MS = 3 * 60_000;
 
 export function loadAssets(manifest = MANIFEST): Asset[] {
   return (JSON.parse(readFileSync(manifest, "utf8")) as { assets: Asset[] }).assets;

@@ -319,8 +319,8 @@ jobs:
   # Not required. The rest of the suite has no models, so its searches are degraded BM25. This runs reranked and
   # filtered search through REST, MCP and the CLI against a real worker: llama.cpp on the runner's CPU, with QMD's
   # embeddinggemma and 0.6B reranker. The files are pinned by SHA-256 in scripts/e2e/rerank-assets.json and cached
-  # under a key made from it. The cache is saved as soon as they are fetched, so a failing check never costs a
-  # download, and a download that fails says so. See scripts/e2e/README.md.
+  # under a key made from it. On main the cache is saved as soon as they are fetched, so a failing check never costs
+  # a download, and a download that fails says so. See scripts/e2e/README.md.
   e2e-rerank:
     name: End-to-end (real reranker on CPU)
     runs-on: ubuntu-latest
@@ -353,8 +353,10 @@ jobs:
           key: e2e-rerank-${{ hashFiles('scripts/e2e/rerank-assets.json') }}
       - name: Fetch what the cache lacks, checked by SHA-256
         run: node scripts/e2e/rerank-assets.ts "$HOME/.cache/memoria-e2e-rerank"
+      # Saved from main only: every branch can read main's cache, and a copy saved per pull request would be
+      # about 1 GB each, pushing older entries out of the repository's 10 GB.
       - name: Save them before any check can fail
-        if: steps.models.outputs.cache-hit != 'true'
+        if: steps.models.outputs.cache-hit != 'true' && github.ref == 'refs/heads/main'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/memoria-e2e-rerank

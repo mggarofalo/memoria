@@ -96,6 +96,8 @@ async function startWorker(dir: string): Promise<Worker> {
     MEMORIA_WORKER_GPU_LAYERS: "0",
     MEMORIA_WORKER_EMBED_MODEL: embed,
     MEMORIA_WORKER_RERANK_MODEL: rerank,
+    // Loading two models can push a small runner past the busy threshold, which only sorts workers.
+    MEMORIA_WORKER_BUSY_LOAD_PER_CORE: "0",
     // The libraries ship beside the binary.
     LD_LIBRARY_PATH: [path.dirname(llamaServer), process.env["LD_LIBRARY_PATH"] ?? ""].filter(Boolean).join(":"),
   };
@@ -105,10 +107,10 @@ async function startWorker(dir: string): Promise<Worker> {
   child.stderr?.setEncoding("utf8").on("data", (text: string) => (log = (log + text).slice(-20_000)));
   const url = `http://127.0.0.1:${port}`;
   const deadline = Date.now() + 5 * 60_000;
-  while (Date.now() < deadline && child.exitCode === null) {
+  while (Date.now() < deadline && !exited(child)) {
     try {
       const health = (await (await fetch(`${url}/health`, { headers: { authorization: `Bearer ${token}` } })).json()) as { status?: string };
-      if (health.status === "ok") return { url, token, child, output: () => log };
+      if (health.status === "ok" || health.status === "busy") return { url, token, child, output: () => log };
     } catch {
       // Still starting.
     }
@@ -118,21 +120,26 @@ async function startWorker(dir: string): Promise<Worker> {
   throw new Error(`The worker did not become ready on the CPU within five minutes. Its output:\n${log}`);
 }
 
+/** A child killed by a signal has no exit code, only a signal. */
+function exited(child: ChildProcess): boolean {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
 /** Lets the worker stop its llama-server children itself. Windows has no SIGTERM to give it, so there the whole tree goes. */
 async function stopWorker(worker: Worker): Promise<void> {
   const { child } = worker;
-  if (child.exitCode !== null || child.pid === undefined) return;
-  const exited = new Promise((resolve) => child.once("exit", resolve));
+  if (exited(child) || child.pid === undefined) return;
+  const gone = new Promise((resolve) => child.once("exit", resolve));
   if (process.platform === "win32") {
     spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" });
   } else {
     child.kill("SIGTERM");
     const timer = setTimeout(() => child.kill("SIGKILL"), 15_000);
-    await exited;
+    await gone;
     clearTimeout(timer);
     return;
   }
-  await exited;
+  await gone;
 }
 
 function json(key: string): Record<string, string> {
@@ -265,36 +272,46 @@ async function main(): Promise<number> {
   }
   const started = Date.now();
   const worker = await startWorker(path.resolve(dir));
-  const h = new Harness({
-    bareIndex: true,
-    extraCollections: [COLLECTION],
-    apiEnv: { [`Memoria__Ingest__Collections__${COLLECTION}__Enabled`]: "true", Memoria__Ingest__MinReindexInterval: "00:00:00" },
-    sidecarEnv: { MEMORIA_QMD_WORKER_URL: worker.url, MEMORIA_QMD_WORKER_TOKEN: worker.token, MEMORIA_QMD_WORKER_POLL_MS: "1000" },
-  });
+  let h: Harness | undefined;
   let crashed = false;
   try {
-    if (!process.argv.includes("--no-build")) h.buildServers();
-    h.buildCli();
-    h.seedIndex();
-    await h.choosePorts();
-    await h.startSidecar();
-    await h.startProxy();
-    const admin = bootstrap(h);
-    await h.startApi();
-    await seed(h, await keyFor(h, admin, "rerank-writer", ["ingest"]));
-    await embedAll(h);
-    await searches(h, await keyFor(h, admin, "rerank-reader", ["read"]), worker);
-    noModels(h);
+    h = new Harness({
+      bareIndex: true,
+      extraCollections: [COLLECTION],
+      apiEnv: { [`Memoria__Ingest__Collections__${COLLECTION}__Enabled`]: "true", Memoria__Ingest__MinReindexInterval: "00:00:00" },
+      sidecarEnv: { MEMORIA_QMD_WORKER_URL: worker.url, MEMORIA_QMD_WORKER_TOKEN: worker.token, MEMORIA_QMD_WORKER_POLL_MS: "1000" },
+    });
+    await runChecks(h, worker);
   } catch (error) {
     crashed = true;
-    console.error(h.scrub(String(error instanceof Error ? error.stack : error)));
+    const text = String(error instanceof Error ? error.stack : error);
+    console.error(h ? h.scrub(text) : text);
     console.error(`worker output, last part:\n${worker.output().slice(-4_000)}`);
   } finally {
-    await h.cleanUp();
+    await h?.cleanUp();
     await stopWorker(worker);
   }
-  const failed = h.results.filter((r) => !r.ok);
-  console.log(`\n${h.results.length - failed.length} passed, ${failed.length} failed, in ${Math.round((Date.now() - started) / 1000)}s`);
+  return report(h?.results ?? [], started, crashed);
+}
+
+async function runChecks(h: Harness, worker: Worker): Promise<void> {
+  if (!process.argv.includes("--no-build")) h.buildServers();
+  h.buildCli();
+  h.seedIndex();
+  await h.choosePorts();
+  await h.startSidecar();
+  await h.startProxy();
+  const admin = bootstrap(h);
+  await h.startApi();
+  await seed(h, await keyFor(h, admin, "rerank-writer", ["ingest"]));
+  await embedAll(h);
+  await searches(h, await keyFor(h, admin, "rerank-reader", ["read"]), worker);
+  noModels(h);
+}
+
+function report(results: ReadonlyArray<{ name: string; ok: boolean }>, started: number, crashed: boolean): number {
+  const failed = results.filter((r) => !r.ok);
+  console.log(`\n${results.length - failed.length} passed, ${failed.length} failed, in ${Math.round((Date.now() - started) / 1000)}s`);
   for (const result of failed) console.log(`  FAILED: ${result.name}`);
   return failed.length > 0 || crashed ? 1 : 0;
 }

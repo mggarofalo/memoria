@@ -50,7 +50,7 @@ node scripts/e2e/rerank.ts --assets <dir> --llama-server <path>      # elsewhere
 
 `rerank-assets.json` pins llama.cpp b12110's Linux CPU build and both models, by Hugging Face revision and SHA-256. A download is tried four times, with backoff, and a file is kept only once its hash matches. When it still fails, the run stops before any check, with an error naming the file and saying it was the download.
 
-**In CI** it is `End-to-end (real reranker on CPU)`, not required. The files are cached under a key made from `rerank-assets.json`, and the cache is saved straight after they are fetched, so a failing check never costs another download. On this desktop the whole run takes 13 s after the build, with each reranked search 0.6 to 1.3 s on the CPU. A GitHub runner has fewer cores, so allow a few seconds a search. The job's timeout is 15 minutes, and most of its time is the .NET, Go and sidecar builds. The cost is about 1 GB of the repository's 10 GB Actions cache, and the minutes of one more Ubuntu job per run.
+**In CI** it is `End-to-end (real reranker on CPU)`, not required. The files are cached under a key made from `rerank-assets.json`. A push to main saves the cache straight after fetching them, so a failing check never costs another download there. Pull requests read main's cache and save none of their own, as each copy is about 1 GB. On this desktop the whole run takes 13 s after the build, with each reranked search 0.6 to 1.3 s on the CPU. A GitHub runner has fewer cores, so allow a few seconds a search. The job's timeout is 15 minutes, and most of its time is the .NET, Go and sidecar builds. The cost is about 1 GB of the repository's 10 GB Actions cache, and the minutes of one more Ubuntu job per run.
 
 ## Running the suite
 
