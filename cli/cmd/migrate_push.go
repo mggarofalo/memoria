@@ -732,7 +732,7 @@ func resendWait(attempt int) time.Duration {
 
 // sleep waits, saying why first: the run can wait for minutes, and a reason is what tells a rate limit from an outage.
 func (r *pushRun) sleep(wait time.Duration, why string) bool {
-	r.a.info(why + "; waiting " + wait.String() + ".")
+	r.a.info(why + "; waiting " + shownWait(wait) + ".")
 	return r.a.sleep(r.ctx, wait) == nil
 }
 
@@ -819,6 +819,14 @@ func (r *pushRun) retryAnswer(outcome pushed, resp *http.Response, tries retries
 
 func (r *pushRun) stopForInterrupt() {
 	r.stop(apperr.New(apperr.KindGeneric, "stopped before the end. Progress is saved, so run this again to continue"))
+}
+
+// shownWait is a wait as a person reads it. A shared pause is what is left of it, such as 10.999996s, so it is rounded.
+func shownWait(wait time.Duration) string {
+	if wait >= time.Second {
+		return wait.Round(time.Second).String()
+	}
+	return wait.Round(time.Millisecond).String()
 }
 
 // What a wait is for, as the run reports it.

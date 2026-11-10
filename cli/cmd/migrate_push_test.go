@@ -1308,6 +1308,19 @@ func TestAnOlderCopyGoesWhenTheServerHoldsNothing(t *testing.T) {
 	checkCalls(t, server, "a.md", 2)
 }
 
+func TestAWaitIsShownRounded(t *testing.T) {
+	for wait, want := range map[time.Duration]string{
+		10*time.Second + 999*time.Millisecond: "11s",
+		11*time.Second - 3*time.Microsecond:   "11s",
+		time.Minute:                           "1m0s",
+		250*time.Millisecond + 40:             "250ms",
+	} {
+		if got := shownWait(wait); got != want {
+			t.Errorf("shownWait(%v) = %q, want %q", wait, got, want)
+		}
+	}
+}
+
 func TestEveryWaitSaysWhatItIsFor(t *testing.T) {
 	for _, c := range []struct {
 		action migrate.Action
