@@ -43,6 +43,51 @@ internal static class EncodedTokens
 		return decoded.Length >= MinDecodedChars && HoldsSelfEvidentToken(decoded);
 	}
 
+	public static bool IsHexEncodedCredential(SecretCandidate candidate)
+	{
+		string value = candidate.Value;
+		return value.Length <= MaxEncodedChars && HoldsSelfEvidentToken(Encoding.Latin1.GetString(Convert.FromHexString(value)));
+	}
+
+	public static bool IsUnicodeEscapedCredential(SecretCandidate candidate)
+	{
+		string value = candidate.Value;
+		if (value.Length > MaxEncodedChars)
+		{
+			return false;
+		}
+
+		string decoded = UnescapeUnicode(value);
+		return (decoded.Length >= MinDecodedChars && HoldsSelfEvidentToken(decoded))
+			|| (LetterAfterBackslash(candidate) is char letter && HoldsSelfEvidentToken(letter + decoded));
+	}
+
+	/// <summary>
+	/// The letter of an escape such as <c>\n</c> just before the run. In <c>C:\tools\npm\u005f…</c> it is the token's own first letter, so the
+	/// run is also judged with it. Only the run is replaced, which leaves that one letter showing.
+	/// </summary>
+	private static char? LetterAfterBackslash(SecretCandidate candidate)
+	{
+		int start = candidate.Secret.Index;
+		return start >= 2 && candidate.Input[start - 2] == '\\' && candidate.Input[start - 1] is 'n' or 'r' or 't' or 'f' or 'b' or 'v' or '0'
+			? candidate.Input[start - 1]
+			: null;
+	}
+
+	/// <summary>Each <c>\uXXXX</c> as its character. The rule's pattern puts four hex digits after every <c>\u</c> it takes.</summary>
+	private static string UnescapeUnicode(string value)
+	{
+		StringBuilder output = new(value.Length);
+		for (int i = 0; i < value.Length; i++)
+		{
+			bool escape = value[i] == '\\' && i + 5 < value.Length && value[i + 1] == 'u';
+			output.Append(escape ? (char)Convert.ToInt32(value.Substring(i + 2, 4), 16) : value[i]);
+			i += escape ? 5 : 0;
+		}
+
+		return output.ToString();
+	}
+
 	public static bool IsBase64EncodedCredential(SecretCandidate candidate)
 	{
 		string value = candidate.Value;
