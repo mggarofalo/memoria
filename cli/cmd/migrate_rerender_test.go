@@ -480,3 +480,54 @@ func TestTheFurthestChunkSetsHowManyMessagesAreNeeded(t *testing.T) {
 		t.Fatalf("code = %d, summary = %+v", code, summary)
 	}
 }
+
+// checkAccepted is an export sent on --accept-uncounted, named in the report and counted in the summary.
+func checkAccepted(t *testing.T, f *rerenderFixture, report string) {
+	t.Helper()
+	if problems := rerenderProblems(t, report); len(problems) != 1 || problems[0].Status != migrate.RerenderAcceptedUncounted {
+		t.Fatalf("problems = %+v", problems)
+	}
+	if !strings.Contains(f.h.stdout.String(), "acceptedUncounted") {
+		t.Fatalf("stdout = %q", f.h.stdout.String())
+	}
+}
+
+// An older export with no counts, in the exporter's own format, is sent when its body is the transcript's, and not otherwise
+// unless the owner passes --accept-uncounted, which the report and the summary both say.
+func TestAnUncountedExportGoesWhenItsBodyIsTheTranscripts(t *testing.T) {
+	fixture := filepath.Join("..", "internal", "migrate", "testdata", "exporter")
+	id := "5e55ad6a-1111-4222-8333-444455556666"
+	export, err := os.ReadFile(filepath.Join(fixture, "2026-01-15_codex_"+id+"_chunk-00001.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	transcript, err := os.ReadFile(filepath.Join(fixture, "rollout-2026-01-15T10-00-00-"+id+".jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	uncounted := strings.NewReplacer("message_start: 0\n", "", "message_end: 2\n", "", "message_count: 3\n", "").Replace(strings.ReplaceAll(string(export), "\r\n", "\n"))
+	// A long frontmatter field puts it over the cap and leaves its body as the exporter wrote it.
+	big := strings.Replace(uncounted, "root_thread_id:", `padding: "`+strings.Repeat("x", migrate.DefaultMaxDocumentBytes)+"\"\nroot_thread_id:", 1)
+	cases := []struct {
+		name, transcript string
+		extra            []string
+		want             func(migrate.RerenderSummary) bool
+	}{
+		{"covered", string(transcript), nil, func(s migrate.RerenderSummary) bool { return s.WouldSend == 1 && s.AcceptedUncounted == 0 }},
+		{"short", strings.Join(strings.Split(string(transcript), "\n")[:3], "\n") + "\n", nil, func(s migrate.RerenderSummary) bool { return s.Uncounted == 1 }},
+		{"short, accepted", strings.Join(strings.Split(string(transcript), "\n")[:3], "\n") + "\n", []string{"--accept-uncounted"}, func(s migrate.RerenderSummary) bool { return s.WouldSend == 1 && s.AcceptedUncounted == 1 }},
+	}
+	for _, c := range cases {
+		f := newRerenderFixture(t)
+		writeFile(t, f.big, big)
+		writeFile(t, f.transcript, "")
+		writeFile(t, filepath.Join(f.codex, "rollout-2026-01-15T10-00-00-"+id+".jsonl"), c.transcript)
+		summary, _, report := f.run(t, nil, c.extra...)
+		if !c.want(summary) {
+			t.Fatalf("%s: summary = %+v", c.name, summary)
+		}
+		if c.name == "short, accepted" {
+			checkAccepted(t, f, report)
+		}
+	}
+}

@@ -32,6 +32,8 @@ const (
 	RerenderShorter = "transcript_shorter"
 	// RerenderUncounted is an export that does not say how many messages it reaches, so nothing can show the transcript has them all.
 	RerenderUncounted = "export_uncounted"
+	// RerenderAcceptedUncounted is an uncounted export sent anyway on the owner's --accept-uncounted. It is named in the report.
+	RerenderAcceptedUncounted = "accepted_uncounted"
 )
 
 // maxMetaRecords is how far into a transcript its session_meta is looked for. Codex writes it first.
@@ -101,29 +103,41 @@ func frontmatterBlock(data []byte) []byte {
 	return text[:4+end+1]
 }
 
-// CountMessages counts a Codex transcript's messages the way the server does: a response_item message from the user or the
-// assistant with text in it. A line it cannot read is not counted, so a damaged transcript reads as shorter, never longer.
-func CountMessages(file string) (int64, error) {
+// Message is one message of a transcript, as the exporter and the server both read it.
+type Message struct {
+	Role, Text string
+}
+
+// TranscriptMessages reads a Codex transcript's messages the way its exporter does, which is also how the server counts them: a
+// response_item message from the user or the assistant with text in it, the text of each block stripped and joined by a blank
+// line. A line it cannot read is left out, so a damaged transcript reads as shorter, never longer.
+func TranscriptMessages(file string) ([]Message, error) {
 	handle, err := os.Open(file)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	defer func() { _ = handle.Close() }()
 	scanner := bufio.NewScanner(handle)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxTranscriptLine)
-	var count int64
+	var messages []Message
 	for scanner.Scan() {
-		if isMessage(scanner.Bytes()) {
-			count++
+		if message, ok := messageOf(scanner.Bytes()); ok {
+			messages = append(messages, message)
 		}
 	}
-	return count, scanner.Err()
+	return messages, scanner.Err()
+}
+
+// CountMessages is how many messages the server will find in a transcript.
+func CountMessages(file string) (int64, error) {
+	messages, err := TranscriptMessages(file)
+	return int64(len(messages)), err
 }
 
 // maxTranscriptLine is the server's own limit on a line. A longer one is dropped there too.
 const maxTranscriptLine = 16 * 1024 * 1024
 
-func isMessage(line []byte) bool {
+func messageOf(line []byte) (Message, bool) {
 	var record struct {
 		Type    string `json:"type"`
 		Payload struct {
@@ -133,29 +147,89 @@ func isMessage(line []byte) bool {
 		} `json:"payload"`
 	}
 	if json.Unmarshal(line, &record) != nil || record.Type != "response_item" || record.Payload.Type != "message" {
-		return false
+		return Message{}, false
 	}
-	return (record.Payload.Role == "user" || record.Payload.Role == "assistant") && hasText(record.Payload.Content)
+	if record.Payload.Role != "user" && record.Payload.Role != "assistant" {
+		return Message{}, false
+	}
+	text := blockText(record.Payload.Content)
+	return Message{Role: record.Payload.Role, Text: text}, text != ""
 }
 
-func hasText(content json.RawMessage) bool {
+// blockText is the exporter's text_blocks: a string stripped, or the stripped text blocks joined by a blank line.
+func blockText(content json.RawMessage) string {
 	var text string
 	if json.Unmarshal(content, &text) == nil {
-		return strip(text) != ""
+		return strip(text)
 	}
 	var blocks []struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
 	}
 	if json.Unmarshal(content, &blocks) != nil {
-		return false
+		return ""
 	}
+	var parts []string
 	for _, block := range blocks {
 		if (block.Type == "input_text" || block.Type == "output_text" || block.Type == "text") && strip(block.Text) != "" {
-			return true
+			parts = append(parts, strip(block.Text))
 		}
 	}
-	return false
+	return strings.Join(parts, "\n\n")
+}
+
+// ExporterFormat is the export body this can read: render_chunk in the Codex exporter of agent-skills at 3478baa, in
+// codex/skills/recall/scripts/export_sessions.py. Each message is "## User" or "## Assistant", a blank line, its text and a blank line,
+// after the frontmatter and a "# " title.
+const ExporterFormat = "agent-skills 3478baa codex/skills/recall/scripts/export_sessions.py render_chunk"
+
+// BodyCovered says whether an export's body is, exactly, the transcript's first messages as that exporter renders them. Matching
+// the text itself is what makes a heading-like line inside a message part of that message, not one of its own. Anything else,
+// such as another heading, a message the transcript lacks, or text left over, is not shown to be covered.
+func BodyCovered(export []byte, messages []Message) bool {
+	text := strings.ReplaceAll(string(export), "\r\n", "\n")
+	rest, found := bodyOf(text)
+	if !found {
+		return false
+	}
+	for _, message := range messages {
+		if rest == "" {
+			return true
+		}
+		block := "## " + labelOf(message.Role) + "\n\n" + strings.ReplaceAll(message.Text, "\r\n", "\n") + "\n"
+		if !strings.HasPrefix(rest, block) {
+			return false
+		}
+		rest = strings.TrimPrefix(rest[len(block):], "\n")
+	}
+	return rest == ""
+}
+
+func labelOf(role string) string {
+	if role == "user" {
+		return "User"
+	}
+	return "Assistant"
+}
+
+// bodyOf is the text after the frontmatter, and after the title the exporter writes before the first message.
+func bodyOf(text string) (string, bool) {
+	if !strings.HasPrefix(text, "---\n") {
+		return "", false
+	}
+	end := strings.Index(text[4:], "\n---\n")
+	if end < 0 {
+		return "", false
+	}
+	body := strings.TrimPrefix(text[4+end+len("\n---\n"):], "\n")
+	if strings.HasPrefix(body, "# ") {
+		title, rest, found := strings.Cut(body, "\n")
+		if !found || strings.Contains(title, "\n") {
+			return "", false
+		}
+		body = strings.TrimPrefix(rest, "\n")
+	}
+	return body, true
 }
 
 // strip trims what Python's str.strip trims, which is more than Go's TrimSpace, so a message of only those is not counted.
@@ -274,8 +348,10 @@ type RerenderSummary struct {
 	NotReached   int            `json:"notReached"`
 	// Shorter is transcripts with fewer messages than their exports reach, which are not sent.
 	Shorter int `json:"transcriptShorter"`
-	// Uncounted is exports that do not say how many messages they reach, which are not sent.
+	// Uncounted is exports that do not say how many messages they reach, and whose body does not show the transcript has them all.
 	Uncounted int `json:"exportUncounted"`
+	// AcceptedUncounted is those sent anyway, because the owner passed --accept-uncounted after looking. They are in Sent too.
+	AcceptedUncounted int `json:"acceptedUncounted"`
 }
 
 // RefusedTotal is every session the server refused.

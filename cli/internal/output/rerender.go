@@ -20,13 +20,19 @@ const RerenderShorterNote = "A transcript with fewer messages than its exports w
 // RerenderShrankNote is said for session_shrank, as a refusal by code alone does not say what it leaves.
 const RerenderShrankNote = "session_shrank means the server kept what it had: the export is still the only copy of the messages the transcript lacks."
 
-// RerenderUncountedNote is said for an export that does not say how far its messages reach.
-const RerenderUncountedNote = "An export that does not say how many messages it holds was not sent, as nothing can show its transcript has them all. Its export is its only copy."
+// RerenderUncountedNote is said for an export that does not say how far its messages reach, and whose body does not show it.
+const RerenderUncountedNote = "An export that does not count its messages, and whose body is not its transcript's, was not sent: nothing shows the transcript has them all, so its export is its only copy. After looking, --accept-uncounted sends it anyway."
+
+// RerenderAcceptedNote is said whenever --accept-uncounted let an export through, so it is never silent.
+const RerenderAcceptedNote = "Sent with --accept-uncounted, on your word: for these, nothing showed the transcript holds every message the export does. The local report names them."
 
 func rerenderLines(s *migrate.RerenderSummary) []string {
 	var lines []string
 	for _, reason := range ruleNames(s.Refused) {
 		lines = append(lines, fmt.Sprintf("%s: refused, %s: %d", s.Name, reason, s.Refused[reason]))
+	}
+	if s.AcceptedUncounted > 0 {
+		lines = append(lines, fmt.Sprintf("%s: %d sent with --accept-uncounted", s.Name, s.AcceptedUncounted))
 	}
 	return lines
 }
@@ -59,17 +65,18 @@ func rerenderNotes(result *migrate.RerenderResult) []string {
 }
 
 func lossNotes(result *migrate.RerenderResult) []string {
-	shorter, shrank, uncounted := 0, 0, 0
+	shorter, shrank, uncounted, accepted := 0, 0, 0, 0
 	for i := range result.Collections {
 		shorter += result.Collections[i].Shorter
 		shrank += result.Collections[i].Refused["session_shrank"]
 		uncounted += result.Collections[i].Uncounted
+		accepted += result.Collections[i].AcceptedUncounted
 	}
 	var notes []string
 	for _, said := range []struct {
 		count int
 		note  string
-	}{{shorter, RerenderShorterNote}, {shrank, RerenderShrankNote}, {uncounted, RerenderUncountedNote}} {
+	}{{shorter, RerenderShorterNote}, {shrank, RerenderShrankNote}, {uncounted, RerenderUncountedNote}, {accepted, RerenderAcceptedNote}} {
 		if said.count > 0 {
 			notes = append(notes, said.note)
 		}

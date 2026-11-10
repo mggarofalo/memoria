@@ -37,6 +37,9 @@ var runbookSteps = []string{
 	"memoria migrate rerender", "memoria migrate cutover", "memoria migrate rollback",
 }
 
+// runbookFlags must each be shown in use, as a command the owner can copy.
+var runbookFlags = []string{"memoria migrate rerender --accept-uncounted", "memoria migrate push --accept-over-cap"}
+
 // codeCommands is every memoria command in the runbook's code blocks, with a line continued by a backslash joined to the next,
 // and a prompt or .exe taken off.
 func codeCommands(runbook string) []string {
@@ -122,15 +125,27 @@ func TestTheRunbooksCommandsAreRealWithRealFlags(t *testing.T) {
 			t.Errorf("%q: %s", line, problem)
 		}
 	}
-	for _, step := range runbookSteps {
-		found := false
-		for _, line := range commands {
-			found = found || strings.HasPrefix(line+" ", step+" ")
+	for _, use := range runbookFlags {
+		step, flag, _ := strings.Cut(use, " --")
+		if !hasCommand(commands, step, "--"+flag) {
+			t.Errorf("the runbook shows no %q", use)
 		}
-		if !found {
+	}
+	for _, step := range runbookSteps {
+		if !hasCommand(commands, step, "") {
 			t.Errorf("the runbook has no %q step", step)
 		}
 	}
+}
+
+// hasCommand is a command line for this step, using this flag if one is named.
+func hasCommand(commands []string, step, flag string) bool {
+	for _, line := range commands {
+		if strings.HasPrefix(line+" ", step+" ") && (flag == "" || strings.Contains(line+" ", " "+flag+" ")) {
+			return true
+		}
+	}
+	return false
 }
 
 // What the runbook test must refuse, so the test above is shown to read commands as cobra does.
@@ -157,7 +172,7 @@ func TestTheRunbookCheckRefusesWhatCobraWould(t *testing.T) {
 
 func TestTheRunbookQuotesWhatRerenderSaysAndUses(t *testing.T) {
 	runbook := readRunbook(t)
-	for _, said := range []string{output.RerenderNoTranscriptNote, output.RerenderShorterNote, output.RerenderShrankNote, "format=codex", "409 `session_shrank`", "`allowShrink`"} {
+	for _, said := range []string{output.RerenderNoTranscriptNote, output.RerenderShorterNote, output.RerenderShrankNote, output.RerenderUncountedNote, output.RerenderAcceptedNote, "format=codex", "409 `session_shrank`", "`allowShrink`", "`accepted_uncounted`", "`acceptedUncounted`"} {
 		if !strings.Contains(runbook, said) {
 			t.Errorf("the runbook does not say %q", said)
 		}
@@ -167,5 +182,8 @@ func TestTheRunbookQuotesWhatRerenderSaysAndUses(t *testing.T) {
 	}
 	if codexFormat != "codex" {
 		t.Error("the format rerender sends is not the one the runbook names")
+	}
+	if migrate.RerenderAcceptedUncounted != "accepted_uncounted" || !strings.Contains(migrate.ExporterFormat, "3478baa") || !strings.Contains(runbook, "agent-skills at `3478baa`") {
+		t.Error("the runbook does not name the exporter format, or the report status, that rerender uses")
 	}
 }

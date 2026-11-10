@@ -160,3 +160,72 @@ func TestALinkToATranscriptIsTheSameFile(t *testing.T) {
 		t.Fatalf("found = %v, err = %v", found, err)
 	}
 }
+
+// The fixture is what the Codex exporter at agent-skills 3478baa wrote for the transcript beside it, unchanged: one assistant message
+// holds lines that look like "## User" and "## Assistant" headings. Its counts are taken out here, as an older export lacks them.
+func exporterFixture(t *testing.T) ([]byte, []Message) {
+	t.Helper()
+	export, err := os.ReadFile(filepath.Join("testdata", "exporter", "2026-01-15_codex_5e55ad6a-1111-4222-8333-444455556666_chunk-00001.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages, err := TranscriptMessages(filepath.Join("testdata", "exporter", "rollout-2026-01-15T10-00-00-5e55ad6a-1111-4222-8333-444455556666.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kept []string
+	for _, line := range strings.Split(strings.ReplaceAll(string(export), "\r\n", "\n"), "\n") {
+		if !strings.HasPrefix(line, "message_start:") && !strings.HasPrefix(line, "message_end:") && !strings.HasPrefix(line, "message_count:") {
+			kept = append(kept, line)
+		}
+	}
+	return []byte(strings.Join(kept, "\n")), messages
+}
+
+func TestTheExportersBodyIsReadAsItsMessages(t *testing.T) {
+	export, messages := exporterFixture(t)
+	if len(messages) != 3 || strings.Count(string(export), "\n## ") != 5 {
+		t.Fatalf("%d messages; the fixture has changed", len(messages))
+	}
+	if _, known := ReachOf(export); known {
+		t.Fatal("the counts are still there")
+	}
+	if !BodyCovered(export, messages) {
+		t.Fatal("the exporter's own output for this transcript was not read as covered")
+	}
+	if !BodyCovered([]byte(strings.ReplaceAll(string(export), "\n", "\r\n")), messages) {
+		t.Fatal("line endings changed the reading")
+	}
+	if !BodyCovered(export, append(messages, Message{Role: "user", Text: "later"})) {
+		t.Fatal("a transcript that has gone on was not read as covering it")
+	}
+}
+
+func TestABodyThatIsNotTheTranscriptsIsNotCovered(t *testing.T) {
+	export, messages := exporterFixture(t)
+	text := string(export)
+	for name, c := range map[string]struct {
+		export   string
+		messages []Message
+	}{
+		"a message short":            {text, messages[:2]},
+		"no messages":                {text, nil},
+		"a message changed":          {strings.Replace(text, "A second block.", "Another block.", 1), messages},
+		"a heading it does not know": {text + "\n## System\n\nmore\n", messages},
+		"text left over":             {text + "\nmore\n", messages},
+		"a message's role swapped":   {strings.Replace(text, "## User\n\nthanks", "## Assistant\n\nthanks", 1), messages},
+		"no frontmatter":             {text[strings.Index(text, "# Please"):], messages},
+		"an unclosed frontmatter":    {"---\nsession_id: x\n## User\n\nPlease explain the plan\n", messages},
+	} {
+		if BodyCovered([]byte(c.export), c.messages) {
+			t.Errorf("%s was read as covered", name)
+		}
+	}
+}
+
+func TestTheTranscriptsTextIsTheExportersText(t *testing.T) {
+	_, messages := exporterFixture(t)
+	if messages[1].Text != "Here is the plan.\n\n## User\n\nThat heading above is quoted inside this message, and is not a message of its own.\n\n## Assistant\n\nA second block." || messages[2].Text != "thanks" || messages[2].Role != "user" {
+		t.Fatalf("messages = %q", messages)
+	}
+}
