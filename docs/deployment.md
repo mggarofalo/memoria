@@ -380,7 +380,7 @@ PersistentKeepalive = 25
 
 Leave `MTU` unset. The default, 1420 on a network of 1500-byte packets, carries requests of several MiB between the sidecar and a worker.
 
-**What the API host needs.** The sidecar container reaches workers through the host: Docker masquerades its traffic, so a worker sees it from the host's tunnel address. Docker also accepts its containers' outbound traffic ahead of the host firewall's own rules, so `ufw`'s default of dropping forwarded traffic does not stop it, and no route rule is needed. What `ufw`'s default of denying incoming traffic does stop is the workers' handshakes, so allow the tunnel's port:
+**What the API host needs.** The sidecar container reaches workers through the host: Docker masquerades its traffic, so a worker sees it from the host's tunnel address. With Docker's default firewall backend, iptables, Docker also accepts its containers' outbound traffic ahead of the host firewall's own rules, so `ufw`'s default of dropping forwarded traffic does not stop it, and no route rule is needed. Docker's opt-in nftables backend keeps its rules in a table of its own, which this has not been tried with. What `ufw`'s default of denying incoming traffic does stop is the workers' handshakes, so allow the tunnel's port:
 
 ```sh
 ufw allow 51820/udp

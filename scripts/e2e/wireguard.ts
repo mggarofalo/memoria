@@ -199,10 +199,12 @@ async function workerHost(): Promise<void> {
 
 /** Without the tunnel's address there is nothing to bind, so the worker stops, as the start-order note says. */
 function startOrder(): void {
-  const early = docker(["run", "--rm", "--network", `container:${WORKER_TUNNEL}`, "-v", `${path.join(repo, "worker")}:/worker:ro`, "-w", "/worker",
+  // Everything else as the real worker has it, so the address is the only thing missing.
+  const early = docker(["run", "--rm", "--network", `container:${WORKER_TUNNEL}`, "-v", `${path.join(repo, "worker")}:/worker:ro`, "-v", `${dir}:/check:ro`, "-w", "/worker",
     "-e", "MEMORIA_WORKER_ALLOW_HTTP_ON_PRIVATE_NETWORK=1", "-e", "MEMORIA_WORKER_HOST=10.0.0.9", "-e", `MEMORIA_WORKER_TOKEN=${WORKER_TOKEN}`,
-    "-e", "MEMORIA_WORKER_LLAMA_SERVER=/bin/false", NODE_IMAGE, "node", "src/main.ts"], { allowFailure: true });
-  check("worker: on an address the host does not have yet, it fails to start", early.code !== 0, early.out);
+    "-e", "MEMORIA_WORKER_LLAMA_SERVER=/check/llama-server", "-e", "MEMORIA_WORKER_MODEL_DIR=/check/models", "-e", "MEMORIA_WORKER_WARMUP=0",
+    "-e", "MEMORIA_WORKER_LLAMA_BASE_PORT=9384", NODE_IMAGE, "node", "src/main.ts"], { allowFailure: true });
+  check("worker: on an address the host does not have yet, it fails to start, for want of the address", early.code !== 0 && early.out.includes("EADDRNOTAVAIL"), early.out);
   const plain = docker(["run", "--rm", "--network", `container:${WORKER_TUNNEL}`, "-v", `${path.join(repo, "worker")}:/worker:ro`, "-w", "/worker",
     "-e", `MEMORIA_WORKER_HOST=${TUNNEL.worker}`, "-e", `MEMORIA_WORKER_TOKEN=${WORKER_TOKEN}`, NODE_IMAGE, "node", "src/main.ts"], { allowFailure: true });
   check("worker: without MEMORIA_WORKER_ALLOW_HTTP_ON_PRIVATE_NETWORK it refuses the tunnel address", plain.code !== 0 && plain.out.includes("MEMORIA_WORKER_ALLOW_HTTP_ON_PRIVATE_NETWORK=1"), plain.out);
@@ -285,7 +287,7 @@ async function firewall(): Promise<void> {
   // The worker sends a handshake every 5 seconds until one is answered, so in 15 the API host would have learned its new port.
   await new Promise((resolve) => setTimeout(resolve, 15_000));
   const blocked = fromSidecar(`${WORKER_URL}/health`, { token: true });
-  check("ufw: with its default deny incoming, a worker that starts its tunnel anew cannot reach the API host", blocked !== "200" && endpoint() === known, { blocked, known, now: endpoint() });
+  check("ufw: with its default deny incoming, a worker that starts its tunnel anew cannot reach the API host", blocked === "TimeoutError" && known !== "" && endpoint() === known, { blocked, known, now: endpoint() });
   onHost("ufw allow 51820/udp >/dev/null");
   const opened = await until(() => fromSidecar(`${WORKER_URL}/health`, { token: true }), (status) => status === "200", 40);
   check("ufw: with the tunnel's port allowed, the worker's handshake gets through and the sidecar reaches it", opened === "200", { opened, wg: wg(HOST_TUNNEL, "show wg0") });
