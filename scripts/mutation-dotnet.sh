@@ -4,9 +4,9 @@
 # Otherwise (nightly) mutates everything. Never run this from a git hook.
 # Every config runs, so one score under its threshold does not hide the others.
 #
-# With MUTATION_LIMIT_MINUTES set, running out of time is reported as inconclusive
-# instead of failing. Stryker.NET writes its score at the end, so a config that
-# runs out of time has no score to report; the nightly run has no such limit.
+# With MUTATION_LIMIT_MINUTES set, running out of time fails the run as inconclusive.
+# Stryker.NET writes its score at the end, so a config that runs out of time has no
+# score, and a run with no score must not read as a pass. The nightly run has no limit.
 #
 # MUTATION_CONFIGS names the configs to run, space-separated; the default is all four.
 # MUTATION_MUTATE narrows what they mutate, as space-separated globs, each passed as
@@ -26,7 +26,7 @@ for glob in ${MUTATION_MUTATE:-}; do
 done
 
 inconclusive() {
-  message="Mutation (.NET) is inconclusive: the time limit ended before $1 finished. No score for it, and this is not a failure. The nightly run covers it."
+  message="Mutation (.NET) is inconclusive: the time limit ended before $1 finished, so it has no score. This fails the run; the nightly run covers the whole project."
   echo "$message"
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     echo "$message" >> "$GITHUB_STEP_SUMMARY"
@@ -44,6 +44,7 @@ for config in ${MUTATION_CONFIGS:-core api security security-core}; do
     left=$((MUTATION_LIMIT_MINUTES * 60 - $(date +%s) + started))
     if [ "$left" -le 0 ]; then
       inconclusive "$config"
+      status=1
       continue
     fi
     limiter="timeout $left"
@@ -54,6 +55,7 @@ for config in ${MUTATION_CONFIGS:-core api security security-core}; do
     --output "StrykerOutput/$config" --concurrency "$runners" $since $mutate || code=$?
   if [ "$code" -eq 124 ] && [ -n "$limiter" ]; then
     inconclusive "$config"
+    status=1
   elif [ "$code" -ne 0 ]; then
     status=1
   fi

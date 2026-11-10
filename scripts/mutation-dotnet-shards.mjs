@@ -1,5 +1,5 @@
-// Prints the .NET mutation matrix as JSON: one entry for a pull request, which mutates
-// only what changed, or the shards in stryker/shards.json for a full run. Each entry has
+// Prints the .NET mutation matrix as JSON: for a pull request, one entry, the security
+// subset of Memoria.Api, which mutates only what changed; or for a full run, the shards in stryker/shards.json for a full run. Each entry has
 // the shard's name, its config, and the globs scripts/mutation-dotnet.sh passes to Stryker
 // as --mutate, with the rest shards expanded so every file is mutated exactly once.
 // Usage: node scripts/mutation-dotnet-shards.mjs [--pull-request]
@@ -22,5 +22,5 @@ export function expand(shards) {
 if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith("mutation-dotnet-shards.mjs")) {
   const pullRequest = process.argv.includes("--pull-request");
   const { shards } = JSON.parse(readFileSync(new URL("../stryker/shards.json", import.meta.url), "utf8"));
-  process.stdout.write(JSON.stringify(pullRequest ? [{ name: "", configs: "", mutate: "" }] : expand(shards)));
+  process.stdout.write(JSON.stringify(pullRequest ? [{ name: "", configs: "security", mutate: "" }] : expand(shards)));
 }

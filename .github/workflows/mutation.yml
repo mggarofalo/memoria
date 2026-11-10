@@ -53,14 +53,16 @@ jobs:
     name: Mutation (.NET${{ matrix.shard.name && format(', {0}', matrix.shard.name) || '' }})
     needs: dotnet-shards
     runs-on: ubuntu-latest
-    # A pull request mutates only what changed, in one job, and stops itself at 50
-    # minutes, reporting inconclusive; see scripts/mutation-dotnet.sh. The full run does
+    # A pull request mutates only what changed in the security subset of Memoria.Api,
+    # in one job, and fails as inconclusive if that takes past 20 minutes. Any Memoria.Core
+    # config spends about 13 minutes on its first test run alone, so pull requests leave
+    # Core to the full run; see scripts/mutation-dotnet.sh. The full run does
     # not fit one job's 4 hours: Memoria.Core alone has about 5,600 mutants, most of them
     # covered by thousands of redaction tests, at several seconds each. So it runs as the
     # shards in stryker/shards.json, each with the job limit to itself and its config's
     # thresholds, break included. Core's shards cover every file once; security-core's
     # files are among them, under the same 90% break, so a full run does not mutate them twice.
-    timeout-minutes: ${{ github.event_name == 'pull_request' && 60 || 240 }}
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 30 || 240 }}
     strategy:
       fail-fast: false
       matrix:
@@ -78,7 +80,7 @@ jobs:
       - name: Mutate
         run: sh scripts/mutation-dotnet.sh
         env:
-          MUTATION_LIMIT_MINUTES: ${{ github.event_name == 'pull_request' && '50' || '' }}
+          MUTATION_LIMIT_MINUTES: ${{ github.event_name == 'pull_request' && '20' || '' }}
           MUTATION_CONFIGS: ${{ matrix.shard.configs }}
           MUTATION_MUTATE: ${{ matrix.shard.mutate }}
       # Always, pull requests included: a failed score is only actionable with the report,
