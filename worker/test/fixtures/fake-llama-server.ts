@@ -18,6 +18,8 @@ const loadUntil = Date.now() + Number(process.env.FAKE_LOAD_MS ?? "0");
 const loadGate = process.env.FAKE_LOAD_UNTIL_FILE;
 const loading = (): boolean => Date.now() < loadUntil || (loadGate !== undefined && !existsSync(loadGate));
 let hung = false;
+/** How this process got its socket: handed over by the test, or bound here. */
+let listenedBy: "handle" | "port" = "port";
 
 function vectorFor(text: string): number[] {
   let h = 7;
@@ -59,7 +61,7 @@ const routes = new Map<string, (body: Body) => Reply>([
   ["/completion", completion],
   ["/v1/chat/completions", chat],
   ["/props", () => (loading() ? [503, { error: { message: "Loading model" } }] : [200, { model_alias: process.env.LLAMA_ARG_ALIAS ?? "" }])],
-  ["/debug/env", () => [200, { keys: Object.keys(process.env).filter((k) => k.toUpperCase().startsWith("MEMORIA_")), args, api: Boolean(process.env.LLAMA_API_KEY) }]],
+  ["/debug/env", () => [200, { keys: Object.keys(process.env).filter((k) => k.toUpperCase().startsWith("MEMORIA_")), args, api: Boolean(process.env.LLAMA_API_KEY), listenedBy }]],
   [
     "/debug/say",
     (body) => {
@@ -101,7 +103,21 @@ const server = createServer((request, response) => {
     return finish(typeof route === "function" ? route(body) : [404, { error: { message: "no such route" } }]);
   });
 });
-server.listen(port, "127.0.0.1");
+// Launched by the tests' supervisor, the port is already bound and comes over the IPC channel (handOverPort in helpers.ts). Told to bind it
+// itself, or run with no channel, it binds the port as llama-server does, and fails the same way if something holds it.
+if (process.send) {
+  process.once("message", (message: { listen?: string }, handle?: unknown) => {
+    if (message.listen === "handle" && handle) {
+      listenedBy = "handle";
+      server.listen(handle as Parameters<typeof server.listen>[0]);
+    } else {
+      server.listen(port, "127.0.0.1");
+    }
+    process.channel?.unref();
+  });
+} else {
+  server.listen(port, "127.0.0.1");
+}
 // Never outlive the test process. A test that fails, or a mutant that breaks the
 // supervisor's stop, would otherwise leave these running and use up the machine.
 const parent = process.ppid;
