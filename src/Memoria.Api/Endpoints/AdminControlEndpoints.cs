@@ -22,7 +22,7 @@ public static partial class AdminControlEndpoints
 			.WithMemoriaScope(MemoriaScopes.Admin)
 			.WithTags("Operations")
 			.AddEndpointFilter(AdminKeyEndpoints.RequireApiKeyModeAsync)
-			.AddEndpointFilter(RequireUnboundKeyAsync)
+			.WithMetadata(new MemoriaUnboundKeyAttribute())
 			.AddEndpointFilter(ForwardRefusalsAsync)
 			.ProducesProblem(StatusCodes.Status401Unauthorized)
 			.ProducesProblem(StatusCodes.Status403Forbidden)
@@ -108,26 +108,6 @@ public static partial class AdminControlEndpoints
 			.Produces<JobInfo>(StatusCodes.Status202Accepted)
 			.ProducesProblem(StatusCodes.Status409Conflict)
 			.ProducesValidationProblem();
-	}
-
-	/// <summary>
-	/// A key bound to particular collections must not act on all of them, which every
-	/// route here does. An admin-only key is bound to none, and an all-collections key to
-	/// every one; both may.
-	/// </summary>
-	internal static async ValueTask<object?> RequireUnboundKeyAsync(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
-	{
-		ICallerScope scope = context.HttpContext.RequestServices.GetRequiredService<ICallerScope>();
-		if (scope.Collections is { Count: > 0 })
-		{
-			return TypedResults.Problem(
-				statusCode: StatusCodes.Status403Forbidden,
-				title: "Key is bound to collections",
-				detail: "Operations act on every collection, so they need an admin key that is not limited to particular collections.",
-				extensions: new Dictionary<string, object?> { ["code"] = "collection_scoped_key" });
-		}
-
-		return await next(context);
 	}
 
 	/// <summary>

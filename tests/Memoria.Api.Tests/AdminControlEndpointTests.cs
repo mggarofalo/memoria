@@ -139,6 +139,45 @@ public sealed class AdminControlEndpointTests(AuthApiFactory factory) : IClassFi
 		Assert.Empty(factory.Sidecar.Requests);
 	}
 
+	/// <summary>The scope check runs before the body is read, so no body can turn the refusal into a 400.</summary>
+	[Theory]
+	[InlineData("{not json", "application/json")]
+	[InlineData("""{"collections":[]}""", "application/json")]
+	[InlineData("""{"collections":"notes"}""", "application/json")]
+	[InlineData("", "application/json")]
+	public async Task ACollectionScopedAdminKey_Gets403_WhateverTheReindexBody(string body, string contentType)
+	{
+		ScriptSidecar();
+		(Memoria.Api.Auth.ApiKeyRecord record, string token) = await factory.IssueAsync([MemoriaScopes.Admin, MemoriaScopes.Read], ["claude-sessions"], label: "scoped reindex");
+		HttpClient scoped = AuthApiFactory.Authorized(factory.CreateClient(), token);
+
+		HttpResponseMessage response = await scoped.PostAsync("/v1/admin/reindex", new StringContent(body, Encoding.UTF8, contentType));
+
+		Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+		Assert.Equal("collection_scoped_key", await CodeOf(response));
+		Assert.Empty(factory.Sidecar.Requests);
+		List<AuthApiFactory.AuditRow> rows = await factory.WaitForAuditAsync(r => r.Any(a => a.KeyId == record.Id));
+		Assert.Equal(403, Assert.Single(rows, r => r.KeyId == record.Id).Status);
+	}
+
+	/// <summary>
+	/// A body that is not JSON at all never selects the operation: routing picks its own 415
+	/// endpoint instead, which any valid key gets, and no key gets 401. The operation and the
+	/// sidecar never see it.
+	/// </summary>
+	[Fact]
+	public async Task ANonJsonReindexBody_SelectsNoOperation_AndTheSidecarHearsNothing()
+	{
+		ScriptSidecar();
+		StringContent Body() => new("collections=notes", Encoding.UTF8, "text/plain");
+		HttpClient scoped = await factory.ClientWithScopesAsync([MemoriaScopes.Admin, MemoriaScopes.Read], ["claude-sessions"]);
+
+		Assert.Equal(HttpStatusCode.UnsupportedMediaType, (await scoped.PostAsync("/v1/admin/reindex", Body())).StatusCode);
+		Assert.Equal(HttpStatusCode.UnsupportedMediaType, (await (await factory.AdminAsync()).PostAsync("/v1/admin/reindex", Body())).StatusCode);
+		Assert.Equal(HttpStatusCode.Unauthorized, (await factory.CreateClient().PostAsync("/v1/admin/reindex", Body())).StatusCode);
+		Assert.Empty(factory.Sidecar.Requests);
+	}
+
 	[Theory]
 	[MemberData(nameof(Routes))]
 	public async Task NoKey_Gets401(string method, string path)

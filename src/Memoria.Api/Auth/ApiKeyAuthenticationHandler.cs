@@ -205,9 +205,28 @@ public sealed partial class ApiKeyAuthenticationHandler(
 
 	protected override async Task HandleForbiddenAsync(AuthenticationProperties properties)
 	{
-		string? required = Context.GetEndpoint()?.Metadata.GetMetadata<MemoriaScopeAttribute>()?.Scope;
+		Endpoint? endpoint = Context.GetEndpoint();
+		string? required = endpoint?.Metadata.GetMetadata<MemoriaScopeAttribute>()?.Scope;
+		if (IsBoundKeyOnUnboundRoute(endpoint, required))
+		{
+			await WriteProblemAsync(
+				StatusCodes.Status403Forbidden,
+				"Key is bound to collections",
+				"Operations act on every collection, so they need an admin key that is not limited to particular collections.",
+				"collection_scoped_key");
+			return;
+		}
+
 		Response.Headers.WWWAuthenticate = "Bearer realm=\"memoria\", error=\"insufficient_scope\"";
 		await WriteProblemAsync(StatusCodes.Status403Forbidden, "Insufficient scope", $"This API key lacks the '{required}' scope.", "insufficient_scope");
+	}
+
+	/// <summary>The key has the scope, so what failed is the route's refusal of a key bound to collections.</summary>
+	private bool IsBoundKeyOnUnboundRoute(Endpoint? endpoint, string? required)
+	{
+		return endpoint?.Metadata.GetMetadata<MemoriaUnboundKeyAttribute>() is not null
+			&& (required is null || Context.User.HasClaim(MemoriaClaims.Scope, required))
+			&& Context.User.HasClaim(static c => c.Type == MemoriaClaims.Collection);
 	}
 
 	private static ClaimsPrincipal BuildPrincipal(ApiKeyRecord record)

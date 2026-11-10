@@ -55,10 +55,12 @@ function drainAndEnable(h: Harness, ops: string): void {
   h.check("ops: draining a name not in the pool is a real 404, exit 4", ghost.code === 4 && ghost.err.includes("ghost"), ghost.out + ghost.err);
 }
 
-function refusedCallers(h: Harness, scoped: string, reader: string, ops: string): void {
+async function refusedCallers(h: Harness, scoped: string, reader: string, ops: string): Promise<void> {
   const from = h.proxiedCount();
   const bound = h.memoria(["workers", "drain", WORKER], { key: scoped });
   h.check("ops: an admin key bound to collections cannot drain: 403, exit 3, with what to do", bound.code === 3 && bound.err.includes("--scope admin"), bound.out + bound.err);
+  const malformed = await h.request({ path: "/v1/admin/reindex", method: "POST", key: scoped, body: "not an object" });
+  h.check("ops: a bound admin key sending a malformed reindex body still gets 403 collection_scoped_key", malformed.status === 403 && malformed.body.includes("collection_scoped_key"), malformed);
   const notAdmin = h.memoria(["queue", "pause"], { key: reader });
   h.check("ops: a read key cannot pause the queue: 403, exit 3", notAdmin.code === 3, notAdmin.out + notAdmin.err);
   // The marker: a call that does reach the sidecar, so an empty record cannot pass for a refusal.
@@ -135,7 +137,7 @@ export async function operations(h: Harness, admin: string): Promise<void> {
   const scoped = make(["--label", "ops-scoped", "--scope", "admin", "--scope", "read", "--collection", "notes"]);
   const reader = make(["--label", "ops-reader", "--scope", "read", "--collection", "notes"]);
   drainAndEnable(h, ops);
-  refusedCallers(h, scoped, reader, ops);
+  await refusedCallers(h, scoped, reader, ops);
   await pauseReindexAndResume(h, ops);
   await readiness(h, ops, reader);
 }
