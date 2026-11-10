@@ -32,6 +32,57 @@ test("the Dockerfile stamps the API from a build argument", () => {
   assert.match(dockerfile, /-p:Version=\$MEMORIA_VERSION/);
 });
 
+test("the sidecar image is patched at install, stamped, non-root, and holds no way to run a model", () => {
+  const dockerfile = read("sidecar/Dockerfile");
+  assert.ok(dockerfile.indexOf("COPY scripts/patch-qmd.ts") < dockerfile.indexOf("RUN npm ci"), "postinstall needs the patch");
+  assert.doesNotMatch(dockerfile, /^RUN .*--ignore-scripts/m);
+  assert.match(dockerfile, /ARG MEMORIA_VERSION=0\.0\.0-dev/);
+  assert.match(dockerfile, /dist\/VERSION/);
+  assert.match(dockerfile, /^USER node$/m);
+  assert.match(dockerfile, /rm -rf node_modules\/@node-llama-cpp/);
+  assert.match(dockerfile, /MEMORIA_QMD_LLM_FALLBACK=0/);
+});
+
+test("the deployment doc lists exactly the variables compose reads, with the defaults compose gives them", () => {
+  const compose = read("deploy/compose.yaml");
+  const variables = new Map<string, string | undefined>();
+  for (const match of compose.matchAll(/\$\{([A-Z_]+)(:-|:\?)?([^}]*)\}/g)) {
+    const [, name, kind, rest] = match;
+    if (name === undefined) continue;
+    if (kind === ":-") variables.set(name, rest);
+    else if (!variables.has(name)) variables.set(name, undefined);
+  }
+  const doc = read("docs/deployment.md");
+  const section = (heading: string): string => {
+    const start = doc.indexOf(`### ${heading}\n`);
+    assert.notEqual(start, -1, heading);
+    const end = doc.indexOf("\n### ", start + 1);
+    return doc.slice(start, end === -1 ? undefined : end);
+  };
+  const rows = (text: string): Map<string, string> =>
+    new Map([...text.matchAll(/^\| `([A-Z_]+)` \| ([^|]*) \|/gm)].map((row) => [row[1] as string, (row[2] as string).trim()]));
+  const required = rows(section("Required environment"));
+  const optional = rows(section("Optional environment"));
+  const documented = new Set([...required.keys(), ...optional.keys()]);
+  assert.deepEqual([...variables.keys()].filter((name) => !documented.has(name)).sort(), [], "compose reads these, and the doc does not list them");
+  assert.deepEqual([...documented].filter((name) => !variables.has(name)).sort(), [], "the doc lists these, and compose does not read them");
+  for (const [name, fallback] of variables) {
+    if (fallback === undefined) assert.ok(required.has(name), `${name} has no default, so it is required`);
+    else if (fallback === "") assert.equal(optional.get(name), "empty", name);
+    else assert.match(optional.get(name) ?? "", new RegExp(fallback.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), name);
+  }
+});
+
+test("compose keeps the sidecar unpublished, off the fallback, and the API on its heap", () => {
+  const compose = read("deploy/compose.yaml");
+  const sidecar = compose.slice(compose.indexOf("  memoria-qmd:\n"), compose.indexOf("  memoria-api:\n"));
+  assert.doesNotMatch(sidecar, /^\s+ports:/m, "only the API may reach the sidecar");
+  assert.match(sidecar, /MEMORIA_QMD_LLM_FALLBACK: "0"/);
+  assert.doesNotMatch(sidecar, /gpus|devices|runtime:/);
+  assert.match(compose, /Memoria__Sidecar__BaseUrl: http:\/\/memoria-qmd:8282/);
+  assert.match(compose, /DOTNET_GCHeapHardLimit: "0x40000000"/);
+});
+
 /** A job's text, from its key to the next job or the end of the file. */
 function job(workflow: string, name: string): string {
   const start = workflow.indexOf(`\n  ${name}:\n`);
@@ -45,7 +96,7 @@ test("the image workflow stamps the derived version, on the same tag pattern as 
   assert.match(docker, /tags: \["v\*\.\*\.\*"\]/);
   assert.match(job(docker, "gate"), /release\.ts validate "\$GITHUB_REF_NAME"/);
   assert.match(docker, /release\.ts describe/);
-  assert.equal(docker.match(/build-args: MEMORIA_VERSION=\$\{\{ steps\.version\.outputs\.version \}\}/g)?.length, 2);
+  assert.equal(docker.match(/build-args: MEMORIA_VERSION=\$\{\{ steps\.version\.outputs\.version \}\}/g)?.length, 4);
   assert.match(read(".github/workflows/release.yml"), /tags: \["v\*\.\*\.\*"\]/);
 });
 
@@ -64,8 +115,11 @@ test("the image workflow's jobs hold only what each needs, and only publish can 
 
   const publish = job(docker, "publish");
   assert.match(publish, /github\.event_name == 'push'/);
-  assert.match(publish, /needs: \[gate, image\]/);
+  assert.match(publish, /needs: \[gate, image, sidecar-image\]/);
   assert.doesNotMatch(job(docker, "image"), /push: true|push=true|login-action/);
+  assert.doesNotMatch(job(docker, "sidecar-image"), /push: true|push=true|login-action/);
+  assert.deepEqual(permissions("sidecar-publish"), ["contents: read", "packages: write"]);
+  assert.deepEqual(permissions("sidecar-attest"), ["contents: read", "id-token: write", "attestations: write"]);
 });
 
 test("what is published is the digest that was verified, and tags are applied only after", () => {
@@ -76,6 +130,12 @@ test("what is published is the digest that was verified, and tags are applied on
   const verify = publish.indexOf('verify-image "$IMAGE@$DIGEST"');
   const tag = publish.indexOf('tag-image "$IMAGE@$DIGEST"');
   assert.ok(push !== -1 && push < verify && verify < tag);
+
+  const sidecar = job(read(".github/workflows/docker.yml"), "sidecar-publish");
+  assert.match(sidecar, /push-by-digest=true/);
+  const sidecarVerify = sidecar.indexOf('verify-sidecar-image "$SIDECAR_IMAGE@$DIGEST"');
+  const sidecarTag = sidecar.indexOf('tag-image "$SIDECAR_IMAGE@$DIGEST"');
+  assert.ok(sidecar.indexOf("name: Push by digest") < sidecarVerify && sidecarVerify < sidecarTag && sidecarVerify !== -1);
 
   const attest = job(read(".github/workflows/docker.yml"), "attest");
   assert.match(attest, /subject-digest: \$\{\{ needs\.publish\.outputs\.digest \}\}/);
@@ -91,8 +151,9 @@ test("latest moves only on release tags, edge only on main, and compose names a 
   assert.doesNotMatch(docker, /is_default_branch|type=ref/);
 
   const compose = read("deploy/compose.yaml");
-  assert.match(compose, /image: ghcr\.io\/mggarofalo\/memoria:\$\{MEMORIA_VERSION:\?/);
-  assert.doesNotMatch(compose, /memoria:latest|memoria:edge/);
+  assert.match(compose, /image: ghcr\.io\/mggarofalo\/memoria-qmd:\$\{MEMORIA_VERSION:\?/);
+  assert.match(compose, /image: ghcr\.io\/mggarofalo\/memoria:\$\{MEMORIA_VERSION\}/);
+  assert.doesNotMatch(compose, /memoria(-qmd)?:(latest|edge)/);
 });
 
 test("every action in every workflow we own is pinned to a commit, with narrow defaults", () => {

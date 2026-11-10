@@ -46,6 +46,7 @@ const USAGE = `usage: release <command>
   notes <tag> --out <file>   write the release notes, refusing any tracker reference
   read-checks <sha>          prove this token can read what validate reads, without judging the result
   verify-image <ref> <ver>   run an image and refuse unless /health reports the version
+  verify-sidecar-image <ref> <ver>  the same for the sidecar image, which must also hold no llama.cpp binaries
   tag-image <ref@digest> <tag...>  point tags at a verified digest and confirm each resolves to it`;
 
 class ReleaseError extends Error {}
@@ -165,6 +166,24 @@ function verifyImageCommand(tools: Tools, image: string | undefined, version: st
   }
 }
 
+/**
+ * The sidecar refuses to start without an index, so it makes one first. The worker address is one nothing listens on: this checks that it starts and what
+ * it reports, and the image holding no llama.cpp binaries is what keeps model work off the host it runs on.
+ */
+function verifySidecarImageCommand(tools: Tools, image: string | undefined, version: string | undefined): void {
+  if (image === undefined || version === undefined) fail("verify-sidecar-image needs an image and a version");
+  const name = "memoria-verify";
+  tools.docker(["run", "-d", "--name", name, "-p", `127.0.0.1:${VERIFY_PORT}:8282`, "-e", "MEMORIA_QMD_ALLOW_HTTP_ON_PRIVATE_NETWORK=1", "-e", "MEMORIA_QMD_WORKER_URL=http://127.0.0.1:9", "-e", `MEMORIA_QMD_SECRET=${randomBytes(32).toString("base64url")}`, "--entrypoint", "sh", image, "-c", "node scripts/init-index.mjs verify && exec node dist/main.js"]);
+  try {
+    const reported = reportedVersion(tools);
+    if (reported !== version) fail(`${image} reports version ${reported ?? "(no answer)"}, expected ${version}`);
+    if (tools.docker(["exec", name, "sh", "-c", "ls node_modules/@node-llama-cpp 2>/dev/null | wc -l"]).trim() !== "0") fail(`${image} holds llama.cpp binaries`);
+    tools.print(`${image} reports ${reported} and holds no llama.cpp binaries`);
+  } finally {
+    tools.docker(["rm", "-f", name]);
+  }
+}
+
 /** Point tags at a verified digest without rebuilding, then confirm each tag resolves to exactly that digest. */
 function tagImageCommand(tools: Tools, image: string | undefined, tags: readonly string[]): void {
   const digest = image?.split("@")[1];
@@ -259,6 +278,8 @@ function dispatch(args: readonly string[], tools: Tools): void {
       return readChecksCommand(tools, first);
     case "verify-image":
       return verifyImageCommand(tools, first, args[2]);
+    case "verify-sidecar-image":
+      return verifySidecarImageCommand(tools, first, args[2]);
     case "tag-image":
       return tagImageCommand(tools, first, args.slice(2));
     default:

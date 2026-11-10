@@ -19,7 +19,7 @@ Memoria does **not** reimplement retrieval. QMD stays the engine; its SQLite ind
 | `cli/` (`memoria`) | Go + cobra + keyring | Client; credentials in the OS keyring |
 | QMD | GGUF models, SQLite | Retrieval engine, never exposed directly |
 
-Container images publish to `ghcr.io/mggarofalo/memoria`.
+Container images publish to `ghcr.io/mggarofalo/memoria` (the API) and `ghcr.io/mggarofalo/memoria-qmd` (the sidecar).
 
 ## Status
 

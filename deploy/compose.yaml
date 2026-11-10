@@ -1,28 +1,65 @@
-# Memoria.Api on the always-on host. The memoria-qmd sidecar
-# is a separate service on the model host; point MEMORIA_SIDECAR_URL at it.
-# See docs/deployment.md.
+# Memoria.Api and the memoria-qmd sidecar on one Linux host, with model work on workers
+# reached over WireGuard. The sidecar publishes no port: only the API can reach it, on one
+# bridge network, with nothing between them. See docs/deployment.md.
 #
-#   MEMORIA_VERSION=0.1.0 \
-#   MEMORIA_SIDECAR_URL=http://192.168.1.20:8282 \
-#   MEMORIA_SIDECAR_SECRET=... \
+# Put the values in deploy/.env, mode 600, then:
+#
 #   docker compose -f deploy/compose.yaml up -d
 #
-# Create the first admin key, once, with the same environment set:
+# First run only, before that: make the index, and the first admin key.
 #
+#   docker compose -f deploy/compose.yaml run --rm --no-deps memoria-qmd \
+#     scripts/init-index.mjs claude-sessions codex-sessions
 #   docker compose -f deploy/compose.yaml run --rm --no-deps memoria-api \
 #     --bootstrap-admin-key homelab-admin
 
 services:
-  memoria-api:
-    image: ghcr.io/mggarofalo/memoria:${MEMORIA_VERSION:?set MEMORIA_VERSION to the release to run, e.g. 0.1.0}
-    container_name: memoria-api
+  memoria-qmd:
+    image: ghcr.io/mggarofalo/memoria-qmd:${MEMORIA_VERSION:?set MEMORIA_VERSION to the release to run, e.g. 0.1.0}
+    container_name: memoria-qmd
     restart: unless-stopped
     environment:
-      Memoria__Sidecar__BaseUrl: ${MEMORIA_SIDECAR_URL:?set MEMORIA_SIDECAR_URL to the sidecar, e.g. http://192.168.1.20:8282}
+      # Plain http, which is why this has to be said. Within this bridge only the API can
+      # reach it, and traffic to workers stays inside the tunnel.
+      MEMORIA_QMD_ALLOW_HTTP_ON_PRIVATE_NETWORK: "1"
+      MEMORIA_QMD_ALLOWED_HOSTS: memoria-qmd
+      MEMORIA_QMD_SECRET: ${MEMORIA_SIDECAR_SECRET:?set MEMORIA_SIDECAR_SECRET to 16 or more random characters}
+      # Only the API can connect, so it can have all of them.
+      MEMORIA_QMD_MAX_CONNECTIONS_PER_SOURCE: "512"
+      # Nothing here runs a model. With workers down, search answers from BM25 and says so.
+      MEMORIA_QMD_LLM: remote
+      MEMORIA_QMD_LLM_FALLBACK: "0"
+      MEMORIA_QMD_WARMUP: "0"
+      MEMORIA_QMD_WORKERS: ${MEMORIA_QMD_WORKERS:?set MEMORIA_QMD_WORKERS to the worker list; see docs/deployment.md}
+      # The names MEMORIA_QMD_WORKERS gives as tokenEnv.
+      MEMORIA_WORKER_TOKEN_GPU: ${MEMORIA_WORKER_TOKEN_GPU:-}
+      MEMORIA_WORKER_TOKEN_LAPTOP: ${MEMORIA_WORKER_TOKEN_LAPTOP:-}
+    volumes:
+      # Rebuildable from the corpus, at the cost of re-embedding on the workers.
+      - memoria-qmd-index:/index
+      - memoria-qmd-config:/config
+      # The documents. Back this up: it may be the only copy.
+      - ${MEMORIA_CORPUS:-memoria-corpus}:/corpus
+    networks: [memoria]
+    # Stopped jobs persist, but give the drain its time.
+    stop_grace_period: 15s
+
+  memoria-api:
+    image: ghcr.io/mggarofalo/memoria:${MEMORIA_VERSION}
+    container_name: memoria-api
+    restart: unless-stopped
+    depends_on: [memoria-qmd]
+    environment:
+      Memoria__Sidecar__BaseUrl: http://memoria-qmd:8282
       Memoria__Ingest__DigestKey: ${MEMORIA_INGEST_DIGEST_KEY:?set MEMORIA_INGEST_DIGEST_KEY to 32 or more random characters}
-      Memoria__Sidecar__Secret: ${MEMORIA_SIDECAR_SECRET:?set MEMORIA_SIDECAR_SECRET to the sidecar's MEMORIA_QMD_SECRET}
+      Memoria__Sidecar__Secret: ${MEMORIA_SIDECAR_SECRET}
       Memoria__Search__RerankByDefault: "true"
       Memoria__Auth__DatabasePath: /data/control.db
+      # Each must be an empty directory the first time ingest uses it.
+      Memoria__Ingest__Collections__claude-sessions__Enabled: "true"
+      Memoria__Ingest__Collections__codex-sessions__Enabled: "true"
+      # 1 GiB, the least ingest is sized for. See docs/deployment.md.
+      DOTNET_GCHeapHardLimit: "0x40000000"
       # The reverse proxy's address as this container sees it. Required once the
       # proxy host exists; without it all clients share one failed-auth budget.
       Memoria__Auth__TrustedProxies__0: ${MEMORIA_TRUSTED_PROXY:-}
@@ -30,6 +67,7 @@ services:
       # API keys and the audit log. Durable and not rebuildable, unlike QMD's
       # index: losing this volume revokes every key. Keep it on a local disk.
       - memoria-data:/data
+    networks: [memoria]
     ports:
       # LAN only. Public exposure goes through the reverse proxy once the
       # homelab hardening work lands; do not publish on 0.0.0.0 of a host with a
@@ -42,5 +80,12 @@ services:
       start_period: 10s
       retries: 3
 
+networks:
+  memoria:
+    driver: bridge
+
 volumes:
   memoria-data:
+  memoria-qmd-index:
+  memoria-qmd-config:
+  memoria-corpus:

@@ -360,6 +360,36 @@ test("verify-image waits for the container, compares the version, and always rem
   assert.match(lines[0] as string, /reports 1\.2\.3/);
 });
 
+test("verify-sidecar-image makes the index it needs, compares the version, and refuses llama.cpp binaries", (t) => {
+  const repo = tempRepo(t);
+  repo.commit("feat: a");
+  const report = (): string => JSON.stringify({ status: "ok", version: "1.2.3" });
+  const docker = (binaries: string, calls: string[][]) => (args: readonly string[]): string => {
+    calls.push([...args]);
+    return args[0] === "exec" ? `${binaries}\n` : "";
+  };
+
+  const calls: string[][] = [];
+  const clean = fakeTools(repo, undefined, undefined, { docker: docker("0", calls), httpGet: report });
+  assert.equal(run(["verify-sidecar-image", "repo@sha256:abc", "1.2.3"], clean.tools, assert.fail), 0);
+  assert.ok(calls[0]?.includes("repo@sha256:abc"));
+  assert.ok(calls[0]?.some((arg) => arg.includes("init-index.mjs")), "the sidecar refuses to start without an index");
+  assert.ok(calls[0]?.some((arg) => arg.includes(":8282")));
+  assert.deepEqual(calls.at(-1), ["rm", "-f", "memoria-verify"]);
+
+  const errors: string[] = [];
+  const heavy: string[][] = [];
+  const withBinaries = fakeTools(repo, undefined, undefined, { docker: docker("6", heavy), httpGet: report });
+  assert.equal(run(["verify-sidecar-image", "img", "1.2.3"], withBinaries.tools, (e) => errors.push(e)), 1);
+  assert.match(errors[0] as string, /llama\.cpp binaries/);
+  assert.deepEqual(heavy.at(-1), ["rm", "-f", "memoria-verify"]);
+
+  const wrong: string[][] = [];
+  const wrongVersion = fakeTools(repo, undefined, undefined, { docker: docker("0", wrong), httpGet: () => JSON.stringify({ version: "9.9.9" }) });
+  assert.equal(run(["verify-sidecar-image", "img", "1.2.3"], wrongVersion.tools, (e) => errors.push(e)), 1);
+  assert.equal(run(["verify-sidecar-image", "img"], wrongVersion.tools, (e) => errors.push(e)), 1);
+});
+
 test("verify-image refuses a wrong version or a silent container, and still removes it", (t) => {
   const repo = tempRepo(t);
   repo.commit("feat: a");

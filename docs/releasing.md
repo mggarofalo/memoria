@@ -71,6 +71,11 @@ Nothing else holds a version. `package.json` says `0.0.0`, the csproj says `0.0.
 | `Docker Image` | everything | `contents: read` | builds locally and checks `/health`; publishes nothing |
 | `Publish Image` | `main`, tags | `contents: read`, `packages: write` | pushes by digest with no tag, runs that exact digest and checks `/health`, then points the tags at the digest and confirms each one resolves to it |
 | `Attest Image Provenance` | tags | `contents: read`, `id-token: write`, `attestations: write` | attests the verified digest |
+| `Sidecar Image` | everything | `contents: read` | builds the sidecar image, starts it on a fresh index, checks `/health` and that it holds no llama.cpp binaries; publishes nothing |
+| `Publish Sidecar Image` | `main`, tags | `contents: read`, `packages: write` | the same as `Publish Image`, for `ghcr.io/mggarofalo/memoria-qmd` |
+| `Attest Sidecar Image Provenance` | tags | `contents: read`, `id-token: write`, `attestations: write` | attests that verified digest |
+
+`Publish Image` waits for `Sidecar Image` too, so a release whose sidecar image fails publishes neither: compose runs both at one version.
 
 A pull request that touches the CLI, the services, or the release tooling runs the `release.yml` build job with the version `0.0.0-dryrun`, stopping before anything is published.
 

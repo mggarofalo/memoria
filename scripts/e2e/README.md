@@ -9,6 +9,12 @@ node scripts/e2e/run.ts --no-build   # reuses a built API and sidecar
 node scripts/e2e/run.ts --no-build --only-ingest   # only the second server: ingest, sources and migrate, for running them many times
 ```
 
+## The deployed layout
+
+`node scripts/e2e/compose.ts` runs `deploy/compose.yaml` as it ships, on both images built from this checkout, with the sidecar tests' scripted worker in a container standing in for a remote host. It checks what the process-based suite cannot: that the sidecar publishes no port and shares its network with the API alone, holds no llama.cpp binaries, answers degraded search with every worker down, finishes a waiting embed once a worker answers, and keeps its data across a restart. The suite above runs a recording proxy between the API and the sidecar for its own checks, which is what this layout forbids, so it does not run on it. This needs Docker, and removes its containers, volumes and images when it ends.
+
+## Running the suite
+
 It needs Node 22.18+, Go and the .NET SDK. It exits non-zero if any check fails. It connects from loopback addresses such as `127.0.0.2`, which Linux and Windows answer without setup. macOS does not, so the auth checks fail there.
 
 ## What it touches
