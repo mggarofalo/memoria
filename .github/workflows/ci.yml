@@ -97,6 +97,8 @@ jobs:
               - src/**
               - cli/**
               - sidecar/**
+              # The harness takes its ports from worker/test/ports.ts, and the compose checks mount worker/test.
+              - worker/**
               - tools/**
               - skills/**
               - deploy/**
