@@ -11,6 +11,11 @@
 //
 // Gitleaks is best effort: it can miss a token at a chunk boundary, so 0 findings is not proof that nothing is left.
 //
+// --gitleaks-ignore <file> reads a .gitleaksignore of findings a person reviewed: one fingerprint a line, '#' for comments. A
+// fingerprint is <list>/<path in it>:<rule>:<line>, gitleaks's own form for a file, with the line counted in the redacted
+// document. A listed finding is counted as ignored and does not fail the run; any other still does. --gitleaks-findings <file>
+// writes the fingerprints of the findings that are not ignored, for that review. Both files hold paths, so keep them private.
+//
 // Exits 0 when clean, 1 when something was refused, found, skipped or not scanned, 2 on bad usage, 3 when it could not finish.
 using System.Diagnostics;
 using System.Text.Json;
@@ -41,21 +46,49 @@ internal static class RedactionReport
 		Options? options = Options.Parse(args);
 		if (options is null)
 		{
-			Console.Error.WriteLine("usage: RedactionCheck [--json] [--no-gitleaks] <directory of .md files> ... | --lists-on-stdin");
+			Console.Error.WriteLine("usage: RedactionCheck [--json] [--no-gitleaks] [--gitleaks-ignore <file>] [--gitleaks-findings <file>] <directory of .md files> ... | --lists-on-stdin");
 			return 2;
 		}
 
-		List<Result> results = [.. options.Lists.Select(list => Check(list, options.Gitleaks))];
+		HashSet<string> ignored = options.IgnoreFile is null ? [] : Fingerprints.Read(options.IgnoreFile);
+		List<string> remaining = [];
+		List<Result> results = [.. options.Lists.Select(list => Check(list, options.Gitleaks, ignored, remaining))];
+		if (options.FindingsFile is not null)
+		{
+			File.WriteAllLines(options.FindingsFile, remaining);
+		}
+
 		Report(results, options.Json);
 		return results.All(static result => result.IsClean) ? 0 : 1;
 	}
 
-	private static Result Check(FileList list, bool gitleaks)
+	private static Result Check(FileList list, bool gitleaks, HashSet<string> ignored, List<string> remaining)
 	{
 		using Gitleaks? scan = gitleaks ? Gitleaks.Start() : null;
 		Summary summary = Redact(list, scan);
-		Dictionary<string, int> findings = scan?.Finish() ?? [];
-		return new Result(summary.Files, summary.Changed, summary.Refused, summary.Skipped, summary.CredentialNames, scan?.Unscanned ?? 0, summary.Counts, summary.FilesByRule, gitleaks, findings);
+		(Dictionary<string, int> findings, int ignoredCount) = Sort(list.Name, scan?.Finish() ?? [], ignored, remaining);
+		return new Result(summary.Files, summary.Changed, summary.Refused, summary.Skipped, summary.CredentialNames, scan?.Unscanned ?? 0, summary.Counts, summary.FilesByRule, gitleaks, findings, ignoredCount);
+	}
+
+	/// <summary>Counts a finding the ignore file lists as ignored, and every other one by rule, keeping its fingerprint for the findings file.</summary>
+	private static (Dictionary<string, int> Findings, int Ignored) Sort(string list, List<(string Rule, string? Document, int Line)> found, HashSet<string> ignored, List<string> remaining)
+	{
+		Dictionary<string, int> findings = [];
+		int ignoredCount = 0;
+		foreach ((string rule, string? document, int line) in found)
+		{
+			string? fingerprint = document is null ? null : Fingerprints.Of(list, document, rule, line);
+			if (fingerprint is not null && ignored.Contains(fingerprint))
+			{
+				ignoredCount++;
+				continue;
+			}
+
+			findings[rule] = findings.GetValueOrDefault(rule) + 1;
+			remaining.Add(fingerprint ?? "# a finding outside any document, which cannot be ignored: " + rule);
+		}
+
+		return (findings, ignoredCount);
 	}
 
 	private static Summary Redact(FileList list, Gitleaks? scan)
@@ -76,7 +109,7 @@ internal static class RedactionReport
 			{
 				RedactedMarkdown result = redactor.Redact(UnredactedMarkdown.FromText(text));
 				summary.Add(result.CountsByRule);
-				scan?.Write(result.Text);
+				scan?.Write(result.Text, list.NameOf(file));
 			}
 			catch (RedactionException)
 			{
@@ -136,6 +169,7 @@ internal static class RedactionReport
 
 		Console.WriteLine($"gitleaks findings in redacted output: {result.GitleaksFindings.Values.Sum()}. Best effort: it can miss a token at a chunk boundary, so 0 is not proof that nothing is left.");
 		Console.WriteLine($"documents gitleaks could not read: {result.GitleaksUnscanned}");
+		Console.WriteLine($"gitleaks findings listed in the ignore file: {result.GitleaksIgnored}");
 		foreach ((string rule, int count) in result.GitleaksFindings.OrderByDescending(static pair => pair.Value))
 		{
 			Console.WriteLine($"  {rule}: {count}");
@@ -149,7 +183,9 @@ internal sealed class Gitleaks : IDisposable
 	private readonly Process _process;
 	private readonly Task<string> _report;
 	private readonly Task _errors;
+	private readonly List<(int StartLine, string Name)> _starts = [];
 	private int _documents;
+	private int _nextLine = 2;
 	private bool _failed;
 
 	private Gitleaks(Process process)
@@ -186,9 +222,16 @@ internal sealed class Gitleaks : IDisposable
 		return new Gitleaks(Process.Start(start) ?? throw new InvalidOperationException("gitleaks did not start."));
 	}
 
-	public void Write(string text)
+	/// <summary>
+	/// Each document goes on after the last, with a line break. Its first line's number in the stream is kept, so a finding's line can
+	/// be told as its document and its line there: the stream's own fingerprints, <c>:rule:line</c>, have no path, and shift whenever an
+	/// earlier document changes, so they cannot say which finding a person reviewed.
+	/// </summary>
+	public void Write(string text, string name)
 	{
 		_documents++;
+		_starts.Add((_nextLine, name));
+		_nextLine += text.Count(static c => c == '\n') + 1;
 		Send(text + "\n");
 	}
 
@@ -210,13 +253,14 @@ internal sealed class Gitleaks : IDisposable
 		}
 	}
 
-	public Dictionary<string, int> Finish()
+	/// <summary>Each finding's rule, the document it starts in, and its line there. A finding before the first document has none.</summary>
+	public List<(string Rule, string? Document, int Line)> Finish()
 	{
 		CloseInput();
 		string report = _report.GetAwaiter().GetResult();
 		_errors.GetAwaiter().GetResult();
 		_process.WaitForExit();
-		Dictionary<string, int>? findings = _process.ExitCode == 0 && !_failed ? Parse(report) : null;
+		List<(string Rule, string? Document, int Line)>? findings = _process.ExitCode == 0 && !_failed ? Parse(report, _starts) : null;
 		_failed = findings is null;
 		return findings ?? [];
 	}
@@ -234,16 +278,18 @@ internal sealed class Gitleaks : IDisposable
 	}
 
 	/// <summary>Null when gitleaks gave something other than its report.</summary>
-	private static Dictionary<string, int>? Parse(string report)
+	private static List<(string Rule, string? Document, int Line)>? Parse(string report, List<(int StartLine, string Name)> starts)
 	{
 		try
 		{
-			Dictionary<string, int> findings = [];
+			List<(string Rule, string? Document, int Line)> findings = [];
 			using JsonDocument document = JsonDocument.Parse(report);
 			foreach (JsonElement finding in document.RootElement.EnumerateArray())
 			{
 				string rule = finding.GetProperty("RuleID").GetString() ?? "unknown";
-				findings[rule] = findings.GetValueOrDefault(rule) + 1;
+				int line = finding.GetProperty("StartLine").GetInt32();
+				int index = Fingerprints.DocumentAt(starts, line);
+				findings.Add(index < 0 ? (rule, null, 0) : (rule, starts[index].Name, line - starts[index].StartLine + 1));
 			}
 
 			return findings;
@@ -260,7 +306,43 @@ internal sealed class Gitleaks : IDisposable
 	}
 }
 
-internal sealed record FileList(string? Root, string? Directory, IReadOnlyList<string>? Paths)
+/// <summary>gitleaks's fingerprint for a finding in a file, <c>path:rule:line</c>, with the path led by the list's name, and reading a .gitleaksignore of them.</summary>
+internal static class Fingerprints
+{
+	public static string Of(string list, string document, string rule, int line)
+	{
+		return $"{list}/{document}:{rule}:{line}";
+	}
+
+	/// <summary>Every line but blanks and '#' comments, trimmed, as gitleaks reads the file.</summary>
+	public static HashSet<string> Read(string path)
+	{
+		return [.. File.ReadAllLines(path).Select(static line => line.Trim()).Where(static line => line.Length > 0 && line[0] != '#')];
+	}
+
+	/// <summary>The index of the last document starting at or before the line, or -1 when it is before them all.</summary>
+	public static int DocumentAt(List<(int StartLine, string Name)> starts, int line)
+	{
+		int low = 0, high = starts.Count - 1, found = -1;
+		while (low <= high)
+		{
+			int middle = (low + high) / 2;
+			if (starts[middle].StartLine <= line)
+			{
+				found = middle;
+				low = middle + 1;
+			}
+			else
+			{
+				high = middle - 1;
+			}
+		}
+
+		return found;
+	}
+}
+
+internal sealed record FileList(string? Root, string? Directory, IReadOnlyList<string>? Paths, string Name)
 {
 	/// <summary>The path as a server would see it, relative to the collection.</summary>
 	public string NameOf(string file)
@@ -275,37 +357,86 @@ internal sealed record FileList(string? Root, string? Directory, IReadOnlyList<s
 	}
 }
 
-internal sealed record Options(bool Json, bool Gitleaks, List<FileList> Lists)
+internal sealed record Options(bool Json, bool Gitleaks, List<FileList> Lists, string? IgnoreFile, string? FindingsFile)
 {
 	public static Options? Parse(string[] args)
 	{
-		bool json = false, gitleaks = true;
-		List<FileList> lists = [];
-		for (int i = 0; i < args.Length; i++)
+		Parsing parsing = new();
+		for (int i = 0; i < args.Length && !parsing.Bad; i++)
 		{
-			switch (args[i])
+			parsing.Take(args, ref i);
+		}
+
+		return parsing.Build();
+	}
+
+	/// <summary>The options as they are read, one argument at a time.</summary>
+	private sealed class Parsing
+	{
+		private readonly List<FileList> _lists = [];
+		private bool _json;
+		private bool _gitleaks = true;
+		private string? _ignore;
+		private string? _findings;
+
+		public bool Bad { get; private set; }
+
+		public void Take(string[] args, ref int i)
+		{
+			if (ValueOf(args, ref i, "--gitleaks-ignore") is { } ignore)
+			{
+				_ignore = ignore;
+				Bad |= !File.Exists(ignore);
+			}
+			else if (ValueOf(args, ref i, "--gitleaks-findings") is { } findings)
+			{
+				_findings = findings;
+				Bad |= findings.Length == 0;
+			}
+			else
+			{
+				TakeFlagOrList(args[i]);
+			}
+		}
+
+		private void TakeFlagOrList(string arg)
+		{
+			switch (arg)
 			{
 				case "--json":
-					json = true;
+					_json = true;
 					break;
 				case "--no-gitleaks":
-					gitleaks = false;
+					_gitleaks = false;
 					break;
 				case "--lists-on-stdin":
-					lists.AddRange(ReadLists());
+					_lists.AddRange(ReadLists());
 					break;
 				default:
-					if (!Directory.Exists(args[i]))
-					{
-						return null;
-					}
-
-					lists.Add(new FileList(null, args[i], null));
+					Bad |= !Directory.Exists(arg);
+					_lists.Add(new FileList(null, arg, null, Path.GetFileName(Path.TrimEndingDirectorySeparator(arg))));
 					break;
 			}
 		}
 
-		return lists.Count == 0 ? null : new Options(json, gitleaks, lists);
+		/// <summary>Ignoring or listing findings means nothing without gitleaks, and a typo must not pass as a clean run.</summary>
+		public Options? Build()
+		{
+			bool valid = !Bad && _lists.Count > 0 && (_gitleaks || (_ignore is null && _findings is null));
+			return valid ? new Options(_json, _gitleaks, _lists, _ignore, _findings) : null;
+		}
+	}
+
+	/// <summary>The value after an option that takes one, moving past it, or null when this is not that option. An option with no value is a typo.</summary>
+	private static string? ValueOf(string[] args, ref int i, string option)
+	{
+		if (args[i] != option)
+		{
+			return null;
+		}
+
+		i++;
+		return i < args.Length ? args[i] : "";
 	}
 
 	/// <summary>From the raw stream, as Console.In would decode by the console's code page rather than UTF-8.</summary>
@@ -313,11 +444,11 @@ internal sealed record Options(bool Json, bool Gitleaks, List<FileList> Lists)
 	{
 		using Stream input = Console.OpenStandardInput();
 		List<ListOnStdin> lists = JsonSerializer.Deserialize<List<ListOnStdin>>(input, new JsonSerializerOptions(JsonSerializerDefaults.Web)) ?? [];
-		return lists.Select(static list => new FileList(list.Root, null, list.Paths));
+		return lists.Select(static (list, index) => new FileList(list.Root, null, list.Paths, list.Name ?? $"list-{index + 1}"));
 	}
 }
 
-internal sealed record ListOnStdin(string? Root, List<string> Paths);
+internal sealed record ListOnStdin(string? Root, List<string> Paths, string? Name);
 
 internal sealed record Result(
 	int Files,
@@ -329,7 +460,8 @@ internal sealed record Result(
 	Dictionary<string, int> Replacements,
 	Dictionary<string, int> FilesByRule,
 	bool GitleaksRan,
-	Dictionary<string, int> GitleaksFindings)
+	Dictionary<string, int> GitleaksFindings,
+	int GitleaksIgnored)
 {
 	[JsonIgnore]
 	public bool IsClean => GitleaksFindings.Count == 0 && GitleaksUnscanned == 0 && CredentialNames == 0 && Refused == 0 && Skipped == 0;

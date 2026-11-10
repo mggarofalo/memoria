@@ -249,6 +249,9 @@ type migrateReportOptions struct {
 	tool        string
 	noGitleaks  bool
 	acceptSkips bool
+	// gitleaksIgnore is a .gitleaksignore of reviewed findings, and gitleaksFindings where to write the ones left. Both hold paths.
+	gitleaksIgnore   string
+	gitleaksFindings string
 }
 
 func newMigrateReportCmd(a *app) *cobra.Command {
@@ -274,7 +277,14 @@ gitleaks on its standard input, so no copy is written to disk.
 
 This exits 1 if a document was refused, gitleaks found something or could not read a
 document, or anything could not be read. Those last are counted, never named, and
---accept-skips lets the exit be 0 for them alone.`,
+--accept-skips lets the exit be 0 for them alone.
+
+A finding a person has reviewed and judged harmless can be listed by fingerprint in a
+file in gitleaks's .gitleaksignore form, passed with --gitleaks-ignore. A fingerprint is
+<collection>/<path>:<rule>:<line>, the line counted in the redacted document. A listed
+finding is counted as ignored and does not fail the run; any other finding still does.
+--gitleaks-findings <file> writes the fingerprints of the findings that are not listed,
+for that review. Both files hold paths, so keep them out of any repository.`,
 		Example: `  memoria migrate report --qmd-config ~/.config/qmd/index.yml --tool tools/RedactionCheck/bin/Release/net10.0/RedactionCheck.dll`,
 		Args:    noArgs,
 		RunE:    func(cmd *cobra.Command, _ []string) error { return a.migrateReport(cmd.Context(), o) },
@@ -284,6 +294,8 @@ document, or anything could not be read. Those last are counted, never named, an
 	f.StringVar(&o.tool, "tool", "", "Path to the built RedactionCheck.dll (required)")
 	f.BoolVar(&o.noGitleaks, "no-gitleaks", false, "Skip the second look at the redacted text, which makes this a weaker check")
 	f.BoolVar(&o.acceptSkips, "accept-skips", false, "Exit 0 even if a file or folder could not be read. They stay counted")
+	f.StringVar(&o.gitleaksIgnore, "gitleaks-ignore", "", "A .gitleaksignore of reviewed findings by fingerprint. Listed findings do not fail the run")
+	f.StringVar(&o.gitleaksFindings, "gitleaks-findings", "", "Write the fingerprints of findings not listed in --gitleaks-ignore to this file, for review")
 	return cmd
 }
 
@@ -336,10 +348,27 @@ func checkReportTools(o migrateReportOptions) error {
 	if info, err := os.Stat(o.tool); o.tool == "" || err != nil || info.IsDir() {
 		return apperr.New(apperr.KindUsage, "--tool must name a built RedactionCheck.dll; build it with 'dotnet build tools/RedactionCheck -c Release'")
 	}
+	if err := checkGitleaksFiles(o); err != nil {
+		return err
+	}
 	if !o.noGitleaks {
 		if _, err := exec.LookPath("gitleaks"); err != nil {
 			return apperr.New(apperr.KindUsage, "gitleaks is not on PATH; install it, or pass --no-gitleaks to go without that second look")
 		}
+	}
+	return nil
+}
+
+// checkGitleaksFiles refuses an ignore file that is missing, or either file without gitleaks, which would let a typo pass as clean.
+func checkGitleaksFiles(o migrateReportOptions) error {
+	if o.noGitleaks && (o.gitleaksIgnore != "" || o.gitleaksFindings != "") {
+		return apperr.New(apperr.KindUsage, "--gitleaks-ignore and --gitleaks-findings need gitleaks, so they cannot go with --no-gitleaks")
+	}
+	if o.gitleaksIgnore == "" {
+		return nil
+	}
+	if info, err := os.Stat(o.gitleaksIgnore); err != nil || info.IsDir() {
+		return apperr.New(apperr.KindUsage, "--gitleaks-ignore must name a readable file")
 	}
 	return nil
 }
@@ -351,6 +380,12 @@ func (a *app) runRedactionCheck(ctx context.Context, o migrateReportOptions, col
 	if o.noGitleaks {
 		args = append(args, "--no-gitleaks")
 	}
+	if o.gitleaksIgnore != "" {
+		args = append(args, "--gitleaks-ignore", o.gitleaksIgnore)
+	}
+	if o.gitleaksFindings != "" {
+		args = append(args, "--gitleaks-findings", o.gitleaksFindings)
+	}
 	reports := make([]migrate.Report, 0, len(collections))
 	unread := make([]int, 0, len(collections))
 	lists := make([]migrate.CheckList, 0, len(collections))
@@ -360,7 +395,7 @@ func (a *app) runRedactionCheck(ctx context.Context, o migrateReportOptions, col
 			return nil, apperr.New(apperr.KindUsage, "collection %s: %s", collection.Name, plan.Problem)
 		}
 		unread = append(unread, plan.Unreadable)
-		lists = append(lists, migrate.CheckList{Root: collection.Path, Paths: append([]string{}, files...)})
+		lists = append(lists, migrate.CheckList{Name: collection.Name, Root: collection.Path, Paths: append([]string{}, files...)})
 		reports = append(reports, migrate.Report{Name: collection.Name})
 	}
 	stdin, err := json.Marshal(lists)

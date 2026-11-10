@@ -193,6 +193,34 @@ function gitleaksReads(h: Harness, tool: string): void {
   });
 }
 
+/**
+ * A reviewed finding listed by fingerprint no longer fails the report, and nothing else is excused: the same finding on another
+ * line, or in another collection, still does. The fingerprint names the collection, the document and its line in the redacted text.
+ */
+function gitleaksIgnore(h: Harness, tool: string): void {
+  const { line, value } = gitleaksOnlyLine();
+  const token = h.remember(value);
+  const folder = h.privatePath("migrate-ignore");
+  write(folder, "sub/doc.md", `# Doc\n\nfirst\n${line}\n`);
+  const config = planConfig(h, folder, { pattern: "**/*.md" }, 300);
+  const findings = h.privatePath("migrate-findings.txt");
+  const listed = h.memoria(["migrate", "report", "--qmd-config", config, "--tool", tool, "--gitleaks-findings", findings, "--format", "json"]);
+  const written = readFileSync(findings, "utf8").trim();
+  h.check("migrate report: --gitleaks-findings writes the fingerprint of a finding, collection first, and the run still fails", listed.code === 1 && written === "c/sub/doc.md:generic-api-key:4" && !written.includes(token), { code: listed.code, written });
+
+  const ignore = h.privatePath("migrate-reviewed.gitleaksignore");
+  writeFileSync(ignore, `# reviewed: a fixture line\n${written}\n`);
+  const passed = h.memoria(["migrate", "report", "--qmd-config", config, "--tool", tool, "--gitleaks-ignore", ignore, "--format", "json"]);
+  const row = (JSON.parse(passed.out || "[{}]") as Array<{ gitleaksFindings?: Record<string, number>; gitleaksIgnored?: number }>)[0];
+  h.check("migrate report: a finding the ignore file lists is counted as ignored, and the run exits 0", passed.code === 0 && row?.gitleaksIgnored === 1 && Object.keys(row?.gitleaksFindings ?? {}).length === 0, passed.out + passed.err);
+
+  for (const [label, entry] of [["another line", "c/sub/doc.md:generic-api-key:5"], ["another collection", "d/sub/doc.md:generic-api-key:4"], ["another rule", "c/sub/doc.md:github-pat:4"]]) {
+    writeFileSync(ignore, `${entry}\n`);
+    const run = h.memoria(["migrate", "report", "--qmd-config", config, "--tool", tool, "--gitleaks-ignore", ignore, "--format", "json"]);
+    h.check(`migrate report: an ignore entry for ${label} does not excuse the finding`, run.code === 1, run.out + run.err);
+  }
+}
+
 /** Forces the unexpected: a NUL in a path. The Windows event log gets what an unhandled exception says. */
 function crash(h: Harness, tool: string): void {
   const input = JSON.stringify([{ paths: ["secretfilename\0.md"] }]);
@@ -252,6 +280,7 @@ function realGitleaks(h: Harness, config: string, tool: string): void {
     return;
   }
   gitleaksReads(h, tool);
+  gitleaksIgnore(h, tool);
   const run = h.memoria(["migrate", "report", "--qmd-config", config, "--tool", redactionCheckDll(), "--format", "json"]);
   const { notes } = rowsOf(run.out);
   h.check("migrate report: with real gitleaks, it reads the redacted text on stdin and finds nothing left", run.code === 0 && notes?.gitleaksRan === true && notes.files === 2, run.out + run.err);

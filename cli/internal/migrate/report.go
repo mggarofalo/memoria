@@ -21,6 +21,8 @@ type CheckResult struct {
 	FilesByRule     map[string]int `json:"filesByRule"`
 	GitleaksRan     bool           `json:"gitleaksRan"`
 	GitleaksResults map[string]int `json:"gitleaksFindings"`
+	// GitleaksIgnored is the findings the --gitleaks-ignore file lists by fingerprint. They do not fail the run.
+	GitleaksIgnored int `json:"gitleaksIgnored"`
 }
 
 // Report is a collection's redaction check. Skipped also counts what the plan could not read, so a folder that was
@@ -54,6 +56,8 @@ func ParseCheck(stdout []byte, lists int) ([]CheckResult, error) {
 // CheckList is one collection for the redaction check, sent on its standard input. Root is so it can judge each file's path
 // as a server would see it, relative to the collection.
 type CheckList struct {
+	// Name leads each fingerprint, so a reviewed finding in one collection cannot excuse one in another.
+	Name  string   `json:"name"`
 	Root  string   `json:"root"`
 	Paths []string `json:"paths"`
 }

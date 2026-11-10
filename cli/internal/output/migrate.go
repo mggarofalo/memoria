@@ -121,6 +121,9 @@ func MigrateReportTable(w io.Writer, reports []migrate.Report) error {
 		for _, rule := range ruleNames(r.GitleaksResults) {
 			b.WriteString(row(fmt.Sprintf("%s: gitleaks %s: %d left after redaction", r.Name, rule, r.GitleaksResults[rule])) + "\n")
 		}
+		if r.GitleaksIgnored > 0 {
+			b.WriteString(row(fmt.Sprintf("%s: %d gitleaks finding(s) listed in the ignore file, so they do not fail the run", r.Name, r.GitleaksIgnored)) + "\n")
+		}
 		if r.CredentialNames > 0 {
 			b.WriteString(row(fmt.Sprintf("%s: %d file name(s) look like a credential, which a server refuses", r.Name, r.CredentialNames)) + "\n")
 		}
@@ -143,6 +146,9 @@ func MigrateReportMarkdown(w io.Writer, reports []migrate.Report) error {
 		}
 		for _, rule := range ruleNames(r.GitleaksResults) {
 			fmt.Fprintf(&b, "  - gitleaks %s: %d left after redaction\n", inlineText(rule), r.GitleaksResults[rule])
+		}
+		if r.GitleaksIgnored > 0 {
+			fmt.Fprintf(&b, "  - %d gitleaks finding(s) listed in the ignore file, so they do not fail the run\n", r.GitleaksIgnored)
 		}
 		if r.CredentialNames > 0 {
 			fmt.Fprintf(&b, "  - %d file name(s) look like a credential, which a server refuses\n", r.CredentialNames)
