@@ -6,9 +6,10 @@ on:
   pull_request:
     branches: ["main"]
 
-# A new push to a pull request replaces its running checks. Pushes to main finish.
+# A new push to a pull request replaces its running checks. Every push to main runs in a group of its own, so none is
+# cancelled or replaced while it waits, and every main commit gets a result.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -39,6 +40,8 @@ jobs:
       cli: ${{ steps.filter.outputs.cli }}
       sidecar: ${{ steps.filter.outputs.sidecar }}
       worker: ${{ steps.filter.outputs.worker }}
+      e2e: ${{ steps.filter.outputs.e2e }}
+      wireguard: ${{ steps.filter.outputs.wireguard }}
     steps:
       - name: Filter paths
         id: filter
@@ -88,6 +91,29 @@ jobs:
               - package-lock.json
               - eslint.config.mjs
               - .gitattributes
+            # Everything the real CLI, API and sidecar are built from, both layouts, and the checks themselves.
+            e2e:
+              - .github/workflows/ci.yml
+              - src/**
+              - cli/**
+              - sidecar/**
+              - tools/**
+              - skills/**
+              - deploy/**
+              - scripts/e2e/**
+              - Dockerfile
+              - .dockerignore
+              - Memoria.slnx
+              - Directory.Build.props
+              - package.json
+              - package-lock.json
+              - .gitattributes
+            wireguard:
+              - .github/workflows/ci.yml
+              - sidecar/**
+              - worker/**
+              - deploy/**
+              - scripts/e2e/wireguard.ts
 
   build:
     name: Build & Test
@@ -243,6 +269,8 @@ jobs:
   # throwaway index with no models; see scripts/e2e/README.md.
   e2e:
     name: End-to-end (real API and sidecar)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.e2e != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -251,6 +279,8 @@ jobs:
         uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
           dotnet-version: "10.0.x"
+          cache: true
+          cache-dependency-path: "**/*.csproj"
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -280,6 +310,8 @@ jobs:
   # on another layout, and the checks that need the recording proxy say NOT RUN here.
   e2e-compose:
     name: End-to-end (compose layout)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.e2e != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -288,6 +320,8 @@ jobs:
         uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
           dotnet-version: "10.0.x"
+          cache: true
+          cache-dependency-path: "**/*.csproj"
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -308,6 +342,8 @@ jobs:
   # The WireGuard tunnel from the API host to a worker, as docs/deployment.md sets it up, simulated in Docker. Not required.
   e2e-wireguard:
     name: End-to-end (WireGuard tunnel)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.wireguard != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -326,6 +362,8 @@ jobs:
   # a download, and a download that fails says so. See scripts/e2e/README.md.
   e2e-rerank:
     name: End-to-end (real reranker on CPU)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.e2e != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -334,6 +372,8 @@ jobs:
         uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
           dotnet-version: "10.0.x"
+          cache: true
+          cache-dependency-path: "**/*.csproj"
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:

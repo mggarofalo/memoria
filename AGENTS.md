@@ -118,7 +118,7 @@ Hooks work from PowerShell, cmd, and Git Bash: `scripts/run-sh.mjs` finds the `s
 
 ### Other CI
 
-`.github/workflows/audit.yml` runs `npm audit`, `govulncheck`, and `dotnet list package --vulnerable` daily and whenever a dependency file changes. `.github/workflows/security.yml` runs CodeQL and gitleaks. The `End-to-end (real API and sidecar)` job in `ci.yml` runs `scripts/e2e`, and `End-to-end (real reranker on CPU)` runs its reranked searches against a real worker with cached, checksum-pinned models. None of these is required, so a new advisory cannot block an unrelated pull request. Actions are pinned by commit SHA; Dependabot keeps the pins, and the dependencies, up to date in weekly grouped pull requests.
+`.github/workflows/audit.yml` runs `npm audit`, `govulncheck`, and `dotnet list package --vulnerable` daily and whenever a dependency file changes. `.github/workflows/security.yml` runs gitleaks on every pull request, and CodeQL on pushes to `main`, weekly and by hand, so a CodeQL alert shows after a change merges. The `End-to-end (real API and sidecar)` job in `ci.yml` runs `scripts/e2e`, and `End-to-end (real reranker on CPU)` runs its reranked searches against a real worker with cached, checksum-pinned models. These, and the compose and WireGuard jobs, run on a pull request only when its paths can affect them, and always on `main`. Every push to `main` runs CI and Security in a concurrency group of its own, so none is cancelled. None of these is required, so a new advisory cannot block an unrelated pull request. Actions are pinned by commit SHA; Dependabot keeps the pins, and the dependencies, up to date in weekly grouped pull requests.
 
 ## Architecture
 
