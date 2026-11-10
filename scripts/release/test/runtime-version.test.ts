@@ -89,8 +89,9 @@ test("the worker's installer stamp reaches a copy that has no git", (t) => {
   const script = path.join(REPO_ROOT, "worker", "scripts", "write-version.ts");
   execFileSync(process.execPath, [script, copy], { stdio: "pipe" });
 
-  assert.equal(readFileSync(path.join(copy, workerVersion.STAMP_FILE), "utf8"), `${workerVersion.resolveVersion()}\n`);
-  assert.equal(workerVersion.resolveVersion(copy), workerVersion.resolveVersion());
+  const stamp = readFileSync(path.join(copy, workerVersion.STAMP_FILE), "utf8");
+  assert.equal(stamp, `${workerVersion.resolveVersion(undefined, 0)}\n`);
+  assert.equal(workerVersion.resolveVersion(copy, 0), stamp.trim());
   assert.throws(() => execFileSync(process.execPath, [script], { stdio: "pipe" }));
 });
 
