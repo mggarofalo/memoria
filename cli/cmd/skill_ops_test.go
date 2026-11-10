@@ -12,7 +12,7 @@ import (
 
 // The operator skill, held to the CLI the same way as the search skill. These read files outside
 // the Go module too, so run them with: go test -count=1 ./cmd -run Skill
-const opsSkillPath = "../../skills/memoria-ops/SKILL.md"
+var opsSkillPath = repoPath("skills/memoria-ops/SKILL.md")
 
 func readOpsSkill(t *testing.T) string {
 	t.Helper()
@@ -163,7 +163,7 @@ func TestTheInactiveCheckRecognizesTheOpsSkill(t *testing.T) {
 }
 
 func TestTheOpsTriggerPromptsAreBalanced(t *testing.T) {
-	data, err := os.ReadFile("../../skills/evals/memoria-ops-triggers.json")
+	data, err := os.ReadFile(repoPath("skills/evals/memoria-ops-triggers.json"))
 	if err != nil {
 		t.Fatal(err)
 	}

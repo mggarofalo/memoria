@@ -1,18 +1,38 @@
 #!/bin/sh
-# Real Go branch coverage, as a slow REPORT run by hand (mutation.yml). It never blocks anything:
-# the blocking gate is statement coverage in scripts/coverage-go.sh.
+# Real Go branch coverage, as a slow report run by hand (mutation.yml). It is not a
+# required check: the blocking gate is statement coverage in scripts/coverage-go.sh.
+# It fails when a package could not be counted, so a gap shows rather than
+# shrinking the total.
 #
 # gobco can only take one package at a time, has no threshold, and cannot
 # exclude generated files, so this runs it per package and tallies its listing
 # without client.gen.go. Each condition is two branches, true and false.
+#
+# gobco type-checks every .go file in a package whatever its build constraints,
+# and panics on a function declared once per platform (harden_unix.go beside
+# harden_windows.go). So it runs on a copy of the module without the files this
+# platform never builds. gobco then tests its own copy of the module alone, so
+# MEMORIA_REPO_ROOT points the tests that read the docs and skills at this checkout.
 # Writes cli/reports/gobco.txt.
 set -eu
 
 cd "$(dirname "$0")/../cli"
 mkdir -p reports
-gobco="go run github.com/rillig/gobco@v1.3.4"
-out=reports/gobco.txt
+out="$PWD/reports/gobco.txt"
 : > "$out"
+# Git Bash's pwd is /c/..., which Go on Windows cannot open; pwd -W gives C:/....
+MEMORIA_REPO_ROOT=$(cd .. && { pwd -W 2>/dev/null || pwd; })
+export MEMORIA_REPO_ROOT
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+cp -R . "$work/cli"
+cd "$work/cli"
+go list -f '{{$dir := .Dir}}{{range .IgnoredGoFiles}}{{$dir}}/{{.}}{{"\n"}}{{end}}' ./... | while read -r ignored; do
+  if [ -n "$ignored" ]; then rm "$ignored"; fi
+done
+
+gobco="go run github.com/rillig/gobco@v1.3.4"
 
 total_covered=0
 total_branches=0
@@ -23,9 +43,9 @@ note_failure() {
   echo "$1: not counted, $2" | tee -a "$out"
 }
 
-for package in $(go list -f '{{.Dir}}' ./...); do
-  relative=".${package#"$PWD"}"
-  relative=$(echo "$relative" | tr '\\' '/')
+module=$(go list -m)
+for package in $(go list ./...); do
+  relative=".${package#"$module"}"
   listing=$(mktemp)
   # shellcheck disable=SC2086 # word splitting of the command is intended
   if ! $gobco -branch -list-all -test -timeout=300s "$relative" > "$listing" 2>&1; then
@@ -73,4 +93,7 @@ fi
 echo "$summary" | tee -a "$out"
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
   echo "$summary" >> "$GITHUB_STEP_SUMMARY"
+fi
+if [ -n "$failed" ]; then
+  exit 1
 fi

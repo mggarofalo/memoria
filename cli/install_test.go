@@ -173,10 +173,7 @@ func runInstallSh(t *testing.T, s shellScenario) shellRun {
 	if err != nil {
 		t.Skip("sh is not available")
 	}
-	script, err := filepath.Abs(filepath.Join("..", "install.sh"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	script := repoPath("install.sh")
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "bin")
 	r := shellRun{
@@ -438,8 +435,8 @@ func TestInstallShRejectsUnknownOptions(t *testing.T) {
 }
 
 func TestDocumentedInstallNeverPipesToAShell(t *testing.T) {
-	for _, path := range []string{"../install.sh", "../install.ps1", "../docs/cli.md", "../README.md"} {
-		data, err := os.ReadFile(path)
+	for _, path := range []string{"install.sh", "install.ps1", "docs/cli.md", "README.md"} {
+		data, err := os.ReadFile(repoPath(path))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -487,10 +484,7 @@ func runInstallPsIn(t *testing.T, archive []byte, checksums, installDir string, 
 	if err != nil {
 		t.Skip("pwsh is not available")
 	}
-	script, err := filepath.Abs(filepath.Join("..", "install.ps1"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	script := repoPath("install.ps1")
 	base := t.TempDir()
 	fixtures := filepath.Join(base, "fixtures")
 	if err := os.MkdirAll(fixtures, 0o755); err != nil {
