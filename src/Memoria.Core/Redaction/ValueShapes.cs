@@ -5,7 +5,7 @@ namespace Memoria.Core.Redaction;
 /// Every test requires the shape to be complete, because a real password can start with any
 /// character: <c>${Secret123</c> has no closing brace, and <c>env.Secret123</c> is not a name.
 /// </summary>
-internal static class ValueShapes
+internal static partial class ValueShapes
 {
 	private const int ShortTokenLength = 16;
 	private const int LongestMarkerSegment = 12;
@@ -47,8 +47,22 @@ internal static class ValueShapes
 			|| IsRedactedForm(text)
 			|| IsMaskOrSample(text)
 			|| SquashedMarkers.Any(marker => text.Contains(marker, StringComparison.OrdinalIgnoreCase))
-			|| ReadsAsSample(text);
+			|| ReadsAsSample(text)
+			|| IsFormatWithPlaceholders(text);
 	}
+
+	/// <summary>
+	/// A format written with angle-bracket names, as in <c>mem_&lt;id&gt;_&lt;secret&gt;</c> or <c>ghp_&lt;token&gt;</c>, and no random
+	/// text besides. It describes a credential's shape, and holds none.
+	/// </summary>
+	private static bool IsFormatWithPlaceholders(string text)
+	{
+		string rest = AngleName().Replace(text, "_");
+		return rest.Length < text.Length && !rest.AsSpan().ContainsAny('<', '>') && rest.Split(['_', '-', '.', '/', ':', ' ']).All(static part => !IsRandomSegment(part));
+	}
+
+	[System.Text.RegularExpressions.GeneratedRegex("<[a-z][a-z0-9_-]{0,23}>", System.Text.RegularExpressions.RegexOptions.CultureInvariant)]
+	private static partial System.Text.RegularExpressions.Regex AngleName();
 
 	/// <summary>True for <c>[REDACTED]</c>, <c>[REDACTED:name]</c>, and a placeholder cut off at the end of the text, as a title can be.</summary>
 	public static bool IsRedactedForm(string text)
@@ -265,7 +279,14 @@ internal static class ValueShapes
 			return text.EndsWith(")s", StringComparison.Ordinal) && IsNameBody(text.AsSpan(2, text.Length - 4));
 		}
 
-		return text[^1] == '%' && IsNameBody(text.AsSpan(1, text.Length - 2));
+		if (text[^1] == '%' && IsNameBody(text.AsSpan(1, text.Length - 2)))
+		{
+			return true;
+		}
+
+		// A Windows path under a variable, as in %ProgramData%\service\secret\.
+		int close = text.IndexOf('%', 1);
+		return close > 1 && close + 1 < text.Length && text[close + 1] is '\\' or '/' && IsNameBody(text.AsSpan(1, close - 1));
 	}
 
 	/// <summary>Words, dotted paths, and simple filters, with nothing that reads as random.</summary>
@@ -378,9 +399,10 @@ internal static class ValueShapes
 			return false;
 		}
 
-		ReadOnlySpan<char> prefix = value.AsSpan(0, open);
+		// An optional call, apiKeyFor?.(role), is a call too.
+		ReadOnlySpan<char> prefix = value.AsSpan(0, open).TrimEnd("?.");
 		int generic = prefix.IndexOf('<');
-		return IsIdentifierPath(generic > 0 ? prefix[..generic] : prefix);
+		return !prefix.IsEmpty && IsIdentifierPath(generic > 0 ? prefix[..generic] : prefix);
 	}
 
 	/// <summary><c>(data: Input)</c>: an opening parenthesis, a plain name, then a delimiter. <c>(Secret123</c> has none of that.</summary>
@@ -414,8 +436,10 @@ internal static class ValueShapes
 		return true;
 	}
 
+	/// <summary>A name part, with JavaScript's <c>#</c> for a private field allowed first, as in <c>this.#routes</c>.</summary>
 	private static bool IsIdentifierPart(ReadOnlySpan<char> part)
 	{
+		part = part.StartsWith('#') ? part[1..] : part;
 		if (part.IsEmpty || char.IsAsciiDigit(part[0]) || IsRandomSegment(part))
 		{
 			return false;

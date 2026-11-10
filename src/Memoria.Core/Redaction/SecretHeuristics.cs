@@ -285,12 +285,13 @@ internal static class SecretHeuristics
 	/// <summary>A password on a known command line or in a known call. The surrounding text already says what it is.</summary>
 	public static bool IsCommandCredential(SecretCandidate candidate)
 	{
-		string value = candidate.JudgedValue;
+		string value = CodeValues.WithoutMarkup(candidate.JudgedValue);
 		return value.Length >= PasswordLength
-			&& value[0] != '/'
+			&& value[0] is not ('/' or '<')
 			&& !ValueShapes.IsPlaceholder(value)
 			&& !Keywords.Contains(value)
-			&& !ValueShapes.IsCodeReference(value);
+			&& !ValueShapes.IsCodeReference(value)
+			&& !CodeValues.HasInterpolation(value);
 	}
 
 	/// <summary><c>curl -u user:password</c>. The flag is common, so the line must be a curl command.</summary>
@@ -365,6 +366,18 @@ internal static class SecretHeuristics
 	/// <c>, ; &amp;</c> are then part of it. A delimiter followed by <c>name=</c> is a real separator, which keeps query strings intact.
 	/// </summary>
 	public static int ExtendAssignment(SecretCandidate candidate)
+	{
+		return GluedMarkupStart(candidate) ?? ExtendValue(candidate);
+	}
+
+	/// <summary>A closing tag glued to the value, as in <c>&lt;c&gt;password: x&lt;/c&gt;</c>, is markup, so the replacement stops before it.</summary>
+	private static int? GluedMarkupStart(SecretCandidate candidate)
+	{
+		int markup = candidate.Value.IndexOf("</", StringComparison.Ordinal);
+		return markup > 0 && CodeValues.WithoutMarkup(candidate.Value).Length == markup ? candidate.Secret.Index + markup : null;
+	}
+
+	private static int ExtendValue(SecretCandidate candidate)
 	{
 		string input = candidate.Input;
 		int end = ExtendPastStrayQuote(input, candidate.Secret.Index, candidate.End);
@@ -451,7 +464,7 @@ internal static class SecretHeuristics
 			return false;
 		}
 
-		string value = NormalizeRemainder(WholeValue(candidate));
+		string value = CodeValues.WithoutMarkup(NormalizeRemainder(WholeValue(candidate)));
 		return !IsBenignCandidate(candidate, keyGroup, value) && JudgeByKind(candidate, keyGroup, kind, value);
 	}
 
@@ -576,6 +589,7 @@ internal static class SecretHeuristics
 			|| IsLocator(value)
 			|| IsSourceLocation(value)
 			|| IsFileName(value)
+			|| CodeValues.IsCode(value, readAsCode)
 			|| (readAsCode && ValueShapes.IsCodeReference(value));
 	}
 

@@ -278,7 +278,9 @@ internal static class RedactionRules
 	public static readonly RedactionRule MemoriaSharedSecret = new(
 		"memoria-shared-secret",
 		Pattern(@"(?:MEMORIA_QMD_SECRET|MEMORIA_QMD_WORKER_TOKEN|MEMORIA_WORKER_TOKEN|MEMORIA_SIDECAR_SECRET|Memoria__Sidecar__Secret)" + Close + Operator + Value),
-		c => !ValueShapes.IsPlaceholder(c.JudgedValue) && !ValueShapes.IsCodeReference(c.JudgedValue) && !c.Value.Equals("unset", StringComparison.OrdinalIgnoreCase));
+		c => !ValueShapes.IsPlaceholder(c.JudgedValue) && !ValueShapes.IsCodeReference(c.JudgedValue) && !c.Value.Equals("unset", StringComparison.OrdinalIgnoreCase)
+			&& !CodeValues.HasInterpolation(c.JudgedValue) && !CodeValues.IsCommandWord(c.Input, c.Value, c.End)
+			&& !(c.Match.Index >= 2 && c.Input.AsSpan(c.Match.Index - 2, 2) is "${"));
 
 	/// <summary>
 	/// Passwords in URLs and connection strings for any scheme: postgres, mysql, mongodb, redis, amqp, https, jdbc.
@@ -314,7 +316,7 @@ internal static class RedactionRules
 	public static readonly RedactionRule AuthorizationHeader = new(
 		"authorization-header",
 		Pattern(@"(?i:authorization)" + Close + Operator + @"(?:\\*[""'`]|%2[27])?(?:[ \t]|%20|\+)*(?i:bearer|basic|token|apikey)(?:[ \t]|%20|\+)+(?<secret>[^\s""'`\\,;<>&]+(?:[,;]+[^\s""'`\\,;<>&]+)*)"),
-		c => SecretHeuristics.IsExplicitCredential(c.JudgedValue));
+		c => SecretHeuristics.IsExplicitCredential(c.JudgedValue) && !CodeValues.HasInterpolation(c.JudgedValue));
 
 	/// <summary>A bearer token with no header name around it, such as a value in a config or a log line. Stricter than <see cref="AuthorizationHeader"/>, because prose says "bearer" too.</summary>
 	public static readonly RedactionRule BearerToken = new(
@@ -382,11 +384,14 @@ internal static class RedactionRules
 		Pattern(@"(?:\bmachine\s+\S+\s+login\s+\S+\s+password[ \t]+(?<secret>\S+)|(?:^|[\r\n])[ \t]*password[ \t]+(?<secret>[^\s]*[^A-Za-z\s][^\s]*)[ \t]*(?:$|[\r\n]))"),
 		SecretHeuristics.IsCommandCredential);
 
-	/// <summary>Secrets in XML: <c>&lt;password&gt;x&lt;/password&gt;</c>, and <c>&lt;add key="ApiKey" value="x"/&gt;</c> from .NET configuration.</summary>
+	/// <summary>
+	/// Secrets in XML: <c>&lt;password&gt;x&lt;/password&gt;</c>, and <c>&lt;add key="ApiKey" value="x"/&gt;</c> from .NET configuration.
+	/// The element must close, so a regex's named group <c>(?&lt;secret&gt;…)</c> and markdown's <c>&lt;token&gt;</c> placeholder are not elements.
+	/// </summary>
 	public static readonly RedactionRule XmlSecret = new(
 		"xml-secret",
 		Pattern(
-			@"(?i:<(?:password|passwd|secret|token|api[_\-]?key|access[_\-]?key|secret[_\-]?key|client[_\-]?secret)>)(?<secret>[^<\r\n]+)<"
+			@"(?i:<(?:password|passwd|secret|token|api[_\-]?key|access[_\-]?key|secret[_\-]?key|client[_\-]?secret)>)(?<secret>[^<\r\n]+)</"
 			+ @"|(?i:<add\s+(?:key|name)=[""'][A-Za-z0-9_.:\-]*(?:password|pwd|secret|token|key)[""']\s+value=)[""'](?<secret>[^""'\r\n]+)"
 			+ @"|(?i:<add\s+value=)[""'](?<secret>[^""'\r\n]+)[""'](?i:\s+(?:key|name)=[""'][A-Za-z0-9_.:\-]*(?:password|pwd|secret|token|key)[""'])"),
 		SecretHeuristics.IsCommandCredential);
