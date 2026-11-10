@@ -43,15 +43,32 @@ test("the sidecar image is patched at install, stamped, non-root, and holds no w
   assert.match(dockerfile, /MEMORIA_QMD_LLM_FALLBACK=0/);
 });
 
-test("the deployment doc lists exactly the variables compose reads, with the defaults compose gives them", () => {
-  const compose = read("deploy/compose.yaml");
+/** The variables a compose file reads, with their defaults. `$${...}` is a literal `${...}` passed to a shell, which compose does not read. */
+function composeVariables(file: string): Map<string, string | undefined> {
   const variables = new Map<string, string | undefined>();
-  for (const match of compose.matchAll(/\$\{([A-Z_]+)(:-|:\?)?([^}]*)\}/g)) {
+  for (const match of read(file).matchAll(/(?<!\$)\$\{([A-Z_]+)(:-|:\?)?([^}]*)\}/g)) {
     const [, name, kind, rest] = match;
     if (name === undefined) continue;
     if (kind === ":-") variables.set(name, rest);
     else if (!variables.has(name)) variables.set(name, undefined);
   }
+  return variables;
+}
+
+test("the deployment doc's backup table lists exactly what backup.yaml reads beyond compose.yaml", () => {
+  const shared = composeVariables("deploy/compose.yaml");
+  const variables = [...composeVariables("deploy/backup.yaml")].filter(([name]) => !shared.has(name));
+  const doc = read("docs/deployment.md");
+  const start = doc.indexOf("### Backup environment\n");
+  assert.notEqual(start, -1);
+  const table = doc.slice(start, doc.indexOf("\n\n**", start));
+  const rows = new Map([...table.matchAll(/^\| `([A-Z_]+)` \|\s*([^|]*?)\s*\|/gm)].map((row) => [row[1] as string, (row[2] as string).trim()]));
+  assert.deepEqual([...rows.keys()].sort(), variables.map(([name]) => name).sort());
+  for (const [name, fallback] of variables) assert.equal(rows.get(name), fallback === undefined ? "" : `\`${fallback}\``, name);
+});
+
+test("the deployment doc lists exactly the variables compose reads, with the defaults compose gives them", () => {
+  const variables = composeVariables("deploy/compose.yaml");
   const doc = read("docs/deployment.md");
   const section = (heading: string): string => {
     const start = doc.indexOf(`### ${heading}\n`);
@@ -71,6 +88,17 @@ test("the deployment doc lists exactly the variables compose reads, with the def
     else if (fallback === "") assert.equal(optional.get(name), "empty", name);
     else assert.match(optional.get(name) ?? "", new RegExp(fallback.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), name);
   }
+});
+
+test("a restore writes only into empty volumes, and backups pin restic and check each database copy", () => {
+  const backup = read("deploy/backup.yaml");
+  assert.match(backup, /image: restic\/restic:[0-9.]+@sha256:[0-9a-f]{64}/);
+  const restore = backup.slice(backup.indexOf("  restore:\n"));
+  assert.ok(restore.indexOf("already holds data") !== -1 && restore.indexOf("already holds data") < restore.indexOf("restic restore"), "the refusal comes before anything is written");
+  for (const mount of ["/data", "/index", "/config", "/corpus"]) assert.match(restore, new RegExp(`for d in [^\\n]*${mount}`), mount);
+  const snapshot = read("sidecar/scripts/snapshot-db.mjs");
+  assert.match(snapshot, /readonly: true/);
+  assert.match(snapshot, /integrity_check/);
 });
 
 test("compose keeps the sidecar unpublished, off the fallback, and the API on its heap", () => {

@@ -1,0 +1,93 @@
+# Backups for deploy/compose.yaml, used beside it, never on its own. See docs/deployment.md#backups.
+#
+#   docker compose -f deploy/compose.yaml -f deploy/backup.yaml run --rm backup init       # once
+#   docker compose -f deploy/compose.yaml -f deploy/backup.yaml run --rm snapshot          # then, daily:
+#   docker compose -f deploy/compose.yaml -f deploy/backup.yaml run --rm backup
+#
+# restore writes only into empty volumes, and refuses otherwise, so it cannot overwrite a running deployment.
+
+x-restic: &restic
+  image: restic/restic:0.18.1@sha256:39d9072fb5651c80d75c7a811612eb60b4c06b32ffe87c2e9f3c7222e1797e76
+  hostname: memoria
+  environment:
+    RESTIC_REPOSITORY: ${RESTIC_REPOSITORY:-/repository}
+    RESTIC_PASSWORD_FILE: /run/secrets/restic_password
+  secrets: [restic_password]
+
+services:
+  # Consistent copies of the live databases, which restic then backs up with the files.
+  snapshot:
+    image: ghcr.io/mggarofalo/memoria-qmd:${MEMORIA_VERSION}
+    profiles: [backup]
+    user: "0:0"
+    network_mode: none
+    entrypoint: ["node", "scripts/snapshot-db.mjs"]
+    command:
+      - /data/control.db
+      - /staging/control.db
+      - /index/qmd/index.sqlite
+      - /staging/index.sqlite
+      - /index/qmd/index.sqlite.queue.sqlite
+      - /staging/queue.sqlite
+    # Writable, as a reader of a WAL database writes its -shm index. The script opens each database read-only, and gives any file it
+    # creates back to the database's owner.
+    volumes:
+      - memoria-data:/data
+      - memoria-qmd-index:/index
+      - memoria-backup-staging:/staging
+
+  backup:
+    <<: *restic
+    profiles: [backup]
+    command: ["backup", "--tag", "memoria", "/backup"]
+    volumes:
+      - ${MEMORIA_CORPUS:-memoria-corpus}:/backup/corpus:ro
+      - memoria-qmd-config:/backup/qmd-config:ro
+      - memoria-backup-staging:/backup/databases:ro
+      - ${MEMORIA_BACKUP_REPOSITORY:-memoria-backup-repository}:/repository
+
+  restore:
+    <<: *restic
+    profiles: [restore]
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -eu
+        for d in /data /index /config /corpus; do
+          if [ -n "$$(ls -A "$$d")" ]; then
+            echo "refusing: $$d already holds data. Restore only into empty volumes; see docs/deployment.md#restore." >&2
+            exit 2
+          fi
+        done
+        restic restore "$${MEMORIA_RESTORE_SNAPSHOT:-latest}" --target /restore
+        from=/restore/backup
+        cp -a "$$from/corpus/." /corpus/
+        cp -a "$$from/qmd-config/." /config/
+        mkdir -p /index/qmd
+        cp "$$from/databases/index.sqlite" /index/qmd/index.sqlite
+        if [ -f "$$from/databases/queue.sqlite" ]; then cp "$$from/databases/queue.sqlite" /index/qmd/index.sqlite.queue.sqlite; fi
+        cp "$$from/databases/control.db" /data/control.db
+        chown -R 1000:1000 /corpus /config /index
+        chown -R 1654:1654 /data
+        rm -rf "$$from"
+        echo "restored $${MEMORIA_RESTORE_SNAPSHOT:-latest}"
+    environment:
+      RESTIC_REPOSITORY: ${RESTIC_REPOSITORY:-/repository}
+      RESTIC_PASSWORD_FILE: /run/secrets/restic_password
+      MEMORIA_RESTORE_SNAPSHOT: ${MEMORIA_RESTORE_SNAPSHOT:-latest}
+    volumes:
+      - memoria-data:/data
+      - memoria-qmd-index:/index
+      - memoria-qmd-config:/config
+      - ${MEMORIA_CORPUS:-memoria-corpus}:/corpus
+      - memoria-restore-staging:/restore
+      - ${MEMORIA_BACKUP_REPOSITORY:-memoria-backup-repository}:/repository
+
+secrets:
+  restic_password:
+    file: ${MEMORIA_BACKUP_PASSWORD_FILE:?set MEMORIA_BACKUP_PASSWORD_FILE to the file holding the backup password}
+
+volumes:
+  memoria-backup-staging:
+  memoria-restore-staging:
+  memoria-backup-repository:

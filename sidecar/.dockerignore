@@ -6,3 +6,4 @@
 !src/
 !scripts/patch-qmd.ts
 !scripts/init-index.mjs
+!scripts/snapshot-db.mjs
