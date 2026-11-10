@@ -35,7 +35,7 @@ docs/migration.md for the order.`,
 		Args: noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() },
 	}
-	cmd.AddCommand(newMigratePlanCmd(a), newMigrateReportCmd(a), newMigratePushCmd(a), newMigrateVerifyCmd(a), newMigrateCutoverCmd(a), newMigrateRollbackCmd(a))
+	cmd.AddCommand(newMigratePlanCmd(a), newMigrateReportCmd(a), newMigratePushCmd(a), newMigrateVerifyCmd(a), newMigrateRerenderCmd(a), newMigrateCutoverCmd(a), newMigrateRollbackCmd(a))
 	return cmd
 }
 

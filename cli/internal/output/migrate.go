@@ -334,6 +334,14 @@ func verifyNotes(result *migrate.VerifyResult) []string {
 	return append(notes, append(verifyLimits, seed, "Local report: "+result.ReportFile)...)
 }
 
+func countHeldBySession(result *migrate.VerifyResult) int {
+	held := 0
+	for i := range result.Collections {
+		held += result.Collections[i].HeldBySession
+	}
+	return held
+}
+
 func countUncompared(result *migrate.VerifyResult) int {
 	uncompared := 0
 	for i := range result.Collections {
@@ -353,6 +361,9 @@ func situationNotes(result *migrate.VerifyResult) []string {
 	if uncompared > 0 {
 		notes = append(notes, fmt.Sprintf("%d sampled document(s) could not be compared: every difference sits beside a redaction mark, but they could not be lined up. Each may be missing text beside a mark, so compare it with its local file by hand. Each mark can hide one line with spaces, and any lines without, so there is no limit on what a document with many marks can lose.", uncompared))
 	}
+	if held := countHeldBySession(result); held > 0 {
+		notes = append(notes, fmt.Sprintf("%d document(s) are held through their session's parts, which were not compared with them or sampled: only that the session is complete was checked.", held))
+	}
 	if behind {
 		notes = append(notes, "If you pushed in the last few minutes, the index may still be catching up, as a document is counted and fetched only once it is indexed. Wait, and run this again before treating these as failures.")
 	}
@@ -364,6 +375,8 @@ func countNote(s *migrate.VerifySummary) string {
 	switch {
 	case s.CountDiffers:
 		return fmt.Sprintf("the counts differ: %d local, %d on the server", s.LocalFiles, s.ServerDocuments)
+	case s.HeldBySession > 0:
+		return fmt.Sprintf("the counts were not compared, as %d document(s) are held through their session's parts, which a session writes more of", s.HeldBySession)
 	case s.TakenOver > 0:
 		return fmt.Sprintf("the counts were not compared, as one takeover turns that check off for the whole collection, and there are %d", s.TakenOver)
 	}

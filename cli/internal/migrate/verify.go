@@ -17,6 +17,8 @@ type VerifySummary struct {
 	// Confirmed is paths the server records as complete, at the local file's version.
 	Confirmed int `json:"confirmed"`
 	TakenOver int `json:"takenOver"`
+	// HeldBySession is documents not held as they are, whose Codex session the server holds complete instead, as a re-render leaves them.
+	HeldBySession int `json:"heldBySession"`
 	// VersionDiffers is paths the server holds at another version than the local file's.
 	VersionDiffers int `json:"versionDiffers"`
 	NotHeld        int `json:"notHeld"`

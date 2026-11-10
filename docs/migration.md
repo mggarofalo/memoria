@@ -12,6 +12,10 @@ All the commands are in [cli.md](cli.md).
 - **A checkout of this repository,** for `tools/RedactionCheck` and `skills/memoria/SKILL.md`.
 - **Each target collection opened and empty** on the server.
 
+```sh
+memoria auth login --api-url <server>
+```
+
 ## Before you start
 
 - **A target must be empty when it is first opened.** The server checks this only the first time ingest uses a collection, so point `push` only at a target meant for this migration.
@@ -119,7 +123,40 @@ memoria migrate verify --qmd-config ~/.config/qmd/index.yml --queries queries.tx
 | `--accept-over-cap` | I know these documents are over the server's size limit |
 | `--accept-skips` | I know these files or folders could not be read |
 
-**Raw Codex sessions.** The CLI does not send them. `migrate push` sends the exported markdown, and the only route that takes a raw transcript is `POST /v1/ingest/session`, which nothing in this repository calls for Codex. So an export over the server's size limit, which `push` reports as over the cap, can be stored only by sending its raw transcript to that route yourself, which splits it, or by raising `MaxDocumentBytes` and `MEMORIA_QMD_MAX_DOCUMENT_BYTES` together.
+**Codex exports over the cap.** An export over the 2 MiB limit gets 413, and `push` reports it as over the cap. It goes again from its raw transcript, through the session route, which splits a session into parts the cap allows:
+
+```sh
+memoria migrate rerender --qmd-config ~/.config/qmd/index.yml --codex-sessions ~/.codex/sessions
+memoria migrate rerender --qmd-config ~/.config/qmd/index.yml --codex-sessions ~/.codex/sessions --apply --timeout 10m
+```
+
+Add `--codex-sessions ~/.codex/archived_sessions` as well if Codex archived any of those sessions. A large transcript takes a while to send and render, which is what `--timeout` is for.
+
+- **Which documents.** Each selected file larger than the default 2 MiB cap, and each the last `push` to this server named over the cap.
+- **Which transcript.** The one whose file name holds the export's frontmatter `session_id`, and whose `session_meta` names that same session, as the server checks. It is sent with `format=codex` and that `session_id`.
+- **The version it sends.** `updated` is the later of the transcript's file time and the newest file time among that session's exports here. A chunk of the session already stored carries its export's time as its version, and the transcript is what those exports came from, so it is at least as current. Sending the transcript's own time, often older, would be refused with 409 `stale_version`.
+- **A transcript shorter than its exports.** Before sending, it counts the transcript's messages as the server does, and compares them with how far the session's exports reach: `message_start` plus `message_count`, or else `message_end` plus one. If the transcript has fewer, it is not sent, as the server cannot refuse it for an export it never stored. The output says: "A transcript with fewer messages than its exports was not sent: the export is the only copy of the messages it lacks. The local report says how many."
+- **An export that does not count its messages.** An older export has no `message_start`, `message_count` or `message_end`. Its body is read instead, in the format of the Codex exporter in agent-skills at `3478baa` (`codex/skills/recall/scripts/export_sessions.py`): after the frontmatter and a `# ` title, each message is `## User` or `## Assistant`, a blank line, its text and a blank line. It is sent only if that body is, exactly, the transcript's first messages rendered that way. Matching the text is what keeps a line inside a message that looks like a heading from counting as a message of its own. Any other heading, a message the transcript lacks, or text left over, and it is not sent. The output says: "An export that does not count its messages, and whose body is not its transcript's, was not sent: nothing shows the transcript has them all, so its export is its only copy. After looking, --accept-uncounted sends it anyway."
+- **The last resort.** If you have compared such an export with its transcript yourself and are content, send it with `--accept-uncounted`. It is never silent: each one is named in the report as `accepted_uncounted`, counted as `acceptedUncounted` in the summary, and the output says: "Sent with --accept-uncounted, on your word: for these, nothing showed the transcript holds every message the export does. The local report names them."
+
+```sh
+memoria migrate rerender --qmd-config ~/.config/qmd/index.yml --codex-sessions ~/.codex/sessions --apply --accept-uncounted --timeout 10m
+```
+- **Stop or go.** It exits 0 only when every one is held through its session. The dry run, without `--apply`, already says what it found, and its private report names each file it could not match.
+- **A missing transcript.** It says so, names the file in the report, and exits 1, with this line in its output: "An over-cap document with no raw transcript here is held only by its export, which the server cannot store. Find its transcript, or keep the export." Do not retire local QMD while that is so: the export is the only copy.
+- **More than one transcript naming a session.** It sends none of them and says so. Move the one you do not want out of the folders given.
+- **What a Codex session takes over.** Unlike Claude Code, a Codex session needs no proof of which copy it is. It replaces documents in the collection root whose frontmatter names it, and leaves copies in subfolders alone. One that has fewer messages than those documents reach is refused with 409 `session_shrank`, and nothing changes. `rerender` never sends `allowShrink`, and says: "session_shrank means the server kept what it had: the export is still the only copy of the messages the transcript lacks."
+- **A copy in a subfolder.** A stored export of the same session in a subfolder is not taken over, so its text is held twice and can turn up twice in search. That is the server's rule, kept on purpose, as such a copy can be another fork of the session.
+- **A write still running.** A 409 `ingest_in_progress`, as after a run that was killed, is waited out, as `push` does, for up to six minutes.
+- **Running it again** asks the server first, and sends nothing it holds complete at this version or later.
+
+Afterwards `push` still reports them over the cap, as they are, so pass it `--accept-over-cap`.
+
+```sh
+memoria migrate push --qmd-config ~/.config/qmd/index.yml --apply --accept-over-cap
+```
+
+`verify` counts each as held through its session, checking only that the session is complete. It does not compare or sample those documents, and says so, and it turns the count check off for that collection, as a session writes more documents than one export.
 
 **What `verify` proves.** Every path's state and version on the server, and that a sample of documents matches the local text apart from redaction. It does not prove every document's text is right:
 
@@ -135,7 +172,7 @@ Check each one by hand: the local file against `memoria get`. It may be missing 
 
 **Stop or go.** Run `verify` until these hold, then cut over:
 
-- `verify` exits 0; or it exits 1, every count is zero except files not held, and that count equals what `push` reported as over the cap. Those are the four above, and going on means you accept they stay unsearchable until you decide what to do with them. Any other count is a stop.
+- `verify` exits 0, with any over-cap documents counted as held by their session. If `rerender` could not send one, the count of files not held is that one, and it is a stop until its transcript is found or you accept that it stays unsearchable, with its export as its only copy.
 - You have looked by hand at each document it could not compare.
 - You have looked at the overlap and it does not surprise you. Results that share almost nothing with local QMD are worth a look, even though they do not fail `verify`.
 
