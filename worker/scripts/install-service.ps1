@@ -6,7 +6,7 @@
     Copies the worker with its own node.exe and nssm.exe under Program Files,
     where only administrators can change it, and registers a service that runs
     as the virtual account NT SERVICE\<ServiceName>. Requires an elevated
-    PowerShell, NSSM on PATH (winget install NSSM.NSSM), Node 22.18+, and a CUDA
+    PowerShell, NSSM on PATH (winget install NSSM.NSSM), Node 26.13+, and a CUDA
     build of llama-server. Run it with -WhatIf first: that prints every step and
     changes nothing, and does not need elevation.
 
