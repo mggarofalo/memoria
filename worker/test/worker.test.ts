@@ -393,6 +393,82 @@ test("a full queue refuses before reading the body", async () => {
   );
 });
 
+/** One connection, driven by hand, so a test decides when each part of a request goes. */
+function rawConnection(url: string) {
+  const socket = connect(Number(new URL(url).port), "127.0.0.1");
+  let received = "";
+  let closed = false;
+  const waiters: Array<() => void> = [];
+  const wake = () => waiters.splice(0).forEach((w) => w());
+  socket.on("data", (chunk) => {
+    received += chunk.toString("latin1");
+    wake();
+  });
+  socket.on("close", () => {
+    closed = true;
+    wake();
+  });
+  socket.on("error", () => {});
+  const answers = () => received.match(/HTTP\/1\.1 \d{3}/g) ?? [];
+  return {
+    write: (text: string) => new Promise<void>((resolve) => socket.write(text, () => resolve())),
+    /** Resolves once this many answers have arrived, or the connection has closed. */
+    answered: async (count: number) => {
+      while (answers().length < count && !closed) await new Promise<void>((resolve) => waiters.push(resolve));
+      return { statuses: answers().map((a) => Number(a.slice(9))), closed };
+    },
+    closed: async () => {
+      while (!closed) await new Promise<void>((resolve) => waiters.push(resolve));
+    },
+    end: () => socket.destroy(),
+  };
+}
+
+const postHead = (path: string, length: number) => `POST ${path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer ${TOKEN}\r\nContent-Type: application/json\r\nContent-Length: ${length}\r\n\r\n`;
+
+test("a client still sending when it is turned away gets the answer, and its connection stays usable", async () => {
+  await withWorker(
+    async (w) => {
+      const gate = w.gates.get("embed")!;
+      let release = () => {};
+      const held = new Promise<void>((resolve) => (release = resolve));
+      const busy = [gate.run(() => held), gate.run(() => held)];
+      const body = JSON.stringify({ texts: ["x".repeat(200_000)] });
+      const c = rawConnection(w.url);
+      try {
+        await c.write(postHead("/v1/embed", body.length) + body.slice(0, 1000));
+        assert.deepEqual(await c.answered(1), { statuses: [503], closed: false });
+        // The rest of the body arrives after the answer. A server that closed on its answer resets the client here.
+        await c.write(body.slice(1000));
+        await c.write("GET /health HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer " + TOKEN + "\r\n\r\n");
+        assert.deepEqual(await c.answered(2), { statuses: [503, 200], closed: false });
+      } finally {
+        c.end();
+        release();
+        await Promise.all(busy);
+      }
+    },
+    { maxQueue: 0 },
+  );
+});
+
+test("a client that keeps sending past the body limit after it is turned away is cut off", async () => {
+  await withWorker(
+    async (w) => {
+      const c = rawConnection(w.url);
+      try {
+        await c.write(postHead("/v1/transcribe", 64 * 1024));
+        assert.deepEqual((await c.answered(1)).statuses, [404]);
+        await c.write("x".repeat(4 * 1024));
+        await c.closed();
+      } finally {
+        c.end();
+      }
+    },
+    { bodyLimitBytes: 2048 },
+  );
+});
+
 test("request bodies held in memory are capped, and released with the answer", async () => {
   await withWorker(
     async (w) => {

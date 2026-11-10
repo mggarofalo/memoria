@@ -287,6 +287,21 @@ export function createWorkerServer(options: WorkerServerOptions): { server: Serv
     return operation(request);
   };
 
+  /**
+   * A request turned away before its body was read. Closing the connection while the client is
+   * still sending resets it, and the reset can reach the client before the answer, which it then
+   * never reads. So the rest is read and dropped and the connection stays open, and only a client
+   * still sending past the body limit is cut off.
+   */
+  const discardRest = (request: IncomingMessage): void => {
+    let dropped = 0;
+    request.on("data", (chunk: Buffer) => {
+      dropped += chunk.length;
+      if (dropped > options.bodyLimitBytes) request.socket.destroy();
+    });
+    request.resume();
+  };
+
   const send = (response: ServerResponse, status: number, body: unknown): void => {
     const text = JSON.stringify(body);
     response.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(text) });
@@ -302,11 +317,7 @@ export function createWorkerServer(options: WorkerServerOptions): { server: Serv
       heldBy.delete(request);
     });
     const finish = (status: number, body: unknown, errorCode?: string): void => {
-      if (!request.complete) {
-        // Turned away before the body was read: discard the rest and end the connection.
-        response.setHeader("connection", "close");
-        request.resume();
-      }
+      if (!request.complete) discardRest(request);
       send(response, status, body);
       log.info({ method: request.method, path, status, durationMs: Date.now() - started, ...(errorCode ? { errorCode } : {}) }, "request");
     };
