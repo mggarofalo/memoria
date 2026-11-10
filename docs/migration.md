@@ -65,14 +65,16 @@ memoria migrate report --qmd-config ~/.config/qmd/index.yml --tool tools/Redacti
   --gitleaks-findings ~/.config/memoria/migrate-state/findings.txt
 ```
 
-`--gitleaks-findings <file>` writes one fingerprint for each finding, in the form `<collection>/<path>:<rule>:<line>`: the collection's name in your QMD config, the file's path in it, the gitleaks rule, and the line in the redacted document. Open each file at that line, decide, and copy the ones you judge harmless into an ignore file, with a comment line above each saying why:
+`--gitleaks-findings <file>` writes one fingerprint for each finding not already listed, in the form `<collection>/<path>:<rule>:<line>`: the collection's name in your QMD config, the file's path in it, the gitleaks rule, and the line in the redacted document. Open each file at that line, decide, and copy the ones you judge harmless into an ignore file, with a comment line above each saying why:
 
 ```text
 # a list of git blob hashes; the keyword is in a file name, and the value is a SHA-1
 notes/build/hashes.md:generic-api-key:12
 ```
 
-Then run the report with `--gitleaks-ignore ~/.config/memoria/migrate-state/reviewed.gitleaksignore`. A listed finding is counted as ignored, and shown as such, and does not fail the run. A new finding, one under another rule, or one that has moved to another line or file still exits 1. The file is in `.gitleaksignore` form: one fingerprint a line, with blank lines and `#` comments skipped.
+Then run the report with `--gitleaks-ignore ~/.config/memoria/migrate-state/reviewed.gitleaksignore`. Each listing excuses one finding: it is counted as ignored, and shown as such, and does not fail the run. A new finding, one under another rule, or one that has moved to another line or file still exits 1, and so does a second finding on a listed line, until its fingerprint is listed a second time. The findings file shows such a fingerprint twice. The file is in `.gitleaksignore` form: one fingerprint a line, with blank lines and `#` comments skipped.
+
+The findings file is deleted when the report starts, so a run that cannot finish leaves none behind from an earlier run. An empty findings file does not mean the run was clean, as a document gitleaks could not read has no findings to list: go by the exit code.
 
 - **Keep both files private, and out of any repository.** A fingerprint holds a file's path, and paths can say more than you mean them to. `~/.config/memoria/migrate-state/` is the place for them.
 - **A fingerprint names a line, not a value.** If the text on a listed line changes and gitleaks still flags it under the same rule, it stays listed. This is how gitleaks's own fingerprints work. Review the file again after editing a listed document.

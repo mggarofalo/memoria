@@ -13,8 +13,10 @@
 //
 // --gitleaks-ignore <file> reads a .gitleaksignore of findings a person reviewed: one fingerprint a line, '#' for comments. A
 // fingerprint is <list>/<path in it>:<rule>:<line>, gitleaks's own form for a file, with the line counted in the redacted
-// document. A listed finding is counted as ignored and does not fail the run; any other still does. --gitleaks-findings <file>
-// writes the fingerprints of the findings that are not ignored, for that review. Both files hold paths, so keep them private.
+// document. Each line listed excuses one finding: it is counted as ignored and does not fail the run, while any other, even a
+// second on the same line, still does, so two findings on one line need the fingerprint listed twice. --gitleaks-findings
+// <file> writes the fingerprints of the findings that are not ignored, one a finding, for that review. It is deleted before
+// the run starts, so a run that cannot finish leaves none from an earlier one. Both files hold paths, so keep them private.
 //
 // Exits 0 when clean, 1 when something was refused, found, skipped or not scanned, 2 on bad usage, 3 when it could not finish.
 using System.Diagnostics;
@@ -50,7 +52,12 @@ internal static class RedactionReport
 			return 2;
 		}
 
-		HashSet<string> ignored = options.IgnoreFile is null ? [] : Fingerprints.Read(options.IgnoreFile);
+		if (options.FindingsFile is not null)
+		{
+			File.Delete(options.FindingsFile);
+		}
+
+		Dictionary<string, int> ignored = options.IgnoreFile is null ? [] : Fingerprints.Read(options.IgnoreFile);
 		List<string> remaining = [];
 		List<Result> results = [.. options.Lists.Select(list => Check(list, options.Gitleaks, ignored, remaining))];
 		if (options.FindingsFile is not null)
@@ -62,7 +69,7 @@ internal static class RedactionReport
 		return results.All(static result => result.IsClean) ? 0 : 1;
 	}
 
-	private static Result Check(FileList list, bool gitleaks, HashSet<string> ignored, List<string> remaining)
+	private static Result Check(FileList list, bool gitleaks, Dictionary<string, int> ignored, List<string> remaining)
 	{
 		using Gitleaks? scan = gitleaks ? Gitleaks.Start() : null;
 		Summary summary = Redact(list, scan);
@@ -70,16 +77,17 @@ internal static class RedactionReport
 		return new Result(summary.Files, summary.Changed, summary.Refused, summary.Skipped, summary.CredentialNames, scan?.Unscanned ?? 0, summary.Counts, summary.FilesByRule, gitleaks, findings, ignoredCount);
 	}
 
-	/// <summary>Counts a finding the ignore file lists as ignored, and every other one by rule, keeping its fingerprint for the findings file.</summary>
-	private static (Dictionary<string, int> Findings, int Ignored) Sort(string list, List<(string Rule, string? Document, int Line)> found, HashSet<string> ignored, List<string> remaining)
+	/// <summary>Counts a finding the ignore file lists as ignored, using up one listing, and every other one by rule, keeping its fingerprint for the findings file.</summary>
+	private static (Dictionary<string, int> Findings, int Ignored) Sort(string list, List<(string Rule, string? Document, int Line)> found, Dictionary<string, int> ignored, List<string> remaining)
 	{
 		Dictionary<string, int> findings = [];
 		int ignoredCount = 0;
 		foreach ((string rule, string? document, int line) in found)
 		{
 			string? fingerprint = document is null ? null : Fingerprints.Of(list, document, rule, line);
-			if (fingerprint is not null && ignored.Contains(fingerprint))
+			if (fingerprint is not null && ignored.GetValueOrDefault(fingerprint) > 0)
 			{
+				ignored[fingerprint]--;
 				ignoredCount++;
 				continue;
 			}
@@ -314,10 +322,14 @@ internal static class Fingerprints
 		return $"{list}/{document}:{rule}:{line}";
 	}
 
-	/// <summary>Every line but blanks and '#' comments, trimmed, as gitleaks reads the file.</summary>
-	public static HashSet<string> Read(string path)
+	/// <summary>Every line but blanks and '#' comments, trimmed, as gitleaks reads the file, with how many times each is listed.</summary>
+	public static Dictionary<string, int> Read(string path)
 	{
-		return [.. File.ReadAllLines(path).Select(static line => line.Trim()).Where(static line => line.Length > 0 && line[0] != '#')];
+		return File.ReadAllLines(path)
+			.Select(static line => line.Trim())
+			.Where(static line => line.Length > 0 && line[0] != '#')
+			.CountBy(static line => line, StringComparer.Ordinal)
+			.ToDictionary(StringComparer.Ordinal);
 	}
 
 	/// <summary>The index of the last document starting at or before the line, or -1 when it is before them all.</summary>

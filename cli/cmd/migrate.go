@@ -281,10 +281,11 @@ document, or anything could not be read. Those last are counted, never named, an
 
 A finding a person has reviewed and judged harmless can be listed by fingerprint in a
 file in gitleaks's .gitleaksignore form, passed with --gitleaks-ignore. A fingerprint is
-<collection>/<path>:<rule>:<line>, the line counted in the redacted document. A listed
-finding is counted as ignored and does not fail the run; any other finding still does.
---gitleaks-findings <file> writes the fingerprints of the findings that are not listed,
-for that review. Both files hold paths, so keep them out of any repository.`,
+<collection>/<path>:<rule>:<line>, the line counted in the redacted document. Each
+listing excuses one finding, which is counted as ignored and does not fail the run; any
+other finding still does, even a second on a listed line. --gitleaks-findings <file>
+writes the fingerprints of the findings that are not listed, one a finding, for that
+review. Both files hold paths, so keep them out of any repository.`,
 		Example: `  memoria migrate report --qmd-config ~/.config/qmd/index.yml --tool tools/RedactionCheck/bin/Release/net10.0/RedactionCheck.dll`,
 		Args:    noArgs,
 		RunE:    func(cmd *cobra.Command, _ []string) error { return a.migrateReport(cmd.Context(), o) },
