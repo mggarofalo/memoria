@@ -4,8 +4,7 @@
  * real tool, with gitleaks where it is installed.
  */
 import { spawn, spawnSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
-import { mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { pause, redactionCheckDll, repo, type Harness } from "./harness.ts";
 
@@ -156,17 +155,30 @@ func main() {
   }
 }
 
+/**
+ * A line that real gitleaks reports and Memoria's redaction leaves, so a finding can only come from gitleaks reading what it was
+ * given. gitleaks's generic-api-key catches it, and that rule is the one left out of the import. The value is split in the file so
+ * this repository's own gitleaks scan does not report it. RedactionLeavesGitleaksOnlyLineTests fails first if a rule change starts
+ * removing it.
+ */
+function gitleaksOnlyLine(): { line: string; value: string } {
+  const fixture = JSON.parse(readFileSync(path.join(repo, "scripts", "e2e", "gitleaks-only.json"), "utf8")) as { name: string; value: string[] };
+  const value = fixture.value.join("");
+  return { line: `${fixture.name}: ${value}`, value };
+}
+
 /** Each of these once gave gitleaks nothing to read, while the report said 0 and exited 0, or ended with "did not finish". */
 function gitleaksReads(h: Harness, tool: string): void {
-  const token = h.remember("ruby" + "gems_" + randomBytes(24).toString("hex"));
-  const body = `\nthe value is ${token} here\n`;
+  const { line, value } = gitleaksOnlyLine();
+  const token = h.remember(value);
+  const body = `\n${line}\n`;
   const filler = "plain words\n".repeat(20_000);
   const cases: Array<{ label: string; files: string[] }> = [
     { label: "a Markdown file", files: [`# Doc${body}`] },
     { label: "a file starting %PDF", files: [`%PDF-1.7${body}`] },
     { label: "a file starting MZ", files: [`MZ ${body}`] },
     { label: "a file starting PK", files: [`PK\x03\x04${body}`] },
-    { label: "a sentence naming the allow marker", files: [`# Doc\n\ngit${"leaks:allow"} is named here ${token}\n`] },
+    { label: "a sentence naming the allow marker", files: [`# Doc\n\ngit${"leaks:allow"} is named here, ${line}\n`] },
     { label: "several files that start like binaries", files: [`%PDF-1.7${body}${filler}`, `MZ ${body}${filler}`, `PK\x03\x04${body}${filler}`] },
     { label: "a 200 KB file starting MZ", files: [`MZ ${body}${filler}`] },
   ];
