@@ -507,7 +507,9 @@ internal static class RedactionRules
 		Provider("groq-key", "gsk_", @"gsk_[A-Za-z0-9]{32,}"),
 		Provider("xai-key", "xai-", @"xai-[A-Za-z0-9]{32,}"),
 		Provider("langsmith-key", "lsv2_", @"lsv2_[A-Za-z0-9_]{32,}"),
-		Provider("onepassword-token", "ops_", @"ops_[A-Za-z0-9_\-]{32,}"),
+		// A service account token is base64 or base64url after ops_eyJ, so + / _ - and padding are inside it. Any other ops_ token is URL-safe,
+		// so a path through an ops_ folder stays.
+		Provider("onepassword-token", "ops_", @"(?:ops_eyJ[A-Za-z0-9+/_\-]{32,}={0,3}|ops_[A-Za-z0-9_\-]{32,})"),
 		Provider("cloudflare-token", "cfut_", @"cfut_[A-Za-z0-9_\-]{32,}"),
 		// An organization token's body is base64 with a second base64 part after an underscore, so + / = are inside it.
 		Provider("sentry-token", "sntrys_", @"sntrys_[A-Za-z0-9_+/=\-]{32,}"),
