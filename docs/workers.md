@@ -2,7 +2,7 @@
 
 The sidecar can send its model work to another machine. QMD still owns retrieval on the node that holds the index: full-text search, vector lookup, fusion and caching all stay in the sidecar's process. Only the three model operations move: embedding, reranking and query expansion.
 
-**Status: run on one real GPU.** The worker and the parity benchmark have run on a Windows desktop with an RTX 5080, using real models and a real index. The Mac, the services and the sidecar's API on top have not; see [What has and has not been verified](#what-has-and-has-not-been-verified). `MEMORIA_QMD_LLM=local` remains the default, and local mode loads none of this code.
+**Status: run on one real GPU.** The worker and the parity benchmark have run on a Windows desktop with an RTX 5080, using real models and a real index. The sidecar and the API have run on it in compose, on one host. The Mac, the services and a worker on another machine have not; see [What has and has not been verified](#what-has-and-has-not-been-verified). `MEMORIA_QMD_LLM=local` remains the default, and local mode loads none of this code.
 
 **The reranker transport is decided:** llama-server, given the exact tokens in-process QMD would score. [The decision](#the-decision) has the numbers.
 
@@ -270,6 +270,20 @@ One run of `bench/parity.ts` with the same flags as `npm run bench:parity`, with
 
 On the GPU, with no sidecar involved: one short embedding takes about 77 ms, a batch of 32 about 170 ms, reranking 10 long documents about 345 ms, and expansion a median of about 270 ms. All three models take about 4.4 GB of VRAM. During requests the card reached 80% utilization and about 200 W, from 12 W idle.
 
+**Run again on 2026-11-10,** from a fresh install of the official b12110 CUDA 13.4 build, against a newer copy of the index (1,594 documents, 58,429 vectors), with the smoke script and `test:live` passing first. It took 7 min 43 s, with no query errors and no worker restarts, and agrees with the run above:
+
+| Measurement | Mean | Minimum | Median |
+|---|---|---|---|
+| Rerank rank correlation | 0.989 | 0.933 | 0.991 |
+| Rerank top-10 overlap | 0.958 | 0.800 | 1.000 |
+| Rerank mean score difference | 0.0037 | | 0.0021 |
+| Rerank largest score difference | 0.026 | | 0.015 |
+| End-to-end top-10 overlap | 0.946 | 0.800 | 1.000 |
+| End-to-end rank correlation | 0.963 | 0.758 | 0.983 |
+| Embedding cosine | 0.9998 | 0.9997 | 0.9998 |
+
+Rerank latency had a median of 1,761 ms in-process and 896 ms on the worker, and search with rerank 1,992 ms and 1,622 ms. The decision stands.
+
 ### Two-hour soak
 
 Sustained rerank and embed load on the real GPU, using real document text from a copy of the index.
@@ -350,7 +364,7 @@ Across-sides agreement now sits between the two within-side figures, so the remo
 
 ## Memory
 
-**A search can allocate over 4 GB of JavaScript heap.** QMD's vector lookup reads a document's whole body once per matching chunk, and this corpus has documents up to 21 MB. One query reached 4.1 GB and, at Node's default limit, the benchmark died of it. That is QMD's behaviour, in-process or remote. `bench:parity` now raises the limit to 6 GiB. The sidecar service (`npm start` and its image) runs with 4 GiB, which is under that 4.1 GB query.
+**Stock QMD can allocate over 4 GB of JavaScript heap in one search.** Its vector lookup in 2.8.3 reads a document's whole body once per matching chunk, and this corpus has documents up to 21 MB. One benchmark query reached 4.1 GB and, at Node's default limit, the benchmark died of it. `sidecar/scripts/patch-qmd.ts` now reads each body once, only for the files that survive, and QMD's `main` has since capped those bodies (tobi/qmd#1021), unreleased as of 2.8.3. With the patch, all 24 benchmark queries, as typed sub-queries and as plain expanded queries, ran one after another on a copy of the real index under the sidecar's 4 GiB limit: the most heap any reached was 664 MB, the most resident memory 834 MB, and the longest event-loop stall 304 ms. `bench:parity` still raises its limit to 6 GiB, because it also holds the in-process models. Concurrent searches add up, as [deployment.md](deployment.md#memory-and-large-documents) says.
 
 **The benchmark cleans up its index copies.** They hold real transcripts. A normal exit and Ctrl-C remove them. A fatal crash runs no code at all, so the next run removes what a dead run left, recognising its own directories by a marker holding the owner's process ID. `--out` is rewritten after each query and marked `partial` until the run ends, so a crash keeps the results so far.
 
@@ -420,12 +434,13 @@ The benchmark reports numbers and sets no thresholds. [The decision](#the-decisi
 | A kill mid-write leaves vectors consistent | Run: the farm on the real SDK, killed outright six times at varied moments. A kill is a race, so a deterministic test covers the rollback, and another the startup repair on the exact state a kill leaves. |
 | The farm matches the SDK's output | Run: both paths on a fake model, comparing rows and vector bytes. |
 | An index from before the newer vector columns works | Run: a fixture rebuilt to the old shape, not a real old index. |
-| Interactive latency under real embedding load | **Not measured.** The priority logic is tested; its effect on a GPU is not. |
+| Interactive latency under real embedding load | Run once, on one worker with `maxConcurrent: 4`: reranked searches through the API took 6.3 to 11.1 s while the same GPU embedded a corpus, and 1 s without reranking. Not compared with an idle GPU in the same run. |
+| The sidecar and API on a real worker | Run: `deploy/compose.yaml` built from source on Docker Desktop, reaching a worker on the host at `host.docker.internal`, through a rehearsal migration of the real corpus, search over REST, MCP and the CLI, and a worker killed mid-search (answered `no_rerank`). On SIGTERM the API drained and exited 0; the sidecar, with an embedding job running and a search in flight, overran compose's 15 s grace and was killed, and its jobs resumed on restart. Not over WireGuard. |
 | llama-server accepts these flags and routes | Run on Windows with llama.cpp b12110 on CUDA: smoke script and `npm run test:live`. |
 | Scores match in-process QMD | Run: the benchmark above, on one machine. Close, not identical. |
 | GPU loading on CUDA | Run: `nvidia-smi` shows VRAM, utilization and power rising during requests. |
 | GPU loading on Metal | **Not run.** |
-| A worker pool, or a worker on another machine | **Not run for real.** Everything here was one worker on loopback. |
+| A worker pool, or a worker on another machine | **Not run for real.** Everything here was one worker, on loopback or reached from containers on the same host. |
 | The NSSM and launchd scripts work | **Not run for real.** Dry-run plans and ACL helpers are tested; see [what is unconfirmed](deployment.md#not-confirmed). |
 | Windows VRAM reading | Run: the parser's result matched real `nvidia-smi` output on one GPU. |
 | macOS thermal reading | Parsing tested against sample output, not against the real tool. |
