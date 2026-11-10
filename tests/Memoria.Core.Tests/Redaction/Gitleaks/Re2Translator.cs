@@ -13,9 +13,12 @@ namespace Memoria.Core.Tests.Redaction.Gitleaks;
 /// capture, or any of several in separate branches. Captures in sequence, as in <c>(x-){3}</c>, or under a quantifier at any depth, would
 /// make the secret a fragment, so the whole match is the secret instead. Every other capture becomes non-capturing.</item>
 /// <item>A <c>\b</c> that starts or ends the pattern beside the secret becomes a consuming ASCII boundary outside the secret,
-/// <c>(?:^|[^0-9A-Za-z_])</c> or <c>(?:[^0-9A-Za-z_]|\z)</c>. .NET's <c>\b</c> is Unicode-aware, so a token touching a non-ASCII
-/// letter, as in <c>éAKIA…</c>, would have no boundary and be missed. When the whole match is the secret, the secret group is drawn
-/// inside such a boundary, and before a final terminator such as <c>(?:[^a-z]|\z)</c>, so neither neighbour is taken with it.</item>
+/// <c>(?:^|[^0-9A-Za-z_]|…)</c>, which also lets a JSON or URL escape such as <c>\n</c> or <c>%3D</c> stand before the token, or
+/// <c>(?:[^0-9A-Za-z_]|\z)</c>. .NET's <c>\b</c> is Unicode-aware, so a token touching a non-ASCII letter, as in <c>éAKIA…</c>,
+/// would have no boundary and be missed. When the whole match is the secret, the secret group is drawn inside such a boundary, and
+/// before a final terminator such as <c>(?:[^a-z]|\z)</c>, so neither neighbour is taken with it.</item>
+/// <item>Upstream's common ending after a secret, a quote, space, semicolon, backtick, <c>\n</c> or the end, becomes any character
+/// that cannot continue a token, so a token before a period, comma, bracket, tab or escaped quote is found.</item>
 /// <item>A <c>-</c> straight after an expanded shorthand or POSIX class in a class is escaped: <c>[\s-x]</c> is a space, a dash or an x.</item>
 /// </list>
 /// What it cannot express it refuses, so a rule is never imported with a different meaning: lookaround, <c>\Q</c>, <c>\p</c>, <c>\C</c>,
@@ -417,7 +420,7 @@ public sealed class Re2Translator
 		bool trail = trailing && groups.Any(capture => capture.CloseToken == _output.Count - 2);
 		if (lead)
 		{
-			_output[first] = "(?:^|[^0-9A-Za-z_])";
+			_output[first] = LeadingBoundary;
 		}
 
 		if (trail)
@@ -443,18 +446,57 @@ public sealed class Re2Translator
 			_output[group.Token + 1] = "";
 		}
 
-		int terminator = Terminator();
-		bool terminated = terminator >= 0 && terminator == group.CloseToken + 1;
-		for (int i = terminator + 1; terminated && i < _output.Count - 1; i++)
-		{
-			_output[i] = _output[i] == "\\b" ? "(?:[^0-9A-Za-z_]|\\z)" : _output[i];
-		}
-
+		bool terminated = AsciiTerminator(group);
 		if ((trail || terminated) && _output[group.CloseToken - 1] == "\\b")
 		{
 			_output[group.CloseToken - 1] = "";
 		}
 	}
+
+	/// <summary>True when a final terminator follows the secret. Its <c>\b</c> branches become ASCII, and upstream's usual ending is widened.</summary>
+	private bool AsciiTerminator(Capture group)
+	{
+		int terminator = Terminator();
+		if (terminator < 0 || terminator != group.CloseToken + 1)
+		{
+			return false;
+		}
+
+		for (int i = terminator + 1; i < _output.Count - 1; i++)
+		{
+			_output[i] = _output[i] == "\\b" ? "(?:[^0-9A-Za-z_]|\\z)" : _output[i];
+		}
+
+		WidenStandardTerminator(terminator);
+		return true;
+	}
+
+	/// <summary>
+	/// Upstream's common ending, a quote, space, semicolon, backtick, <c>\n</c> or the end, misses a token before a period, comma,
+	/// bracket, tab or escaped quote, all common in prose and JSON. That ending stands only for "the token stops here", so it
+	/// becomes any character that cannot continue a token. Other endings, which some rules draw on purpose, are kept.
+	/// </summary>
+	private void WidenStandardTerminator(int open)
+	{
+		const string Standard = "[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z";
+		int close = _output.Count - 1;
+		if (string.Concat(_output.Skip(open + 1).Take(close - open - 1)) != Standard)
+		{
+			return;
+		}
+
+		_output[open] = "(?:[^0-9A-Za-z_]|\\z)";
+		for (int i = open + 1; i <= close; i++)
+		{
+			_output[i] = "";
+		}
+	}
+
+	/// <summary>
+	/// What may stand before a token once its <c>\b</c> is drawn in ASCII: the start, any character that cannot be part of a word,
+	/// or an escape a transcript carries in a JSON string or a URL, as <c>\nAKCp…</c> or <c>%3DAKCp…</c>, as Memoria's own rules allow.
+	/// </summary>
+	private const string LeadingBoundary = "(?:^|[^0-9A-Za-z_]|\\\\+[nrtfbv0]|\\\\u[0-9A-Fa-f]{4}|%[0-9A-Fa-f]{2})";
 
 	/// <summary>The opening token of a final top-level group that only ends the token, such as <c>(?:[^a-z0-9]|\z)</c>, or -1.</summary>
 	private int Terminator()

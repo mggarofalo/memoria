@@ -185,6 +185,24 @@ public sealed class GitleaksRuleDataTests
 		Assert.Equal(tokens, found);
 	}
 
+	/// <summary>Where a transcript puts a token: after a JSON escape, before punctuation or an escaped quote, in brackets.</summary>
+	[Theory]
+	[InlineData("my key is {S}.")]
+	[InlineData("keys: {S}, and more")]
+	[InlineData("({S})")]
+	[InlineData("[key]({S})")]
+	[InlineData("{\"out\":\"line1\\n{S}\\nline3\"}")]
+	[InlineData("{\"out\":\"token {S}\\tnext\"}")]
+	[InlineData("{\"cmd\":\"{\\\"t\\\":\\\"{S}\\\"}\"}")]
+	[InlineData("q=%3D{S}%26x")]
+	public void A_token_in_punctuation_or_json_escapes_is_found(string context)
+	{
+		string token = "AK" + "Cp" + Synthetic.Body(69, 4108);
+		Regex pattern = RedactionRules.Pattern(GitleaksRuleData.BuiltIn.Rules.Single(static rule => rule.Id == "artifactory-api-key").Pattern);
+
+		Assert.Equal(token, pattern.Match(context.Replace("{S}", token, StringComparison.Ordinal)).Groups["secret"].Value);
+	}
+
 	/// <summary>
 	/// A <c>\b</c> left in a pattern is Unicode-aware, so it is allowed only away from the secret's edges, where it reads a keyword
 	/// or a command name. Any new one is a decision to make, not an accident.
