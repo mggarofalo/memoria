@@ -10,43 +10,65 @@ namespace Memoria.Api.Sidecar;
 /// answer, or its failure, serves them all for <see cref="SidecarOptions.ReadinessCacheTime"/>. A caller who gives up does not stop
 /// the probe the others wait on: it has its own timeout, <see cref="SidecarOptions.ReadinessTimeout"/>.
 /// </summary>
+/// <remarks>
+/// Ages are measured on the monotonic clock, so a wall clock stepped back cannot keep a stale answer, a failure included, for the
+/// size of the step. The probe starts on its own, outside the lock and without the first caller's execution context, so no caller
+/// waits on a lock while it starts, and its trace is not credited to whichever request happened to start it.
+/// </remarks>
 public sealed class ReadinessCache(TimeProvider time, IOptions<MemoriaOptions> options)
 {
 	private readonly object _gate = new();
 	private Task<SidecarReadinessResult>? _current;
-	private DateTimeOffset _expires = DateTimeOffset.MinValue;
+	private long? _finishedAt;
 
 	/// <summary>The probe in flight or still fresh, or a new one through <paramref name="probe"/>.</summary>
 	public Task<SidecarReadinessResult> GetAsync(Func<CancellationToken, Task<SidecarReadinessResult>> probe)
 	{
 		ArgumentNullException.ThrowIfNull(probe);
+		TaskCompletionSource<SidecarReadinessResult> started;
 		lock (_gate)
 		{
-			if (_current is { } current && (!current.IsCompleted || time.GetUtcNow() < _expires))
+			if (_current is { } current && (_finishedAt is not { } finished || time.GetElapsedTime(finished) < options.Value.Sidecar.ReadinessCacheTime))
 			{
 				return current;
 			}
 
-			// Marked unexpired until it ends, so it is shared while in flight; RunAsync sets when it goes stale.
-			_expires = DateTimeOffset.MaxValue;
-			_current = RunAsync(probe);
-			return _current;
+			started = new TaskCompletionSource<SidecarReadinessResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+			_current = started.Task;
+			_finishedAt = null;
 		}
+
+		using (ExecutionContext.SuppressFlow())
+		{
+			_ = Task.Run(() => RunAsync(probe, started));
+		}
+
+		return started.Task;
 	}
 
-	private async Task<SidecarReadinessResult> RunAsync(Func<CancellationToken, Task<SidecarReadinessResult>> probe)
+	private async Task RunAsync(Func<CancellationToken, Task<SidecarReadinessResult>> probe, TaskCompletionSource<SidecarReadinessResult> started)
 	{
-		SidecarOptions settings = options.Value.Sidecar;
 		try
 		{
-			using CancellationTokenSource timeout = new(settings.ReadinessTimeout, time);
-			return await probe(timeout.Token);
+			using CancellationTokenSource timeout = new(options.Value.Sidecar.ReadinessTimeout, time);
+			started.SetResult(await probe(timeout.Token));
+		}
+		catch (OperationCanceledException ex)
+		{
+			started.SetCanceled(ex.CancellationToken);
+		}
+		catch (Exception ex)
+		{
+			started.SetException(ex);
 		}
 		finally
 		{
 			lock (_gate)
 			{
-				_expires = time.GetUtcNow() + settings.ReadinessCacheTime;
+				if (_current == started.Task)
+				{
+					_finishedAt = time.GetTimestamp();
+				}
 			}
 		}
 	}

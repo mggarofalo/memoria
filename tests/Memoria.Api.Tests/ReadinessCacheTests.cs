@@ -95,7 +95,7 @@ public sealed class ReadinessCacheTests : IDisposable
 	[Fact]
 	public async Task An_answer_goes_stale_after_the_cache_time_and_the_next_caller_probes_again()
 	{
-		MovableClock time = new();
+		SteppedClock time = new();
 		MemoriaOptions settings = new() { Sidecar = { ReadinessCacheTime = TimeSpan.FromSeconds(2), ReadinessTimeout = TimeSpan.FromSeconds(5) } };
 		ReadinessCache cache = new(time, Options.Create(settings));
 		int probes = 0;
@@ -120,7 +120,7 @@ public sealed class ReadinessCacheTests : IDisposable
 	public async Task With_no_cache_time_only_a_probe_in_flight_is_shared()
 	{
 		MemoriaOptions settings = new() { Sidecar = { ReadinessCacheTime = TimeSpan.Zero, ReadinessTimeout = TimeSpan.FromSeconds(5) } };
-		ReadinessCache cache = new(new MovableClock(), Options.Create(settings));
+		ReadinessCache cache = new(new SteppedClock(), Options.Create(settings));
 		TaskCompletionSource<SidecarReadinessResult> pending = new();
 		int probes = 0;
 		Task<SidecarReadinessResult> Probe(CancellationToken _)
@@ -150,5 +150,84 @@ public sealed class ReadinessCacheTests : IDisposable
 			return null!;
 		});
 		await Assert.ThrowsAnyAsync<OperationCanceledException>(() => probe);
+	}
+
+	[Fact]
+	public async Task A_wall_clock_stepped_back_does_not_keep_an_answer_longer()
+	{
+		SteppedClock time = new();
+		MemoriaOptions settings = new() { Sidecar = { ReadinessCacheTime = TimeSpan.FromSeconds(2), ReadinessTimeout = TimeSpan.FromSeconds(5) } };
+		ReadinessCache cache = new(time, Options.Create(settings));
+		int probes = 0;
+		Task<SidecarReadinessResult> Probe(CancellationToken _)
+		{
+			probes++;
+			return Task.FromResult<SidecarReadinessResult>(null!);
+		}
+
+		await cache.GetAsync(Probe);
+		time.StepWallClock(TimeSpan.FromHours(-1));
+		time.Advance(TimeSpan.FromSeconds(3));
+		await cache.GetAsync(Probe);
+
+		Assert.Equal(2, probes);
+	}
+
+	[Fact]
+	public async Task A_probe_that_throws_at_once_is_shared_as_a_failure_and_the_next_caller_after_it_probes_again()
+	{
+		MemoriaOptions settings = new() { Sidecar = { ReadinessCacheTime = TimeSpan.Zero, ReadinessTimeout = TimeSpan.FromSeconds(5) } };
+		ReadinessCache cache = new(new SteppedClock(), Options.Create(settings));
+
+		await Assert.ThrowsAsync<InvalidOperationException>(() => cache.GetAsync(_ => throw new InvalidOperationException("refused")));
+		Assert.Null(await cache.GetAsync(_ => Task.FromResult<SidecarReadinessResult>(null!)));
+	}
+
+	/// <summary>The cached answer is the sidecar's own, so what each caller is shown is decided per caller, after it.</summary>
+	[Fact]
+	public async Task An_admins_full_report_is_not_what_an_anonymous_caller_gets_from_the_same_answer()
+	{
+		using AuthApiFactory auth = new();
+		using WebApplicationFactory<Program> cached = auth.WithWebHostBuilder(static builder => builder.UseSetting("Memoria:Sidecar:ReadinessCacheTime", "00:00:30"));
+		auth.Sidecar.On("GET", "/ready", HttpStatusCode.OK, SidecarFixtures.Readiness("ready", resident: true));
+		(_, string key) = await auth.IssueAsync([Memoria.Api.Http.MemoriaScopes.Admin]);
+
+		string full = await AuthApiFactory.Authorized(cached.CreateClient(), key).GetStringAsync("/ready");
+		string anonymous = await cached.CreateClient().GetStringAsync("/ready");
+
+		Assert.Equal(1, auth.Sidecar.Requests.Count(r => r.Uri.AbsolutePath == "/ready"));
+		Assert.Contains("\"sidecar\":{", full, StringComparison.Ordinal);
+		Assert.Contains("\"sidecar\":null", anonymous, StringComparison.Ordinal);
+		Assert.Contains("\"reason\":null", anonymous, StringComparison.Ordinal);
+	}
+
+	/// <summary>A clock whose monotonic timestamp and wall time move apart, as when NTP steps the wall clock.</summary>
+	private sealed class SteppedClock : TimeProvider
+	{
+		private long _ticks;
+		private DateTimeOffset _wall = DateTimeOffset.UnixEpoch.AddYears(56);
+
+		public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+
+		public override long GetTimestamp()
+		{
+			return _ticks;
+		}
+
+		public override DateTimeOffset GetUtcNow()
+		{
+			return _wall;
+		}
+
+		public void Advance(TimeSpan by)
+		{
+			_ticks += by.Ticks;
+			_wall += by;
+		}
+
+		public void StepWallClock(TimeSpan by)
+		{
+			_wall += by;
+		}
 	}
 }

@@ -567,29 +567,40 @@ host refuses them for any address outside the LAN:
   is all they ask for, so refusing them at the proxy means a leaked admin key cannot
   be used from outside.
 
-In nginx-proxy-manager, add these to the proxy host's custom config. Put your LAN's
-range in place of `192.168.1.0/24`, and keep the `proxy_pass` matching the host's
-forward:
+In nginx-proxy-manager, add these to the proxy host's custom config, with your LAN's
+range in place of `192.168.1.0/24`:
 
 ```nginx
-location = /ready {
-    allow 127.0.0.1;
+location ~* ^/ready/?$ {
     allow 192.168.1.0/24;
     deny all;
-    proxy_pass http://memoria-api:8080;
+    include conf.d/include/proxy.conf;
 }
-location /v1/admin/ {
-    allow 127.0.0.1;
+location ~* ^/v1/admin(/|$) {
     allow 192.168.1.0/24;
     deny all;
-    proxy_pass http://memoria-api:8080;
+    include conf.d/include/proxy.conf;
 }
 ```
 
+- **Case-insensitive, by regex.** The API matches routes whatever their case, and
+  ignores a trailing slash, while a plain nginx `location` matches case and all. A
+  plain `location /v1/admin/` would let `/V1/Admin/keys` through to the API. A regex
+  `location` is also chosen over nginx-proxy-manager's own `location /`.
+- **`include`, not `proxy_pass`.** nginx-proxy-manager sets `X-Forwarded-For` and its
+  other headers in its own `location /`, and a new `location` inherits none of them.
+  Its `proxy.conf` holds those headers and its own `proxy_pass`, so these requests
+  carry the client's address like any other, as
+  [Tell the API who its proxy is](#tell-the-api-who-its-proxy-is) requires.
+- **Who counts as local.** A caller on the host itself reaches nginx through Docker's
+  published port, so nginx sees the Docker gateway's address, not `127.0.0.1`. Add
+  that address if something on the host needs these routes through the proxy.
+
 With Cloudflare or another proxy in front, `allow` sees that proxy's address unless
-nginx resolves the real client, as in step 4 above, so set that up first. Check both
-from outside the LAN, for example from a phone off Wi-Fi: each must answer 403 from
-nginx, not the API's own 401 or 200.
+nginx resolves the real client, as in step 4 above, so set that up first. Check from
+outside the LAN, for example from a phone off Wi-Fi, that `/ready`, `/READY`,
+`/v1/admin/keys` and `/V1/Admin/keys` each answer 403 from nginx, not the API's own
+401 or 200. Run `nginx -t` inside the proxy's container after saving.
 
 ## Upgrade order
 

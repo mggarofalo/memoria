@@ -16,6 +16,7 @@ test("callers share one call while it runs and for its time to live, then call a
   const first = shared();
   const second = shared();
   assert.equal(first, second);
+  await settled();
   finish(7);
   assert.equal(await first, 7);
   clock = 999;
@@ -23,9 +24,27 @@ test("callers share one call while it runs and for its time to live, then call a
   assert.equal(calls, 1);
   clock = 1_000;
   const third = shared();
+  await settled();
   finish(8);
   assert.equal(await third, 8);
   assert.equal(calls, 2);
+});
+
+/** The call starts on a microtask: let it. */
+const settled = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+
+test("a call that throws at once, after one that succeeded, is a failure not kept, and never serves the old answer forever", async () => {
+  let clock = 0;
+  let calls = 0;
+  const shared = sharedFor(1_000, () => {
+    calls++;
+    if (calls === 2) throw new Error("thrown at once");
+    return Promise.resolve(calls);
+  }, () => clock);
+  assert.equal(await shared(), 1);
+  clock = 1_000;
+  await assert.rejects(shared(), /thrown at once/);
+  assert.equal(await shared(), 3);
 });
 
 test("a failure is shared by those waiting on it, and not kept for the next caller", async () => {
