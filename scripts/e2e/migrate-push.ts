@@ -12,6 +12,7 @@ import { issueKey } from "./auth-helpers.ts";
 import { pause, redactionCheckDll, repo, type CliResult, type Harness } from "./harness.ts";
 import { forceIndex } from "./ingest.ts";
 import { line } from "./ingest-races.ts";
+import { migrateRerender, RERENDER_TARGET } from "./migrate-rerender.ts";
 
 const TARGET = "migrated";
 const SECOND_TARGET = "migrated-resume";
@@ -508,13 +509,14 @@ function stops(h: Harness, key: string, narrow: string): void {
 
 /** Runs against a server started with INGEST_SERVER, where these targets are opened and empty. */
 export async function migratePush(h: Harness, admin: string): Promise<void> {
-  const collections = [TARGET, SECOND_TARGET, REFUSING_TARGET, KILLED_TARGET, RULES_TARGET, TAKEOVER_TARGET, TRUST_TARGET, SPELLING_TARGET, DECOMPOSED_TARGET, CREDENTIAL_TARGET, OLDER_TARGET, SHAPES_TARGET, FILLED, CLOSED];
+  const collections = [TARGET, SECOND_TARGET, REFUSING_TARGET, KILLED_TARGET, RULES_TARGET, TAKEOVER_TARGET, TRUST_TARGET, SPELLING_TARGET, DECOMPOSED_TARGET, CREDENTIAL_TARGET, OLDER_TARGET, SHAPES_TARGET, RERENDER_TARGET, FILLED, CLOSED];
   // A key has a budget of requests a minute, and this should not spend its time waiting out a window. A real push does, and goes at that rate.
   const fresh = async (label: string): Promise<string> => (await issueKey(h, admin, { label, scopes: ["ingest", "read"], collections })).token;
   const pushKey = await fresh("push");
   const first = await dryRunAndSend(h, pushKey);
   verifyRuns(h, pushKey, first);
   await redactedShapes(h, await fresh("push-shapes"));
+  await migrateRerender(h, await fresh("push-rerender"));
   await pathRules(h, await fresh("push-rules"));
   const other = await fresh("push-other");
   planCounts(h, other);

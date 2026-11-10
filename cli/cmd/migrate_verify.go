@@ -290,7 +290,7 @@ func (r *pushRun) verifyCollection(job pushJob, in verifyInputs) *verifying {
 // noteCount flags counts that differ. A session that took over documents writes its own parts, so its count is not comparable, and
 // a file not held is already reported and explains a lower count.
 func (v *verifying) noteCount() {
-	if v.summary.TakenOver == 0 && v.summary.ServerDocuments != v.summary.LocalFiles-v.summary.NotHeld {
+	if v.summary.TakenOver == 0 && v.summary.HeldBySession == 0 && v.summary.ServerDocuments != v.summary.LocalFiles-v.summary.NotHeld {
 		v.summary.CountDiffers = true
 		v.note("count_differs", v.summary.Target, strconv.Itoa(v.summary.LocalFiles)+" local, "+strconv.Itoa(v.summary.ServerDocuments)+" on the server")
 	}
@@ -330,10 +330,27 @@ func (r *pushRun) checkPath(v *verifying, name string) {
 	case state == migrate.StateComplete:
 		v.summary.VersionDiffers++
 		v.note("version_differs", name, "")
+	case r.heldBySession(v, name):
+		v.summary.HeldBySession++
 	default:
 		v.summary.NotHeld++
 		v.note("not_held", name, state)
 	}
+}
+
+// heldBySession is a document whose frontmatter names a Codex session the server holds complete. A re-render sends the raw
+// transcript instead of an export too large to store, so the text is held in that session's parts and not at this path.
+func (r *pushRun) heldBySession(v *verifying, name string) bool {
+	data, err := v.c.root.ReadFile(filepath.FromSlash(name))
+	if err != nil {
+		return false
+	}
+	id := migrate.SessionIDOf(data)
+	if id == "" {
+		return false
+	}
+	held, _ := r.sessionHeld(v.c, id)
+	return held != nil
 }
 
 // sampleOf picks across the whole list, and differently each run unless given the same seed.

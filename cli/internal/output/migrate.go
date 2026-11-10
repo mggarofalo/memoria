@@ -364,6 +364,8 @@ func countNote(s *migrate.VerifySummary) string {
 	switch {
 	case s.CountDiffers:
 		return fmt.Sprintf("the counts differ: %d local, %d on the server", s.LocalFiles, s.ServerDocuments)
+	case s.HeldBySession > 0:
+		return fmt.Sprintf("the counts were not compared, as %d document(s) are held through their session's parts, which a session writes more of", s.HeldBySession)
 	case s.TakenOver > 0:
 		return fmt.Sprintf("the counts were not compared, as one takeover turns that check off for the whole collection, and there are %d", s.TakenOver)
 	}
