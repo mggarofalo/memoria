@@ -36,7 +36,8 @@ export const handOverPort: SpawnFn = (command, args, options) => {
   const child = spawn(command, args, { env: options.env, stdio: ["ignore", "ignore", "pipe", "ipc"], windowsHide: options.windowsHide });
   child.channel?.unref();
   const port = Number(args[args.indexOf("--port") + 1]);
-  const held = createServer();
+  // A check that arrives before the handover is turned away at once, rather than left waiting on a socket no one serves.
+  const held = createServer((socket) => socket.destroy());
   const tell = (message: { listen: "handle" | "port" }, handle?: Server) => {
     if (!child.connected) return void held.close();
     child.send(message, handle, () => held.close());
