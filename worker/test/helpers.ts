@@ -1,7 +1,5 @@
-import { createServer, type Server } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { AddressInfo } from "node:net";
 import type { Server as HttpServer } from "node:http";
 import type { Role, RoleConfig } from "../src/config.ts";
 import { Inference, LlamaServers } from "../src/inference.ts";
@@ -9,18 +7,13 @@ import { createLogger, type Logger } from "../src/log.ts";
 import type { MachineState } from "../src/probes.ts";
 import { createWorkerServer, type Gate } from "../src/server.ts";
 import { Supervisor, type SupervisorTimings } from "../src/supervisor.ts";
+import { freePort, listenFetchable } from "./ports.ts";
 
 export const TOKEN = "worker-test-token-0123456789";
 
 export const fixturePath = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "fake-llama-server.ts");
 
-export async function freePort(): Promise<number> {
-  const probe: Server = createServer();
-  await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
-  const { port } = probe.address() as AddressInfo;
-  await new Promise((resolve) => probe.close(resolve));
-  return port;
-}
+export { freePort };
 
 export const FAST_TIMINGS: Partial<SupervisorTimings> = { pollMs: 20, healthyPollMs: 50, healthTimeoutMs: 1_000, hungAfter: 2, backoffBaseMs: 20, backoffMaxMs: 100, stopTimeoutMs: 2_000 };
 
@@ -81,8 +74,7 @@ export async function startWorker(options: { token?: string | undefined; env?: N
     thresholds: { busyLoadPerCore: 0.9, busyVramFreeMb: 500, busyOnThermal: true },
     log,
   });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const { port } = server.address() as AddressInfo;
+  const port = await listenFetchable(server);
   return {
     url: `http://127.0.0.1:${port}`,
     roles,

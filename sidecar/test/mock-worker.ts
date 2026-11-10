@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import type { AddressInfo } from "node:net";
+import { listenFetchable } from "../../worker/test/ports.ts";
 
 /**
  * A scripted memoria-worker over real HTTP. Each route has a replaceable handler,
@@ -55,8 +55,7 @@ export class MockWorker {
 
   async start(): Promise<this> {
     this.#server = createServer((request, response) => void this.#handle(request, response));
-    await new Promise<void>((resolve) => this.#server!.listen(0, "127.0.0.1", resolve));
-    this.url = `http://127.0.0.1:${(this.#server.address() as AddressInfo).port}`;
+    this.url = `http://127.0.0.1:${await listenFetchable(this.#server)}`;
     return this;
   }
 

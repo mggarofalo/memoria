@@ -8,7 +8,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { mkdir, rm, writeFile } from "node:fs/promises";
-import { createServer, type AddressInfo } from "node:net";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { test } from "node:test";
@@ -20,14 +19,7 @@ import { queueDbPathFor } from "../src/queue-store.ts";
 import { openBackend, type LlmOptions, type OpenedBackend } from "../src/store.ts";
 import { authHeaders, tempDir, testConfig } from "./helpers.ts";
 import { EMBED_FILE, MockWorker, vectorFor } from "./mock-worker.ts";
-
-async function freePort(): Promise<number> {
-  const probe = createServer();
-  await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
-  const { port } = probe.address() as AddressInfo;
-  await new Promise((resolve) => probe.close(resolve));
-  return port;
-}
+import { freePort } from "../../worker/test/ports.ts";
 
 const skip = process.env.MEMORIA_QMD_INTEGRATION === "1" ? false : "set MEMORIA_QMD_INTEGRATION=1";
 

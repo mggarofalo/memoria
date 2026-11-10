@@ -16,6 +16,7 @@ import { missingSdkFixes, requireSdkFixes, type SdkStoreFunctions } from "../src
 import { SearchBusy, SearchGate } from "../src/search-gate.ts";
 import { FakeBackend } from "./fake-backend.ts";
 import { authHeaders, makeApp, testConfig } from "./helpers.ts";
+import { freePort } from "../../worker/test/ports.ts";
 
 /** Replays of what a review proved: a document or request must not freeze or crash the sidecar. */
 
@@ -167,7 +168,7 @@ test("the cap has a sensible default and can be set", () => {
 
 async function listening(over: Parameters<typeof testConfig>[0]): Promise<{ app: App; port: number }> {
   const app = await buildApp({ backend: new FakeBackend({ collections: [], docs: [] }), config: testConfig(over), logger: false });
-  await app.listen({ host: "127.0.0.1", port: 0 });
+  await app.listen({ host: "127.0.0.1", port: await freePort() });
   return { app, port: (app.server.address() as { port: number }).port };
 }
 
