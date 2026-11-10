@@ -836,7 +836,8 @@ func waitReason(action migrate.Action, named time.Duration) string {
 	case migrate.ActionPause:
 		why = "The server is busy with other large documents, so every worker waits"
 	case migrate.ActionResendThenReport:
-		why = "The server failed this request"
+		// 500, or 408 for an upload that arrived too slowly, which says nothing about the server.
+		why = "The server failed this request, or it arrived too slowly"
 	default:
 		why = "The server is unavailable"
 	}

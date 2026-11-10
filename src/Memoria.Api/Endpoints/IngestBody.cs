@@ -1,6 +1,6 @@
 using Memoria.Api.Ingest;
+using Microsoft.AspNetCore.Mvc.Formatters;
 using Microsoft.AspNetCore.OpenApi;
-using Microsoft.Net.Http.Headers;
 using Microsoft.OpenApi;
 
 namespace Memoria.Api.Endpoints;
@@ -53,8 +53,8 @@ public static class IngestBody
 	}
 
 	/// <summary>
-	/// As routing's check did: no content type at all is let through, and otherwise the media type alone
-	/// decides, as parameters such as <c>charset</c> are the reader's business.
+	/// As routing's check did, with the same comparison: no content type at all is let through, and
+	/// otherwise the sent type must be a subset of the route's, so parameters such as <c>charset</c> pass.
 	/// </summary>
 	public static bool Matches(string? sent, string expected)
 	{
@@ -63,8 +63,7 @@ public static class IngestBody
 			return true;
 		}
 
-		return MediaTypeHeaderValue.TryParse(sent, out MediaTypeHeaderValue? parsed)
-			&& string.Equals(parsed.MediaType.Value, expected, StringComparison.OrdinalIgnoreCase);
+		return new MediaType(sent).IsSubsetOf(new MediaType(expected));
 	}
 
 	private static IOpenApiSchema Named(Type type, OpenApiSchema schema, OpenApiDocument? document)

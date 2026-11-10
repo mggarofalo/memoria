@@ -75,6 +75,33 @@ public sealed class IngestContentTypeTests(AuthApiFactory factory) : IClassFixtu
 		Assert.NotEqual(HttpStatusCode.UnsupportedMediaType, response.StatusCode);
 	}
 
+	/// <summary>
+	/// Routing still guards the admin routes' JSON bodies, so it is the oracle: the ingest check must
+	/// let through exactly what routing let through, loose headers and structured suffixes included.
+	/// </summary>
+	[Theory]
+	[InlineData("application/json")]
+	[InlineData("Application/JSON; charset=utf-8")]
+	[InlineData("application/json;")]
+	[InlineData("application/vnd.example+json")]
+	[InlineData("application/problem+json")]
+	[InlineData("application/*")]
+	[InlineData("text/json")]
+	[InlineData("text/plain")]
+	[InlineData("multipart/form-data; boundary=x")]
+	public async Task Matches_AgreesWithRoutingsOwnCheck(string contentType)
+	{
+		HttpClient admin = await factory.AdminAsync();
+		using StringContent body = new("{}");
+		body.Headers.ContentType = null;
+		Assert.True(body.Headers.TryAddWithoutValidation("Content-Type", contentType));
+
+		HttpResponseMessage response = await admin.PostAsync("/v1/admin/reindex", body);
+
+		bool routingAccepted = response.StatusCode != HttpStatusCode.UnsupportedMediaType;
+		Assert.Equal(routingAccepted, IngestBody.Matches(contentType, "application/json"));
+	}
+
 	[Theory]
 	[InlineData(null, true)]
 	[InlineData("", true)]

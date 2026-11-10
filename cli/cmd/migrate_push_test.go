@@ -1317,7 +1317,7 @@ func TestEveryWaitSaysWhatItIsFor(t *testing.T) {
 		{migrate.ActionHold, 0, "Rate limited (HTTP 429): this key has used its requests for now, so every worker waits"},
 		{migrate.ActionHold, time.Minute, "Rate limited (HTTP 429): this key has used its requests for now, so every worker waits; its Retry-After asks for 1m0s"},
 		{migrate.ActionPause, 0, "The server is busy with other large documents, so every worker waits"},
-		{migrate.ActionResendThenReport, 0, "The server failed this request"},
+		{migrate.ActionResendThenReport, 0, "The server failed this request, or it arrived too slowly"},
 		{migrate.ActionResend, time.Second, "The server is unavailable; its Retry-After asks for 1s"},
 	} {
 		if got := waitReason(c.action, c.named); got != c.want {
