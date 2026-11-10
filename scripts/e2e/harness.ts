@@ -12,6 +12,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Plan, ProxyRecord } from "./proxy.ts";
+import { freePort } from "../../worker/test/ports.ts";
 
 export const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -502,17 +503,6 @@ function run(command: string, args: string[], cwd: string): void {
   // npm is a .cmd on Windows, which needs a shell; these arguments are all constants.
   const result = spawnSync(command, args, { cwd, stdio: ["ignore", "inherit", "inherit"], shell: command === "npm" && process.platform === "win32" });
   if (result.status !== 0) throw new Error(`${command} ${args.join(" ")} failed`);
-}
-
-function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.on("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      server.close(() => (address && typeof address === "object" ? resolve(address.port) : reject(new Error("no port"))));
-    });
-  });
 }
 
 export function pause(ms: number): Promise<void> {
