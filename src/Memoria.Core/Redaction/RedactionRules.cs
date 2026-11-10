@@ -278,7 +278,9 @@ internal static class RedactionRules
 	public static readonly RedactionRule MemoriaSharedSecret = new(
 		"memoria-shared-secret",
 		Pattern(@"(?:MEMORIA_QMD_SECRET|MEMORIA_QMD_WORKER_TOKEN|MEMORIA_WORKER_TOKEN|MEMORIA_SIDECAR_SECRET|Memoria__Sidecar__Secret)" + Close + Operator + Value),
-		c => !ValueShapes.IsPlaceholder(c.JudgedValue) && !ValueShapes.IsCodeReference(c.JudgedValue) && !c.Value.Equals("unset", StringComparison.OrdinalIgnoreCase));
+		c => !ValueShapes.IsPlaceholder(c.JudgedValue) && !ValueShapes.IsCodeReference(c.JudgedValue) && !c.Value.Equals("unset", StringComparison.OrdinalIgnoreCase)
+			&& !CodeValues.HasInterpolation(c.JudgedValue) && !CodeValues.IsCommandWord(c.Input, c.Value, c.End)
+			&& !(c.Match.Index >= 2 && c.Input.AsSpan(c.Match.Index - 2, 2) is "${"));
 
 	/// <summary>
 	/// Passwords in URLs and connection strings for any scheme: postgres, mysql, mongodb, redis, amqp, https, jdbc.
@@ -313,8 +315,8 @@ internal static class RedactionRules
 	/// <summary><c>Authorization</c> and <c>Proxy-Authorization</c> headers with a Bearer, Basic, Token, or ApiKey scheme, in shell, JSON at any escaping depth, and URL-encoded form.</summary>
 	public static readonly RedactionRule AuthorizationHeader = new(
 		"authorization-header",
-		Pattern(@"(?i:authorization)" + Close + Operator + @"(?:\\*[""'`]|%2[27])?(?:[ \t]|%20|\+)*(?i:bearer|basic|token|apikey)(?:[ \t]|%20|\+)+(?<secret>[^\s""'`\\,;<>&]+(?:[,;]+[^\s""'`\\,;<>&]+)*)"),
-		c => SecretHeuristics.IsExplicitCredential(c.JudgedValue));
+		Pattern(@"(?i:authorization)" + Close + Operator + @"(?:\\*[""'`]|%2[27])?(?:[ \t]|%20|\+)*(?i:bearer|basic|token|apikey)(?:[ \t]|%20|\+)+(?<secret>\$\{[ \t]*(?:""[^""\r\n]*""|'[^'\r\n]*')[ \t]*\}|[^\s""'`\\,;<>&]+(?:[,;]+[^\s""'`\\,;<>&]+)*)"),
+		c => SecretHeuristics.IsExplicitCredential(CodeValues.UnwrapLiteral(c.JudgedValue)) && !CodeValues.HasInterpolation(c.JudgedValue));
 
 	/// <summary>A bearer token with no header name around it, such as a value in a config or a log line. Stricter than <see cref="AuthorizationHeader"/>, because prose says "bearer" too.</summary>
 	public static readonly RedactionRule BearerToken = new(
@@ -382,14 +384,28 @@ internal static class RedactionRules
 		Pattern(@"(?:\bmachine\s+\S+\s+login\s+\S+\s+password[ \t]+(?<secret>\S+)|(?:^|[\r\n])[ \t]*password[ \t]+(?<secret>[^\s]*[^A-Za-z\s][^\s]*)[ \t]*(?:$|[\r\n]))"),
 		SecretHeuristics.IsCommandCredential);
 
-	/// <summary>Secrets in XML: <c>&lt;password&gt;x&lt;/password&gt;</c>, and <c>&lt;add key="ApiKey" value="x"/&gt;</c> from .NET configuration.</summary>
+	/// <summary>
+	/// Secrets in XML: <c>&lt;password&gt;x&lt;/password&gt;</c>, and <c>&lt;add key="ApiKey" value="x"/&gt;</c> from .NET configuration.
+	/// A regex's named group <c>(?&lt;secret&gt;…)</c> and markdown's <c>&lt;token&gt;</c> before prose are not elements.
+	/// </summary>
 	public static readonly RedactionRule XmlSecret = new(
 		"xml-secret",
 		Pattern(
 			@"(?i:<(?:password|passwd|secret|token|api[_\-]?key|access[_\-]?key|secret[_\-]?key|client[_\-]?secret)>)(?<secret>[^<\r\n]+)<"
 			+ @"|(?i:<add\s+(?:key|name)=[""'][A-Za-z0-9_.:\-]*(?:password|pwd|secret|token|key)[""']\s+value=)[""'](?<secret>[^""'\r\n]+)"
 			+ @"|(?i:<add\s+value=)[""'](?<secret>[^""'\r\n]+)[""'](?i:\s+(?:key|name)=[""'][A-Za-z0-9_.:\-]*(?:password|pwd|secret|token|key)[""'])"),
-		SecretHeuristics.IsCommandCredential);
+		c => !IsRegexGroupOrProse(c) && SecretHeuristics.IsCommandCredential(c));
+
+	/// <summary>
+	/// A regex's named group, as in <c>(?&lt;secret&gt;[^\s]+)</c>, and markdown that names a placeholder before prose, as in
+	/// <c>Bearer &lt;token&gt;` when a token is set</c>, are not XML elements. Prose there is three words or more that run out of a
+	/// markdown code span, past its closing backtick. A passphrase, as in <c>&lt;password&gt;correct horse battery staple&lt;br&gt;</c>, has none.
+	/// </summary>
+	private static bool IsRegexGroupOrProse(SecretCandidate candidate)
+	{
+		return (candidate.Match.Index >= 2 && candidate.Input.AsSpan(candidate.Match.Index - 2, 2) is "(?")
+			|| (candidate.Value.Contains('`', StringComparison.Ordinal) && candidate.Value.Count(static c => c == ' ') >= 2);
+	}
 
 	/// <summary>SQL that sets a password: <c>IDENTIFIED BY 'x'</c>, <c>IDENTIFIED BY "x"</c>, and <c>WITH PASSWORD 'x'</c>.</summary>
 	public static readonly RedactionRule SqlPassword = new(
