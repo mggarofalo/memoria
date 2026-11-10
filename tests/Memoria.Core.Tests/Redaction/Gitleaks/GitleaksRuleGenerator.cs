@@ -19,11 +19,19 @@ public static class GitleaksRuleGenerator
 	public const string Commit = "83d9cd684c87d95d656c1458ef04895a7f1cbd8e";
 	public const string Sha256 = "e163e53b9e7e8a8511e77271e2b323ed057759542a6d988258afe3a1fa329caf";
 
-	/// <summary>Rules left out by choice, with the reason. Rules gated on a file path are left out by <see cref="Exclusion"/>.</summary>
+	/// <summary>
+	/// Rules left out by choice, with the reason. Rules gated on a file path are left out by <see cref="Exclusion"/>. A rule that
+	/// duplicates one of Memoria's is left out only when it undoes a decision that rule makes on purpose, which a test shows.
+	/// </summary>
 	private static readonly Dictionary<string, string> s_leftOut = new(StringComparer.Ordinal)
 	{
 		["generic-api-key"] = "Left out on purpose. Its only judge is entropy, which reads commit hashes, UUIDs and module checksums under a key-like name as secrets. "
 			+ "Memoria's secret-assignment rule covers the same assignments with a judge that reads the name and the value.",
+		["curl-auth-user"] = Duplicate("curl-user-password", "It replaces the user name with the password, and takes a password that reads as a word or a sample, which Memoria's rule leaves."),
+		["private-key"] = Duplicate("private-key", "It replaces a key block that is mostly a mask, such as one of x characters, which Memoria's rule leaves."),
+		["slack-webhook-url"] = Duplicate("slack-webhook", "It replaces the documentation's sample URL of zeros, and the host with the path, which Memoria's rule keeps readable."),
+		["square-access-token"] = Duplicate("square-token and square-production-token", "It takes an EAAA value of any length from 26 to 64, which includes Facebook-shaped tokens and samples Memoria's rules leave."),
+		["twilio-api-key"] = Duplicate("twilio-key", "It has no boundary after its 32 characters, so it takes the head of any longer hex run."),
 	};
 
 	/// <summary>
@@ -45,6 +53,11 @@ public static class GitleaksRuleGenerator
 		NewLine = "\n",
 		Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
 	};
+
+	private static string Duplicate(string ours, string why)
+	{
+		return $"Covered by Memoria's {ours}. {why}";
+	}
 
 	/// <summary>The JSON that <c>rules.json</c> must hold, from the TOML's exact bytes.</summary>
 	public static string Generate(byte[] toml)
@@ -81,6 +94,45 @@ public static class GitleaksRuleGenerator
 		GitleaksSource source = new("gitleaks", Version, Commit, "config/gitleaks.toml", hash, "MIT");
 		GitleaksRuleData data = new(source, excluded, patches, global, rules);
 		return JsonSerializer.Serialize(data, s_write) + "\n";
+	}
+
+	/// <summary>
+	/// <c>docs/gitleaks-rules.md</c>, written from the data so the page cannot drift from what the engine loads. It names every
+	/// imported rule with upstream's description, and every rule left out or pattern corrected, with the reason.
+	/// </summary>
+	internal static string Docs(GitleaksRuleData data)
+	{
+		StringBuilder page = new();
+		page.Append("# Imported gitleaks rules\n\n")
+			.Append("<!-- Generated from src/Memoria.Core/Redaction/Gitleaks/rules.json by GitleaksRuleDataTests. Do not edit. -->\n\n")
+			.Append($"Memoria's redaction engine also runs gitleaks's default detection rules, from gitleaks {data.Source.Version} ")
+			.Append($"(commit `{data.Source.Commit[..8]}`, {data.Source.License} licence). Gitleaks itself never runs. ")
+			.Append("Each rule reads only what Memoria's own rules left, and replaces only its secret, as `[REDACTED:gitleaks-<id>]`. ")
+			.Append($"{data.Rules.Count} rules are imported and {data.Excluded.Count} are left out.\n\n")
+			.Append("## Left out\n\n| Rule | Why |\n|---|---|\n");
+		foreach (GitleaksExclusion exclusion in data.Excluded)
+		{
+			page.Append($"| `{exclusion.Id}` | {Cell(exclusion.Reason)} |\n");
+		}
+
+		page.Append("\n## Corrected\n\n| Where | Why |\n|---|---|\n");
+		foreach (GitleaksPatch patch in data.Patches)
+		{
+			page.Append($"| {Cell(patch.Where)}: `{Cell(patch.Upstream)}` | {Cell(patch.Reason)} |\n");
+		}
+
+		page.Append("\n## Imported\n\n| Rule | What it finds |\n|---|---|\n");
+		foreach (GitleaksRuleSpec rule in data.Rules)
+		{
+			page.Append($"| `gitleaks-{rule.Id}` | {Cell(rule.Description)} |\n");
+		}
+
+		return page.ToString();
+	}
+
+	private static string Cell(string text)
+	{
+		return text.Replace("|", "\\|", StringComparison.Ordinal).ReplaceLineEndings(" ");
 	}
 
 	/// <summary>The allowlist pattern translated, with any correction applied and recorded.</summary>

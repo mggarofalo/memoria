@@ -29,6 +29,21 @@ public sealed class GitleaksRuleDataTests
 	}
 
 	[Fact]
+	public void The_docs_page_is_written_from_the_data()
+	{
+		string generated = GitleaksRuleGenerator.Docs(GitleaksRuleData.BuiltIn);
+		string path = Path.Combine(RepositoryRoot(), "docs", "gitleaks-rules.md");
+		if (Environment.GetEnvironmentVariable(WriteVariable) == "1")
+		{
+			File.WriteAllText(path, generated);
+		}
+
+		Assert.True(
+			generated == File.ReadAllText(path).ReplaceLineEndings("\n"),
+			$"docs/gitleaks-rules.md is out of date. Regenerate with {WriteVariable}=1 dotnet test Memoria.slnx --filter GitleaksRuleData");
+	}
+
+	[Fact]
 	public void The_built_in_data_is_the_committed_file()
 	{
 		Assert.Equal(GitleaksRuleData.Parse(File.ReadAllText(Path.Combine(s_folder, "rules.json"))), GitleaksRuleData.BuiltIn, new DataComparer());
@@ -72,7 +87,7 @@ public sealed class GitleaksRuleDataTests
 		Assert.DoesNotContain(data.Rules, static rule => rule.Id == "generic-api-key");
 		Assert.Contains(data.Excluded, static exclusion => exclusion.Id == "generic-api-key");
 		Assert.Equal(
-			["freemius-secret-key", "generic-api-key", "hashicorp-tf-password", "kubernetes-secret-yaml", "nuget-config-password", "pkcs12-file"],
+			["curl-auth-user", "freemius-secret-key", "generic-api-key", "hashicorp-tf-password", "kubernetes-secret-yaml", "nuget-config-password", "pkcs12-file", "private-key", "slack-webhook-url", "square-access-token", "twilio-api-key"],
 			data.Excluded.Select(static exclusion => exclusion.Id).Order(StringComparer.Ordinal));
 		Assert.All(data.Excluded, static exclusion => Assert.False(string.IsNullOrWhiteSpace(exclusion.Reason)));
 	}
@@ -213,7 +228,7 @@ public sealed class GitleaksRuleDataTests
 	{
 		string[] kept = [.. GitleaksRuleData.BuiltIn.Rules.Where(static rule => rule.Pattern.Contains(@"\b", StringComparison.Ordinal)).Select(static rule => rule.Id).Order(StringComparer.Ordinal)];
 
-		Assert.Equal(["atlassian-api-token", "curl-auth-header", "curl-auth-user", "openai-api-key", "sidekiq-sensitive-url"], kept);
+		Assert.Equal(["atlassian-api-token", "curl-auth-header", "openai-api-key", "sidekiq-sensitive-url"], kept);
 	}
 
 	[Fact]

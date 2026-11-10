@@ -403,8 +403,8 @@ public sealed class RedactionPinTests
 	[InlineData("", true)]
 	[InlineData("ABC", false)]
 	[InlineData("a_b", false)]
-	[InlineData("0123456789012345678901234567890123456789", true)]
-	[InlineData("01234567890123456789012345678901234567890", false)]
+	[InlineData("0123456789012345678901234567890123456789012345678901234567890123", true)]
+	[InlineData("01234567890123456789012345678901234567890123456789012345678901234", false)]
 	public void Placeholder_name_is_exact(string name, bool expected)
 	{
 		Assert.Equal(expected, ValueShapes.IsPlaceholderName(name));

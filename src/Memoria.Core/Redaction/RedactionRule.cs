@@ -30,6 +30,7 @@ internal sealed class ScanGuard
 	private readonly Stopwatch? _clock;
 	private readonly TimeSpan _budget;
 	private long _credit;
+	private bool? _keywordsFound;
 
 	public ScanGuard(RedactionRule rule, int textLength, Stopwatch? clock = null, TimeSpan budget = default)
 	{
@@ -50,6 +51,13 @@ internal sealed class ScanGuard
 		}
 
 		ThrowIfOverBudget();
+	}
+
+	/// <summary>Whether the text holds one of the rule's keywords. Asked once per text, as a keyword may be anywhere in it, not only ahead.</summary>
+	public bool HoldsKeyword(string input, SearchValues<string> keywords)
+	{
+		_keywordsFound ??= input.AsSpan().ContainsAny(keywords);
+		return _keywordsFound.Value;
 	}
 
 	public void ThrowIfOverBudget()
@@ -79,19 +87,27 @@ internal sealed class RedactionRule
 	private const string SecretGroup = "secret";
 
 	private readonly SearchValues<string>? _prefilter;
+	private readonly SearchValues<string>? _keywords;
+	private readonly Lazy<Regex> _pattern;
 
 	public RedactionRule(
 		string name,
-		Regex pattern,
+		Regex? pattern,
 		Func<SecretCandidate, bool>? accept = null,
 		Func<string, Match, (int Start, int End)?>? findSpan = null,
 		Func<SecretCandidate, int>? extend = null,
 		string? literal = null,
 		bool linesMatter = false,
-		bool skipRejected = false)
+		bool skipRejected = false,
+		IReadOnlyList<string>? keywords = null,
+		bool backstop = false,
+		Func<Regex>? buildPattern = null)
 	{
+		Backstop = backstop;
 		Name = name;
-		Pattern = pattern;
+		_pattern = pattern is not null
+			? new Lazy<Regex>(pattern)
+			: new Lazy<Regex>(buildPattern ?? throw new ArgumentNullException(nameof(pattern)), LazyThreadSafetyMode.ExecutionAndPublication);
 		Accept = accept;
 		FindSpan = findSpan;
 		Extend = extend;
@@ -99,18 +115,24 @@ internal sealed class RedactionRule
 		SkipRejected = skipRejected;
 		Placeholder = $"[REDACTED:{name}]";
 		Literal = literal;
+		Keywords = keywords ?? [];
 		_prefilter = literal is null ? null : SearchValues.Create([literal], StringComparison.Ordinal);
+		_keywords = Keywords.Count == 0 ? null : SearchValues.Create([.. Keywords], StringComparison.OrdinalIgnoreCase);
 	}
 
 	/// <summary>Stable name, used in the placeholder and in the per-rule counts.</summary>
 	public string Name { get; }
 
-	public Regex Pattern { get; }
+	/// <summary>The pattern. A rule given <c>buildPattern</c> builds it on first use, which a keyword check usually spares.</summary>
+	public Regex Pattern => _pattern.Value;
 
 	public string Placeholder { get; }
 
 	/// <summary>Text every match contains, so a document without it skips the regex. Null when no such text exists.</summary>
 	public string? Literal { get; }
+
+	/// <summary>Words, compared ignoring case, of which a document must hold one for the regex to run. Empty when the rule has none.</summary>
+	public IReadOnlyList<string> Keywords { get; }
 
 	public Func<SecretCandidate, bool>? Accept { get; }
 
@@ -124,6 +146,12 @@ internal sealed class RedactionRule
 	/// <summary>True when a rejected candidate is rejected as a whole, so its inside need not be searched again.</summary>
 	public bool SkipRejected { get; }
 
+	/// <summary>
+	/// True for an imported rule, which reads only what this engine's own rules left. It never runs on the view with wrapped lines
+	/// joined, where it could take a token one of our rules would label on the plain text, and it runs after them in each sweep.
+	/// </summary>
+	public bool Backstop { get; }
+
 	/// <summary>Finds the next span to replace at or after <paramref name="start"/>. False when the rule has no more hits.</summary>
 	public bool TryFindNext(string input, int start, out int spanStart, out int spanEnd)
 	{
@@ -135,7 +163,8 @@ internal sealed class RedactionRule
 	{
 		spanStart = 0;
 		spanEnd = 0;
-		if (_prefilter is not null && !input.AsSpan(start).ContainsAny(_prefilter))
+		// A literal is part of every match, so only the text ahead needs it. A keyword is context and may lie behind.
+		if ((_prefilter is not null && !input.AsSpan(start).ContainsAny(_prefilter)) || (_keywords is not null && !guard.HoldsKeyword(input, _keywords)))
 		{
 			return false;
 		}
@@ -204,6 +233,32 @@ internal sealed class RedactionRule
 			return null;
 		}
 
-		return (secret.Index, Extend?.Invoke(candidate) ?? candidate.End);
+		int end = Extend?.Invoke(candidate) ?? candidate.End;
+		return Backstop && OverlapsPlaceholder(input, secret.Index, end) ? null : (secret.Index, end);
+	}
+
+	/// <summary>
+	/// True when the span touches a placeholder a rule already wrote. Our own rules take a value with a placeholder inside it on
+	/// purpose, so a secret around one cannot survive in pieces. An imported rule has no such judgement, and could take a
+	/// placeholder with its neighbour, or split one, as <c>user:pass</c> splits <c>[REDACTED:x]</c>, so it is held to this.
+	/// </summary>
+	private static bool OverlapsPlaceholder(string input, int start, int end)
+	{
+		const string Open = "[REDACTED:";
+		int from = Math.Max(0, start - 72);
+		int limit = Math.Min(input.Length, end + Open.Length);
+		int open = input.IndexOf(Open, from, limit - from, StringComparison.Ordinal);
+		while (open >= 0 && open < end)
+		{
+			int close = input.IndexOf(']', open);
+			if (close >= start && ValueShapes.IsRedactedForm(input[open..(close + 1)]))
+			{
+				return true;
+			}
+
+			open = input.IndexOf(Open, open + 1, limit - open - 1, StringComparison.Ordinal);
+		}
+
+		return false;
 	}
 }

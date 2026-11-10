@@ -46,7 +46,7 @@ public sealed class Redactor : IRedactor
 	{
 		_rules = rules;
 		_lineRules = [.. rules.Where(static rule => rule.LinesMatter)];
-		_tokenRules = [.. rules.Where(static rule => !rule.LinesMatter)];
+		_tokenRules = [.. rules.Where(static rule => !rule.LinesMatter && !rule.Backstop)];
 		_budget = budget;
 	}
 

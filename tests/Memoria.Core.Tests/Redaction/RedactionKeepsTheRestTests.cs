@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using Memoria.Core.Redaction;
 
 namespace Memoria.Core.Tests.Redaction;
@@ -6,8 +7,11 @@ namespace Memoria.Core.Tests.Redaction;
 /// Redaction removes the secret and nothing else. Stored text is the only copy once a local index is retired, so a word lost after
 /// a token is lost for good. For every rule and form, in every context, the output must be the input with the secret replaced.
 /// </summary>
-public sealed class RedactionKeepsTheRestTests
+public sealed partial class RedactionKeepsTheRestTests
 {
+	[GeneratedRegex(@"^(?<kept>.*?)\[REDACTED:(?<name>[a-z0-9-]+)\]$", RegexOptions.Singleline)]
+	private static partial Regex OnePlaceholder();
+
 	/// <summary>What follows a secret. Each is ordinary text, and starts in a way a token's tail could also start.</summary>
 	private static readonly (string Name, string Text)[] s_after =
 	[
@@ -94,12 +98,32 @@ public sealed class RedactionKeepsTheRestTests
 	public static TheoryData<string, string, string> ContextualForms()
 	{
 		TheoryData<string, string, string> forms = [];
-		foreach ((string rule, string template, string secret) in RedactionCases.Contextual.Concat(ReviewCases.Positives).Concat(ShapeForms()).Concat(s_handForms))
+		foreach ((string rule, string template, string secret) in RedactionCases.Contextual.Concat(ReviewCases.Positives).Concat(ShapeForms()).Concat(s_handForms).Concat(ImportedForms()))
 		{
 			forms.Add(rule, template, secret);
 		}
 
 		return forms;
+	}
+
+	/// <summary>
+	/// Each imported rule's sampled case, in the same contexts. A rule of ours may take the token first, so the expected label is the one
+	/// the engine gives the case on its own. A case it does not reduce to one placeholder keeps the imported name, so the check fails.
+	/// </summary>
+	private static IEnumerable<(string Rule, string Template, string Secret)> ImportedForms()
+	{
+		foreach (Gitleaks.ImportedCases.Form form in Gitleaks.ImportedCases.Forms)
+		{
+			string output = Redactor.Shared.RedactFragment(form.Text).Text;
+			Match placed = output.StartsWith(form.Before, StringComparison.Ordinal) && output.EndsWith(form.After, StringComparison.Ordinal)
+				? OnePlaceholder().Match(output[form.Before.Length..^form.After.Length])
+				: Match.Empty;
+
+			// A rule of ours may keep the start of the match on purpose, such as a webhook's host. Then that start is context too.
+			string kept = placed.Success && form.Secret.StartsWith(placed.Groups["kept"].Value, StringComparison.Ordinal) ? placed.Groups["kept"].Value : "";
+			string label = placed.Success && kept.Length < form.Secret.Length ? placed.Groups["name"].Value : form.Rule;
+			yield return (label, form.Before + kept + "{S}" + form.After, form.Secret[kept.Length..]);
+		}
 	}
 
 	/// <summary>Each format in the shapes table, filled from a fixed seed.</summary>
@@ -226,7 +250,8 @@ public sealed class RedactionKeepsTheRestTests
 	public void Every_rule_has_a_form_here()
 	{
 		IEnumerable<string> covered = RedactionCases.Tokens.Concat(ReviewCases.ProviderTokens).Select(static token => token.Rule)
-			.Concat(RedactionCases.Contextual.Concat(ReviewCases.Positives).Concat(ShapeForms()).Concat(s_handForms).Select(static form => form.Rule));
+			.Concat(RedactionCases.Contextual.Concat(ReviewCases.Positives).Concat(ShapeForms()).Concat(s_handForms).Select(static form => form.Rule))
+			.Concat(Gitleaks.ImportedCases.Forms.Select(static form => form.Rule));
 		string missing = string.Join(", ", Redactor.RuleNames.Except(covered));
 
 		Assert.True(missing.Length == 0, missing);
