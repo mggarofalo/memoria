@@ -57,12 +57,13 @@ async function externalConfig(roles: RoleConfig[], over: NodeJS.ProcessEnv = {})
 
 test("the started worker serves, warms up over real requests, and only shuts down once", async () => {
   const roles = await roleConfigs();
-  const upstream = fakeSupervisor(roles);
+  const upstreamLines: string[] = [];
+  const upstream = fakeSupervisor(roles, { log: createLogger(undefined, (line) => upstreamLines.push(line)) });
   upstream.start();
   const { log, lines } = capturedLog();
   let worker: Awaited<ReturnType<typeof startWorker>>;
   try {
-    assert.equal(await upstream.waitReady(10_000), true, `upstream ready: ${JSON.stringify(upstream.status())}`);
+    assert.equal(await upstream.waitReady(10_000), true, `upstream ready: ${JSON.stringify(upstream.status())}\n${upstreamLines.join("\n")}`);
     const config = await externalConfig(roles);
     for (const role of config.roles) role.externalApiKey = upstream.apiKeyFor(role.role);
     worker = await startWorker(config, log, { probes: noProbes });

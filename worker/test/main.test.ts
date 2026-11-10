@@ -6,6 +6,7 @@ import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { runSmoke } from "../scripts/smoke.ts";
+import { createLogger } from "../src/log.ts";
 import { fakeSupervisor, freePort, roleConfigs, TOKEN } from "./helpers.ts";
 
 /** The real entry point as its own process, pointed at already-running fake servers. */
@@ -18,10 +19,11 @@ function waitForExit(child: ChildProcess): Promise<void> {
 
 test("the entry point starts, warms up, serves every endpoint, keeps the token out of its output, and stops", async () => {
   const roles = await roleConfigs();
-  const upstream = fakeSupervisor(roles);
+  const upstreamLines: string[] = [];
+  const upstream = fakeSupervisor(roles, { log: createLogger(undefined, (line) => upstreamLines.push(line)) });
   upstream.start();
   try {
-    assert.equal(await upstream.waitReady(10_000), true, `upstream ready: ${JSON.stringify(upstream.status())}`);
+    assert.equal(await upstream.waitReady(10_000), true, `upstream ready: ${JSON.stringify(upstream.status())}\n${upstreamLines.join("\n")}`);
   } catch (err) {
     // Its children would hold this file's process open, and hang the run.
     await upstream.stop();
