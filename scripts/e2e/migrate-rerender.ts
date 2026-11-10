@@ -2,12 +2,17 @@
  * `memoria migrate rerender` against a real API and sidecar: an export over the cap goes again from its raw Codex transcript,
  * and `verify` then counts it held through its session. Fixtures only, in the driver's private directory.
  */
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, utimesSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { CliResult, Harness } from "./harness.ts";
 import { codexMessage, codexMeta, forceIndex } from "./ingest.ts";
 
 export const RERENDER_TARGET = "migrated-rerender";
+export const CHUNKS_TARGET = "migrated-rerender-chunks";
+
+const OLDER_ID = "0a1b2c3d-2222-4222-8333-444455556666";
+const NEWER_ID = "0a1b2c3d-3333-4222-8333-444455556666";
+const EXPORT_TIME = new Date("2025-06-01T12:00:00Z");
 
 const SENT_ID = "0a1b2c3d-1111-4222-8333-444455556666";
 const MISSING_ID = "0a1b2c3d-9999-4222-8333-444455556666";
@@ -24,6 +29,7 @@ interface RerenderRow {
 interface VerifyRow {
   heldBySession: number;
   notHeld: number;
+  takenOver: number;
   countDiffers: boolean;
 }
 
@@ -35,8 +41,38 @@ function file(root: string, name: string, text: string): string {
 }
 
 /** An export of a session over the cap, as the exporter writes one: its session in frontmatter, and the messages below. */
-function export_(id: string): string {
-  return `---\nsession_id: "${id}"\nmessage_count: 1\n---\n\n## User\n\n` + "padding words ".repeat(MAX_DOCUMENT_BYTES / 14 + 10);
+function export_(id: string, start = 0): string {
+  return `---\nsession_id: "${id}"\nmessage_start: ${start}\nmessage_count: 1\n---\n\n## User\n\n` + "padding words ".repeat(MAX_DOCUMENT_BYTES / 14 + 10);
+}
+
+/** A session's first chunk, small enough to store, and its second, too large, both written after the transcript or before it. */
+function chunks(root: string, codex: string, id: string, transcriptTime: Date): void {
+  const first = file(root, `2026-01-15_${id.slice(9, 13)}_1.md`, `---\nsession_id: "${id}"\nmessage_start: 0\nmessage_count: 1\n---\n\n## User\n\nfirst\n`);
+  const second = file(root, `2026-01-15_${id.slice(9, 13)}_2.md`, export_(id, 1));
+  const transcript = file(codex, `rollout-2026-01-15T10-00-00-${id}.jsonl`, codexMeta(id) + codexMessage("first") + codexMessage(`chunkword${id.slice(9, 13)} second`));
+  for (const export__ of [first, second]) utimesSync(export__, EXPORT_TIME, EXPORT_TIME);
+  utimesSync(transcript, transcriptTime, transcriptTime);
+}
+
+/**
+ * A stored chunk carries its export's time, and exports are written after the transcript, so the version sent must be the later of
+ * the two or the server refuses it as stale. Both orders are held here.
+ */
+export async function rerenderWithAStoredChunk(h: Harness, key: string): Promise<void> {
+  const root = h.privatePath("rerender-chunks");
+  const codex = h.privatePath("rerender-chunks-codex");
+  chunks(root, codex, OLDER_ID, new Date("2025-01-01T00:00:00Z"));
+  chunks(root, codex, NEWER_ID, new Date("2026-01-01T00:00:00Z"));
+  const config = h.privatePath("rerender-chunks.yml");
+  writeFileSync(config, `collections:\n  ${CHUNKS_TARGET}:\n    path: ${JSON.stringify(root)}\n    pattern: "**/*.md"\n`);
+  const pushed = h.memoria(["migrate", "push", "--qmd-config", config, "--api-url", h.apiUrl, "--apply", "--format", "json"], { key });
+  h.check("rerender: each session's first chunk is stored and its second is over the cap", rowOf<{ sent: number; overCap: number }>(pushed).sent === 2 && rowOf<{ overCap: number }>(pushed).overCap === 2, pushed.out + pushed.err);
+  const sent = h.memoria(["migrate", "rerender", "--qmd-config", config, "--codex-sessions", codex, "--api-url", h.apiUrl, "--apply", "--format", "json"], { key });
+  h.check("rerender: a session with a stored chunk goes, whether its transcript is older or newer than its exports", sent.code === 0 && rowOf<RerenderRow>(sent).sent === 2, sent.out + sent.err);
+  await forceIndex({ h });
+  const verify = h.memoria(["migrate", "verify", "--qmd-config", config, "--api-url", h.apiUrl, "--format", "json"], { key });
+  const row = rowOf<VerifyRow>(verify);
+  h.check("rerender: verify then finds the stored chunks taken over and the others held through their session", verify.code === 0 && row.takenOver === 2 && row.heldBySession === 2 && row.notHeld === 0, verify.out + verify.err);
 }
 
 function rowOf<T>(run: CliResult): T {

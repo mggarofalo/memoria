@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -70,6 +71,63 @@ Only a private report names the files.`,
 // rerenderItem is one over-cap document and what was found for it.
 type rerenderItem struct {
 	name, sessionID, transcript string
+	// newest is the latest file time among the session's exports here. Stored chunks carry their export's time as their version.
+	newest time.Time
+}
+
+// sessionExports is what this collection's exports of one session say together: the newest file time, and the furthest message.
+type sessionExports struct {
+	newest time.Time
+	reach  int64
+	known  bool
+}
+
+// exportsOf reads the frontmatter of every selected file once, for the sessions these over-cap documents name.
+func exportsOf(job pushJob, root *os.Root) map[string]*sessionExports {
+	found := map[string]*sessionExports{}
+	for _, name := range job.paths {
+		head, updated, err := readHead(root, name)
+		if err != nil {
+			continue
+		}
+		id := migrate.SessionIDOf(head)
+		if id == "" {
+			continue
+		}
+		facts := found[id]
+		if facts == nil {
+			facts = &sessionExports{}
+			found[id] = facts
+		}
+		facts.add(head, updated)
+	}
+	return found
+}
+
+func (s *sessionExports) add(head []byte, updated time.Time) {
+	if updated.After(s.newest) {
+		s.newest = updated
+	}
+	if reach, known := migrate.ReachOf(head); known {
+		s.reach, s.known = max(s.reach, reach), true
+	}
+}
+
+// headLimit matches what the frontmatter readers look at.
+const headLimit = 64 * 1024
+
+func readHead(root *os.Root, name string) ([]byte, time.Time, error) {
+	updated, _, err := fileVersion(root, name)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	file, err := root.Open(filepath.FromSlash(name))
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	defer func() { _ = file.Close() }()
+	head, err := io.ReadAll(io.LimitReader(file, headLimit))
+	return head, updated, err
 }
 
 type rerendering struct {
@@ -132,14 +190,19 @@ func find(job pushJob, transcripts *migrate.Transcripts, reported map[string]boo
 		return nil, apperr.New(apperr.KindUsage, "collection %s: its folder cannot be opened", job.collection.Name)
 	}
 	defer func() { _ = root.Close() }()
-	for _, name := range overCap(job, root, reported) {
+	names := overCap(job, root, reported)
+	if len(names) == 0 {
+		return g, nil
+	}
+	exports := exportsOf(job, root)
+	for _, name := range names {
 		g.summary.OverCap++
-		g.match(root, name, transcripts)
+		g.match(root, name, transcripts, exports)
 	}
 	return g, nil
 }
 
-func (g *rerendering) match(root *os.Root, name string, transcripts *migrate.Transcripts) {
+func (g *rerendering) match(root *os.Root, name string, transcripts *migrate.Transcripts, exports map[string]*sessionExports) {
 	data, err := root.ReadFile(filepath.FromSlash(name))
 	if err != nil {
 		g.summary.Unreadable++
@@ -159,7 +222,29 @@ func (g *rerendering) match(root *os.Root, name string, transcripts *migrate.Tra
 		g.summary.Several++
 		g.problem(name, migrate.RerenderSeveral, "")
 	default:
-		g.items = append(g.items, rerenderItem{name: name, sessionID: id, transcript: matching[0]})
+		g.check(rerenderItem{name: name, sessionID: id, transcript: matching[0]}, exports[id])
+	}
+}
+
+// check sends nothing a transcript cannot fully stand in for. An over-cap export was never stored, so the server cannot refuse a
+// shorter transcript for it: this is the only place that sees those messages would be lost.
+func (g *rerendering) check(item rerenderItem, exports *sessionExports) {
+	if exports == nil || !exports.known {
+		g.summary.Uncounted++
+		g.problem(item.name, migrate.RerenderUncounted, "")
+		return
+	}
+	count, err := migrate.CountMessages(item.transcript)
+	switch {
+	case err != nil:
+		g.summary.Unreadable++
+		g.problem(item.name, migrate.RerenderUnreadable, "transcript")
+	case count < exports.reach:
+		g.summary.Shorter++
+		g.problem(item.name, migrate.RerenderShorter, strconv.FormatInt(exports.reach-count, 10)+" messages")
+	default:
+		item.newest = exports.newest
+		g.items = append(g.items, item)
 	}
 }
 
@@ -269,7 +354,12 @@ func (r *pushRun) rerenderOne(c *pushCollection, item rerenderItem) (string, str
 	if err != nil {
 		return migrate.RerenderRefused, "transcript_unreadable"
 	}
+	// The transcript is what its exports came from, so it is at least as current as the newest of them. Its own file time is
+	// often older, and a stored chunk carries its export's time, so that alone would be refused as stale_version.
 	updated := info.ModTime().UTC().Truncate(time.Millisecond)
+	if item.newest.After(updated) {
+		updated = item.newest
+	}
 	held, answered := r.sessionHeld(c, item.sessionID)
 	if !answered {
 		return migrate.RerenderNotReached, ""
@@ -298,7 +388,36 @@ func (r *pushRun) sessionHeld(c *pushCollection, id string) (*time.Time, bool) {
 	return answer.JSON200.Updated, true
 }
 
+// sendTranscript waits out a write of this session that is still running, as push does, for up to the server's hold.
 func (r *pushRun) sendTranscript(c *pushCollection, item rerenderItem, updated time.Time) (string, string) {
+	var waited time.Duration
+	for {
+		status, answered, answer := r.postTranscript(c, item, updated)
+		wait := sessionInProgressWait(status, answered, answer)
+		if wait == 0 || waited >= inProgressBudget {
+			return judgeSession(status, answered, answer)
+		}
+		waited += wait
+		if !r.sleep(wait) {
+			r.stopForInterrupt()
+			return migrate.RerenderNotReached, ""
+		}
+	}
+}
+
+func sessionInProgressWait(status int, answered bool, answer *api.IngestSessionResponse) time.Duration {
+	if !answered || answer == nil || status != http.StatusConflict {
+		return 0
+	}
+	refused := apperr.FromResponse(status, answer.HTTPResponse.Header, answer.Body)
+	if refused.Code != "ingest_in_progress" {
+		return 0
+	}
+	named := apperr.ParseRetryAfter(answer.HTTPResponse.Header.Get("Retry-After"), time.Now())
+	return min(max(named, minServerWait), maxRetryWait)
+}
+
+func (r *pushRun) postTranscript(c *pushCollection, item rerenderItem, updated time.Time) (int, bool, *api.IngestSessionResponse) {
 	var answer *api.IngestSessionResponse
 	format := codexFormat
 	params := &api.IngestSessionParams{Collection: &c.job.target, Format: &format, SessionId: &item.sessionID, Updated: &updated}
@@ -315,7 +434,7 @@ func (r *pushRun) sendTranscript(c *pushCollection, item rerenderItem, updated t
 		answer = got
 		return got.HTTPResponse, got.Body, nil
 	})
-	return judgeSession(status, answered, answer)
+	return status, answered, answer
 }
 
 // judgeSession reads the session route's answer. 202 is all of it, and 207 is a part, which is reported with what the server said.

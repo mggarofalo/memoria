@@ -73,13 +73,90 @@ func TestSessionMetaMustComeEarly(t *testing.T) {
 	}
 }
 
+func TestReachIsReadAsTheServerReadsIt(t *testing.T) {
+	for text, want := range map[string]int64{
+		"---\nmessage_start: 10\nmessage_count: 5\n---\n":      15,
+		"---\nmessage_count: 5\n---\n":                         5,
+		"---\nmessage_end: 9\n---\n":                           10,
+		"---\r\nmessage_start: 2\r\nmessage_end: 4\r\n---\r\n": 5,
+		"---\nmessage_count: 5\nmessage_end: 99\n---\n":        5,
+	} {
+		if got, known := ReachOf([]byte(text)); !known || got != want {
+			t.Errorf("%q = %d %v, want %d", text, got, known, want)
+		}
+	}
+	for _, text := range []string{"---\ntitle: x\n---\n", "message_count: 5\n", "---\nmessage_count: 5\n", "---\nmessage_count: x\n---\n"} {
+		if _, known := ReachOf([]byte(text)); known {
+			t.Errorf("%q was read as known", text)
+		}
+	}
+}
+
+func TestMessagesAreCountedAsTheServerCountsThem(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "t.jsonl")
+	lines := []string{
+		meta(testID),
+		`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"a"}]}}`,
+		`{"type":"response_item","payload":{"type":"message","role":"assistant","content":"b"}}`,
+		`{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"c"},{"type":"image","text":"x"}]}}`,
+		`{"type":"response_item","payload":{"type":"message","role":"developer","content":"d"}}`,
+		`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"image","text":"e"}]}}`,
+		`{"type":"response_item","payload":{"type":"message","role":"user","content":"  \n\u001f "}}`,
+		`{"type":"response_item","payload":{"type":"function_call","role":"user","content":"f"}}`,
+		`{"type":"event_msg","payload":{"type":"message","role":"user","content":"g"}}`,
+		`not json`,
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if count, err := CountMessages(path); err != nil || count != 3 {
+		t.Fatalf("count = %d, err = %v", count, err)
+	}
+	if _, err := CountMessages(filepath.Join(t.TempDir(), "absent")); err == nil {
+		t.Fatal("a missing file was counted")
+	}
+}
+
+func TestOneFileIsKeptOnceHoweverItIsReached(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "a", "rollout-"+testID+".jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(meta(testID)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	found, err := FindTranscripts([]string{dir, filepath.Join(dir, "a"), dir + string(filepath.Separator)})
+	if err != nil || len(found.ByID[testID]) != 1 {
+		t.Fatalf("found = %v, err = %v", found, err)
+	}
+}
+
 func TestARerenderSummaryAddsUp(t *testing.T) {
-	s := RerenderSummary{OverCap: 9, Sent: 1, Already: 1, Partial: 1, Refused: map[string]int{"a": 1}, NoSessionID: 1, NoTranscript: 1, Several: 1, Unreadable: 1, NotReached: 1}
-	if !s.Accounted() || s.NotHeld() != 7 || s.RefusedTotal() != 1 {
+	s := RerenderSummary{OverCap: 11, Shorter: 1, Uncounted: 1, Sent: 1, Already: 1, Partial: 1, Refused: map[string]int{"a": 1}, NoSessionID: 1, NoTranscript: 1, Several: 1, Unreadable: 1, NotReached: 1}
+	if !s.Accounted() || s.NotHeld() != 9 || s.RefusedTotal() != 1 {
 		t.Fatalf("summary = %+v", s)
 	}
 	s.WouldSend = 1
 	if s.Accounted() {
 		t.Fatal("an extra count was accounted for")
+	}
+}
+
+func TestALinkToATranscriptIsTheSameFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "a", "rollout-"+testID+".jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(meta(testID)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "a"), filepath.Join(dir, "b")); err != nil {
+		t.Skipf("this host cannot make links: %v", err)
+	}
+	found, err := FindTranscripts([]string{filepath.Join(dir, "a"), filepath.Join(dir, "b")})
+	if err != nil || len(found.ByID[testID]) != 1 {
+		t.Fatalf("found = %v, err = %v", found, err)
 	}
 }

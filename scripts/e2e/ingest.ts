@@ -17,7 +17,7 @@ const TYPO = "typo";
 const CLOSED = "closed";
 const FILLED = "filled";
 /** Targets of `migrate push`, each opened and empty, so a count of what is on disk means something. */
-const MIGRATED = ["migrated", "migrated-resume", "migrated-refusing", "migrated-killed", "migrated-rules", "migrated-takeover", "migrated-trust", "migrated-spelling", "migrated-decomposed", "migrated-credential", "migrated-older", "migrated-shapes", "migrated-rerender"];
+const MIGRATED = ["migrated", "migrated-resume", "migrated-refusing", "migrated-killed", "migrated-rules", "migrated-takeover", "migrated-trust", "migrated-spelling", "migrated-decomposed", "migrated-credential", "migrated-older", "migrated-shapes", "migrated-rerender", "migrated-rerender-chunks"];
 const VERSION = "2026-02-01T00:00:00Z";
 const LATER = "2026-02-02T00:00:00Z";
 const ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";

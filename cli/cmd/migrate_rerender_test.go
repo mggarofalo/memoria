@@ -111,9 +111,18 @@ func bigExport(id string) string {
 	return "---\nsession_id: \"" + id + "\"\nmessage_count: 3\n---\n\n" + strings.Repeat("words ", migrate.DefaultMaxDocumentBytes/6+1)
 }
 
+// transcriptFor is a transcript of three messages, as many as bigExport says it reaches.
 func transcriptFor(id string) string {
-	return `{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"id":"` + id + `","cwd":"/w"}}` + "\n" +
-		`{"timestamp":"2026-01-01T00:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}}` + "\n"
+	return transcriptOf(id, 3)
+}
+
+func transcriptOf(id string, messages int) string {
+	text := `{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"id":"` + id + `","cwd":"/w"}}` + "\n"
+	for i := range messages {
+		role := []string{"user", "assistant"}[i%2]
+		text += `{"timestamp":"2026-01-01T00:00:01Z","type":"response_item","payload":{"type":"message","role":"` + role + `","content":[{"type":"input_text","text":"hi"}]}}` + "\n"
+	}
+	return text
 }
 
 func newRerenderFixture(t *testing.T) *rerenderFixture {
@@ -325,7 +334,7 @@ func TestWhatTheLastPushNamedOverTheCapIsReRenderedToo(t *testing.T) {
 	server := newSessionServer(t)
 	small := filepath.Join(f.notes, "small.md")
 	id := "12345678-1234-1234-1234-123456789abc"
-	writeFile(t, small, "---\nsession_id: "+id+"\n---\n\nsmall\n")
+	writeFile(t, small, "---\nsession_id: "+id+"\nmessage_count: 1\n---\n\nsmall\n")
 	writeFile(t, filepath.Join(f.codex, "rollout-"+id+".jsonl"), transcriptFor(id))
 	report, err := migrate.PushReportPath(server.URL)
 	if err != nil {
@@ -381,5 +390,93 @@ func TestVerifyCountsADocumentHeldThroughItsSession(t *testing.T) {
 		if problem.Name == "a.md" {
 			t.Fatalf("a.md was reported: %+v", problem)
 		}
+	}
+}
+
+func TestATranscriptShorterThanItsExportIsNotSent(t *testing.T) {
+	f := newRerenderFixture(t)
+	writeFile(t, f.transcript, transcriptOf(rerenderID, 2)+`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"  \u001c "}]}}`+"\n")
+	for _, apply := range [][]string{nil, {"--apply"}} {
+		server := newSessionServer(t)
+		summary, code, report := f.run(t, server, apply...)
+		if code != apperr.ExitGeneric || summary.Shorter != 1 || len(server.uploads()) != 0 {
+			t.Fatalf("%v: code = %d, summary = %+v", apply, code, summary)
+		}
+		if problems := rerenderProblems(t, report); len(problems) != 1 || problems[0].Status != migrate.RerenderShorter || problems[0].Reason != "1 messages" {
+			t.Fatalf("problems = %+v", problems)
+		}
+	}
+}
+
+func TestAnExportThatDoesNotCountItsMessagesIsNotSent(t *testing.T) {
+	f := newRerenderFixture(t)
+	writeFile(t, f.big, strings.Replace(bigExport(rerenderID), "message_count: 3\n", "", 1))
+	if summary, code, _ := f.run(t, nil); code != apperr.ExitGeneric || summary.Uncounted != 1 {
+		t.Fatalf("code = %d, summary = %+v", code, summary)
+	}
+}
+
+// A chunk of the session already stored carries its export's time, so the upload must not be older than that, nor than the transcript.
+func TestTheVersionSentIsTheLaterOfTheTranscriptAndItsExports(t *testing.T) {
+	transcriptTime, exportTime := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)
+	for name, c := range map[string]struct{ transcript, export, want time.Time }{
+		"transcript older": {transcriptTime, exportTime, exportTime},
+		"transcript newer": {exportTime.Add(time.Hour), exportTime, exportTime.Add(time.Hour)},
+	} {
+		f := newRerenderFixture(t)
+		sibling := filepath.Join(f.notes, "2026-01-01_abcdef01_part1.md")
+		writeFile(t, sibling, "---\nsession_id: "+rerenderID+"\nmessage_start: 0\nmessage_count: 1\n---\n\nhi\n")
+		for _, file := range []string{f.big, sibling} {
+			if err := os.Chtimes(file, c.export, c.export); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.Chtimes(f.transcript, c.transcript, c.transcript); err != nil {
+			t.Fatal(err)
+		}
+		server := newSessionServer(t)
+		if _, code, _ := f.run(t, server, "--apply"); code != 0 {
+			t.Fatalf("%s: code = %d, stderr = %q", name, code, f.h.stderr.String())
+		}
+		if sent, err := time.Parse(time.RFC3339Nano, server.uploads()[0].updated); err != nil || !sent.Equal(c.want) {
+			t.Fatalf("%s: sent %v, want %v (%v)", name, sent, c.want, err)
+		}
+	}
+}
+
+func TestAWriteStillRunningIsWaitedOut(t *testing.T) {
+	f := newRerenderFixture(t)
+	server := newSessionServer(t)
+	server.answer = func(attempt int) (int, string) {
+		if attempt < 2 {
+			return http.StatusConflict, "ingest_in_progress"
+		}
+		return http.StatusAccepted, ""
+	}
+	if summary, code, _ := f.run(t, server, "--apply"); code != 0 || summary.Sent != 1 || len(server.uploads()) != 3 {
+		t.Fatalf("code = %d, summary = %+v, uploads = %d", code, summary, len(server.uploads()))
+	}
+}
+
+func TestOneFolderGivenTwiceFindsATranscriptOnce(t *testing.T) {
+	f := newRerenderFixture(t)
+	server := newSessionServer(t)
+	if summary, code, _ := f.run(t, server, "--apply", "--codex-sessions", f.codex, "--codex-sessions", filepath.Join(f.codex, "2026")); code != 0 || summary.Sent != 1 {
+		t.Fatalf("code = %d, summary = %+v, stderr = %q", code, summary, f.h.stderr.String())
+	}
+}
+
+// The over-cap chunk may not be the session's last, so how far the messages reach is the furthest of all its exports here.
+func TestTheFurthestChunkSetsHowManyMessagesAreNeeded(t *testing.T) {
+	f := newRerenderFixture(t)
+	// It sorts before the over-cap chunk, so the furthest is not simply the last one read.
+	writeFile(t, filepath.Join(f.notes, "2026-01-01_0later.md"), "---\nsession_id: "+rerenderID+"\nmessage_start: 3\nmessage_count: 2\n---\n\nlater\n")
+	writeFile(t, f.transcript, transcriptOf(rerenderID, 4))
+	if summary, code, _ := f.run(t, nil); code != apperr.ExitGeneric || summary.Shorter != 1 {
+		t.Fatalf("code = %d, summary = %+v", code, summary)
+	}
+	writeFile(t, f.transcript, transcriptOf(rerenderID, 5))
+	if summary, code, _ := f.run(t, nil); code != 0 || summary.WouldSend != 1 {
+		t.Fatalf("code = %d, summary = %+v", code, summary)
 	}
 }

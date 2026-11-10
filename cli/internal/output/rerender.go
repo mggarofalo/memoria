@@ -14,6 +14,15 @@ const RerenderNoTranscriptNote = "An over-cap document with no raw transcript he
 // RerenderTakeoverNote says what a Codex session does to an export, which proves nothing about which copy it is.
 const RerenderTakeoverNote = "A Codex session takes over documents in the collection root whose frontmatter names it. One that would lose messages is refused with session_shrank, and nothing changes."
 
+// RerenderShorterNote is said when a transcript holds fewer messages than its exports, which were then not sent.
+const RerenderShorterNote = "A transcript with fewer messages than its exports was not sent: the export is the only copy of the messages it lacks. The local report says how many."
+
+// RerenderShrankNote is said for session_shrank, as a refusal by code alone does not say what it leaves.
+const RerenderShrankNote = "session_shrank means the server kept what it had: the export is still the only copy of the messages the transcript lacks."
+
+// RerenderUncountedNote is said for an export that does not say how far its messages reach.
+const RerenderUncountedNote = "An export that does not say how many messages it holds was not sent, as nothing can show its transcript has them all. Its export is its only copy."
+
 func rerenderLines(s *migrate.RerenderSummary) []string {
 	var lines []string
 	for _, reason := range ruleNames(s.Refused) {
@@ -33,6 +42,7 @@ func rerenderNotes(result *migrate.RerenderResult) []string {
 	if missing > 0 {
 		notes = append(notes, RerenderNoTranscriptNote)
 	}
+	notes = append(notes, lossNotes(result)...)
 	notes = append(notes, RerenderTakeoverNote)
 	switch {
 	case result.DryRun:
@@ -48,6 +58,25 @@ func rerenderNotes(result *migrate.RerenderResult) []string {
 	return notes
 }
 
+func lossNotes(result *migrate.RerenderResult) []string {
+	shorter, shrank, uncounted := 0, 0, 0
+	for i := range result.Collections {
+		shorter += result.Collections[i].Shorter
+		shrank += result.Collections[i].Refused["session_shrank"]
+		uncounted += result.Collections[i].Uncounted
+	}
+	var notes []string
+	for _, said := range []struct {
+		count int
+		note  string
+	}{{shorter, RerenderShorterNote}, {shrank, RerenderShrankNote}, {uncounted, RerenderUncountedNote}} {
+		if said.count > 0 {
+			notes = append(notes, said.note)
+		}
+	}
+	return notes
+}
+
 // MigrateRerenderTable renders a re-render. It names no file: only the local report does.
 func MigrateRerenderTable(w io.Writer, result *migrate.RerenderResult) error {
 	rows := make([]string, 0, len(result.Collections))
@@ -58,14 +87,14 @@ func MigrateRerenderTable(w io.Writer, result *migrate.RerenderResult) error {
 		if result.DryRun {
 			sent = []any{s.WouldSend}
 		}
-		rows = append(rows, row(append(append([]any{s.Name, s.Target, s.OverCap}, sent...), s.NoSessionID, s.NoTranscript, s.Several, s.Unreadable, s.NotReached)...))
+		rows = append(rows, row(append(append([]any{s.Name, s.Target, s.OverCap}, sent...), s.NoSessionID, s.NoTranscript, s.Shorter, s.Uncounted, s.Several, s.Unreadable, s.NotReached)...))
 		for _, line := range rerenderLines(s) {
 			b.WriteString(row(line) + "\n")
 		}
 	}
-	header := "COLLECTION\tTARGET\tOVER CAP\tSENT\tALREADY SENT\tPARTIAL\tREFUSED\tNO SESSION ID\tNO TRANSCRIPT\tSEVERAL TRANSCRIPTS\tUNREADABLE\tNOT REACHED"
+	header := "COLLECTION\tTARGET\tOVER CAP\tSENT\tALREADY SENT\tPARTIAL\tREFUSED\tNO SESSION ID\tNO TRANSCRIPT\tTRANSCRIPT SHORTER\tNOT COUNTED\tSEVERAL TRANSCRIPTS\tUNREADABLE\tNOT REACHED"
 	if result.DryRun {
-		header = "COLLECTION\tTARGET\tOVER CAP\tWOULD SEND\tNO SESSION ID\tNO TRANSCRIPT\tSEVERAL TRANSCRIPTS\tUNREADABLE\tNOT REACHED"
+		header = "COLLECTION\tTARGET\tOVER CAP\tWOULD SEND\tNO SESSION ID\tNO TRANSCRIPT\tTRANSCRIPT SHORTER\tNOT COUNTED\tSEVERAL TRANSCRIPTS\tUNREADABLE\tNOT REACHED"
 	}
 	if err := table(w, header, rows); err != nil {
 		return err
@@ -81,8 +110,8 @@ func MigrateRerenderMarkdown(w io.Writer, result *migrate.RerenderResult) error 
 	var b strings.Builder
 	for i := range result.Collections {
 		s := &result.Collections[i]
-		fmt.Fprintf(&b, "- **%s** to %s: %d over cap, %d would send, %d sent, %d already sent, %d partial, %d refused, %d with no session id, %d with no transcript, %d with several, %d unreadable, %d not reached\n",
-			inlineText(s.Name), inlineText(s.Target), s.OverCap, s.WouldSend, s.Sent, s.Already, s.Partial, s.RefusedTotal(), s.NoSessionID, s.NoTranscript, s.Several, s.Unreadable, s.NotReached)
+		fmt.Fprintf(&b, "- **%s** to %s: %d over cap, %d would send, %d sent, %d already sent, %d partial, %d refused, %d with no session id, %d with no transcript, %d with a shorter transcript, %d not counted, %d with several, %d unreadable, %d not reached\n",
+			inlineText(s.Name), inlineText(s.Target), s.OverCap, s.WouldSend, s.Sent, s.Already, s.Partial, s.RefusedTotal(), s.NoSessionID, s.NoTranscript, s.Shorter, s.Uncounted, s.Several, s.Unreadable, s.NotReached)
 		for _, line := range rerenderLines(s) {
 			b.WriteString("  - " + inlineText(line) + "\n")
 		}
