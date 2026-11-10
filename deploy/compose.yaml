@@ -41,7 +41,8 @@ services:
       # The documents. Back this up: it may be the only copy.
       - ${MEMORIA_CORPUS:-memoria-corpus}:/corpus
     networks: [memoria]
-    # Stopped jobs persist, but give the drain its time.
+    # Shutdown takes MEMORIA_QMD_SHUTDOWN_DRAIN_MS (10 s by default) plus at most 3 s, and stopped
+    # jobs persist, so this leaves 2 s spare. Raise it with the drain, never below drain + 3 s.
     stop_grace_period: 15s
 
   memoria-api:

@@ -3,7 +3,11 @@ import { homedir } from "node:os";
 import { buildApp, warmup, type App } from "./app.ts";
 import { isLoopbackHost, loadConfig, type SidecarConfig } from "./config.ts";
 import { openJobStore, retryJobStore, queueDbPathFor } from "./queue-store.ts";
+import { shutDown } from "./shutdown.ts";
 import { openBackend, type LlmOptions } from "./store.ts";
+
+/** Past the drain, what the rest of shutdown may take before it gives up: see `shutDown`. */
+const SHUTDOWN_BACKSTOP_MS = 3_000;
 
 /**
  * Process entry point. Opens the index once, builds the app, warms the
@@ -93,18 +97,13 @@ async function main(): Promise<void> {
     closing = true;
     stopRetrying();
     app.log.info({ signal, pendingJobs: app.ctx.jobs.pending }, "shutting down");
+    // Should a step hang, still exit before the container's grace runs out, and say so.
+    setTimeout(() => {
+      app.log.error({ timeoutMs: config.shutdownDrainMs + SHUTDOWN_BACKSTOP_MS }, "shutdown did not finish in time");
+      process.exit(1);
+    }, config.shutdownDrainMs + SHUTDOWN_BACKSTOP_MS).unref();
     try {
-      await app.close();
-      // Index what was accepted in the debounce window. A timeout loses nothing:
-      // the jobs are persisted and resume at the next start.
-      if (!(await app.ctx.jobs.drain(config.shutdownDrainMs))) {
-        app.log.warn({ pendingJobs: app.ctx.jobs.pending, timeoutMs: config.shutdownDrainMs }, "reindex jobs still pending at shutdown");
-      }
-      // A job still running is about to lose the index under it. That is not its
-      // failure, so it stays queued in the store and resumes at the next start.
-      app.ctx.jobs.suspend();
-      await backend.close();
-      jobStore?.close();
+      await shutDown({ closeServer: () => app.close(), jobs: app.ctx.jobs, backend, closeStore: () => jobStore?.close(), log: app.log }, config.shutdownDrainMs);
       process.exit(0);
     } catch (err) {
       app.log.error({ err }, "shutdown failed");

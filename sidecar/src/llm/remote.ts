@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { WorkerError, type OperationTimeouts, workerName } from "./client.ts";
+import { WorkerError, WorkerLifecycle, type OperationTimeouts, workerName } from "./client.ts";
 import { EXPANSION_GRAMMAR, EXPANSION_SAMPLING, EXPANSION_SYSTEM_PROMPT, expansionFailure, expansionPrompt, parseExpansion } from "./expansion.ts";
 import { WorkerPool, type BreakerOptions, type DispatchTarget } from "./pool.ts";
 import { WorkerRerankTransport, type RerankTransport } from "./rerank-transport.ts";
@@ -140,7 +140,12 @@ function workersFrom(options: RemoteLlmOptions): PoolWorkerConfig[] {
 
 /** Only an outage justifies the CPU tokenizer. A refusal or a full queue would refuse or wait there too. */
 function allowsTokenFallback(err: unknown): boolean {
-  return err instanceof WorkerError && err.code !== "rejected" && err.code !== "saturated";
+  return err instanceof WorkerError && err.code !== "rejected" && err.code !== "saturated" && err.code !== "closing";
+}
+
+/** Shutdown, not an outage: nothing should load a model on this host for it. */
+function isClosing(err: unknown): boolean {
+  return err instanceof WorkerError && err.code === "closing";
 }
 
 /**
@@ -151,6 +156,8 @@ export class RemoteLlm implements LlmSurface {
   readonly embedModelName: string;
   readonly transportName: string;
   readonly pool: WorkerPool;
+  /** Every worker call this pool makes, so shutdown can stop them. */
+  readonly lifecycle = new WorkerLifecycle();
   readonly #rerankUri: string;
   readonly #generateUri: string;
   readonly #transport: RerankTransport;
@@ -179,6 +186,7 @@ export class RemoteLlm implements LlmSurface {
       embedFiles: acceptedEmbedFiles(options.models.embed),
       ...definedOnly({ breaker: options.breaker, timeouts: options.timeouts, fetch: options.fetch, onCall: options.onCall, now: options.now, probeEveryMs: options.probeEveryMs, onDisagreement: options.onDisagreement, interactiveReserve: options.interactiveReserve }),
       interactiveBudgetMs: () => this.#remainingMs(),
+      lifecycle: this.lifecycle,
       trial: (capability, target) => this.#trial(capability, target),
       probe: (target) => this.#probeVector(target),
     });
@@ -278,7 +286,7 @@ export class RemoteLlm implements LlmSurface {
   }
 
   async #embedWithoutWorker(texts: string[], isQuery: boolean, err: unknown): Promise<(EmbeddingResult | null)[]> {
-    const fallback = isQuery ? this.#fallback : null;
+    const fallback = isQuery && !isClosing(err) ? this.#fallback : null;
     this.#onDegraded?.({ operation: "embed", error: messageOf(err), fallback: fallback !== null });
     if (fallback) {
       try {

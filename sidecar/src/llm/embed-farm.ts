@@ -296,6 +296,11 @@ class Farm {
 
   /** Retry a brief failure. Past that, find out whether the batch or the worker is at fault. */
   async #recover(items: Item[], triesLeft: number, err: WorkerError): Promise<void> {
+    // Shutdown refused it: no worker is at fault, and no retry can go, so the job stops here and waits for the next start.
+    if (err.code === "closing") {
+      this.#outage = true;
+      return;
+    }
     if (triesLeft > 1 && err.code !== "rejected") {
       await this.#deps.sleep(this.#retryBaseMs * 2 ** (this.#retries - triesLeft));
       await this.#embed(items, triesLeft - 1);

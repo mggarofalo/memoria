@@ -65,7 +65,7 @@ Everything is an environment variable, except that in remote LLM mode the worker
 | `MEMORIA_QMD_LOG_LEVEL` | `info` | pino level. |
 | `MEMORIA_QMD_REINDEX_DEBOUNCE_MS` | `60000` | Quiet period after a document write before its index update runs. `0` turns the debounce off. |
 | `MEMORIA_QMD_REINDEX_MAX_WAIT_MS` | `300000` | Longest an update can wait from its first write, so steady ingest cannot starve the index. |
-| `MEMORIA_QMD_SHUTDOWN_DRAIN_MS` | `10000` | How long shutdown waits for queued jobs. Keep it under compose's `stop_grace_period` (15 s). |
+| `MEMORIA_QMD_SHUTDOWN_DRAIN_MS` | `10000` | How long shutdown runs queued jobs before it stops them. Shutdown takes up to this plus 3 s, so keep that under compose's `stop_grace_period` (15 s). |
 | `MEMORIA_QMD_LLM` | `local` | `remote` sends model work to a worker. See [`docs/workers.md`](../docs/workers.md), which has the other worker settings and what has not been verified. |
 
 ## The contract
@@ -218,7 +218,7 @@ One worker runs one job at a time. Document writes do not start a scan each: the
 - If any write in a burst asks for embedding, the shared job embeds. An embed run sweeps every unembedded document in the collection, so a separate job would not have spared the others.
 - `POST /reindex` does not wait. An identical job that is already waiting is returned and released to run.
 - So a new document is not searchable, and a deleted one is not gone from search, until the job finishes. Call `POST /reindex` for the collection when that delay matters.
-- On SIGINT or SIGTERM the sidecar releases held jobs and waits up to `MEMORIA_QMD_SHUTDOWN_DRAIN_MS` for them. Jobs persist in `index.sqlite.queue.sqlite` beside the index, so anything unfinished, including after a crash, runs after the next start. See [The job queue](#the-job-queue).
+- On SIGINT or SIGTERM the sidecar stops accepting requests and starts no more worker calls, an embedding batch included. Calls and requests already in flight go on. It releases held jobs and runs them for up to `MEMORIA_QMD_SHUTDOWN_DRAIN_MS`, so what was accepted is scanned into the index. A job that needs a worker stops at its next call and waits, queued, for the next start, not counted as failed. At the end of that time the running job is kept as queued, worker calls still in flight are cut off, requests get a second to answer without them, and the index closes. It exits 0 within about `MEMORIA_QMD_SHUTDOWN_DRAIN_MS` plus 3 seconds; if anything still hangs at that point, it logs `shutdown did not finish in time` and exits 1. Jobs persist in `index.sqlite.queue.sqlite` beside the index, so anything unfinished, including after a crash, runs after the next start. See [The job queue](#the-job-queue).
 
 ### The job queue
 
@@ -261,6 +261,7 @@ Layout:
 | File | Role |
 |---|---|
 | `src/main.ts` | Process entry: config, open index, warm, listen, shutdown. |
+| `src/shutdown.ts` | The shutdown sequence and its time budget. |
 | `src/app.ts` | Builds the Fastify app: auth hook, error envelope, swagger, job runner. |
 | `src/routes.ts` | Every route and its JSON schema. |
 | `src/store.ts` | The `QmdBackend` interface and the only import of `@tobilu/qmd`. |

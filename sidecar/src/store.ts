@@ -168,6 +168,10 @@ export interface QmdBackend extends MetadataSource {
   snippet(body: string, query: string, maxLen: number, chunkPos: number, chunkLen: number, intent?: string): Snippet;
   addLineNumbers(text: string, startLine: number): string;
   models(): ModelStatus;
+  /** Start no more worker calls, for shutdown. Those in flight go on. Nothing in local mode. */
+  stopWorkerCalls(): void;
+  /** End the worker calls still in flight, for shutdown. Nothing in local mode. */
+  abortWorkerCalls(): void;
   close(): Promise<void>;
 }
 
@@ -537,6 +541,8 @@ export async function openBackend(options: OpenBackendOptions): Promise<OpenedBa
   },
   addLineNumbers: (text, startLine) => qmd.addLineNumbers(text, startLine),
   models: () => (remote ? remoteModelStatus(remote, llm as unknown as LlmSurface) : modelStatus(llm)),
+  stopWorkerCalls: () => remote?.lifecycle.refuseNew(),
+  abortWorkerCalls: () => remote?.lifecycle.abortInFlight(),
   close: async () => {
     wired?.close();
     // store.close() disposes the SDK's own instance, which is also the fallback.
