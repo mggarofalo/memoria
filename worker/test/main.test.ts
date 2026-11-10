@@ -21,7 +21,7 @@ test("the entry point starts, warms up, serves every endpoint, keeps the token o
   const upstream = fakeSupervisor(roles);
   upstream.start();
   try {
-    assert.equal(await upstream.waitReady(10_000), true);
+    assert.equal(await upstream.waitReady(10_000), true, `upstream ready: ${JSON.stringify(upstream.status())}`);
   } catch (err) {
     // Its children would hold this file's process open, and hang the run.
     await upstream.stop();

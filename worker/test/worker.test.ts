@@ -35,7 +35,9 @@ async function waitUntil(check: () => boolean | Promise<boolean>, what: string, 
 async function withWorker(run: (w: RunningWorker) => Promise<void>, options: Parameters<typeof startWorker>[0] = {}): Promise<void> {
   const worker = await startWorker(options);
   try {
-    assert.equal(await worker.supervisor.waitReady(30_000), true, "models ready");
+    // Say what each server was doing, so a failure here can be told apart: never started, restarting, or up but not answering.
+    const ready = await worker.supervisor.waitReady(30_000);
+    assert.equal(ready, true, `models ready: ${JSON.stringify(worker.supervisor.status())}\n${worker.logs.filter((l) => l.includes("llama-server")).join("\n")}`);
     await run(worker);
   } finally {
     await worker.stop();

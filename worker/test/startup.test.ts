@@ -62,7 +62,7 @@ test("the started worker serves, warms up over real requests, and only shuts dow
   const { log, lines } = capturedLog();
   let worker: Awaited<ReturnType<typeof startWorker>>;
   try {
-    assert.equal(await upstream.waitReady(10_000), true);
+    assert.equal(await upstream.waitReady(10_000), true, `upstream ready: ${JSON.stringify(upstream.status())}`);
     const config = await externalConfig(roles);
     for (const role of config.roles) role.externalApiKey = upstream.apiKeyFor(role.role);
     worker = await startWorker(config, log, { probes: noProbes });
