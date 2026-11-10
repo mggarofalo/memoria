@@ -381,6 +381,8 @@ public sealed class MemoriaQmdClientTests
 		(MemoriaQmdClient client, FakeHttpHandler handler) = Create();
 
 		await Assert.ThrowsAnyAsync<ArgumentException>(() => client.DrainWorkerAsync(name));
+		await Assert.ThrowsAnyAsync<ArgumentException>(() => client.EnableWorkerAsync(name));
+		await Assert.ThrowsAnyAsync<ArgumentException>(() => client.RetryJobAsync(name));
 		await Assert.ThrowsAnyAsync<ArgumentException>(() => client.CancelJobAsync(name));
 		Assert.Empty(handler.Requests);
 	}
@@ -403,6 +405,10 @@ public sealed class MemoriaQmdClientTests
 		Assert.Equal(2, queue.Jobs.Queued);
 		Assert.True(paused.Paused);
 		Assert.False(resumed.Paused);
+		Assert.Equal(new Uri(BaseAddress, "queue"), handler.Requests[0].Uri);
+		Assert.Equal(HttpMethod.Get, handler.Requests[0].Method);
+		Assert.Equal(HttpMethod.Post, handler.Requests[1].Method);
+		Assert.Null(handler.Requests[1].Body);
 		Assert.Equal(new Uri(BaseAddress, "./queue:pause"), handler.Requests[1].Uri);
 		Assert.Equal(HttpMethod.Post, handler.Requests[2].Method);
 		Assert.Equal(new Uri(BaseAddress, "./queue:resume"), handler.Requests[2].Uri);
