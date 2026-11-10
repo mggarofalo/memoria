@@ -34,6 +34,9 @@ func rerenderLines(s *migrate.RerenderSummary) []string {
 	if s.AcceptedUncounted > 0 {
 		lines = append(lines, fmt.Sprintf("%s: %d sent with --accept-uncounted", s.Name, s.AcceptedUncounted))
 	}
+	if s.Threads > 0 {
+		lines = append(lines, fmt.Sprintf("%s: %d raw transcript(s) for these, as one export can hold its session's subagent threads too", s.Name, s.Threads))
+	}
 	return lines
 }
 

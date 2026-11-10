@@ -22,8 +22,8 @@ func TestARerenderSaysWhatIsNotHeldAndWhy(t *testing.T) {
 	if !strings.Contains(text, "All 1 over-cap document(s) are held") || strings.Contains(text, RerenderNoTranscriptNote) || strings.Contains(text, RerenderShrankNote) || strings.Contains(text, RerenderShorterNote) {
 		t.Fatalf("text = %s", text)
 	}
-	dry := &migrate.RerenderResult{DryRun: true, Collections: []migrate.RerenderSummary{{Name: "codex", OverCap: 1, WouldSend: 1}}}
-	checkHolds(t, renderedBy(t, func(w io.Writer) error { return MigrateRerenderTable(w, dry) }), "WOULD SEND", "Dry run: nothing was sent.")
+	dry := &migrate.RerenderResult{DryRun: true, Collections: []migrate.RerenderSummary{{Name: "codex", OverCap: 1, WouldSend: 1, Threads: 3}}}
+	checkHolds(t, renderedBy(t, func(w io.Writer) error { return MigrateRerenderTable(w, dry) }), "WOULD SEND", "Dry run: nothing was sent.", "codex: 3 raw transcript(s) for these")
 }
 
 func TestVerifySaysWhenASessionHoldsItsDocuments(t *testing.T) {
