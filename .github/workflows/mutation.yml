@@ -58,13 +58,16 @@ jobs:
         run: sh scripts/mutation-dotnet.sh
         env:
           MUTATION_LIMIT_MINUTES: ${{ github.event_name == 'pull_request' && '50' || '' }}
+      # Always, pull requests included: a failed score is only actionable with the report,
+      # and a run that hits its time limit still has the reports of the configs it finished.
       - name: Upload report
-        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+        if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: mutation-dotnet
           path: StrykerOutput/*/reports/
-          retention-days: 30
+          if-no-files-found: ignore
+          retention-days: ${{ github.event_name == 'pull_request' && 7 || 30 }}
 
   node:
     name: Mutation (${{ matrix.package }})
@@ -97,12 +100,13 @@ jobs:
         env:
           MUTATION_LIMIT_MINUTES: ${{ github.event_name == 'pull_request' && '50' || '' }}
       - name: Upload report
-        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+        if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: mutation-${{ matrix.package }}
           path: ${{ matrix.package }}/reports/
-          retention-days: 30
+          if-no-files-found: ignore
+          retention-days: ${{ github.event_name == 'pull_request' && 7 || 30 }}
 
   cli:
     name: Mutation (CLI)
@@ -120,12 +124,13 @@ jobs:
       - name: Mutate
         run: sh scripts/mutation-go.sh
       - name: Upload report
-        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+        if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: mutation-cli
           path: cli/reports/
-          retention-days: 30
+          if-no-files-found: ignore
+          retention-days: ${{ github.event_name == 'pull_request' && 7 || 30 }}
 
   # Real Go branch coverage. A slow report, never a gate: statement coverage in
   # CI is what blocks. gobco has no per-file exclusion or threshold of its own,
