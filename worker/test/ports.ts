@@ -43,8 +43,20 @@ export async function listenFetchable(server: Listener, host = "127.0.0.1"): Pro
  * take it before that server binds, so use this only where a test cannot pass port 0 itself.
  */
 export async function freePort(): Promise<number> {
-  const probe: Server = createServer();
-  const port = await listenFetchable(probe);
-  await new Promise((resolve) => probe.close(resolve));
-  return port;
+  return (await freePorts(1))[0]!;
+}
+
+/**
+ * Ports nothing holds right now, all different. Each is held until all are chosen: Linux can hand a port released a moment ago to the next
+ * bind of port 0, so asking one at a time can return the same port twice, and two servers then fight over it.
+ */
+export async function freePorts(count: number): Promise<number[]> {
+  const probes: Server[] = Array.from({ length: count }, () => createServer());
+  try {
+    const ports: number[] = [];
+    for (const probe of probes) ports.push(await listenFetchable(probe));
+    return ports;
+  } finally {
+    await Promise.all(probes.map((probe) => new Promise((resolve) => (probe.listening ? probe.close(resolve) : resolve(undefined)))));
+  }
 }
