@@ -55,6 +55,7 @@ dotnet build Memoria.slnx -p:TreatWarningsAsErrors=true   # build (CI parity)
 dotnet test Memoria.slnx                                  # test
 dotnet format Memoria.slnx --verify-no-changes            # format gate (CI parity)
 sh scripts/redaction-report.sh <corpus-dir>               # local release check: gitleaks over redacted output, counts only. Not for CI
+MEMORIA_REDACTION_REPORT=<dir> dotnet test tests/Memoria.Core.Tests --filter RedactionMeasurement   # opt-in: this repo's lines redaction changes, and sampled tokens caught; compare <dir>/redaction-report.txt before and after a rule change
 MEMORIA_WRITE_OPENAPI=1 dotnet test Memoria.slnx --filter OpenApiContract   # refresh src/Memoria.Api/openapi.json after an endpoint change
 npx --yes @stoplight/spectral-cli@6.17.0 lint --fail-severity warn src/Memoria.Api/openapi.json   # lint gate (CI parity)
 
