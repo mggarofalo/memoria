@@ -190,6 +190,19 @@ Where `settings.json` or `settings.local.json` allows qmd's tools, it adds `mcp_
 
 It adds no hook. It shows the `SessionEnd` hook you already have, and whether one is there at all. The hook is yours, and has to do what [What the hook has to do](#what-the-hook-has-to-do) says.
 
+If your hook is the `session-end-export.py` from [agent-skills](https://github.com/mggarofalo/agent-skills), turn its hosted mode on now, after `--apply`. It is off until `~/.config/agent-skills/memoria.json` says otherwise:
+
+```json
+{
+  "url": "<server>",
+  "push": true,
+  "search": "memoria",
+  "since": "<the time of your last migrate push>"
+}
+```
+
+`push` makes the hook send each changed transcript at session end, and `search` points its `/recall` skill at the server. `since` matters: the hook sends only transcripts changed after it, and leaves older ones to the migration, so set it to when you last ran `push` and nothing in between is missed. Turning it off again is `"push": false`, or deleting the file, and `rollback` does neither. The agent-skills `skills/recall/references/SETUP.md` has the rest.
+
 It refuses a config it cannot read as a whole, a form of TOML it cannot edit safely, and a config that is a link or read-only, and changes nothing. If so, fix that file by hand and run it again.
 
 **Stop or go.** Go on when every change it shows is one you expected. Then run the same command with `--apply`, and confirm. If a client wrote to a file since it was shown, it stops: run it again and read it again.
@@ -228,3 +241,5 @@ The hook that pushes sessions is not in this repository, and `cutover` does not 
 - **Send `projectDirectory`** to `POST /v1/ingest/session`, the session's folder name under Claude Code's projects folder. Without it, a session cannot show it is the original, so it never takes over its migrated documents.
 - **Surface `session_shrank`.** A 409 with this code means the upload holds fewer messages than the documents reach. Nothing was changed, and someone has to decide, so it must not be retried quietly or dropped.
 - **Report a transcript with no `cwd`.** With none, the server cannot match the folder, so the session stores beside its export. The hook should say so rather than look like a success.
+
+The agent-skills hook's hosted mode, from [Cut over](#6-cut-over), does all three. It holds a `session_shrank` upload in its spool and logs it on every run as needing attention, rather than sending it again.
