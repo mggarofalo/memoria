@@ -26,31 +26,93 @@ On the sidecar:
 | Variable | Default | Purpose |
 |---|---|---|
 | `MEMORIA_QMD_LLM` | `local` | `remote` sends model work to a worker. |
-| `MEMORIA_QMD_WORKERS` | unset | The pool, as a JSON list. See below. |
-| `MEMORIA_QMD_WORKER_URL` | unset | Shorthand for a pool of one. Must not contain credentials. Set this or the list, not both. |
+| `MEMORIA_QMD_CONFIG_FILE` | unset | A JSON file holding the pool and the queue's tuning. See [The configuration file](#the-configuration-file). Read only in remote mode. |
+| `MEMORIA_QMD_WORKERS` | unset | The pool, as a JSON list: the same list as the file's `workers`. |
+| `MEMORIA_QMD_WORKER_URL` | unset | Shorthand for a pool of one. Must not contain credentials. Set the pool in one place: the file, this list or this URL. |
 | `MEMORIA_QMD_WORKER_TOKEN` | unset | The token for `MEMORIA_QMD_WORKER_URL`. Required unless the worker is on loopback. At least 16 characters. `MEMORIA_QMD_WORKER_TOKEN_FILE` reads it from a file instead, which is what a service should use. |
 | `MEMORIA_QMD_WORKER_TOKEN_FILE` | unset | Reads `MEMORIA_QMD_WORKER_TOKEN` from this file. Setting both is an error. |
 | `MEMORIA_QMD_ALLOW_HTTP_ON_PRIVATE_NETWORK` | `0` | Required for a plain-http worker URL that is not loopback, such as the example below. Set it only on an encrypted network such as a WireGuard tunnel. |
 | `MEMORIA_QMD_WORKER_POLL_MS` | `10000` | How often each worker's `/health` and `/capabilities` are read. |
 | `MEMORIA_QMD_LLM_FALLBACK` | `1` | Tokenize and embed queries on this host's CPU when no worker answers. Needs the embedding model in QMD's cache on this host, under the name QMD gives it (`hf_<owner>_<file>`). It never downloads one, and a call gives up after 30 s. |
 | `MEMORIA_QMD_EMBED_DIMENSIONS` | `768` | Every embedding must have this length. `0` pins it to the first response. |
-| `MEMORIA_QMD_EMBED_BATCH_BYTES` | `262144` | Most text one embedding batch carries. A single larger chunk still goes alone. |
+| `MEMORIA_QMD_EMBED_BATCH_BYTES` | `262144` | Most text one embedding batch carries. A single larger chunk still goes alone. The file's `queue.embedBatchBytes` sets the same thing; set one or the other. |
 | `MEMORIA_QMD_RERANK_TIMEOUT_MS` | `20000` | Deadline for one search-time rerank call. Query vectors and expansion have 10 s each. |
 | `MEMORIA_QMD_SEARCH_DEADLINE_MS` | `60000` | Deadline for all of one search's calls to workers, including retries, slot waits and the CPU fallback. It sits well under `Memoria.Api`'s 2-minute client timeout, so a hung worker yields a degraded answer rather than a timeout. |
 | `MEMORIA_QMD_QUEUE_DB_PATH` | beside the index | The job queue's database. Applies in both LLM modes. |
 
 The pool list names the environment variable holding each token, never the token, so the list itself can be kept in plain configuration. As with other secrets, setting `<name>_FILE` instead of `<name>` reads the token from a file, and `tokenEnv` always names `<name>`. A worker's token must not be the sidecar's own secret: the sidecar compares the values at startup and refuses to run if they match, whatever the variable is called.
 
-Example:
+### The configuration file
+
+`MEMORIA_QMD_CONFIG_FILE` names one JSON file with two sections, both optional. It replaces hand-editing the pool and the queue's tuning into the environment of each service. The sidecar reads it once, at startup, so a change takes a restart. Every object refuses a setting it does not know, so a misspelt key stops startup rather than falling back to a default.
 
 ```json
-[
-  { "name": "desktop", "url": "http://192.168.1.20:8383", "tokenEnv": "DESKTOP_WORKER_TOKEN", "priority": 1, "maxConcurrent": 8 },
-  { "name": "macbook", "url": "http://192.168.1.30:8383", "tokenEnv": "MACBOOK_WORKER_TOKEN", "priority": 2, "capabilities": ["rerank", "generate"] }
-]
+{
+  "workers": [
+    { "name": "desktop", "url": "http://192.168.1.20:8383", "tokenEnv": "DESKTOP_WORKER_TOKEN", "priority": 1, "maxConcurrent": 8 },
+    {
+      "name": "macbook", "url": "http://192.168.1.30:8383", "tokenEnv": "MACBOOK_WORKER_TOKEN", "priority": 2,
+      "capabilities": ["rerank", "generate"],
+      "availability": { "failureThreshold": 5, "backoffMs": 10000, "maxBackoffMs": 120000 }
+    }
+  ],
+  "queue": { "embedBatchBytes": 262144, "embedConcurrency": 0, "interactiveReserve": 1 }
+}
 ```
 
-`capabilities` defaults to all three of `embed`, `rerank` and `generate`, `priority` to 100 (lower is preferred), and `maxConcurrent` to 4. Setting up the worker itself is covered in [`worker/README.md`](../worker/README.md).
+**`workers`** is the list `MEMORIA_QMD_WORKERS` takes, entry for entry. Set the pool in the file, in `MEMORIA_QMD_WORKERS`, or with `MEMORIA_QMD_WORKER_URL`; setting it in two places stops startup.
+
+| Worker key | Default | Purpose |
+|---|---|---|
+| `name` | required | Letters, digits, dots, dashes or underscores, at most 64. Unique. Drain and enable go by it. |
+| `url` | required | The worker's address. No credentials, query or fragment. |
+| `tokenEnv` | unset | The environment variable holding this worker's token. Required unless the worker is on loopback. An entry holding `token` itself is refused. |
+| `capabilities` | all three | Some of `embed`, `rerank` and `generate`. |
+| `priority` | `100` | Tiebreak between equally loaded workers. Lower is preferred. |
+| `maxConcurrent` | `4` | Calls this sidecar sends the worker at once. |
+| `availability.failureThreshold` | `3` | Failures in a row that open one of the worker's circuits. |
+| `availability.backoffMs` | `5000` | Wait before the first trial call once a circuit opens. It doubles after each failed trial. |
+| `availability.maxBackoffMs` | `60000` | Longest that wait grows to. Must not be shorter than `backoffMs`. |
+
+**`queue`** tunes background work. Reindex jobs still run one at a time, whatever these say.
+
+| Queue key | Default | Purpose |
+|---|---|---|
+| `embedBatchBytes` | `262144` | Most text one embedding batch carries, as `MEMORIA_QMD_EMBED_BATCH_BYTES`. |
+| `embedConcurrency` | `0` | Most embedding batches one job sends at once. `0` uses every background slot the workers have. |
+| `interactiveReserve` | `1` | Slots per worker that background work may not use, so a search does not queue behind embedding. Background work always keeps one slot, so a worker with `maxConcurrent: 1` still embeds. |
+
+A file with only `queue` works beside `MEMORIA_QMD_WORKERS` or `MEMORIA_QMD_WORKER_URL`. In local mode the file is not read, as the worker variables are not. Setting up the worker itself is covered in [`worker/README.md`](../worker/README.md).
+
+### Worker tokens
+
+Each worker has its own bearer token. Nothing registers a worker: its token is issued by whoever runs it, and the sidecar holds a copy. Tokens never go in a file kept in the repository. The configuration file names the variable that holds each token, and the loader refuses an entry that holds one.
+
+**Issuing a token for a new worker:**
+
+1. Generate it on a trusted machine: `node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"`. A token under 16 characters, or one that looks like a placeholder, is refused by both sides.
+2. On the worker, write it to the file `MEMORIA_WORKER_TOKEN_FILE` names, readable only by the worker's account. See [`worker/README.md`](../worker/README.md).
+3. On the sidecar's host, write the same token to a file only the sidecar can read, and point `<tokenEnv>_FILE` at it, such as `DESKTOP_WORKER_TOKEN_FILE` for `"tokenEnv": "DESKTOP_WORKER_TOKEN"`.
+4. Add the worker to `workers` and restart the sidecar.
+
+Never reuse the sidecar's `MEMORIA_QMD_SECRET` for a worker; the sidecar refuses to start if one matches. Give every worker a different token, so replacing one does not touch the others.
+
+**Rotating a token** replaces it on both sides. Each side reads its token at startup, so there is a window in which they disagree. Draining the worker first keeps searches off it during that window:
+
+1. `memoria workers drain <name>`, and wait for `inFlight` to reach 0 in `memoria workers list`.
+2. Generate a new token and write it to the worker's token file. Restart the worker.
+3. Write it to the sidecar's file for that worker, and restart the sidecar. A restart puts every drained worker back, so there is no separate enable.
+4. Check that `memoria workers list` shows the worker `up` with a closed circuit.
+
+Rotate a token that may have leaked the same way, at once. Until the sidecar restarts, the worker refuses the old token with 401, which counts as a failure and opens the worker's circuits, so the other workers carry the load.
+
+### Draining a worker and pausing background work
+
+These are runtime controls, held in the sidecar's memory and never written anywhere. A restart of the sidecar puts every worker back in rotation and resumes the queue, which returns it to its configuration. To keep a worker out for good, remove it from `workers`. Through `Memoria.Api` they need an admin key that is not bound to particular collections; see [`docs/cli.md`](cli.md#operating-the-backend).
+
+**Draining** a worker (`POST /workers/{name}:drain`) stops new calls to it. Calls in flight finish, and `inFlight` in `GET /workers` shows them leave. Heartbeats go on, so its state stays visible, but it gets no trial calls and no comparison probe. `POST /workers/{name}:enable` puts it back. A drained worker does not count toward `llm.workersUp` on `/ready`, so with every worker drained `/ready` reads `degraded` and searches run as in [Degraded mode](#degraded-mode). Draining does not change cache keys, so a worker that comes back unchanged keeps its cached answers.
+
+**Pausing** the queue (`POST /queue:pause`) starts no more reindex or embedding jobs. A running job runs to its end; cancel it to stop it sooner. Writes still land on disk and queue their jobs, so nothing is lost, but until `POST /queue:resume` new documents are not searchable and deleted ones still are. Do not pause while a document has to leave search, such as one holding a leaked secret. `GET /queue` reports `paused`. On shutdown a paused queue waits for the job already running, as an unpaused one does, but not for the jobs waiting behind it. Those persist in the queue's database and run after the restart.
 
 ## How calls are routed
 
@@ -70,7 +132,7 @@ Example:
 
 It never takes a worker out of service. This is for honest mistakes, such as two workers on different builds of a model. The bearer token is the trust boundary: a token holder is trusted, and a careful liar would answer this public text honestly anyway. A lockout on this signal could take embedding down over a legitimate model update.
 
-**If a worker did embed bad vectors,** take it out of `MEMORIA_QMD_WORKERS` and run a full force re-embed (`POST /reindex` with `force: true` and no collection). Old vectors stand until each document's new set is written. Jobs keep the names of the workers they used, for tracing, but vectors do not record which worker made them.
+**If a worker did embed bad vectors,** drain it, take it out of the pool's configuration, and run a full force re-embed (`POST /reindex` with `force: true` and no collection). Old vectors stand until each document's new set is written. Jobs keep the names of the workers they used, for tracing, but vectors do not record which worker made them.
 
 ### Degraded mode
 
@@ -95,7 +157,7 @@ When no worker can serve a role, search skips the step that needs it rather than
 
 `llm.embedDisagreement` names any workers that embedded the same text differently. That is reported only, and does not make `status` degraded.
 
-`GET /workers` lists each worker's state, circuits, whether it disagrees, last heartbeat, in-flight calls, queue depth and error rate.
+`GET /workers` lists each worker's state, circuits, whether it disagrees, whether it is drained, last heartbeat, in-flight calls, queue depth and error rate.
 
 ## Embedding jobs in remote mode
 

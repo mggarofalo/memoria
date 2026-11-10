@@ -20,7 +20,7 @@ interface Fleet {
   done(): Promise<void>;
 }
 
-async function fleet(over: { a?: Partial<PoolWorkerConfig>; b?: Partial<PoolWorkerConfig>; bFile?: string } = {}): Promise<Fleet> {
+async function fleet(over: { a?: Partial<PoolWorkerConfig>; b?: Partial<PoolWorkerConfig>; bFile?: string; reserve?: number } = {}): Promise<Fleet> {
   const a = await new MockWorker(8).start();
   const b = await new MockWorker(8, over.bFile).start();
   const attempts = new Map<string, number>();
@@ -39,6 +39,7 @@ async function fleet(over: { a?: Partial<PoolWorkerConfig>; b?: Partial<PoolWork
     fetch: countingFetch,
     now: () => now,
     breaker: { threshold: 3, backoffBaseMs: 1_000, backoffMaxMs: 8_000 },
+    ...(over.reserve !== undefined ? { interactiveReserve: over.reserve } : {}),
   });
   return {
     a,
@@ -623,5 +624,119 @@ test("heartbeats stay out of the per-call log", async () => {
     assert.deepEqual(seen, ["rerank"]);
   } finally {
     await worker.stop();
+  }
+});
+
+// --- operator control -----------------------------------------------------------
+
+test("a drained worker finishes what it has, gets nothing new, and comes back when enabled", async () => {
+  const f = await fleet();
+  try {
+    await f.pool.refresh();
+    let open = () => {};
+    const gate = new Promise<void>((r) => (open = r));
+    const running = f.pool.dispatch("rerank", "interactive", "rerank", async (t) => {
+      await gate;
+      return t.name;
+    });
+    await new Promise((r) => setImmediate(r));
+    const drained = f.pool.drain("a");
+    assert.equal(drained?.drained, true);
+    assert.equal(drained?.inFlight, 1, "the call in flight is still there");
+    assert.equal(await f.pool.dispatch("rerank", "interactive", "rerank", async (t) => t.name), "b", "new work goes elsewhere");
+    open();
+    assert.equal(await running, "a", "and the call in flight finishes where it started");
+    assert.equal(f.pool.workers()[0]!.inFlight, 0);
+    assert.equal(await f.pool.dispatch("rerank", "interactive", "rerank", async (t) => t.name), "b", "idle and preferred, a still gets nothing");
+
+    assert.equal(f.pool.enable("a")?.drained, false);
+    assert.equal(await f.pool.dispatch("rerank", "interactive", "rerank", async (t) => t.name), "a");
+  } finally {
+    await f.done();
+  }
+});
+
+test("with every worker drained, nothing is served and status says so, but heartbeats go on", async () => {
+  const f = await fleet();
+  try {
+    await f.pool.refresh();
+    f.pool.drain("a");
+    f.pool.drain("b");
+    const beats = f.a.count("/health");
+    await f.pool.refresh();
+    assert.ok(f.a.count("/health") > beats, "a drained worker is still watched");
+    assert.deepEqual(f.pool.status(), { embed: false, rerank: false, generate: false });
+    assert.equal(f.pool.documentsUp(), false);
+    assert.equal(f.pool.backgroundCapacity("embed"), 0);
+    assert.equal(await f.pool.confirmDocuments(), false, "a drained worker is not asked to prove itself");
+    await assert.rejects(rerank(f), (e) => e instanceof WorkerError && e.code === "no_worker");
+    assert.equal(f.a.count("/v1/rerank") + f.b.count("/v1/rerank"), 0);
+    assert.deepEqual(f.pool.workers().map((w) => [w.name, w.state, w.drained]), [["a", "up", true], ["b", "up", true]]);
+  } finally {
+    await f.done();
+  }
+});
+
+test("draining or enabling a name not in the pool changes nothing", async () => {
+  const f = await fleet();
+  try {
+    assert.equal(f.pool.drain("nobody"), null);
+    assert.equal(f.pool.enable("nobody"), null);
+    assert.ok(f.pool.workers().every((w) => !w.drained));
+    assert.equal(f.pool.drain("a")?.drained, true);
+    assert.equal(f.pool.drain("a")?.drained, true, "draining twice is the same as once");
+  } finally {
+    await f.done();
+  }
+});
+
+test("a worker's own availability settings decide when its circuit opens and for how long", async () => {
+  const f = await fleet({ a: { availability: { failureThreshold: 1, backoffMs: 5_000 } }, b: { capabilities: ["generate"] } });
+  try {
+    await f.pool.refresh();
+    f.a.on("POST /v1/rerank", () => ({ status: 500, body: { error: "boom" } }));
+    await assert.rejects(rerank(f));
+    assert.equal(f.pool.workers()[0]!.circuits.rerank, "open", "one failure, not the pool's three");
+    f.tick(1_000);
+    assert.equal(f.pool.canServe("rerank"), false, "the pool's 1 s backoff does not apply");
+    f.tick(4_000);
+    assert.equal(f.pool.canServe("rerank"), true);
+  } finally {
+    await f.done();
+  }
+});
+
+test("the interactive reserve can be set, and background work always keeps one slot", async () => {
+  const none = await fleet({ a: { maxConcurrent: 2 }, b: { capabilities: ["generate"] }, reserve: 0 });
+  try {
+    await none.pool.refresh();
+    assert.equal(none.pool.backgroundCapacity("embed"), 2, "no reserve: every slot");
+  } finally {
+    await none.done();
+  }
+  const all = await fleet({ a: { maxConcurrent: 4 }, b: { capabilities: ["generate"] }, reserve: 10 });
+  try {
+    await all.pool.refresh();
+    assert.equal(all.pool.backgroundCapacity("embed"), 1, "a reserve past the slots still leaves background one");
+  } finally {
+    await all.done();
+  }
+});
+
+test("a drained embedder does not count toward the comparison, so one worker left is not compared with nothing", async () => {
+  const compared = await fleet();
+  try {
+    await compared.pool.refresh();
+    assert.ok(compared.a.count("/v1/embed") > 0, "two embedders in rotation are compared");
+  } finally {
+    await compared.done();
+  }
+  const f = await fleet();
+  try {
+    f.pool.drain("b");
+    await f.pool.refresh();
+    assert.equal(f.a.count("/v1/embed") + f.b.count("/v1/embed"), 0, "with one left in rotation there is no comparison");
+  } finally {
+    await f.done();
   }
 });

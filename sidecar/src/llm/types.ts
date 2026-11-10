@@ -101,6 +101,18 @@ export interface PoolWorkerConfig {
   priority: number;
   /** Calls this sidecar sends this worker at once. */
   maxConcurrent: number;
+  /** When this worker's circuits open and how long they stay open. Unset fields take the pool's. */
+  availability?: Partial<WorkerAvailability>;
+}
+
+/** A worker's circuit breaker, as configured. */
+export interface WorkerAvailability {
+  /** Consecutive failures that open a role's circuit. */
+  failureThreshold: number;
+  /** First wait before a trial call; it doubles after each failed trial. */
+  backoffMs: number;
+  /** Longest that wait grows to. */
+  maxBackoffMs: number;
 }
 
 /** What a search went without. Reported to callers with `degraded: true`. */
@@ -129,6 +141,8 @@ export interface WorkerView {
   calls: number;
   /** Failed share of the last 100 calls. */
   errorRate: number;
+  /** An operator took this worker out of rotation. It finishes what it has and gets no new calls. */
+  drained: boolean;
 }
 
 export interface PoolLoad {

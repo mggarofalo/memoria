@@ -43,7 +43,7 @@ The same file then proves the operator's off switch against the collection next 
 
 ## Adding checks
 
-Add a function to `checks.ts` or to the file for its area (`auth-*.ts`, `ingest-*.ts`, `migrate*.ts`, `sources.ts`), and call it from `run.ts`, before `rateLimits`. Only the final scans, `noModels` and `secretsAbsent`, may follow it, because it uses up the failed-auth limit for the address.
+Add a function to `checks.ts` or to the file for its area (`auth-*.ts`, `ingest-*.ts`, `migrate*.ts`, `sources.ts`, `ops.ts` for workers, the queue, reindex and readiness), and call it from `run.ts`, before `rateLimits`. Only the final scans, `noModels` and `secretsAbsent`, may follow it, because it uses up the failed-auth limit for the address.
 
 Keep checks deterministic. The rate limits are fixed and their windows are 30 minutes, so a 429 arrives on an exact request however slow the machine is, and `rateLimits` uses its own key. Other checks can make up to 100 requests with one key before hitting the limit.
 

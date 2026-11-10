@@ -35,7 +35,7 @@ The process logs JSON lines to stdout. The first reranked query after start pays
 
 ### Configuration
 
-Everything is an environment variable. See [`.env.example`](.env.example) for the full list.
+Everything is an environment variable, except that in remote LLM mode the worker pool and the queue's tuning can come from one JSON file instead, named by `MEMORIA_QMD_CONFIG_FILE` ([docs/workers.md](../docs/workers.md#the-configuration-file)). See [`.env.example`](.env.example) for the full list.
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -89,10 +89,12 @@ Every route except `/health` and `/openapi.json` requires `Authorization: Bearer
 | `DELETE /documents?collection=&path=` | Delete by value: removes the file and queues a debounced update. Idempotent; returns 202 with `deleted: false` when no file existed. |
 | `POST /reindex` | Queue `update` (+ `embed`) for some or all collections, without waiting on the debounce. One worker runs one job at a time. |
 | `GET /reindex/jobs`, `GET /reindex/jobs/{id}` | Job history, which persists across restarts. |
-| `GET /queue` | Jobs by state, model calls by priority class, and calls per worker. |
+| `GET /queue` | Jobs by state, whether the queue is paused, model calls by priority class, and calls per worker. |
+| `POST /queue:pause`, `POST /queue:resume` | Start no more jobs, or start them again. A running job runs to its end, and writes still queue. Held in memory, so a restart resumes. |
 | `POST /queue/jobs/{id}:retry` | Queue a failed job again under the same id. 409 unless it has failed. |
 | `POST /queue/jobs/{id}:cancel` | End a waiting job at once. A running job stops at its next safe point, between batches when farming, so a long scan or an in-process embed runs on until it returns. A cancelled job reports `failed` with the error `Cancelled`. 409 if already finished. |
-| `GET /workers` | The worker pool's state, in remote LLM mode. |
+| `GET /workers` | The worker pool's state, in remote LLM mode, including which workers are drained. |
+| `POST /workers/{name}:drain`, `POST /workers/{name}:enable` | Take a worker out of rotation, letting its calls in flight finish, or put it back. Held in memory, so a restart puts every worker back. 404 `unknown_worker` for a name not in the pool, as always in local mode. See [docs/workers.md](../docs/workers.md#draining-a-worker-and-pausing-background-work). |
 | `GET /queue/dead-letters` | Documents set aside, and why. `GET /queue` has the count. |
 | `POST /queue/dead-letters:clear` | Let them embed again, and queue a job to do it. |
 | `POST /cache:purge` | Drop every cached rerank score and expansion. |

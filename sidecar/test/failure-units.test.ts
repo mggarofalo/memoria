@@ -13,7 +13,7 @@ import { cosineOf } from "../src/llm/probe.ts";
 import { acceptedEmbedFiles, RemoteLlm, type RemoteLlmOptions } from "../src/llm/remote.ts";
 import type { Capability, LocalFallback, PoolWorkerConfig } from "../src/llm/types.ts";
 import { parseEmbeddings, ResponseViolation } from "../src/llm/validate.ts";
-import { guardedFallback, sdkCacheFileName, type SdkDb } from "../src/llm/wire.ts";
+import { embedCapacity, guardedFallback, sdkCacheFileName, type SdkDb } from "../src/llm/wire.ts";
 import { openJobStore, retryJobStore, SqliteJobStore } from "../src/queue-store.ts";
 import { loadConfig } from "../src/config.ts";
 import { ManualScheduler, tempDir } from "./helpers.ts";
@@ -1522,4 +1522,12 @@ test("a job is stuck only while it waits: not while retrying, and not once it ha
   open();
   await queue.idle();
   assert.equal(queue.stuck(), null, "it has ended, and failed is a state of its own");
+});
+
+test("an embedding concurrency cap limits a job to fewer batches than the free slots, and 0 means no cap", () => {
+  assert.equal(embedCapacity(6, 0), 6);
+  assert.equal(embedCapacity(6, undefined), 6);
+  assert.equal(embedCapacity(6, 2), 2);
+  assert.equal(embedCapacity(1, 4), 1, "a cap never adds slots");
+  assert.equal(embedCapacity(0, 4), 0, "and with no worker there is nothing to run on");
 });

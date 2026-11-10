@@ -71,7 +71,7 @@ public static partial class AdminKeyEndpoints
 			return TypedResults.Problem(
 				statusCode: StatusCodes.Status404NotFound,
 				title: "Unavailable without API keys",
-				detail: "Memoria:Auth:Mode is Disabled. Key management and writing to the corpus need API keys.",
+				detail: "Memoria:Auth:Mode is Disabled. Key management, operations and writing to the corpus need API keys.",
 				extensions: new Dictionary<string, object?> { ["code"] = "auth_disabled" });
 		}
 
@@ -236,7 +236,7 @@ public static partial class AdminKeyEndpoints
 		return collections.All(IsValidCollectionName) ? null : $"Collection names must be 1 to {MaxCollectionNameLength} characters with no slash or surrounding whitespace. They are case-sensitive.";
 	}
 
-	private static bool IsValidCollectionName(string? name)
+	internal static bool IsValidCollectionName(string? name)
 	{
 		return !string.IsNullOrWhiteSpace(name)
 			&& name.Length <= MaxCollectionNameLength

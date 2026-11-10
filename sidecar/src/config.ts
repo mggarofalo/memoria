@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
-import type { Capability, PoolWorkerConfig } from "./llm/types.ts";
+import { readFileSync } from "node:fs";
+import type { Capability, PoolWorkerConfig, WorkerAvailability } from "./llm/types.ts";
 
 /**
  * Process configuration. Everything comes from environment variables so the
@@ -76,6 +77,10 @@ export type LlmConfig =
       pollMs: number;
       /** Most text one embedding batch carries. */
       embedBatchBytes: number;
+      /** Most embedding batches one job runs at once. 0 means every free background slot. */
+      embedConcurrency: number;
+      /** Slots per worker that background work may not use. */
+      interactiveReserve: number;
       /** Deadline for one search-time rerank call. */
       rerankTimeoutMs: number;
       /** Deadline for all of one search's model work. */
@@ -117,20 +122,67 @@ function loadWorkerList(env: NodeJS.ProcessEnv, raw: string): PoolWorkerConfig[]
   } catch {
     throw new Error("MEMORIA_QMD_WORKERS is not valid JSON");
   }
-  if (!Array.isArray(parsed) || parsed.length === 0) throw new Error("MEMORIA_QMD_WORKERS must be a non-empty list");
+  return workerEntries(env, parsed, "MEMORIA_QMD_WORKERS");
+}
+
+function workerEntries(env: NodeJS.ProcessEnv, parsed: unknown, at: string): PoolWorkerConfig[] {
+  if (!Array.isArray(parsed) || parsed.length === 0) throw new Error(`${at} must be a non-empty list`);
   const names = new Set<string>();
-  return parsed.map((item: unknown, index) => workerFromEntry(env, item, `MEMORIA_QMD_WORKERS[${index}]`, names));
+  return parsed.map((item: unknown, index) => workerFromEntry(env, item, `${at}[${index}]`, names));
+}
+
+/**
+ * `MEMORIA_QMD_CONFIG_FILE`: the worker pool and the queue's tuning in one JSON file, in
+ * place of hand-edited variables. Read once, at startup. Tokens never go in it: each
+ * worker names the variable that holds its token, as in `MEMORIA_QMD_WORKERS`.
+ */
+interface ConfigFile {
+  workers?: unknown;
+  queue: Record<string, unknown>;
+}
+
+const CONFIG_KEYS = ["workers", "queue"] as const;
+const QUEUE_KEYS = ["embedBatchBytes", "embedConcurrency", "interactiveReserve"] as const;
+
+function readConfigFile(env: NodeJS.ProcessEnv): ConfigFile {
+  const file = trimmed(env.MEMORIA_QMD_CONFIG_FILE);
+  if (!file) return { queue: {} };
+  let text: string;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch {
+    throw new Error(`MEMORIA_QMD_CONFIG_FILE names ${file}, which cannot be read`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error("MEMORIA_QMD_CONFIG_FILE is not valid JSON");
+  }
+  const root = readObject(parsed, "The config file", CONFIG_KEYS);
+  const queue = root.queue === undefined ? {} : readObject(root.queue, "queue", QUEUE_KEYS);
+  return { ...(root.workers !== undefined ? { workers: root.workers } : {}), queue };
+}
+
+/** The variable, or the file's setting, but not both: two places for one number is how they drift. */
+function batchBytes(env: NodeJS.ProcessEnv, queue: Record<string, unknown>): number {
+  const name = "MEMORIA_QMD_EMBED_BATCH_BYTES";
+  if (trimmed(env[name]) && queue.embedBatchBytes !== undefined) throw new Error(`Set ${name} or the config file's queue.embedBatchBytes, not both`);
+  if (queue.embedBatchBytes !== undefined) return readCount(queue.embedBatchBytes, 0, "queue.embedBatchBytes", 1024, 16 * 1024 * 1024);
+  return readInt(env[name], 256 * 1024, name, 1024, 16 * 1024 * 1024);
 }
 
 function workerFromEntry(env: NodeJS.ProcessEnv, item: unknown, at: string, names: Set<string>): PoolWorkerConfig {
   if (typeof item !== "object" || item === null) throw new Error(`${at} must be an object`);
   const w = item as Record<string, unknown>;
   if ("token" in w) throw new Error(`${at} must not hold a token; name an environment variable with tokenEnv`);
+  readObject(w, at, WORKER_KEYS);
   const name = readWorkerName(w.name, at, names);
   if (typeof w.url !== "string") throw new Error(`${at}.url is required`);
   const url = checkWorkerUrl(w.url, `${at}.url`, env);
   const token = readTokenEnv(env, w.tokenEnv, at);
   checkWorkerToken(token, url, `${at}.tokenEnv`);
+  const availability = readAvailability(w.availability, `${at}.availability`);
   return {
     name,
     url: w.url,
@@ -138,11 +190,35 @@ function workerFromEntry(env: NodeJS.ProcessEnv, item: unknown, at: string, name
     capabilities: readCapabilities(w.capabilities, at),
     priority: readCount(w.priority, 100, `${at}.priority`, 0, 100000),
     maxConcurrent: readCount(w.maxConcurrent, 4, `${at}.maxConcurrent`, 1, 256),
+    ...(availability ? { availability } : {}),
   };
 }
 
+/** An object holding only these keys, so a misspelt setting is an error rather than a default. */
+function readObject(value: unknown, at: string, keys: readonly string[]): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error(`${at} must be an object`);
+  const unknown = Object.keys(value).filter((k) => !keys.includes(k));
+  if (unknown.length > 0) throw new Error(`${at} has unknown settings: ${unknown.join(", ")}. It takes ${keys.join(", ")}`);
+  return value as Record<string, unknown>;
+}
+
+const WORKER_KEYS = ["name", "url", "tokenEnv", "capabilities", "priority", "maxConcurrent", "availability"] as const;
+const AVAILABILITY_KEYS = ["failureThreshold", "backoffMs", "maxBackoffMs"] as const;
+
+function readAvailability(value: unknown, at: string): Partial<WorkerAvailability> | undefined {
+  if (value === undefined) return undefined;
+  const a = readObject(value, at, AVAILABILITY_KEYS);
+  const read: Partial<WorkerAvailability> = {};
+  if (a.failureThreshold !== undefined) read.failureThreshold = readCount(a.failureThreshold, 3, `${at}.failureThreshold`, 1, 100);
+  if (a.backoffMs !== undefined) read.backoffMs = readCount(a.backoffMs, 5_000, `${at}.backoffMs`, 100, 3_600_000);
+  if (a.maxBackoffMs !== undefined) read.maxBackoffMs = readCount(a.maxBackoffMs, 60_000, `${at}.maxBackoffMs`, 100, 86_400_000);
+  if ((read.maxBackoffMs ?? 60_000) < (read.backoffMs ?? 5_000)) throw new Error(`${at}.maxBackoffMs must not be shorter than backoffMs`);
+  return read;
+}
+
 function readWorkerName(name: unknown, at: string, names: Set<string>): string {
-  if (typeof name !== "string" || !/^[\w.-]{1,64}$/.test(name)) throw new Error(`${at}.name must be letters, digits, dots, dashes or underscores`);
+  // A dot segment would be normalized out of the URL that drains it, so it could never be drained.
+  if (typeof name !== "string" || !/^[\w.-]{1,64}$/.test(name) || name === "." || name === "..") throw new Error(`${at}.name must be letters, digits, dots, dashes or underscores, and not . or ..`);
   if (names.has(name)) throw new Error(`${at}.name repeats "${name}"`);
   names.add(name);
   return name;
@@ -255,15 +331,19 @@ function rejectSecretReuse(workers: readonly PoolWorkerConfig[], secret: string 
   if (reused) throw new Error(`The token for worker "${reused.name}" is the sidecar's own secret. Give each worker its own.`);
 }
 
-function loadWorkers(env: NodeJS.ProcessEnv): PoolWorkerConfig[] {
+function loadWorkers(env: NodeJS.ProcessEnv, file: ConfigFile): PoolWorkerConfig[] {
   const list = trimmed(env.MEMORIA_QMD_WORKERS);
   const raw = trimmed(env.MEMORIA_QMD_WORKER_URL);
-  if (list && raw) throw new Error("Set MEMORIA_QMD_WORKERS or MEMORIA_QMD_WORKER_URL, not both");
+  const sources = [file.workers !== undefined, list !== undefined, raw !== undefined].filter(Boolean).length;
+  if (sources > 1) throw new Error("Set the workers in one place: the config file's workers, MEMORIA_QMD_WORKERS or MEMORIA_QMD_WORKER_URL");
+  if (file.workers !== undefined) return workerEntries(env, file.workers, "workers");
   if (list) return loadWorkerList(env, list);
-  if (!raw) throw new Error("MEMORIA_QMD_WORKERS or MEMORIA_QMD_WORKER_URL is required when MEMORIA_QMD_LLM=remote");
+  if (!raw) throw new Error("The config file's workers, MEMORIA_QMD_WORKERS or MEMORIA_QMD_WORKER_URL is required when MEMORIA_QMD_LLM=remote");
   const url = checkWorkerUrl(raw, "MEMORIA_QMD_WORKER_URL", env);
   const token = resolveSecret(env, "MEMORIA_QMD_WORKER_TOKEN");
   checkWorkerToken(token, url, "MEMORIA_QMD_WORKER_TOKEN");
+  // The worker is named by its host and port, which drain and enable then take, up to 64 characters.
+  if (url.host.length > 64) throw new Error("MEMORIA_QMD_WORKER_URL's host and port are over 64 characters, too long to name the worker. Use MEMORIA_QMD_WORKERS to give it a name");
   return [{ name: url.host, url: raw, token, capabilities: [...CAPABILITIES], priority: 100, maxConcurrent: 4 }];
 }
 
@@ -281,7 +361,8 @@ function loadLlmConfig(env: NodeJS.ProcessEnv, secret: string | undefined): LlmC
   if (mode === "local") return { mode };
   if (mode !== "remote") throw new Error(`MEMORIA_QMD_LLM must be "local" or "remote", got "${mode}"`);
 
-  const workers = loadWorkers(env);
+  const file = readConfigFile(env);
+  const workers = loadWorkers(env, file);
   rejectSecretReuse(workers, secret);
   return {
     mode,
@@ -289,7 +370,9 @@ function loadLlmConfig(env: NodeJS.ProcessEnv, secret: string | undefined): LlmC
     fallback: readBool(env.MEMORIA_QMD_LLM_FALLBACK, true),
     embedDimensions: readInt(env.MEMORIA_QMD_EMBED_DIMENSIONS, 768, "MEMORIA_QMD_EMBED_DIMENSIONS", 0, 65536),
     pollMs: readInt(env.MEMORIA_QMD_WORKER_POLL_MS, 10_000, "MEMORIA_QMD_WORKER_POLL_MS", 100, 3_600_000),
-    embedBatchBytes: readInt(env.MEMORIA_QMD_EMBED_BATCH_BYTES, 256 * 1024, "MEMORIA_QMD_EMBED_BATCH_BYTES", 1024, 16 * 1024 * 1024),
+    embedBatchBytes: batchBytes(env, file.queue),
+    embedConcurrency: readCount(file.queue.embedConcurrency, 0, "queue.embedConcurrency", 0, 1024),
+    interactiveReserve: readCount(file.queue.interactiveReserve, 1, "queue.interactiveReserve", 0, 255),
     rerankTimeoutMs: readInt(env.MEMORIA_QMD_RERANK_TIMEOUT_MS, 20_000, "MEMORIA_QMD_RERANK_TIMEOUT_MS", 100, 110_000),
     searchDeadlineMs: readInt(env.MEMORIA_QMD_SEARCH_DEADLINE_MS, 60_000, "MEMORIA_QMD_SEARCH_DEADLINE_MS", 100, 110_000),
   };

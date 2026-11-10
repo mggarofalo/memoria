@@ -10,7 +10,7 @@ import { HttpError } from "./errors.ts";
 import { JobCancelled, JobPartial, JobQueue, type EmbedSummary, type JobResult, type JobRunContext, type JobScheduler, type JobStore, type ReindexRequest, type Job } from "./jobs.ts";
 import { MetadataIndex } from "./metadata.ts";
 import { registerRoutes } from "./routes.ts";
-import { documentSchema, errorSchema, jobSchema, metadataSchema } from "./schemas.ts";
+import { documentSchema, errorSchema, jobSchema, metadataSchema, workerSchema } from "./schemas.ts";
 import type { QmdBackend } from "./store.ts";
 import { resolveVersion } from "./version.ts";
 
@@ -143,6 +143,7 @@ export async function buildApp(options: BuildAppOptions): Promise<App> {
   app.addSchema(metadataSchema);
   app.addSchema(jobSchema);
   app.addSchema(documentSchema);
+  app.addSchema(workerSchema);
 
   await app.register(swagger, {
     openapi: {
@@ -184,7 +185,7 @@ export async function buildApp(options: BuildAppOptions): Promise<App> {
       }
       // The router needs a regex to tell actions apart; clients do not. The double
       // colon is swagger's escape for a literal one.
-      const action = /^\/(queue\/jobs)\/:(\w+)\(.*\)::([\w-]+)$/.exec(url);
+      const action = /^\/(queue\/jobs|workers)\/:(\w+)\(.*\)::([\w-]+)$/.exec(url);
       if (action) return { schema, url: `/${action[1]}/{${action[2]}}::${action[3]}` };
       return { schema, url };
     },

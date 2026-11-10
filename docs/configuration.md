@@ -34,6 +34,15 @@ never starts half-configured.
 | `GET /v1/admin/keys` | List API keys. |
 | `DELETE /v1/admin/keys/{id}` | Revoke an API key. |
 | `POST /v1/admin/keys/{id}:rotate` | Rotate an API key. |
+| `GET /v1/admin/workers` | List inference workers. See [Operations](#operations). |
+| `POST /v1/admin/workers/{name}:drain` | Take a worker out of rotation. |
+| `POST /v1/admin/workers/{name}:enable` | Put a drained worker back. |
+| `GET /v1/admin/queue` | Background queue status and recent jobs. |
+| `POST /v1/admin/queue:pause` | Pause background work. |
+| `POST /v1/admin/queue:resume` | Resume background work. |
+| `POST /v1/admin/queue/jobs/{id}:retry` | Retry a failed job. |
+| `POST /v1/admin/queue/jobs/{id}:cancel` | Cancel a job. |
+| `POST /v1/admin/reindex` | Queue a reindex. |
 
 ## `Memoria:Sidecar` — reaching memoria-qmd
 
@@ -125,13 +134,33 @@ Scopes do not imply one another.
 |---|---|
 | `read` | Search, documents, collections, status, and the MCP endpoint. |
 | `ingest` | The ingest routes: `/v1/documents`, `/v1/ingest/session` and `/v1/ingest/rendered`. |
-| `admin` | Key management and backend detail: the full `/ready` report and how the backend failed. |
+| `admin` | Key management, [operations](#operations) on the workers and the queue, and backend detail: the full `/ready` report and how the backend failed. |
 
 `admin` does **not** imply `read`. A key used to manage keys is not a key that
 reads the corpus, so day-to-day clients never carry key-management power and a
 bootstrapped key reads nothing. An admin can issue itself a reader, but that
 leaves an audit record and a separate key to revoke. Give a key both scopes if
 you want both.
+
+### Operations
+
+The routes under `/v1/admin` other than `/v1/admin/keys` operate the backend. Each one proxies a sidecar admin route over the shared-secret channel, so the sidecar holds the state and the API decides who may change it.
+
+| Route | Does |
+|---|---|
+| `GET /v1/admin/workers` | Each worker's state, circuits, load, error rate and whether it is drained. Empty in local LLM mode. Never includes tokens. |
+| `POST /v1/admin/workers/{name}:drain` | Take the worker out of rotation. Calls in flight finish, and it gets no new ones. `404` with code `unknown_worker` for a name not in the pool. |
+| `POST /v1/admin/workers/{name}:enable` | Put it back. |
+| `GET /v1/admin/queue` | Jobs by state, whether the queue is paused and persistent, documents set aside, model calls by priority class, and the jobs the sidecar remembers, newest first. |
+| `POST /v1/admin/queue:pause` | Start no more background jobs. A running job runs to its end. Writes still queue, and until the queue resumes new documents are not searchable and deleted ones still are. |
+| `POST /v1/admin/queue:resume` | Let waiting jobs start. |
+| `POST /v1/admin/queue/jobs/{id}:retry` | Queue a failed job again under the same id. `409` unless it failed. |
+| `POST /v1/admin/queue/jobs/{id}:cancel` | Stop a job that has not finished. `409` if it has. |
+| `POST /v1/admin/reindex` | Rescan and, unless `embed` is `false`, embed. Body: optional `collections`, `embed` and `force`. Omitting `collections` means every collection; an empty list is refused. |
+
+**Who may call them.** These act on every collection at once, so they need the `admin` scope and a key that is not bound to particular collections: an admin-only key, or an admin key with `allCollections: true`. A key that lists collections gets `403` with code `collection_scoped_key`, even with the `admin` scope, and a key without `admin` gets `403`. Both are decided before the request body is read, so a body that would not parse gets the same `403`, and neither reaches the sidecar. A body sent as anything but JSON selects no operation at all: routing answers `415` to a valid key and `401` to none, and the operation never runs. Like key management, they are unavailable when `Memoria:Auth:Mode` is `Disabled`. Every call is audited under its operation name, such as `drainWorker`.
+
+**What lasts.** Drain and pause are held in the sidecar's memory, not in the API or on disk: a sidecar restart puts every worker back and resumes the queue. To keep a worker out, remove it from the sidecar's configuration ([docs/workers.md](workers.md#the-configuration-file)). A worker name or job id the sidecar could not hold is refused with `400` before the sidecar is called. The sidecar's own refusals (`400`, `404`, `409`) pass through with its `code`. A sidecar that does not have the route at all, because it is older than the API, gets `502` with code `sidecar_route_missing`.
 
 ### Collection scoping
 
@@ -217,6 +246,8 @@ The trace id comes from the caller's `traceparent` when they send one, so it is 
 correlation only; the audit id is what identifies a record. Requests with no valid
 key are logged but not audited: they have no key to attribute, and recording them
 would let anyone grow the table.
+
+Every request also gets one line in the log stream with its method, route pattern, status, time, trace id, peer address and key id. Anonymous `/health` and `/ready` probes log at debug, so an orchestrator's polling does not fill the log. A probe that carries a key, such as `memoria ready`, logs at information like any other request, so the trace id it prints can be found.
 
 **The audit log is not tamper-evident against the key it records.** `Audit:MaxRowsPerKey`
 keeps one noisy key from growing the table or evicting another key's history, but it also

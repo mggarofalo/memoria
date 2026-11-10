@@ -235,6 +235,8 @@ export class JobQueue {
   #idleWaiters: Array<() => void> = [];
   #storeHealthy = true;
   #suspended = false;
+  /** No job starts while set. In memory only, so a restart always resumes. */
+  #paused = false;
   // Replaced at most once: see `adoptStore`.
 
   constructor(runner: JobRunner, options: JobQueueOptions = {}) {
@@ -522,7 +524,7 @@ export class JobQueue {
   }
 
   #pump(): void {
-    if (this.#active || this.#suspended) return;
+    if (this.#active || this.#suspended || this.#paused) return;
     const job = this.#ready.shift();
     if (!job) return;
     this.#active = job;
@@ -690,6 +692,23 @@ export class JobQueue {
     entry.deferred = false;
   }
 
+  /**
+   * Start no more jobs. A running job runs to its end, and writes still queue, so
+   * nothing accepted is lost: it waits. Held in memory: a restart resumes.
+   */
+  pause(): void {
+    this.#paused = true;
+  }
+
+  resume(): void {
+    this.#paused = false;
+    this.#schedulePump();
+  }
+
+  get paused(): boolean {
+    return this.#paused;
+  }
+
   // --- reading ---------------------------------------------------------------
 
   get(id: string): Job | undefined {
@@ -743,13 +762,15 @@ export class JobQueue {
       if (!this.#entries.get(job.id)?.deferred) this.#release(job);
     }
     const waitingOnRetry = (): number => [...this.#held.keys()].filter((id) => this.#entries.get(id)?.deferred).length;
-    const finished = () => this.#pending === waitingOnRetry();
-    if (finished()) return Promise.resolve(true);
+    // Paused, nothing new starts, so only the job already running is waited for.
+    const finished = this.#paused ? () => this.#active === null : () => this.#pending === waitingOnRetry();
+    const done = (): boolean => this.#pending === waitingOnRetry();
+    if (finished()) return Promise.resolve(done());
     return new Promise((resolve) => {
       const timer = this.#scheduler.setTimeout(() => resolve(false), timeoutMs);
       void this.#until(finished).then(() => {
         this.#scheduler.clearTimeout(timer);
-        resolve(true);
+        resolve(done());
       });
     });
   }

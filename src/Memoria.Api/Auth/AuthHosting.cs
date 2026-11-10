@@ -31,6 +31,7 @@ public static partial class AuthHosting
 		services.AddScoped<ICallerScope, HttpCallerScope>();
 		services.AddScoped<IRequestAudit, HttpRequestAudit>();
 		services.AddSingleton<IAuthorizationHandler, MemoriaScopeHandler>();
+		services.AddSingleton<IAuthorizationHandler, MemoriaUnboundKeyHandler>();
 
 		AuthenticationBuilder authentication = services.AddAuthentication(ApiKeyAuthenticationHandler.SchemeName);
 		if (auth.IsDisabled)

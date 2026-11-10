@@ -154,6 +154,8 @@ var statusClasses = map[int]statusClass{
 // working as designed, which nobody guesses.
 func forbiddenHint(p problem, fallback string) string {
 	switch {
+	case p.Code == "collection_scoped_key":
+		return "operations act on every collection, so they need an admin key bound to none. Issue one: memoria keys create --label ops --scope admin"
 	case p.Code != "insufficient_scope":
 		return fallback
 	case strings.Contains(p.Detail, "'read'"):
@@ -161,7 +163,7 @@ func forbiddenHint(p problem, fallback string) string {
 			"Issue a key to search with: memoria keys create --label <name> --scope read --collection <name>, " +
 			"then use it with memoria auth login --profile <name>"
 	case strings.Contains(p.Detail, "'admin'"):
-		return "managing keys needs a key with the admin scope. The first one comes from running the server with --bootstrap-admin-key"
+		return "managing keys and operating the backend need a key with the admin scope. The first one comes from running the server with --bootstrap-admin-key"
 	}
 	return fallback
 }

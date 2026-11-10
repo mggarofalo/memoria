@@ -141,6 +141,10 @@ export interface QmdBackend extends MetadataSource {
   workers(): WorkerView[];
   /** Null in local mode. */
   poolLoad(): PoolLoad | null;
+  /** Take a worker out of rotation. Null when no worker has that name, as always in local mode. */
+  drainWorker(name: string): WorkerView | null;
+  /** Put a drained worker back. Null when no worker has that name. */
+  enableWorker(name: string): WorkerView | null;
   /** Resolve a path, `qmd://` URI, or docid to document metadata (no body). */
   get(reference: string): Promise<DocumentInfo | DocumentLookupError>;
   getDocumentBody(filepath: string, options: { fromLine?: number; maxLines?: number }): Promise<string | null>;
@@ -182,6 +186,10 @@ export type LlmOptions =
       statusPollMs?: number;
       /** Tuning for the embedding farm's batches. */
       embedBatchBytes?: number;
+      /** Most embedding batches one job runs at once. 0 means as many as workers have background slots. */
+      embedConcurrency?: number;
+      /** Slots per worker that background work may not use. */
+      interactiveReserve?: number;
       /** Tuning for the circuit breaker. */
       breaker?: Partial<BreakerOptions>;
       /** Deadline for one search-time rerank call. */
@@ -318,7 +326,7 @@ function remoteHealth(remote: RemoteLlm, documentsSetAside: number): LlmHealth {
     mode: "remote",
     degraded: unavailable.length > 0,
     unavailable,
-    workersUp: workers.filter((w) => w.state === "up" || w.state === "busy").length,
+    workersUp: workers.filter((w) => !w.drained && (w.state === "up" || w.state === "busy")).length,
     workersTotal: workers.length,
     embedDisagreement: [...remote.pool.disagreeing],
     documentsSetAside,
@@ -480,6 +488,8 @@ export async function openBackend(options: OpenBackendOptions): Promise<OpenedBa
   llmHealth,
   workers: () => remote?.pool.workers() ?? [],
   poolLoad: () => remote?.pool.load() ?? null,
+  drainWorker: (name) => remote?.pool.drain(name) ?? null,
+  enableWorker: (name) => remote?.pool.enable(name) ?? null,
   get: (reference) => store.get(reference, { includeBody: false }),
   getDocumentBody: (filepath, o) => store.getDocumentBody(filepath, o),
   multiGet: (pattern, o) => store.multiGet(pattern, o),

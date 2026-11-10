@@ -30,6 +30,14 @@ public sealed class SidecarContractTests
 		{ "post", "/reindex" },
 		{ "get", "/reindex/jobs" },
 		{ "get", "/reindex/jobs/{id}" },
+		{ "post", "/queue/jobs/{id}:retry" },
+		{ "post", "/queue/jobs/{id}:cancel" },
+		{ "get", "/queue" },
+		{ "post", "/queue:pause" },
+		{ "post", "/queue:resume" },
+		{ "get", "/workers" },
+		{ "post", "/workers/{name}:drain" },
+		{ "post", "/workers/{name}:enable" },
 	};
 
 	[Theory]
@@ -66,6 +74,14 @@ public sealed class SidecarContractTests
 		{ "get", "/reindex/jobs", "200", typeof(SidecarJobsResponse) },
 		{ "get", "/reindex/jobs/{id}", "200", typeof(SidecarJobResponse) },
 		{ "get", "/status", "500", typeof(SidecarError) },
+		{ "post", "/queue/jobs/{id}:retry", "202", typeof(SidecarJobResponse) },
+		{ "post", "/queue/jobs/{id}:cancel", "202", typeof(SidecarJobResponse) },
+		{ "get", "/queue", "200", typeof(SidecarQueue) },
+		{ "post", "/queue:pause", "200", typeof(SidecarPauseResponse) },
+		{ "post", "/queue:resume", "200", typeof(SidecarPauseResponse) },
+		{ "get", "/workers", "200", typeof(SidecarWorkersResponse) },
+		{ "post", "/workers/{name}:drain", "200", typeof(SidecarWorkerResponse) },
+		{ "post", "/workers/{name}:enable", "200", typeof(SidecarWorkerResponse) },
 	};
 
 	[Theory]

@@ -89,6 +89,8 @@ export interface RemoteLlmOptions {
   probeEveryMs?: number;
   onDisagreement?: (workers: readonly string[]) => void;
   searchDeadlineMs?: number;
+  /** Slots per worker that background work may not use. */
+  interactiveReserve?: number;
 }
 
 function basename(uri: string): string {
@@ -175,7 +177,7 @@ export class RemoteLlm implements LlmSurface {
     this.pool = new WorkerPool({
       workers: workersFrom(options),
       embedFiles: acceptedEmbedFiles(options.models.embed),
-      ...definedOnly({ breaker: options.breaker, timeouts: options.timeouts, fetch: options.fetch, onCall: options.onCall, now: options.now, probeEveryMs: options.probeEveryMs, onDisagreement: options.onDisagreement }),
+      ...definedOnly({ breaker: options.breaker, timeouts: options.timeouts, fetch: options.fetch, onCall: options.onCall, now: options.now, probeEveryMs: options.probeEveryMs, onDisagreement: options.onDisagreement, interactiveReserve: options.interactiveReserve }),
       interactiveBudgetMs: () => this.#remainingMs(),
       trial: (capability, target) => this.#trial(capability, target),
       probe: (target) => this.#probeVector(target),

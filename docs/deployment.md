@@ -322,7 +322,7 @@ The sidecar sends embedding, reranking and query expansion to workers on other m
 ]
 ```
 
-[workers.md](workers.md) covers the rest of the list's fields, and setting up a worker.
+[workers.md](workers.md) covers the rest of the list's fields, including each worker's `availability` thresholds, issuing and rotating worker tokens, and setting up a worker. The compose file takes the list from `MEMORIA_QMD_WORKERS`, so a compose install sets the pool there rather than in `MEMORIA_QMD_CONFIG_FILE`. To take a worker out for maintenance without editing the list, drain it with `memoria workers drain <name>` ([cli.md](cli.md#operating-the-backend)).
 
 ### With every worker down
 

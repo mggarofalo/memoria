@@ -256,7 +256,9 @@ public sealed record SidecarJob(
 	string? StartedAt,
 	string? FinishedAt,
 	SidecarJobResult? Result,
-	string? Error);
+	string? Error,
+	int? Attempts = null,
+	string? Worker = null);
 
 public sealed record SidecarJobRequest(IReadOnlyList<string>? Collections, bool Embed, bool Force, string Reason);
 
@@ -267,6 +269,57 @@ public sealed record SidecarUpdateSummary(int Collections, int Indexed, int Upda
 public sealed record SidecarEmbedSummary(int DocsProcessed, int ChunksEmbedded, int Errors, double DurationMs);
 
 public sealed record SidecarMetadataSummary(int Documents, int WithMetadata);
+
+/// <summary><c>GET /workers</c>. Empty in local LLM mode.</summary>
+public sealed record SidecarWorkersResponse(string Mode, IReadOnlyList<SidecarWorker> Workers);
+
+/// <summary>Result of <c>POST /workers/{name}:drain</c> and <c>:enable</c>.</summary>
+public sealed record SidecarWorkerResponse(SidecarWorker Worker);
+
+/// <summary>One worker in the pool, as the sidecar reports it. Never carries a URL path or token.</summary>
+public sealed record SidecarWorker(
+	string Name,
+	string Host,
+	string State,
+	string Circuit,
+	SidecarWorkerCircuits Circuits,
+	bool EmbedDisagrees,
+	IReadOnlyList<string> Capabilities,
+	int Priority,
+	int MaxConcurrent,
+	bool? EmbedModelCompatible,
+	string? RerankTransport,
+	string? LastHeartbeat,
+	int InFlight,
+	double QueueDepth,
+	int Calls,
+	double ErrorRate,
+	bool Drained);
+
+public sealed record SidecarWorkerCircuits(string Embed, string Rerank, string Generate, string Documents);
+
+/// <summary><c>GET /queue</c>.</summary>
+public sealed record SidecarQueue(
+	bool Paused,
+	SidecarJobCounts Jobs,
+	SidecarQueuePersistence Persistence,
+	int DeadLetters,
+	SidecarQueueClasses Classes,
+	IReadOnlyList<SidecarQueueWorker> Workers);
+
+/// <summary>Model calls one worker is running now, by priority class.</summary>
+public sealed record SidecarQueueWorker(string Name, int Interactive, int Background, double QueueDepth);
+
+public sealed record SidecarJobCounts(int Queued, int Held, int Running, int Succeeded, int Failed);
+
+public sealed record SidecarQueuePersistence(bool Enabled, bool Healthy);
+
+public sealed record SidecarQueueClasses(SidecarClassLoad Interactive, SidecarClassLoad Background);
+
+public sealed record SidecarClassLoad(int InFlight, int Waiting);
+
+/// <summary>Result of <c>POST /queue:pause</c> and <c>POST /queue:resume</c>.</summary>
+public sealed record SidecarPauseResponse(bool Paused, SidecarJobCounts Jobs);
 
 /// <summary>Source-generated serializer metadata for every sidecar wire type.</summary>
 [JsonSourceGenerationOptions(
@@ -290,4 +343,8 @@ public sealed record SidecarMetadataSummary(int Documents, int WithMetadata);
 [JsonSerializable(typeof(SidecarReindexRequest))]
 [JsonSerializable(typeof(SidecarJobResponse))]
 [JsonSerializable(typeof(SidecarJobsResponse))]
+[JsonSerializable(typeof(SidecarWorkersResponse))]
+[JsonSerializable(typeof(SidecarWorkerResponse))]
+[JsonSerializable(typeof(SidecarQueue))]
+[JsonSerializable(typeof(SidecarPauseResponse))]
 public sealed partial class SidecarJsonContext : JsonSerializerContext;

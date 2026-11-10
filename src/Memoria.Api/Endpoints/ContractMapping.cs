@@ -77,4 +77,64 @@ internal static class ContractMapping
 	{
 		return new IndexCollectionStatus(collection.Name, collection.Documents, collection.LastUpdated);
 	}
+
+	public static WorkerInfo ToContract(this SidecarWorker worker)
+	{
+		return new WorkerInfo(
+			worker.Name,
+			worker.Host,
+			worker.State,
+			worker.Drained,
+			worker.Circuit,
+			new WorkerCircuits(worker.Circuits.Embed, worker.Circuits.Rerank, worker.Circuits.Generate, worker.Circuits.Documents),
+			worker.Capabilities,
+			worker.Priority,
+			worker.MaxConcurrent,
+			worker.InFlight,
+			worker.QueueDepth,
+			worker.Calls,
+			worker.ErrorRate,
+			worker.LastHeartbeat,
+			worker.EmbedModelCompatible,
+			worker.EmbedDisagrees);
+	}
+
+	public static JobCounts ToContract(this SidecarJobCounts counts)
+	{
+		return new JobCounts(counts.Queued, counts.Held, counts.Running, counts.Succeeded, counts.Failed);
+	}
+
+	public static QueueState ToContract(this SidecarPauseResponse response)
+	{
+		return new QueueState(response.Paused, response.Jobs.ToContract());
+	}
+
+	public static QueueStatus ToContract(this SidecarQueue queue, IReadOnlyList<SidecarJob> jobs)
+	{
+		return new QueueStatus(
+			queue.Paused,
+			queue.Jobs.ToContract(),
+			queue.Persistence.Healthy,
+			queue.DeadLetters,
+			new PriorityLoad(queue.Classes.Interactive.InFlight, queue.Classes.Interactive.Waiting),
+			new PriorityLoad(queue.Classes.Background.InFlight, queue.Classes.Background.Waiting),
+			jobs.Select(ToContract).ToArray());
+	}
+
+	public static JobInfo ToContract(this SidecarJob job)
+	{
+		return new JobInfo(
+			job.Id,
+			job.State,
+			job.Request.Collections,
+			job.Request.Embed,
+			job.Request.Force,
+			job.Request.Reason,
+			job.CreatedAt,
+			job.StartedAt,
+			job.FinishedAt,
+			job.Error,
+			job.Attempts,
+			job.Worker);
+	}
 }
