@@ -560,6 +560,26 @@ test("an unexpanded query keeps its plain form with no expansion worker, and say
   }
 });
 
+test("a search rerun without its failed rerank stays unexpanded", async () => {
+  const { searchDegradable } = await import("../src/llm/degraded-search.ts");
+  const a = await new MockWorker(8).start();
+  const llm = new RemoteLlm({ workers: [workerConfig("a", a.url)], embedDimensions: 8, models: MODELS, fallback: null });
+  const validators = { validateLexQuery: () => null, validateSemanticQuery: () => null };
+  try {
+    a.on("POST /v1/rerank", () => ({ status: 503, body: {} }));
+    const runs: BackendSearchOptions[] = [];
+    const out = await searchDegradable(llm, validators, async (o) => {
+      runs.push(o);
+      if (o.rerank) await rerank(llm);
+      return [];
+    }, { query: "q", expand: false, limit: 5, minScore: 0, rerank: true });
+    assert.deepEqual(runs.map((o) => [o.rerank, o.expand, o.query]), [[true, false, "q"], [false, false, "q"]]);
+    assert.deepEqual(out.degradedReasons, ["no_rerank"]);
+  } finally {
+    await a.stop();
+  }
+});
+
 test("withholding expansion is per search, so searches running together each keep their own", async () => {
   const { withholdExpansion } = await import("../src/store.ts");
   let called = 0;

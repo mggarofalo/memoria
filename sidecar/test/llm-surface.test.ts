@@ -80,7 +80,9 @@ test("searching unexpanded is QMD's own strong-signal path, reached through the 
   assert.equal(hybrid.match(/store\.expandQuery\(/g)?.length, 1, "expansion is asked for in one place");
   // The store hybridQuery gets is the one createStore exposes as `internal`, which the sidecar wraps.
   assert.match(index, /return hybridQuery\(internal, opts\.query, \{/);
-  assert.match(index, /\n\s+internal,\n/);
+  const created = /export async function createStore\([\s\S]*?\n\}\n/.exec(index)![0];
+  assert.match(created, /const internal = createStoreInternal\(/);
+  assert.match(created, /const store = \{\n\s+internal,\n/);
 });
 
 test("cache keys and swallowed failures work the way the adapter assumes", async () => {

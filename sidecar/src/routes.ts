@@ -477,7 +477,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         summary: "Hybrid search",
         description:
           "Run QMD's hybrid pipeline (BM25 + vectors, RRF fusion, optional LLM rerank). Provide either `query` " +
-          "(auto-expanded into lex/vec/hyde variants by the local expansion model) or `searches` (typed sub-queries " +
+          "(expanded into lex/vec/hyde variants by the expansion model unless `expand` is false) or `searches` (typed sub-queries " +
           "you compose yourself; the first gets 2x weight). `filters` are applied after retrieval on frontmatter, so a " +
           "filtered call fetches extra candidates and may return fewer than `limit`.",
         body: {

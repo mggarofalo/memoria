@@ -526,6 +526,8 @@ refuse scoped batch reads with `400`. An older sidecar also ignores the allowlis
 single-document reads and has no glob grammar of its own, so scoped callers would be
 back to QMD's global lookup for as long as the two are mismatched.
 
+An older sidecar also refuses the `expand` field that turns query expansion off, which the API sends on every search by default, so every default search would get `400`. If the API has to run first, set `Memoria__Search__ExpandByDefault=true` until the sidecar is upgraded: the API then sends no `expand` at all.
+
 ## Exposure is gated
 
 Nothing in this repository exposes Memoria to the internet, and nothing
