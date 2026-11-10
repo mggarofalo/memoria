@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.RegularExpressions;
 
 namespace Memoria.Core.Redaction;
@@ -13,6 +14,8 @@ internal static partial class CodeValues
 	private const int LongestTagName = 8;
 
 	private const int SecretLikePiece = 6;
+
+	private const int MinWord = 4;
 
 	/// <summary>Commands whose output is the value, as in <c>$env:X = node -e "..."</c>.</summary>
 	private static readonly HashSet<string> s_commands = new(StringComparer.Ordinal)
@@ -43,10 +46,14 @@ internal static partial class CodeValues
 	}
 
 	/// <summary>True for a value that only code or a version range could be. <paramref name="unquoted"/> allows the shapes a quoted string can also hold.</summary>
-	public static bool IsCode(string value, bool unquoted)
+	/// <remarks>
+	/// For a password's name, <paramref name="password"/> asks more of the text beside a span. Any word left is the password, as
+	/// <c>Summerpassword</c> in <c>${PREFIX}Summerpassword</c>.
+	/// </remarks>
+	public static bool IsCode(string value, bool unquoted, bool password = false)
 	{
 		return IsVersionRange(value)
-			|| IsInterpolationOnly(value)
+			|| (password ? IsInterpolationWithoutWords(value) : IsInterpolationOnly(value))
 			|| (unquoted && (IsCollectionLiteral(value) || IsCallCutAtLineEnd(value) || IsRegexLiteral(value)));
 	}
 
@@ -66,23 +73,51 @@ internal static partial class CodeValues
 	/// </summary>
 	public static bool IsInterpolationOnly(string value)
 	{
-		string rest = value;
-		bool any = false;
-		while (NextSpan(rest) is (int start, int end))
+		return Remainder(value) is string rest && !HoldsSecretLikePiece(rest);
+	}
+
+	/// <summary>Spans with no word of four letters or digits beside them, or in the data they carry.</summary>
+	private static bool IsInterpolationWithoutWords(string value)
+	{
+		return Remainder(value) is string rest && !HoldsWord(rest);
+	}
+
+	/// <summary>
+	/// The value with each span replaced by the data it carries, or null when it has no span or a span is only a literal. The data is a
+	/// shell default after :- or :=, and the quoted literals a command substitution prints. A literal passed to a call in a template,
+	/// as in toString("base64url"), is an argument. Built in one pass, so many spans cost no more than one long one.
+	/// </summary>
+	private static string? Remainder(string value)
+	{
+		StringBuilder rest = new();
+		int from = 0;
+		while (NextSpan(value, from) is (int start, int end))
 		{
-			string body = rest[(start + 2)..Math.Min(rest.Length, Math.Max(start + 2, end - 1))];
+			string body = value[(start + 2)..Math.Min(value.Length, Math.Max(start + 2, end - 1))];
 			if (IsBareLiteral(body))
 			{
-				return false;
+				return null;
 			}
 
-			// What a span holds as data stays to be judged: a shell default after :- or :=, and the quoted literals a command
-			// substitution prints. A literal passed to a call in a template, as in toString("base64url"), is an argument.
-			any = true;
-			rest = rest[..start] + " " + DataIn(body, rest[start + 1] == '(') + " " + rest[Math.Min(end, rest.Length)..];
+			rest.Append(value, from, start - from).Append(' ').Append(DataIn(body, value[start + 1] == '(')).Append(' ');
+			from = Math.Min(end, value.Length);
 		}
 
-		return any && !HoldsSecretLikePiece(rest);
+		// Every span appends a space, so an empty builder means there was none.
+		return rest.Length == 0 ? null : rest.Append(value, from, value.Length - from).ToString();
+	}
+
+	private static bool HoldsWord(string text)
+	{
+		foreach (ValueMatch piece in Pieces().EnumerateMatches(text))
+		{
+			if (piece.Length >= MinWord)
+			{
+				return true;
+			}
+		}
+
+		return false;
 	}
 
 	/// <summary>True when the value holds a span whose code is visible, closed or not. For rules that judge the value as a whole token.</summary>
@@ -142,9 +177,9 @@ internal static partial class CodeValues
 	}
 
 	/// <summary>The next <c>${…}</c> or <c>$(…)</c> whose body is code, as start and end, closed or running to the end of the text.</summary>
-	private static (int Start, int End)? NextSpan(string text)
+	private static (int Start, int End)? NextSpan(string text, int from)
 	{
-		for (int i = text.IndexOf('$'); i >= 0 && i + 2 < text.Length; i = text.IndexOf('$', i + 1))
+		for (int i = text.IndexOf('$', from); i >= 0 && i + 2 < text.Length; i = text.IndexOf('$', i + 1))
 		{
 			char close = text[i + 1] switch { '{' => '}', '(' => ')', _ => '\0' };
 			if (close != '\0' && StartsExpression(text, i + 2))

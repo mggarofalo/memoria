@@ -465,7 +465,7 @@ internal static class SecretHeuristics
 		}
 
 		string value = CodeValues.WithoutMarkup(NormalizeRemainder(WholeValue(candidate)));
-		return !IsBenignCandidate(candidate, keyGroup, value) && JudgeByKind(candidate, keyGroup, kind, value);
+		return !IsBenignCandidate(candidate, keyGroup, value, kind) && JudgeByKind(candidate, keyGroup, kind, value);
 	}
 
 	/// <summary>
@@ -491,7 +491,7 @@ internal static class SecretHeuristics
 		return end > candidate.End ? candidate.Input[candidate.Secret.Index..end] : candidate.JudgedValue;
 	}
 
-	private static bool IsBenignCandidate(SecretCandidate candidate, Group keyGroup, string value)
+	private static bool IsBenignCandidate(SecretCandidate candidate, Group keyGroup, string value, KeyKind kind)
 	{
 		string input = candidate.Input;
 		int start = candidate.Secret.Index;
@@ -499,7 +499,7 @@ internal static class SecretHeuristics
 		// Backticks mark code in markdown, so a call inside them is still a call. Quotes make a literal.
 		bool readAsCode = !IsQuoted(input, start) || input[start - 1] == '`';
 		bool literalDollar = input[start - 1] == '\'' && IsLiteralDollar(value);
-		return (!literalDollar && IsBenignValue(value, keyGroup.Value, readAsCode))
+		return (!literalDollar && IsBenignValue(value, keyGroup.Value, readAsCode, kind == KeyKind.Password))
 			|| IsNestedYamlKey(input, keyGroup, start, value)
 			|| IsHostAfterPlaceholder(candidate.Value, value);
 	}
@@ -581,7 +581,7 @@ internal static class SecretHeuristics
 		return value.Split('-', '_').All(static segment => segment.All(char.IsAsciiLetter) || segment.All(char.IsAsciiDigit));
 	}
 
-	private static bool IsBenignValue(string value, string key, bool readAsCode)
+	private static bool IsBenignValue(string value, string key, bool readAsCode, bool password)
 	{
 		return ValueShapes.IsPlaceholder(value)
 			|| Keywords.Contains(value)
@@ -589,7 +589,7 @@ internal static class SecretHeuristics
 			|| IsLocator(value)
 			|| IsSourceLocation(value)
 			|| IsFileName(value)
-			|| CodeValues.IsCode(value, readAsCode)
+			|| CodeValues.IsCode(value, readAsCode, password)
 			|| (readAsCode && ValueShapes.IsCodeReference(value));
 	}
 

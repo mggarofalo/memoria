@@ -89,6 +89,34 @@ public sealed class CodeFalsePositiveTests
 		Assert.DoesNotContain("Xk9fQ2mLp7Rz", output, StringComparison.Ordinal);
 	}
 
+	/// <summary>A passphrase in a closed element, and a password of plain words beside a span, are still passwords.</summary>
+	[Theory]
+	[InlineData("<password>correct horse battery staple</password>", "horse battery")]
+	[InlineData("<secret>my long pass phrase</secret>", "pass phrase")]
+	[InlineData("<password>Tr0ub4dor x9Q zz</password>", "Tr0ub4dor")]
+	[InlineData("""PASSWORD="${PREFIX}correcthorsebatterystaple" """, "correcthorse")]
+	[InlineData("""PASSWORD="${PREFIX}Summerpassword" """, "Summerpassword")]
+	[InlineData("password: ${x}Winter!Spring!", "Winter!Spring")]
+	public void A_password_of_words_still_goes(string text, string secret)
+	{
+		string output = Redactor.Shared.RedactFragment(text).Text;
+
+		Assert.Contains("[REDACTED:", output, StringComparison.Ordinal);
+		Assert.DoesNotContain(secret, output, StringComparison.Ordinal);
+	}
+
+	/// <summary>Spans are set aside in one pass, so a value of many of them is judged in time linear in its length.</summary>
+	[Fact]
+	public void A_value_of_many_spans_is_judged_in_one_pass()
+	{
+		string text = "password=" + string.Concat(Enumerable.Repeat("${a}", 40_000));
+		System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
+
+		_ = Redactor.Shared.RedactFragment(text);
+
+		Assert.True(clock.Elapsed < TimeSpan.FromSeconds(3), $"took {clock.Elapsed}");
+	}
+
 	[Theory]
 	[InlineData("^5.2.5", true)]
 	[InlineData("~1.2.x", true)]
