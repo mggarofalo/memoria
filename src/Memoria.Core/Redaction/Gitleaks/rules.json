@@ -35,6 +35,12 @@
   ],
   "patches": [
     {
+      "where": "sourcegraph-access-token",
+      "upstream": "(?i)\\b(\\b(sgp_(?:[a-fA-F0-9]{16}|local)_[a-fA-F0-9]{40}|sgp_[a-fA-F0-9]{40}|[a-fA-F0-9]{40})\\b)(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "replacement": "(?i)\\b(\\b(sgp_(?:[a-fA-F0-9]{16}|local)_[a-fA-F0-9]{40}|sgp_[a-fA-F0-9]{40})\\b)(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "reason": "Its last branch was any 40-digit hex value, so wherever the keyword sgp appeared in a document, even inside another word, every commit hash was read as a Sourcegraph token. The branches with the sgp_ prefix stay."
+    },
+    {
       "where": "global allowlist",
       "upstream": "(?i)^true|false|null$",
       "replacement": "(?i)^(?:true|false|null)$",
@@ -2300,7 +2306,7 @@
     {
       "id": "sourcegraph-access-token",
       "description": "Sourcegraph is a code search and navigation engine.",
-      "pattern": "(?i)(?:^|[^0-9A-Za-z_])(?<secret>(?:sgp_(?:[a-fA-F0-9]{16}|local)_[a-fA-F0-9]{40}|sgp_[a-fA-F0-9]{40}|[a-fA-F0-9]{40}))(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
+      "pattern": "(?i)(?:^|[^0-9A-Za-z_])(?<secret>(?:sgp_(?:[a-fA-F0-9]{16}|local)_[a-fA-F0-9]{40}|sgp_[a-fA-F0-9]{40}))(?:[\\x60'\"\\t\\n\\f\\r ;]|\\\\[nr]|\\z)",
       "upstreamPattern": "(?i)\\b(\\b(sgp_(?:[a-fA-F0-9]{16}|local)_[a-fA-F0-9]{40}|sgp_[a-fA-F0-9]{40}|[a-fA-F0-9]{40})\\b)(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "keywords": [
         "sgp_",

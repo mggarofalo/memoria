@@ -120,13 +120,23 @@ public sealed class GitleaksRuleDataTests
 	[Fact]
 	public void The_upstream_allowlist_that_hid_secrets_is_corrected_and_recorded()
 	{
-		GitleaksPatch patch = Assert.Single(GitleaksRuleData.BuiltIn.Patches);
+		Assert.Contains(GitleaksRuleData.BuiltIn.Patches, static patch => patch.Where == "global allowlist");
 		Regex corrected = RedactionRules.Pattern(Assert.Single(GitleaksRuleData.BuiltIn.GlobalAllowlist.Regexes, static regex => regex.Contains("false", StringComparison.Ordinal)));
 
-		Assert.Equal("global allowlist", patch.Where);
 		Assert.Matches(corrected, "False");
 		Assert.DoesNotMatch(corrected, "a8falsez0Qx");
 		Assert.DoesNotMatch(corrected, "trueQ8x0aZ");
+	}
+
+	[Fact]
+	public void Sourcegraph_no_longer_reads_a_commit_hash_as_its_token()
+	{
+		Assert.Contains(GitleaksRuleData.BuiltIn.Patches, static patch => patch.Where == "sourcegraph-access-token");
+		Regex pattern = RedactionRules.Pattern(GitleaksRuleData.BuiltIn.Rules.Single(static rule => rule.Id == "sourcegraph-access-token").Pattern);
+		string hash = "fd9b778c57587e23e883c887350ea537710bee7c";
+
+		Assert.DoesNotMatch(pattern, "def ixasgp(): \"commit\":\"" + hash + "\"");
+		Assert.Equal("sg" + "p_" + hash, pattern.Match("token sg" + "p_" + hash + " ").Groups["secret"].Value);
 	}
 
 	[Theory]

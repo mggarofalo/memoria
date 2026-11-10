@@ -33,6 +33,9 @@ public static class GitleaksRuleGenerator
 	private static readonly Dictionary<string, (string Replacement, string Reason)> s_patches = new(StringComparer.Ordinal)
 	{
 		["(?i)^true|false|null$"] = ("(?i)^(?:true|false|null)$", "Without a group the anchors bind to the first and last words only, so any secret containing \"false\", starting with \"true\" or ending in \"null\" was allowed."),
+		[@"(?i)\b(\b(sgp_(?:[a-fA-F0-9]{16}|local)_[a-fA-F0-9]{40}|sgp_[a-fA-F0-9]{40}|[a-fA-F0-9]{40})\b)(?:[\x60'""\s;]|\\[nr]|$)"] = (
+			@"(?i)\b(\b(sgp_(?:[a-fA-F0-9]{16}|local)_[a-fA-F0-9]{40}|sgp_[a-fA-F0-9]{40})\b)(?:[\x60'""\s;]|\\[nr]|$)",
+			"Its last branch was any 40-digit hex value, so wherever the keyword sgp appeared in a document, even inside another word, every commit hash was read as a Sourcegraph token. The branches with the sgp_ prefix stay."),
 	};
 
 	private static readonly JsonSerializerOptions s_write = new(GitleaksRuleData.JsonOptions)
@@ -111,11 +114,18 @@ public static class GitleaksRuleGenerator
 	private static GitleaksRuleSpec Rule(TomlTable rule, List<GitleaksPatch> patches)
 	{
 		string upstream = (string)rule["regex"];
+		string source = upstream;
+		if (s_patches.TryGetValue(upstream, out (string Replacement, string Reason) patch))
+		{
+			patches.Add(new GitleaksPatch((string)rule["id"], upstream, patch.Replacement, patch.Reason));
+			source = patch.Replacement;
+		}
+
 		int secretGroup = rule.TryGetValue("secretGroup", out object? group) ? Convert.ToInt32(group, System.Globalization.CultureInfo.InvariantCulture) : 0;
 		return new GitleaksRuleSpec(
 			(string)rule["id"],
 			(string)rule["description"],
-			Re2Translator.TranslateRule(upstream, secretGroup),
+			Re2Translator.TranslateRule(source, secretGroup),
 			upstream,
 			[.. Strings(rule, "keywords").Select(static keyword => keyword.ToLowerInvariant()).Distinct(StringComparer.Ordinal)],
 			rule.TryGetValue("entropy", out object? entropy) ? Convert.ToDouble(entropy, System.Globalization.CultureInfo.InvariantCulture) : 0,
