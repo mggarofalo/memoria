@@ -273,6 +273,35 @@ jobs:
       - name: Run the checks
         run: node scripts/e2e/run.ts
 
+  # The ingest checks again, against deploy/compose.yaml as shipped, on images built from this commit. Not required: it repeats the job above
+  # on another layout, and the checks that need the recording proxy say NOT RUN here.
+  e2e-compose:
+    name: End-to-end (compose layout)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup .NET
+        uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        with:
+          dotnet-version: "10.0.x"
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: cli/go.mod
+          cache-dependency-path: cli/go.sum
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: sidecar/package-lock.json
+      - name: Install
+        run: npm ci --no-fund --no-audit
+        working-directory: sidecar
+      - name: Run the checks on the compose layout
+        run: node scripts/e2e/run.ts --layout compose
+
   worker:
     name: Worker Build & Test
     needs: changes

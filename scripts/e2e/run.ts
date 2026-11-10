@@ -7,6 +7,7 @@ import { forwardedHeaders, limits } from "./auth-limits.ts";
 import { issueScopeKeys, mcpScope, multiGetLimits, scopeMatrix, secretsAbsent, sendCanaries } from "./auth-reads.ts";
 import { bootstrap, keyManagement, login, mcp, noModels, rateLimits, scopedReads, scopeErrors, traversal, type Keys } from "./checks.ts";
 import { Harness } from "./harness.ts";
+import { ComposeHarness } from "./compose-layout.ts";
 import { skillMatchesTheServer } from "./skill.ts";
 import { ingest, INGEST_SERVER, keyMaker } from "./ingest.ts";
 import { migrate } from "./migrate.ts";
@@ -66,9 +67,12 @@ async function runIngest(h: Harness): Promise<void> {
   await ingest(h, admin);
   await filters(h, await keyMaker(h, admin)("filter-writer", ["ingest"]), await keyMaker(h, admin)("filter-reader", ["read"]));
   await ingestRaces(h, keyMaker(h, admin));
-  await ingestConnection(h, keyMaker(h, admin));
+  // These two steer or read the recording proxy between the API and the sidecar, which the deployed layout does not have.
+  if (h.hasProxy) await ingestConnection(h, keyMaker(h, admin));
+  else console.log("NOT RUN connection: every check (they steer the recording proxy; the process layout runs them)");
   await ingestRendered(h, keyMaker(h, admin));
-  await sourcesSync(h, admin);
+  if (h.hasProxy) await sourcesSync(h, admin);
+  else console.log("NOT RUN sources sync: every check (they read the recording proxy; the process layout runs them)");
   await migrate(h);
   await migratePush(h, admin);
   noModels(h);
@@ -87,12 +91,16 @@ async function guarded(h: Harness, body: (h: Harness) => Promise<void>): Promise
 }
 
 const started = Date.now();
+// `--layout compose` runs the ingest server as deployed, from deploy/compose.yaml. The first server's checks are of the API's own surface, and
+// connect from chosen loopback addresses that a published container port would rewrite, so they run in the process layout only.
+const compose = process.argv.join(" ").includes("--layout compose");
 const h = new Harness();
-const ingestServer = new Harness(INGEST_SERVER);
+const ingestServer = compose ? new ComposeHarness(INGEST_SERVER) : new Harness(INGEST_SERVER);
 // `--only-ingest` is for running the redaction proof many times over.
 let crashed = await guarded(h, async (first) => {
   if (!process.argv.includes("--no-build")) first.buildServers();
-  if (!process.argv.includes("--only-ingest")) {
+  if (compose) console.log("NOT RUN the first server's checks (the API's own surface; the process layout runs them)");
+  if (!process.argv.includes("--only-ingest") && !compose) {
     first.buildCli();
     await runAll(first);
   }
