@@ -217,7 +217,7 @@ The API runs with a 1 GiB heap (`DOTNET_GCHeapHardLimit`), the least ingest is s
 | `memoria-data` | API keys and the audit log, in `control.db` | **Not rebuildable.** Every key is revoked and the audit trail is gone. Back it up. |
 | `memoria-corpus` | the collection roots: every document | **Not rebuildable** unless every source still exists. Back it up. |
 | `memoria-qmd-index` | the QMD index and the job queue | Rebuildable: run the first-run command, then `POST /reindex` with `embed: true` on the sidecar re-embeds everything on the workers, which takes hours on a large corpus. Deletes are kept in `control.db`, not here. |
-| `memoria-qmd-config` | QMD's own config, used only by the `qmd` CLI. It names no collection: nothing writes one there, and the CLI writes only its model names | Rebuildable. The sidecar reads its collections from the index, and a missing or empty config removes none of them. See [lost collection records](#lost-collection-records). |
+| `memoria-qmd-config` | QMD's own config, used only by the `qmd` CLI. Memoria writes no collection there, so unless you add one it names none, and the CLI writes only its model names | Rebuildable. The sidecar reads its collections from the index, and a missing or empty config removes none of them. See [lost collection records](#lost-collection-records). |
 
 Keep them on a local disk, as SQLite's WAL mode does not work over a network share. To back up the index without rebuilding it, stop the sidecar first, as a copy of a live SQLite file can be torn:
 
@@ -232,15 +232,16 @@ The volume's name carries the compose project's, `memoria` here; `docker volume 
 
 ### Lost collection records
 
-The index keeps a record of each collection: its root, pattern, ignore rules and contexts. Stock QMD deletes a record whenever its config does not name that collection, and a missing config names none, so any `qmd` command, even `qmd status`, deleted them all while the documents stayed (upstream tobi/qmd#1048). The config volume here never names a collection, so this was every `qmd` command run in the container.
+The index keeps a record of each collection: its root, pattern, ignore rules and contexts. Stock QMD deletes a record whenever its config does not name that collection, and a missing config names none, so any `qmd` command, even `qmd status`, deleted them all while the documents stayed (upstream tobi/qmd#1048). Memoria never writes a collection into the config volume, so this was every `qmd` command run in the container.
 
-The image's SDK is patched against this (`sidecar/scripts/patch-qmd.ts`). A config now adds and updates records and never deletes one, nor a global context it does not set. `qmd collection remove` still removes a collection, with its documents. The patch covers only the SDK installed with the sidecar: a `qmd` installed anywhere else on the host is stock.
+The image's SDK is patched against this (`sidecar/scripts/patch-qmd.ts`). A config now adds and updates the records it names and never deletes one. A config that names no collection, as a missing one reads, leaves the global context too; one that names collections and no global context still clears it, which is how `qmd context rm /` works. The patch covers only the SDK installed with the sidecar: a `qmd` installed anywhere else on the host is stock.
 
-**If records are lost anyway,** the sidecar refuses to start, naming the collections whose documents have no record, and changes nothing. Their documents and vectors are still in the index. To bring the records back:
+**If records are lost anyway,** the sidecar refuses to start, naming the collections whose documents have no record, and changes nothing. Their documents and vectors are still in the index, and a record put back under the same name and root finds them again. Nothing is re-embedded, as vectors belong to a document's content, which has not changed. Put the records back before anything scans those collections, because a scan without its ignore rules indexes the files they kept out of search.
 
-1. Run the [first-run command](#first-run) again with the name of every collection the index holds, as the error lists them. That records each one again with its root under `/corpus`. Nothing is re-embedded, since the documents are keyed by collection name.
-2. Add back by hand any ignore rules, contexts or global context you had set, as no copy of them survives. An ignore rule matters most: a file it kept out of search comes back at the next scan without it.
-3. Start the sidecar.
+- **If you had set ignore rules or contexts,** write them into `/config/qmd/index.yml` on the config volume, naming each collection with its root, pattern, rules and contexts in QMD's config format, then run `qmd status` once in the container (`node node_modules/@tobilu/qmd/bin/qmd status`). It records them all from the file. Keep that file: from then on it is the copy of those settings.
+- **If you had not,** run only the `init-index.mjs` command from [first run](#first-run), with the names the error lists. It records each one again with its root under `/corpus`.
+
+Then start the sidecar.
 
 On a host where the sidecar serves an index that `qmd` itself maintains, restore `~/.config/qmd/index.yml` from a backup instead, and run `qmd status` once. Its records, contexts included, come back from the file.
 

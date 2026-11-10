@@ -483,7 +483,7 @@ test("the start-up check names each fix an unpatched SDK lacks, with no marker a
   const throwing = { ...real, syncConfigToDb: () => {
     throw new Error("moved");
   } };
-  assert.deepEqual(missingSdkFixes(throwing).filter((m) => m.startsWith("syncConfigToDb")).length, 2, "a sync it cannot run counts as unpatched");
+  assert.equal(missingSdkFixes(throwing).filter((m) => m.startsWith("syncConfigToDb")).length, 2, "a sync it cannot run counts as unpatched");
 });
 
 test("a collection's documents with no record stop the sidecar, naming the collection", async () => {

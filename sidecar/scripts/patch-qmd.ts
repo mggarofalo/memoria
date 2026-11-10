@@ -116,11 +116,16 @@ const CONFIG_SYNC_EDIT = {
     else {
         setStoreGlobalContext(db, undefined);
     }`,
-  to: `    // Memoria: a collection the config does not name keeps its record, and a global context
-    // the config does not set stays. A missing config reads as naming nothing, so stock QMD
-    // deleted them all here. \`qmd collection remove\` still removes a collection.
+  to: `    // Memoria: a collection the config does not name keeps its record. A missing config reads
+    // as naming nothing, so stock QMD deleted them all here. \`qmd collection remove\` still
+    // removes a collection. A config that names collections and no global context clears it,
+    // which is how \`qmd context rm /\` works; one naming no collection, as a missing file
+    // reads, leaves it.
     if (config.global_context !== undefined) {
         setStoreGlobalContext(db, config.global_context);
+    }
+    else if (configNames.size > 0) {
+        setStoreGlobalContext(db, undefined);
     }`,
 };
 

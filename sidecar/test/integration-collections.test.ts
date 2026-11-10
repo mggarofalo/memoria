@@ -99,6 +99,41 @@ test("qmd's read commands with an empty config directory keep every collection r
   }
 });
 
+test("with a config naming its collections, qmd can still clear the global context and restore rules", { skip, timeout: 120_000 }, async () => {
+  const { root, dbPath, before } = await fixture();
+  const configHome = path.join(root, "config");
+  await mkdir(path.join(configHome, "qmd"), { recursive: true });
+  // The recovery route in docs/deployment.md: a config naming the collections with their rules.
+  const yaml = [
+    "global_context: global context",
+    "collections:",
+    "  alpha:",
+    `    path: ${JSON.stringify(path.join(root, "corpus", "alpha"))}`,
+    "    pattern: '**/*.md'",
+    "    context:",
+    "      /: alpha context",
+    "  beta:",
+    `    path: ${JSON.stringify(path.join(root, "corpus", "beta"))}`,
+    "    pattern: '**/*.md'",
+    "    ignore: ['drafts/**']",
+    "",
+  ].join("\n");
+  await writeFile(path.join(configHome, "qmd", "index.yml"), yaml, "utf8");
+  const db = new Database(dbPath);
+  db.prepare("DELETE FROM store_collections").run();
+  db.close();
+  const env: NodeJS.ProcessEnv = { ...process.env, XDG_CACHE_HOME: path.join(root, "cache"), XDG_CONFIG_HOME: configHome, NO_COLOR: "1" };
+  delete env.INDEX_PATH;
+  delete env.QMD_CONFIG_DIR;
+  const qmd = (...args: string[]) => spawnSync(process.execPath, [cli, ...args], { env, cwd: root, encoding: "utf8", timeout: 60_000 });
+  assert.equal(qmd("status").status, 0);
+  assert.deepEqual(snapshot(dbPath), before, "the records come back with their rules and contexts");
+  const removed = qmd("context", "rm", "/");
+  assert.equal(removed.status, 0, removed.stderr);
+  assert.equal(snapshot(dbPath).globalContext, null, "qmd context rm / still clears it");
+  assert.equal(snapshot(dbPath).collections.length, 2);
+});
+
 test("the sidecar refuses an index whose collection records are gone, and changes nothing", { skip }, async () => {
   const { dbPath } = await fixture();
   // What stock QMD's sync does with a missing config, as a qmd installed elsewhere still would.
