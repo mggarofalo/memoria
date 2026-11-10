@@ -117,7 +117,7 @@ Hooks work from PowerShell, cmd, and Git Bash: `scripts/run-sh.mjs` finds the `s
 
 ### Other CI
 
-`.github/workflows/audit.yml` runs `npm audit`, `govulncheck`, and `dotnet list package --vulnerable` daily and whenever a dependency file changes. `.github/workflows/security.yml` runs CodeQL and gitleaks. The `End-to-end (real API and sidecar)` job in `ci.yml` runs `scripts/e2e`. None of these is required, so a new advisory cannot block an unrelated pull request. Actions are pinned by commit SHA; Dependabot keeps the pins, and the dependencies, up to date in weekly grouped pull requests.
+`.github/workflows/audit.yml` runs `npm audit`, `govulncheck`, and `dotnet list package --vulnerable` daily and whenever a dependency file changes. `.github/workflows/security.yml` runs CodeQL and gitleaks. The `End-to-end (real API and sidecar)` job in `ci.yml` runs `scripts/e2e`, and `End-to-end (real reranker on CPU)` runs its reranked searches against a real worker with cached, checksum-pinned models. None of these is required, so a new advisory cannot block an unrelated pull request. Actions are pinned by commit SHA; Dependabot keeps the pins, and the dependencies, up to date in weekly grouped pull requests.
 
 ## Architecture
 
