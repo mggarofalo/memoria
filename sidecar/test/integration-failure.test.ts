@@ -733,7 +733,7 @@ test("a full force job with a new length does it all at once, and honestly", { s
   assert.equal(after.cv, after.vec);
 });
 
-test("a full force job removes rows of documents no longer in the index; a scoped one does not", { skip }, async () => {
+test("the scan that finds a document gone removes its vector rows, and no force job puts any back", { skip }, async () => {
   const { dbPath, corpus } = await fixture();
   const mock = await new MockWorker(8).start();
   const backend = await openBackend({ dbPath, keepWarm: false, llm: remoteOptions([worker("w", mock)]) });
@@ -742,15 +742,13 @@ test("a full force job removes rows of documents no longer in the index; a scope
     const whole = await counts(dbPath);
     await rm(path.join(corpus, "alpha.md"));
     await backend.update({});
-    await backend.embed({ force: true, collection: "sessions" });
-    assert.deepEqual(await counts(dbPath), whole, "a scoped job leaves them");
-    await backend.embed({ force: true });
     const after = await counts(dbPath);
     assert.ok(after.cv < whole.cv, `${after.cv} < ${whole.cv}`);
     assert.equal(after.cv, after.vec);
-    // And a second force, finding the same state, leaves it alone.
+    await backend.embed({ force: true, collection: "sessions" });
+    assert.deepEqual(await counts(dbPath), after, "a scoped force redoes what is there and adds nothing");
     await backend.embed({ force: true });
-    assert.deepEqual(await counts(dbPath), after);
+    assert.deepEqual(await counts(dbPath), after, "nor does a full one");
   } finally {
     await backend.close();
     await mock.stop();

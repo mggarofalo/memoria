@@ -5,7 +5,7 @@
  * Opt in with MEMORIA_QMD_INTEGRATION=1 (CI sets it; `npm test` does not).
  */
 import assert from "node:assert/strict";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -19,7 +19,10 @@ import { MockWorker } from "./mock-worker.ts";
 const Database = createRequire(import.meta.url)("better-sqlite3") as new (file: string) => { exec(sql: string): void; close(): void };
 const skip = process.env.MEMORIA_QMD_INTEGRATION === "1" ? false : "set MEMORIA_QMD_INTEGRATION=1";
 
-const SECRET = "Deleted text, holding the sentence only this document says. ".repeat(40);
+const PHRASE = "holding the sentence only this document says";
+const SECRET = `Deleted text, ${PHRASE}. `.repeat(40);
+/** Short enough to sit in a page beside other rows, where a delete without secure_delete leaves its bytes. */
+const TINY = "a short note the tiny document alone holds";
 const SHARED = "Text two documents hold word for word, so they share one content row. ".repeat(40);
 
 interface Index {
@@ -35,10 +38,11 @@ async function index(): Promise<Index> {
   await writeFile(path.join(corpus, "shared.md"), `# Shared\n\n${SHARED}\n`, "utf8");
   await writeFile(path.join(corpus, "copies", "shared.md"), `# Shared\n\n${SHARED}\n`, "utf8");
   await writeFile(path.join(corpus, "kept.md"), "# Kept\n\nNothing happens to this one.\n", "utf8");
+  await writeFile(path.join(corpus, "tiny.md"), `# Tiny\n\n${TINY}.\n`, "utf8");
   const dbPath = path.join(root, "index.sqlite");
   const qmd = await import("@tobilu/qmd");
   const builder = await qmd.createStore({ dbPath, config: { collections: { notes: { path: corpus, pattern: "**/*.md" } } } });
-  // As the sidecar writes: rows it deletes, and cells it moves, are overwritten, not left in free space.
+  // As the sidecar and init-index write, so the index starts with nothing left in free space: what is found later, the delete left.
   (builder.internal.db as unknown as { exec(sql: string): void }).exec("PRAGMA secure_delete = ON");
   await builder.update();
   await builder.close();
@@ -94,7 +98,14 @@ test("a deleted document leaves no content, vectors, full text or set-aside in t
       await reader.close();
     }
 
+    // Into the file itself, so a delete that left its bytes in free pages would show.
+    const early = new Database(dbPath);
+    early.exec("PRAGMA wal_checkpoint(PASSIVE)");
+    early.close();
+    assert.notEqual((await readFile(dbPath)).indexOf(Buffer.from(PHRASE)), -1, "the text was in the file before the delete");
+
     await rm(path.join(corpus, "secret.md"));
+    await rm(path.join(corpus, "tiny.md"));
     await backend.update({});
 
     const after = await qmd.createStore({ dbPath });
@@ -110,13 +121,34 @@ test("a deleted document leaves no content, vectors, full text or set-aside in t
     await backend.close();
     await mock.stop();
   }
-  // Nor anywhere in the file, free pages included, once SQLite has checkpointed its write-ahead log into it.
+  // Nor is its text anywhere in the file, free pages included, once the log is folded in. Its words alone can stay in the
+  // full-text index's word lists until FTS5 merges them: docs/deployment.md says so.
   const checkpoint = new Database(dbPath);
   checkpoint.exec("PRAGMA wal_checkpoint(TRUNCATE)");
   checkpoint.close();
-  for (const file of [dbPath, `${dbPath}-wal`]) {
-    const bytes = existsSync(file) ? await readFile(file) : Buffer.alloc(0);
-    assert.equal(bytes.indexOf(Buffer.from("holding the sentence only this document says")), -1, `the deleted text is still in ${path.basename(file)}`);
+  const bytes = await readFile(dbPath);
+  assert.equal(bytes.indexOf(Buffer.from(PHRASE)), -1, "the deleted text is still in index.sqlite");
+  assert.equal(bytes.indexOf(Buffer.from(TINY)), -1, "a short deleted text is still in index.sqlite");
+});
+
+test("a scan that finds a collection's folder gone keeps its vectors, so its return re-embeds nothing", { skip }, async () => {
+  const { corpus, dbPath } = await index();
+  const mock = await new MockWorker(8).start();
+  const backend = await openBackend({ dbPath, keepWarm: false, llm: { mode: "remote", workers: [worker(mock)], embedDimensions: 8, fallback: false, statusPollMs: 0, embedBatchBytes: 2048 } });
+  try {
+    await backend.embed({ force: false });
+    const embeds = mock.count("/v1/embed");
+    const away = corpus + "-away";
+    await rename(corpus, away);
+    assert.equal((await backend.update({})).removed, 5, "the scan found every document gone");
+    await rename(away, corpus);
+    const back = await backend.update({});
+    assert.equal(back.needsEmbedding, 0, "every vector was still there");
+    assert.equal((await backend.embed({ force: false })).docsProcessed, 0);
+    assert.equal(mock.count("/v1/embed"), embeds, "no worker was asked to embed again");
+  } finally {
+    await backend.close();
+    await mock.stop();
   }
 });
 

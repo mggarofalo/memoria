@@ -2319,7 +2319,7 @@
                           },
                           "totalDocuments": {
                             "type": "integer",
-                            "description": "Including inactive rows, which remain only when the index was busy as a scan ended."
+                            "description": "Including inactive rows, which the sidecar's scan removes, except in a collection it found empty or when the index was busy."
                           },
                           "lastModified": {
                             "type": [

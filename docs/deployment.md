@@ -216,22 +216,26 @@ Keep them on a local disk, as SQLite's WAL mode does not work over a network sha
 
 ### What a delete removes, and when
 
-A delete (`DELETE /v1/documents`, or a session that replaces its own parts) takes the file out of the corpus at once, and every read route stops returning it at once. The index follows at the next scan, which the delete queues and which runs once the debounce window ends, or at the next start if shutdown comes first. That scan removes, in one transaction:
+A delete (`DELETE /v1/documents`, or a session that replaces its own parts) takes the file out of the corpus at once, and every read route stops returning it at once. The index follows at the next scan, which the delete queues. The scan runs once the debounce window ends, or at the next start if shutdown comes first. That scan marks the document's row inactive, which takes it out of the full-text index's own copy of the text. At its end, one transaction removes:
 
 - the document's row;
-- its text, in `content` and in the full-text index's own copy of it;
+- its text, in `content`;
 - its chunks' vectors, in `content_vectors` and `vectors_vec`;
 - any record that it was set aside from embedding.
 
 Text and vectors are kept by content, so when another document holds the same text word for word, that text and its vectors stay, as they are that document's too.
 
-The sidecar writes with SQLite's `secure_delete` on, so what it deletes is overwritten in the file, not left in free pages. Three places can still hold deleted text for a while:
+Two cases wait for a later scan:
 
-- **The write-ahead log.** `index.sqlite-wal` can hold earlier versions of those pages until SQLite checkpoints them into the file and reuses the log.
-- **The full-text index's word lists.** These can keep a removed document's words, though not its text in order, until SQLite merges those segments, which it does as more is written.
+- **A collection the scan found with no document at all.** This is what a missing or not yet mounted folder looks like. Removing everything then would cost every vector of the collection a re-embed when the folder comes back, so its rows stay until the collection holds a document again. That includes a collection whose last document was deleted.
+- **A busy index,** as when a `qmd` run outside the sidecar holds it. Nothing is removed, a warning is logged, and the next scan tries again.
+
+The sidecar writes with SQLite's `secure_delete` on, so what it deletes is overwritten in the file, not left in free pages. After a scan that removed anything, it folds the write-ahead log into the file and empties it, so old versions of those pages do not linger there either. Some places can still hold deleted text for a while:
+
+- **The full-text index's word lists.** FTS5 keeps a removed document's words, with their positions, so their order can be read back, until it merges the segments that hold them. It merges segments of like size as more is written, so a large old segment can keep them for a long time. `qmd cleanup` merges them all.
+- **The write-ahead log, when the empty fails.** A reader in the middle of a long read stops the log from being emptied, and its frames then stay until SQLite reuses them.
 - **An index written before this.** Free pages left by a version that did not use `secure_delete`, or by a `qmd` run outside the sidecar, keep what they held until those pages are reused. `qmd cleanup`, which vacuums the file, or a rebuild of the index removes them.
-
-A backup taken before the scan holds the document as it was, until restic's `forget` and `prune` drop that snapshot.
+- **Backups.** A backup taken before the scan holds the document as it was, until restic's `forget` and `prune` drop that snapshot.
 
 ## Backups
 

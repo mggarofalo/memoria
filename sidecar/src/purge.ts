@@ -7,14 +7,21 @@ import { isBusy, withShortBusyTimeout } from "./sqlite-busy.ts";
  * until a `qmd cleanup` that nothing here runs. Deleted text, which may be sensitive,
  * then stays in the index and in every backup of it.
  *
- * This runs after every scan. Content is shared by hash, so a row goes only once no
- * active document holds that hash: a document whose text another one also has leaves
- * that text, and its vectors, to the other. Inactive document rows go too, as they are
- * what kept their content referenced. It is one transaction, so a reader sees all of
- * it or none of it.
+ * This runs after every scan, in one transaction:
+ *
+ * 1. Inactive document rows go, except in a collection the scan found with no
+ *    document at all. That is what a missing or not yet mounted folder looks like,
+ *    and its rows coming back would otherwise cost every vector of it a re-embed.
+ *    They wait until the collection holds a document again.
+ * 2. Then whatever no remaining row holds: vectors and set-asides by hash, and by
+ *    hash and path, and content by hash. Content is shared by hash, so text that
+ *    another document also holds stays, with its vectors, for that one.
+ *
+ * It finds the rows to remove before touching the vector table, so a scan with
+ * nothing to remove costs a few indexed lookups.
  */
 export interface PurgeDb {
-  prepare(sql: string): { get(...args: unknown[]): unknown; run(...args: unknown[]): { changes: number | bigint } };
+  prepare(sql: string): { get(...args: unknown[]): unknown; all(...args: unknown[]): unknown[]; run(...args: unknown[]): { changes: number | bigint } };
   exec(sql: string): void;
 }
 
@@ -25,29 +32,68 @@ export interface PurgeCounts {
   deadLetters: number;
 }
 
-const ACTIVE_HASHES = "SELECT hash FROM documents WHERE active = 1";
+/** Collections with document rows and not one of them active: the scan found the folder empty. */
+const EMPTIED = "SELECT collection FROM documents GROUP BY collection HAVING MAX(active) = 0";
+/** Hashes some remaining row still holds, once step 1 is done. */
+const HELD = "SELECT hash FROM documents";
 
 function hasTable(db: PurgeDb, name: string): boolean {
   return db.prepare("SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') AND name = ?").get(name) !== undefined;
+}
+
+/** Whether vectors_vec can be written here. It needs sqlite-vec loaded, which a host without it lacks. */
+function vectorTableUsable(db: PurgeDb): boolean {
+  if (!hasTable(db, "vectors_vec")) return false;
+  try {
+    db.prepare("SELECT 1 FROM vectors_vec LIMIT 0").get();
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function changes(db: PurgeDb, sql: string): number {
   return Number(db.prepare(sql).run().changes);
 }
 
+/**
+ * A chunk's two rows go together or not at all. Without sqlite-vec, `vectors_vec` cannot be
+ * written, so neither is removed, as the SDK's own cleanup does: they wait for a host with it.
+ */
+function removeVectors(db: PurgeDb): number {
+  if (!hasTable(db, "content_vectors") || !vectorTableUsable(db)) return 0;
+  const orphans = db.prepare(`SELECT hash, seq FROM content_vectors WHERE hash NOT IN (${HELD})`).all() as Array<{ hash: string; seq: number }>;
+  if (orphans.length === 0) return 0;
+  const remove = db.prepare("DELETE FROM vectors_vec WHERE hash_seq = ?");
+  for (const { hash, seq } of orphans) remove.run(`${hash}_${seq}`);
+  return changes(db, `DELETE FROM content_vectors WHERE hash NOT IN (${HELD})`);
+}
+
 function removeAll(db: PurgeDb): PurgeCounts {
-  let vectors = 0;
-  if (hasTable(db, "content_vectors")) {
-    // vectors_vec first: its rows are found through content_vectors. It exists only once something has been embedded.
-    if (hasTable(db, "vectors_vec")) {
-      db.prepare(`DELETE FROM vectors_vec WHERE hash_seq IN (SELECT hash || '_' || seq FROM content_vectors WHERE hash NOT IN (${ACTIVE_HASHES}))`).run();
-    }
-    vectors = changes(db, `DELETE FROM content_vectors WHERE hash NOT IN (${ACTIVE_HASHES})`);
-  }
-  const deadLetters = hasTable(db, "memoria_dead_letters") ? changes(db, `DELETE FROM memoria_dead_letters WHERE hash NOT IN (${ACTIVE_HASHES})`) : 0;
-  const documents = changes(db, "DELETE FROM documents WHERE active = 0");
-  const content = changes(db, "DELETE FROM content WHERE hash NOT IN (SELECT hash FROM documents)");
+  const documents = changes(db, `DELETE FROM documents WHERE active = 0 AND collection NOT IN (${EMPTIED})`);
+  const vectors = removeVectors(db);
+  const deadLetters = hasTable(db, "memoria_dead_letters")
+    ? changes(db, "DELETE FROM memoria_dead_letters WHERE NOT EXISTS (SELECT 1 FROM documents d WHERE d.hash = memoria_dead_letters.hash AND d.path = memoria_dead_letters.path)")
+    : 0;
+  const content = changes(db, `DELETE FROM content WHERE hash NOT IN (${HELD})`);
   return { documents, content, vectors, deadLetters };
+}
+
+function inTransaction<T>(db: PurgeDb, work: () => T): T {
+  db.exec("BEGIN IMMEDIATE");
+  let result: T;
+  try {
+    result = work();
+  } catch (err) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      // SQLite may have rolled back already, as it does on some errors. The first error is the one to report.
+    }
+    throw err;
+  }
+  db.exec("COMMIT");
+  return result;
 }
 
 /**
@@ -56,19 +102,27 @@ function removeAll(db: PurgeDb): PurgeCounts {
  */
 export function purgeDeleted(db: PurgeDb): PurgeCounts | null {
   try {
-    return withShortBusyTimeout(db as never, () => {
-      db.exec("BEGIN IMMEDIATE");
-      try {
-        const counts = removeAll(db);
-        db.exec("COMMIT");
-        return counts;
-      } catch (err) {
-        db.exec("ROLLBACK");
-        throw err;
-      }
-    });
+    return withShortBusyTimeout(db as never, () => inTransaction(db, () => removeAll(db)));
   } catch (err) {
     if (isBusy(err)) return null;
     throw err;
+  }
+}
+
+/** Anything was removed, so its old versions are worth taking out of the write-ahead log. */
+export function removedAny(counts: PurgeCounts | null): boolean {
+  return counts !== null && counts.documents + counts.content + counts.vectors + counts.deadLetters > 0;
+}
+
+/**
+ * Fold the write-ahead log into the file and empty it, so the frames that held deleted rows
+ * are gone too. A reader in the middle of a long read stops it short; nothing is lost by
+ * that, the next one goes further.
+ */
+export function truncateLog(db: PurgeDb): void {
+  try {
+    withShortBusyTimeout(db as never, () => db.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get());
+  } catch {
+    // Busy or not in WAL mode: the log is left for SQLite's own checkpoints.
   }
 }

@@ -857,7 +857,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
                     path: { type: "string", description: "Collection root on the sidecar host." },
                     pattern: { type: "string" },
                     documents: { type: "integer", description: "Active (indexed, not removed) documents." },
-                    totalDocuments: { type: "integer", description: "Including inactive rows, which remain only when the index was busy as a scan ended." },
+                    totalDocuments: { type: "integer", description: "Including inactive rows, which the sidecar's scan removes, except in a collection it found empty or when the index was busy." },
                     lastModified: { type: "string", nullable: true },
                     includeByDefault: { type: "boolean" },
                     context: { type: "string", nullable: true, description: "Root-level context text, if configured." },

@@ -4,7 +4,7 @@ import type { EmbedSummary, UpdateSummary } from "./jobs.ts";
 import type { BreakerOptions } from "./llm/pool.ts";
 import type { RemoteLlm } from "./llm/remote.ts";
 import { requireSdkFixes, type SdkStoreFunctions } from "./sdk-check.ts";
-import { purgeDeleted } from "./purge.ts";
+import { purgeDeleted, removedAny, truncateLog } from "./purge.ts";
 import { withShortBusyTimeout } from "./sqlite-busy.ts";
 import type { DeadLetter, DegradedReason, EmbeddingResult, LlmCallSink, LlmHealth, LlmSurface, PoolLoad, PoolWorkerConfig, Queryable, RerankDocument, RerankResult, WorkerView } from "./llm/types.ts";
 import type { SdkDb, SdkHandles, WiredRemote } from "./llm/wire.ts";
@@ -508,7 +508,9 @@ export async function openBackend(options: OpenBackendOptions): Promise<OpenedBa
   update: async (o) => {
     const r = await store.update(o.collections ? { collections: o.collections } : {});
     // What the scan found deleted leaves nothing behind it: see purge.ts. Any scan can find one.
-    if (purgeDeleted(db as never) === null) options.onLlmWarning?.("The index was busy, so what deleted documents left in it waits for the next scan to remove it.");
+    const purged = purgeDeleted(db as never);
+    if (purged === null) options.onLlmWarning?.("The index was busy, so what deleted documents left in it waits for the next scan to remove it.");
+    if (removedAny(purged)) truncateLog(db as never);
     return {
       collections: r.collections,
       indexed: r.indexed,
