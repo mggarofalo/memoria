@@ -1,7 +1,7 @@
 version: "2"
 
 linters:
-  # Only complexity for now. govet and gofmt already run as their own CI steps.
+  # Only complexity. govet and gofmt already run as their own CI steps.
   default: none
   enable:
     - gocyclo

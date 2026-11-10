@@ -18,8 +18,8 @@ env:
   DOTNET_NOLOGO: true
   DOTNET_CLI_TELEMETRY_OPTOUT: true
 
-# Build & Test, Code Formatting, CLI Build & Test, and CLI Lint are required by
-# the `main protection` ruleset, so their names must not change, and they must
+# The jobs AGENTS.md lists as required status checks are required by the
+# `main protection` ruleset, so their names must not change, and they must
 # always report. That is why path filtering is done here, per job, and never
 # under `on:` above: a job skipped by its `if` still reports and satisfies the
 # ruleset, but a workflow skipped by `on.paths` reports nothing and blocks merges.

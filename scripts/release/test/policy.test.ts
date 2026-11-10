@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { test } from "node:test";
@@ -106,6 +107,40 @@ test("every action in every workflow we own is pinned to a commit, with narrow d
   assert.match(release, /if: github\.event_name == 'push'/);
   assert.match(release, /gh release create "\$GITHUB_REF_NAME" --verify-tag/);
   assert.doesNotMatch(release, /--generate-notes/);
+});
+
+test("the required checks AGENTS.md names are workflow jobs, and it counts them right", () => {
+  const sentence = /^(\w+) gates are required status checks on `main`: (.*?)\.(?: |$)/m.exec(read("AGENTS.md"));
+  assert.ok(sentence, "AGENTS.md names the required checks");
+  const names = [...sentence[2]!.matchAll(/`([^`]+)`/g)].map((m) => m[1]!);
+  const counts = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve"];
+  assert.equal(counts.indexOf(sentence[1]!.toLowerCase()), names.length);
+  const jobs = new Set([...`${read(".github/workflows/ci.yml")}\n${read(".github/workflows/docker.yml")}`.matchAll(/^ {4}name: (.+)$/gm)].map((m) => m[1]!.trim()));
+  assert.deepEqual(names.filter((n) => !jobs.has(n)), [], "named in AGENTS.md but no job has that name");
+});
+
+test("docs say what the code does now, not what is planned or in progress", () => {
+  const status = [
+    /\b(?:is|are) (?:still )?in progress\b/i,
+    /\bcomes? later\b/i,
+    /\blater (?:epic|work|phase)s?\b/i,
+    /\bheading to\b/i,
+    /\bowner's decision\b|\bwaiting on the owner\b|\bto be decided\b/i,
+    /\bnot yet (?:merged|confirmed|run|done|built|implemented|supported|decided)\b|\byet to be\b|\bhas yet to\b/i,
+    /\bfor now\b|\(today\)|\btoday;/i,
+    /\bstill unproven\b|\bwill (?:land|ship|be added|be built|come)\b/i,
+    /\bTODO\b/,
+  ];
+  const files = execFileSync("git", ["ls-files", "*.md"], { cwd: REPO_ROOT, encoding: "utf8" })
+    .split("\n")
+    .filter((f) => f !== "" && !f.includes("Sessions/Fixtures/"));
+  assert.ok(files.length > 10, "found the docs");
+  const found = files.flatMap((file) =>
+    read(file)
+      .split("\n")
+      .flatMap((line, i) => status.filter((p) => p.test(line)).map((p) => `${file}:${i + 1} ${p}`)),
+  );
+  assert.deepEqual(found, [], "Plane tracks status and plans; a doc describes what is true now");
 });
 
 test("the release skill stays free of tracker references", () => {

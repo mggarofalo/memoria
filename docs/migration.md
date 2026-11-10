@@ -26,7 +26,7 @@ All the commands are in [cli.md](cli.md).
 memoria migrate plan --qmd-config ~/.config/qmd/index.yml --codex-sessions ~/.codex/sessions
 ```
 
-If `~/.codex/sessions` does not exist, drop that flag, or the command exits 1. It exits 0 when everything selected can be stored, and 1 when something cannot. Its other exit codes are 2 for a mistake in how you ran it, such as a config with no collections.
+If `~/.codex/sessions` does not exist, drop that flag, or the command exits 1. The raw sessions are counted under `--codex-target`, `codex-sessions` by default. If a QMD collection would go to that name too, such as one holding your Codex exports, the command exits 2: pass `--codex-target` another name. It exits 0 when everything selected can be stored, and 1 when something cannot. Its other exit codes are 2 for a mistake in how you ran it, such as a config with no collections.
 
 An exit of 1 means one of these, and the counts say which:
 
@@ -119,9 +119,7 @@ memoria migrate verify --qmd-config ~/.config/qmd/index.yml --queries queries.tx
 | `--accept-over-cap` | I know these documents are over the server's size limit |
 | `--accept-skips` | I know these files or folders could not be read |
 
-**The 4 over-cap Codex documents.** Four Codex exports are over the 2 MiB limit, so the server answers 413 and `push` reports them as over the cap. This is waiting on the owner's decision. The options are re-rendering them from their raw transcripts through the session route, which splits, or raising `MaxDocumentBytes` and `MEMORIA_QMD_MAX_DOCUMENT_BYTES` together for the migration. Until then, `verify` also exits 1 for them, as they are not held, and search cannot find them.
-
-**Raw Codex sessions.** The CLI does not send them. `migrate push` sends the exported markdown, and the only route that takes a raw transcript is `POST /v1/ingest/session`, which nothing in this repository calls for Codex. So re-rendering those four means sending them to that route yourself.
+**Raw Codex sessions.** The CLI does not send them. `migrate push` sends the exported markdown, and the only route that takes a raw transcript is `POST /v1/ingest/session`, which nothing in this repository calls for Codex. So an export over the server's size limit, which `push` reports as over the cap, can be stored only by sending its raw transcript to that route yourself, which splits it, or by raising `MaxDocumentBytes` and `MEMORIA_QMD_MAX_DOCUMENT_BYTES` together.
 
 **What `verify` proves.** Every path's state and version on the server, and that a sample of documents matches the local text apart from redaction. It does not prove every document's text is right:
 
@@ -133,7 +131,7 @@ memoria migrate verify --qmd-config ~/.config/qmd/index.yml --queries queries.tx
 
 Check each one by hand: the local file against `memoria get`. It may be missing text beside a mark, and a real lost line right next to a mark reads this way too. Each mark can hide one line with spaces, and any lines without, so a document with many marks has no limit on what it can lose. If text is missing, send the file again. A changed or lost line away from any mark is still a difference, and fails.
 
-**Overlap.** `verify` reports how many of local QMD's top 10 results the server also returned. It never fails on this. Local QMD ranks differently and may use another embedder, so 100% is not expected, and nobody has measured a threshold yet. Write down the number from the desktop's first run. If you want a threshold, that number is its evidence.
+**Overlap.** `verify` reports how many of local QMD's top 10 results the server also returned. Low overlap never fails it, but a query that cannot run does. Local QMD ranks differently and may use another embedder, so 100% is not expected, and no threshold has been measured. Write down the number from the desktop's first run.
 
 **Stop or go.** Run `verify` until these hold, then cut over:
 

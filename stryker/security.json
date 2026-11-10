@@ -4,7 +4,7 @@
     "test-projects": ["tests/Memoria.Api.Tests/Memoria.Api.Tests.csproj"],
     "mutate": [
       "**/Auth/**/*.cs",
-      "**/Redaction/**/*.cs",
+      "**/Ingest/IngestRedactionPolicy.cs",
       "**/Http/CallerScope.cs",
       "**/Http/MemoriaScope.cs",
       "**/Search/ScopedCorpus.cs",

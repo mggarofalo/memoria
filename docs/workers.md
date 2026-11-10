@@ -29,6 +29,7 @@ On the sidecar:
 | `MEMORIA_QMD_WORKERS` | unset | The pool, as a JSON list. See below. |
 | `MEMORIA_QMD_WORKER_URL` | unset | Shorthand for a pool of one. Must not contain credentials. Set this or the list, not both. |
 | `MEMORIA_QMD_WORKER_TOKEN` | unset | The token for `MEMORIA_QMD_WORKER_URL`. Required unless the worker is on loopback. At least 16 characters. `MEMORIA_QMD_WORKER_TOKEN_FILE` reads it from a file instead, which is what a service should use. |
+| `MEMORIA_QMD_WORKER_TOKEN_FILE` | unset | Reads `MEMORIA_QMD_WORKER_TOKEN` from this file. Setting both is an error. |
 | `MEMORIA_QMD_ALLOW_HTTP_ON_PRIVATE_NETWORK` | `0` | Required for a plain-http worker URL that is not loopback, such as the example below. Set it only on an encrypted network such as a WireGuard tunnel. |
 | `MEMORIA_QMD_WORKER_POLL_MS` | `10000` | How often each worker's `/health` and `/capabilities` are read. |
 | `MEMORIA_QMD_LLM_FALLBACK` | `1` | Tokenize and embed queries on this host's CPU when no worker answers. Needs the embedding model in QMD's cache on this host, under the name QMD gives it (`hf_<owner>_<file>`). It never downloads one, and a call gives up after 30 s. |
@@ -96,25 +97,9 @@ When no worker can serve a role, search skips the step that needs it rather than
 
 `GET /workers` lists each worker's state, circuits, whether it disagrees, last heartbeat, in-flight calls, queue depth and error rate.
 
-## The job queue
+## Embedding jobs in remote mode
 
-Reindex jobs persist in their own SQLite file beside the index (`index.sqlite.queue.sqlite`). It is not inside QMD's schema, so rebuilding the index leaves jobs alone. This uses Node's built-in `node:sqlite`, which adds no dependency but prints an experimental warning on Node 22.
-
-**A job accepted before a crash runs after the restart,** under the same id. A held job keeps its due time. A job that was running goes back to queued and runs again. A job found running by 5 restarts in a row, with no progress between them, is marked failed, on the assumption that it is what keeps killing the process. Retries during an outage do not count, a document reaching the index clears the count, and so does `:retry`. A clean shutdown leaves a running job queued, which does not count either.
-
-**Resuming is safe in remote mode because a document is written whole.** Its vectors build up in memory and go to the index in one transaction, replacing what it had.
-
-**QMD's own write is not atomic.** Its `insertEmbedding` writes two tables with no transaction, so a kill between them leaves a row claiming a vector that does not exist, and the document reads as complete for good. The farm's transaction closes this for remote mode, but in-process embedding still goes through the SDK. So every start, in both LLM modes, removes such rows and logs how many, and those documents embed again. Between a kill and the next start the index may be short a vector, and only a restart repairs it.
-
-**A damaged queue file does not stop search.** A row that cannot be read is moved to `jobs_quarantine`. Only a file SQLite reports as corrupt, or as not a database, is renamed to `*.corrupt-<time>`, and the last 3 of those are kept. Either way the jobs involved will not run, which a warning says. Any other trouble opening it leaves the file untouched and runs with jobs in memory, with a warning: that covers a file from a newer version and one held by another process.
-
-**One sidecar owns a queue file.** It holds an exclusive SQLite lock for as long as it runs, and the operating system releases that if the process dies. A second sidecar on the same file runs with its jobs in memory and says so, and `/ready` shows `jobs.persistent: false`. It tries again every 30 s, and when the file comes free it takes over the file and its waiting jobs.
-
-A later write failure, such as a full disk, is logged and the queue carries on in memory, writing what it missed if the store recovers. `/ready` shows `jobs.persistent` and `GET /queue` shows `persistence`, so this cannot go unnoticed. Writes never wait on a lock, because they run on the event loop.
-
-**What is stored:** the request, timestamps, result counts, attempts, worker names, and error text. A reason names a file path at most. Document bodies and tokens are never stored, and a test reads the database's raw bytes to check.
-
-**States are unchanged:** `queued`, `running`, `succeeded`, `failed`. So is the debounce. New fields on a job (`priority`, `attempts`, `worker`) are additions.
+The job queue, how it persists, and its routes are in [`sidecar/README.md`](../sidecar/README.md#the-job-queue). This is what remote mode adds.
 
 **With no worker,** a job still runs its scan, so new documents can be found lexically and deleted ones disappear. Embedding then waits: the job goes back to `queued` with `error` saying why, and retries after 30 s, doubling up to 5 min, for as long as it takes. `POST /reindex` for the same target releases it at once, and `:cancel` ends it. On shutdown, the drain does not wait for such a job, because it is persisted anyway.
 
@@ -152,17 +137,6 @@ The record goes when the document is deleted.
 The farm has to reach SDK internals that are not part of its public API, and copies the SQL of a private function. `test/llm-surface.test.ts` pins all of this to the exact SDK version.
 
 **A job leaving documents pending does not report success.** It ends `failed`, with its `result` attached, `embed.docsPending` saying how many, and an `error` saying so. `:retry` or the next job for that collection picks them up. With no worker at all it waits instead, since that resolves itself. In-process embedding in local mode still ends `succeeded` with `embed.errors` set, as the SDK reports no pending count.
-
-| Route | What it does |
-|---|---|
-| `GET /queue` | Jobs by state, model calls by priority class, and calls per worker. |
-| `POST /queue/jobs/{id}:retry` | Queue a failed job again under the same id. 409 unless it has failed. |
-| `POST /queue/jobs/{id}:cancel` | End a waiting job at once. A running job stops at its next safe point, between batches when farming, so a long scan or an in-process embed runs on until it returns. A cancelled job reports `failed` with the error `Cancelled`. 409 if already finished. |
-| `GET /queue/dead-letters` | Documents set aside, and why. `GET /queue` has the count. |
-| `POST /queue/dead-letters:clear` | Let them embed again, and queue a job to do it. |
-| `POST /cache:purge` | Drop every cached rerank score and expansion. |
-
-These are sidecar routes. `Memoria.Api` does not expose them.
 
 ## The main risk: reranker scores
 
@@ -353,8 +327,6 @@ With no worker URL it does nothing and exits 0.
 
 The benchmark reports numbers and sets no thresholds. [The decision](#the-decision) records the results it supported.
 
-CI does not run it yet, since CI configuration is outside this change. Whoever wires it in should gate the job on a worker URL being available and leave it out of the required checks.
-
 ## What has and has not been verified
 
 | Claim | Evidence |
@@ -376,6 +348,6 @@ CI does not run it yet, since CI configuration is outside this change. Whoever w
 | GPU loading on CUDA | Run: `nvidia-smi` shows VRAM, utilization and power rising during requests. |
 | GPU loading on Metal | **Not run.** |
 | A worker pool, or a worker on another machine | **Not run for real.** Everything here was one worker on loopback. |
-| The NSSM and launchd scripts work | **Not run for real.** Dry-run plans and ACL helpers are tested; see [what is unconfirmed](deployment.md#not-yet-confirmed). |
+| The NSSM and launchd scripts work | **Not run for real.** Dry-run plans and ACL helpers are tested; see [what is unconfirmed](deployment.md#not-confirmed). |
 | Windows VRAM reading | Run: the parser's result matched real `nvidia-smi` output on one GPU. |
 | macOS thermal reading | Parsing tested against sample output, not against the real tool. |

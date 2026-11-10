@@ -11,11 +11,35 @@ committed files, and environment variables and switches override everything. Env
 Invalid configuration fails at startup with a message naming the key. The API
 never starts half-configured.
 
+## Routes
+
+`/openapi/v1.json` is the contract; this lists its operations. The MCP endpoint is at `Memoria:Mcp:Path`. [Scopes](#scopes) says which key reaches which, and `DocsMatchCodeTests` keeps this list and the key tables below true to the code.
+
+| Route | What it does |
+|---|---|
+| `GET /health` | Liveness. Anonymous. |
+| `GET /ready` | Readiness. Anonymous; see [Anonymous routes](#anonymous-routes). |
+| `GET /v1/search` | Search the corpus. |
+| `GET /v1/docs/{id}` | Get one document. |
+| `POST /v1/docs:multiGet` | Get several documents. See [Batch selector limits](#batch-selector-limits). |
+| `GET /v1/collections` | List collections. |
+| `GET /v1/status` | Index status. |
+| `POST /v1/documents` | Store a document. |
+| `DELETE /v1/documents` | Delete a document. See [Deleting](#deleting). |
+| `POST /v1/ingest/session` | Store a raw session transcript. |
+| `GET /v1/ingest/session` | How a session's upload ended. |
+| `POST /v1/ingest/rendered` | Store an already rendered document. |
+| `GET /v1/ingest/rendered` | What is recorded for a rendered document's path. |
+| `POST /v1/admin/keys` | Issue an API key. See [Keys](#keys). |
+| `GET /v1/admin/keys` | List API keys. |
+| `DELETE /v1/admin/keys/{id}` | Revoke an API key. |
+| `POST /v1/admin/keys/{id}:rotate` | Rotate an API key. |
+
 ## `Memoria:Sidecar` — reaching memoria-qmd
 
 | Key | Default | Purpose |
 |---|---|---|
-| `BaseUrl` | `http://127.0.0.1:8282` | Where the sidecar listens. The sidecar host moves (desktop today, mini PC later); this value is the only thing that changes. |
+| `BaseUrl` | `http://127.0.0.1:8282` | Where the sidecar listens. |
 | `Secret` | unset | The sidecar's `MEMORIA_QMD_SECRET`, sent as `Authorization: Bearer`. **Required when `BaseUrl` is not loopback.** Set it through the environment or `appsettings.local.json`; never commit it. |
 | `Timeout` | `00:02:00` | Per-request ceiling. A reranked search on a cold sidecar can take 15 s or more; leave headroom. |
 | `ReadinessTimeout` | `00:00:05` | Ceiling for the `/ready` probe only. Probes must fail fast so an orchestrator notices. |
@@ -376,18 +400,3 @@ dotnet run --project src/Memoria.Api
 curl -s http://localhost:8080/ready | jq
 curl -s "http://localhost:8080/v1/search?query=api+key+auth&rerank=false&limit=3" | jq
 ```
-
-## Reserved sections
-
-Later work adds siblings under `Memoria`. The shape is fixed now so
-deployments do not have to be reorganised when they land:
-
-| Section | Contents |
-|---|---|
-| `Memoria:Workers` | The inference pool: one entry per worker with `name`, `url`, a token *reference* (never the token), `capabilities` (`embed`, `rerank`, `generate`), `priority` and availability thresholds. |
-| `Memoria:Queue` | Queue policy: concurrency per worker, embedding batch byte budget, priority classes (interactive before background). |
-
-The sidecar keeps its own environment-variable configuration (see
-`sidecar/.env.example`). The control-plane work decides how much
-of `Workers` and `Queue` the API pushes to the sidecar versus the sidecar
-reading directly; either way the keys above are where operators will find them.

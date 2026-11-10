@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # Memoria.Api only. The memoria-qmd sidecar is deliberately not in this image:
-# it needs the GGUF models, the SQLite index and (today) a GPU-equipped Windows
+# it needs the GGUF models, the SQLite index and a GPU-equipped Windows
 # host, and runs as its own service there. See docs/deployment.md.
 
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build

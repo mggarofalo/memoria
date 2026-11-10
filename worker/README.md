@@ -31,7 +31,7 @@ From the sidecar, `MEMORIA_QMD_WORKER_URL=... npm run test:live` runs further sa
 
 ### As a service
 
-The scripts are provided but have not been run on a real install yet.
+The scripts have not been run on a real install.
 
 **Windows desktop (NSSM).** The service restarts on failure and takes its `llama-server` children down with it. `-WhatIf` prints the plan, needs no elevation and changes nothing. The real run needs an elevated PowerShell.
 
@@ -55,11 +55,13 @@ MEMORIA_WORKER_TOKEN=... ./scripts/install-launchd.sh --host 192.168.1.30 --allo
 | Variable | Default | Purpose |
 |---|---|---|
 | `MEMORIA_WORKER_HOST` | `127.0.0.1` | Must be a literal loopback or private address. Wildcards, public addresses and host names are refused. |
+| `MEMORIA_WORKER_ALLOW_HTTP_ON_PRIVATE_NETWORK` | `0` | Required to bind a non-loopback address: the worker serves plain http, so the network itself must be encrypted (a WireGuard tunnel). See [Requests](#requests). |
+| `MEMORIA_WORKER_ALLOWED_HOSTS` | unset | DNS names a request may arrive under besides `localhost`, comma-separated. An IP address always works. |
 | `MEMORIA_WORKER_PORT` | `8383` | Port. |
 | `MEMORIA_WORKER_TOKEN` | unset | Bearer token. Required off loopback. At least 16 characters. For development: services use the file below. |
 | `MEMORIA_WORKER_TOKEN_FILE` | unset | Read the token from this file at startup: one line of UTF-8, with surrounding whitespace ignored. Setting both is an error. On POSIX the worker refuses to start if group or others have any access to the file (`chmod 600`). |
 | `MEMORIA_WORKER_LLAMA_SERVER` | `llama-server` | The binary. |
-| `MEMORIA_WORKER_MODEL_DIR` | `~/.cache/qmd/models` | Where to find models. Honors `XDG_CACHE_HOME`. |
+| `MEMORIA_WORKER_MODEL_DIR` | unset | Where to find models. Unset means `$XDG_CACHE_HOME/qmd/models`, else `~/.cache/qmd/models`. |
 | `MEMORIA_WORKER_ROLES` | `embed,rerank,generate` | Which models this machine serves. |
 | `MEMORIA_WORKER_<ROLE>_MODEL` | unset | Explicit model path for `EMBED`, `RERANK` or `GENERATE`. The sidecar rejects an embedding file with a different name from its index's. |
 | `MEMORIA_WORKER_<ROLE>_URL` | unset | Use an already-running `llama-server` instead of launching one. Must be a literal loopback or private address. |
