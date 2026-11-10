@@ -112,7 +112,7 @@ These are runtime controls, held in the sidecar's memory and never written anywh
 
 **Draining** a worker (`POST /workers/{name}:drain`) stops new calls to it. Calls in flight finish, and `inFlight` in `GET /workers` shows them leave. Heartbeats go on, so its state stays visible, but it gets no trial calls and no comparison probe. `POST /workers/{name}:enable` puts it back. A drained worker does not count toward `llm.workersUp` on `/ready`, so with every worker drained `/ready` reads `degraded` and searches run as in [Degraded mode](#degraded-mode). Draining does not change cache keys, so a worker that comes back unchanged keeps its cached answers.
 
-**Pausing** the queue (`POST /queue:pause`) starts no more reindex or embedding jobs. A running job runs to its end; cancel it to stop it sooner. Writes still land on disk and queue their jobs, so nothing is lost, but new documents are not searchable until `POST /queue:resume`. `GET /queue` reports `paused`. On shutdown a paused queue is not waited on: its jobs persist and run after the restart.
+**Pausing** the queue (`POST /queue:pause`) starts no more reindex or embedding jobs. A running job runs to its end; cancel it to stop it sooner. Writes still land on disk and queue their jobs, so nothing is lost, but until `POST /queue:resume` new documents are not searchable and deleted ones still are. Do not pause while a document has to leave search, such as one holding a leaked secret. `GET /queue` reports `paused`. On shutdown a paused queue waits for the job already running, as an unpaused one does, but not for the jobs waiting behind it. Those persist in the queue's database and run after the restart.
 
 ## How calls are routed
 

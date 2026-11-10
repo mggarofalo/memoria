@@ -807,7 +807,7 @@ type ClientInterface interface {
 
 	// PauseQueue Pause background work
 	//
-	// Starts no more reindex or embedding jobs. A running job runs to its end; cancel it to stop it sooner. Writes still land and queue, so new documents are not searchable until the queue resumes. Held in the sidecar's memory, so a sidecar restart resumes. Requires the `admin` scope.
+	// Starts no more reindex or embedding jobs. A running job runs to its end; cancel it to stop it sooner. Writes still land and queue, so until the queue resumes new documents are not searchable and deleted ones still are. Held in the sidecar's memory, so a sidecar restart resumes. Requires the `admin` scope.
 	//
 	// Corresponds with POST /v1/admin/queue:pause (the `PauseQueue` operationId).
 	PauseQueue(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -1138,7 +1138,7 @@ func (c *Client) RetryJob(ctx context.Context, id string, reqEditors ...RequestE
 
 // PauseQueue Pause background work
 //
-// Starts no more reindex or embedding jobs. A running job runs to its end; cancel it to stop it sooner. Writes still land and queue, so new documents are not searchable until the queue resumes. Held in the sidecar's memory, so a sidecar restart resumes. Requires the `admin` scope.
+// Starts no more reindex or embedding jobs. A running job runs to its end; cancel it to stop it sooner. Writes still land and queue, so until the queue resumes new documents are not searchable and deleted ones still are. Held in the sidecar's memory, so a sidecar restart resumes. Requires the `admin` scope.
 //
 // Corresponds with POST /v1/admin/queue:pause (the `PauseQueue` operationId).
 func (c *Client) PauseQueue(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
@@ -3050,7 +3050,7 @@ type ClientWithResponsesInterface interface {
 
 	// PauseQueueWithResponse Pause background work
 	//
-	// Starts no more reindex or embedding jobs. A running job runs to its end; cancel it to stop it sooner. Writes still land and queue, so new documents are not searchable until the queue resumes. Held in the sidecar's memory, so a sidecar restart resumes. Requires the `admin` scope.
+	// Starts no more reindex or embedding jobs. A running job runs to its end; cancel it to stop it sooner. Writes still land and queue, so until the queue resumes new documents are not searchable and deleted ones still are. Held in the sidecar's memory, so a sidecar restart resumes. Requires the `admin` scope.
 	//
 	// Returns a wrapper object for the known response body format(s).
 	//
@@ -3596,6 +3596,8 @@ type GetQueueStatusResponse struct {
 	ApplicationproblemJSON401 *ProblemDetails
 	// ApplicationproblemJSON403 the response for an HTTP 403 `application/problem+json` response
 	ApplicationproblemJSON403 *ProblemDetails
+	// ApplicationproblemJSON404 the response for an HTTP 404 `application/problem+json` response
+	ApplicationproblemJSON404 *ProblemDetails
 	// ApplicationproblemJSON429 the response for an HTTP 429 `application/problem+json` response
 	ApplicationproblemJSON429 *ProblemDetails
 	// ApplicationproblemJSON502 the response for an HTTP 502 `application/problem+json` response
@@ -3619,6 +3621,11 @@ func (r GetQueueStatusResponse) GetApplicationproblemJSON401() *ProblemDetails {
 // GetApplicationproblemJSON403 returns the response for an HTTP 403 `application/problem+json` response
 func (r GetQueueStatusResponse) GetApplicationproblemJSON403() *ProblemDetails {
 	return r.ApplicationproblemJSON403
+}
+
+// GetApplicationproblemJSON404 returns the response for an HTTP 404 `application/problem+json` response
+func (r GetQueueStatusResponse) GetApplicationproblemJSON404() *ProblemDetails {
+	return r.ApplicationproblemJSON404
 }
 
 // GetApplicationproblemJSON429 returns the response for an HTTP 429 `application/problem+json` response
@@ -3887,6 +3894,8 @@ type PauseQueueResponse struct {
 	ApplicationproblemJSON401 *ProblemDetails
 	// ApplicationproblemJSON403 the response for an HTTP 403 `application/problem+json` response
 	ApplicationproblemJSON403 *ProblemDetails
+	// ApplicationproblemJSON404 the response for an HTTP 404 `application/problem+json` response
+	ApplicationproblemJSON404 *ProblemDetails
 	// ApplicationproblemJSON429 the response for an HTTP 429 `application/problem+json` response
 	ApplicationproblemJSON429 *ProblemDetails
 	// ApplicationproblemJSON502 the response for an HTTP 502 `application/problem+json` response
@@ -3910,6 +3919,11 @@ func (r PauseQueueResponse) GetApplicationproblemJSON401() *ProblemDetails {
 // GetApplicationproblemJSON403 returns the response for an HTTP 403 `application/problem+json` response
 func (r PauseQueueResponse) GetApplicationproblemJSON403() *ProblemDetails {
 	return r.ApplicationproblemJSON403
+}
+
+// GetApplicationproblemJSON404 returns the response for an HTTP 404 `application/problem+json` response
+func (r PauseQueueResponse) GetApplicationproblemJSON404() *ProblemDetails {
+	return r.ApplicationproblemJSON404
 }
 
 // GetApplicationproblemJSON429 returns the response for an HTTP 429 `application/problem+json` response
@@ -3970,6 +3984,8 @@ type ResumeQueueResponse struct {
 	ApplicationproblemJSON401 *ProblemDetails
 	// ApplicationproblemJSON403 the response for an HTTP 403 `application/problem+json` response
 	ApplicationproblemJSON403 *ProblemDetails
+	// ApplicationproblemJSON404 the response for an HTTP 404 `application/problem+json` response
+	ApplicationproblemJSON404 *ProblemDetails
 	// ApplicationproblemJSON429 the response for an HTTP 429 `application/problem+json` response
 	ApplicationproblemJSON429 *ProblemDetails
 	// ApplicationproblemJSON502 the response for an HTTP 502 `application/problem+json` response
@@ -3993,6 +4009,11 @@ func (r ResumeQueueResponse) GetApplicationproblemJSON401() *ProblemDetails {
 // GetApplicationproblemJSON403 returns the response for an HTTP 403 `application/problem+json` response
 func (r ResumeQueueResponse) GetApplicationproblemJSON403() *ProblemDetails {
 	return r.ApplicationproblemJSON403
+}
+
+// GetApplicationproblemJSON404 returns the response for an HTTP 404 `application/problem+json` response
+func (r ResumeQueueResponse) GetApplicationproblemJSON404() *ProblemDetails {
+	return r.ApplicationproblemJSON404
 }
 
 // GetApplicationproblemJSON429 returns the response for an HTTP 429 `application/problem+json` response
@@ -4055,6 +4076,8 @@ type ReindexResponse struct {
 	ApplicationproblemJSON401 *ProblemDetails
 	// ApplicationproblemJSON403 the response for an HTTP 403 `application/problem+json` response
 	ApplicationproblemJSON403 *ProblemDetails
+	// ApplicationproblemJSON404 the response for an HTTP 404 `application/problem+json` response
+	ApplicationproblemJSON404 *ProblemDetails
 	// ApplicationproblemJSON429 the response for an HTTP 429 `application/problem+json` response
 	ApplicationproblemJSON429 *ProblemDetails
 	// ApplicationproblemJSON502 the response for an HTTP 502 `application/problem+json` response
@@ -4083,6 +4106,11 @@ func (r ReindexResponse) GetApplicationproblemJSON401() *ProblemDetails {
 // GetApplicationproblemJSON403 returns the response for an HTTP 403 `application/problem+json` response
 func (r ReindexResponse) GetApplicationproblemJSON403() *ProblemDetails {
 	return r.ApplicationproblemJSON403
+}
+
+// GetApplicationproblemJSON404 returns the response for an HTTP 404 `application/problem+json` response
+func (r ReindexResponse) GetApplicationproblemJSON404() *ProblemDetails {
+	return r.ApplicationproblemJSON404
 }
 
 // GetApplicationproblemJSON429 returns the response for an HTTP 429 `application/problem+json` response
@@ -4143,6 +4171,8 @@ type ListWorkersResponse struct {
 	ApplicationproblemJSON401 *ProblemDetails
 	// ApplicationproblemJSON403 the response for an HTTP 403 `application/problem+json` response
 	ApplicationproblemJSON403 *ProblemDetails
+	// ApplicationproblemJSON404 the response for an HTTP 404 `application/problem+json` response
+	ApplicationproblemJSON404 *ProblemDetails
 	// ApplicationproblemJSON429 the response for an HTTP 429 `application/problem+json` response
 	ApplicationproblemJSON429 *ProblemDetails
 	// ApplicationproblemJSON502 the response for an HTTP 502 `application/problem+json` response
@@ -4166,6 +4196,11 @@ func (r ListWorkersResponse) GetApplicationproblemJSON401() *ProblemDetails {
 // GetApplicationproblemJSON403 returns the response for an HTTP 403 `application/problem+json` response
 func (r ListWorkersResponse) GetApplicationproblemJSON403() *ProblemDetails {
 	return r.ApplicationproblemJSON403
+}
+
+// GetApplicationproblemJSON404 returns the response for an HTTP 404 `application/problem+json` response
+func (r ListWorkersResponse) GetApplicationproblemJSON404() *ProblemDetails {
+	return r.ApplicationproblemJSON404
 }
 
 // GetApplicationproblemJSON429 returns the response for an HTTP 429 `application/problem+json` response
@@ -5616,7 +5651,7 @@ func (c *ClientWithResponses) RetryJobWithResponse(ctx context.Context, id strin
 
 // PauseQueueWithResponse Pause background work
 //
-// Starts no more reindex or embedding jobs. A running job runs to its end; cancel it to stop it sooner. Writes still land and queue, so new documents are not searchable until the queue resumes. Held in the sidecar's memory, so a sidecar restart resumes. Requires the `admin` scope.
+// Starts no more reindex or embedding jobs. A running job runs to its end; cancel it to stop it sooner. Writes still land and queue, so until the queue resumes new documents are not searchable and deleted ones still are. Held in the sidecar's memory, so a sidecar restart resumes. Requires the `admin` scope.
 //
 // Returns a wrapper object for the known response body format(s).
 //
@@ -6220,6 +6255,13 @@ func ParseGetQueueStatusResponse(rsp *http.Response) (*GetQueueStatusResponse, e
 		}
 		response.ApplicationproblemJSON403 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 429:
 		var dest ProblemDetails
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -6466,6 +6508,13 @@ func ParsePauseQueueResponse(rsp *http.Response) (*PauseQueueResponse, error) {
 		}
 		response.ApplicationproblemJSON403 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 429:
 		var dest ProblemDetails
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -6533,6 +6582,13 @@ func ParseResumeQueueResponse(rsp *http.Response) (*ResumeQueueResponse, error) 
 			return nil, err
 		}
 		response.ApplicationproblemJSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 429:
 		var dest ProblemDetails
@@ -6609,6 +6665,13 @@ func ParseReindexResponse(rsp *http.Response) (*ReindexResponse, error) {
 		}
 		response.ApplicationproblemJSON403 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 429:
 		var dest ProblemDetails
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -6676,6 +6739,13 @@ func ParseListWorkersResponse(rsp *http.Response) (*ListWorkersResponse, error) 
 			return nil, err
 		}
 		response.ApplicationproblemJSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ProblemDetails
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 429:
 		var dest ProblemDetails

@@ -71,7 +71,7 @@ public static partial class AdminKeyEndpoints
 			return TypedResults.Problem(
 				statusCode: StatusCodes.Status404NotFound,
 				title: "Unavailable without API keys",
-				detail: "Memoria:Auth:Mode is Disabled. Key management and writing to the corpus need API keys.",
+				detail: "Memoria:Auth:Mode is Disabled. Key management, operations and writing to the corpus need API keys.",
 				extensions: new Dictionary<string, object?> { ["code"] = "auth_disabled" });
 		}
 

@@ -29,8 +29,18 @@ func TestOpsOutputCannotCarryEscapesOrMarkup(t *testing.T) {
 		"queue table":      func(w *bytes.Buffer) error { return QueueTable(w, queue, 0) },
 		"queue markdown":   func(w *bytes.Buffer) error { return QueueMarkdown(w, queue, 0) },
 		"lines": func(w *bytes.Buffer) error {
-			w.WriteString(WorkerLine(worker) + JobLine("Queued", &queue.Jobs[0]) + QueueLine(state))
+			w.WriteString(WorkerLine(worker, Plain) + JobLine("Queued", &queue.Jobs[0], Plain) + QueueLine(state, Plain))
 			return nil
+		},
+		"lines as markdown": func(w *bytes.Buffer) error {
+			w.WriteString(WorkerLine(worker, Inline) + JobLine("Queued", &queue.Jobs[0], Inline) + QueueLine(state, Inline))
+			return nil
+		},
+		"readiness as markdown": func(w *bytes.Buffer) error {
+			reason := hostileOp
+			stuck := &api.SidecarStuckJob{Reason: hostileOp}
+			report := &api.ReadinessReport{Status: hostileOp, Reason: &reason, Sidecar: &api.SidecarReadiness{Version: hostileOp, Jobs: api.SidecarJobsInfo{Stuck: stuck}, Llm: &api.SidecarLlmInfo{Mode: hostileOp, Unavailable: []string{hostileOp}}}}
+			return ReadinessText(w, report, hostileOp, Inline)
 		},
 	} {
 		var out bytes.Buffer

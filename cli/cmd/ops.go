@@ -57,12 +57,15 @@ func hasField(body []byte, key string) bool {
 }
 
 // presentLine shows a one-line result as table or markdown, and the response itself as json.
-func (a *app) presentLine(ctx context.Context, raw []byte, line string) error {
-	write := func(w io.Writer) error {
-		_, err := io.WriteString(w, line+"\n")
-		return err
+// The line is built for the format, so server text in it is escaped the way that format needs.
+func (a *app) presentLine(ctx context.Context, raw []byte, line func(output.Escape) string) error {
+	write := func(esc output.Escape) func(io.Writer) error {
+		return func(w io.Writer) error {
+			_, err := io.WriteString(w, line(esc)+"\n")
+			return err
+		}
 	}
-	return a.present(ctx, output.Table, raw, map[output.Format]func(io.Writer) error{output.Table: write, output.Markdown: write})
+	return a.present(ctx, output.Table, raw, map[output.Format]func(io.Writer) error{output.Table: write(output.Plain), output.Markdown: write(output.Inline)})
 }
 
 // --- workers ---------------------------------------------------------------------
@@ -168,7 +171,7 @@ func (a *app) workerAction(ctx context.Context, action, name string) error {
 	if err := requireShape(worker != nil && worker.Name != ""); err != nil {
 		return err
 	}
-	return a.presentLine(ctx, body, output.WorkerLine(worker))
+	return a.presentLine(ctx, body, func(esc output.Escape) string { return output.WorkerLine(worker, esc) })
 }
 
 // --- queue -----------------------------------------------------------------------
@@ -285,11 +288,11 @@ func (a *app) presentJob(ctx context.Context, resp *http.Response, body []byte, 
 	if err := requireShape(job != nil && job.Id != ""); err != nil {
 		return err
 	}
-	return a.presentLine(ctx, body, output.JobLine(verb, job))
+	return a.presentLine(ctx, body, func(esc output.Escape) string { return output.JobLine(verb, job, esc) })
 }
 
 var queueToggles = map[string]string{
-	"pause":  "Start no more background jobs. A running job runs to its end, and writes still queue, so new documents are not searchable until 'queue resume'",
+	"pause":  "Start no more background jobs. A running job runs to its end, and writes still queue: until 'queue resume', new documents are not searchable and deleted ones still are",
 	"resume": "Let waiting background jobs start again",
 }
 
@@ -329,7 +332,7 @@ func (a *app) queueToggle(ctx context.Context, action string) error {
 	if err := requireShape(state != nil && hasField(body, "paused")); err != nil {
 		return err
 	}
-	return a.presentLine(ctx, body, output.QueueLine(state))
+	return a.presentLine(ctx, body, func(esc output.Escape) string { return output.QueueLine(state, esc) })
 }
 
 // --- readiness -------------------------------------------------------------------
@@ -378,8 +381,8 @@ func (a *app) ready(ctx context.Context, strict bool) error {
 	}
 	trace := resp.HTTPResponse.Header.Get("X-Trace-Id")
 	if err := a.present(ctx, output.Table, resp.Body, map[output.Format]func(io.Writer) error{
-		output.Markdown: func(w io.Writer) error { return output.ReadinessText(w, report, trace) },
-		output.Table:    func(w io.Writer) error { return output.ReadinessText(w, report, trace) },
+		output.Markdown: func(w io.Writer) error { return output.ReadinessText(w, report, trace, output.Inline) },
+		output.Table:    func(w io.Writer) error { return output.ReadinessText(w, report, trace, output.Plain) },
 	}); err != nil {
 		return err
 	}

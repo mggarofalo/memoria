@@ -758,19 +758,19 @@ export class JobQueue {
    * they cannot finish now, and with a store they survive the restart anyway.
    */
   drain(timeoutMs: number): Promise<boolean> {
-    // Paused, nothing would start, so waiting would only spend the timeout.
-    if (this.#paused) return Promise.resolve(this.#pending === 0);
     for (const job of [...this.#jobs]) {
       if (!this.#entries.get(job.id)?.deferred) this.#release(job);
     }
     const waitingOnRetry = (): number => [...this.#held.keys()].filter((id) => this.#entries.get(id)?.deferred).length;
-    const finished = () => this.#pending === waitingOnRetry();
-    if (finished()) return Promise.resolve(true);
+    // Paused, nothing new starts, so only the job already running is waited for.
+    const finished = this.#paused ? () => this.#active === null : () => this.#pending === waitingOnRetry();
+    const done = (): boolean => this.#pending === waitingOnRetry();
+    if (finished()) return Promise.resolve(done());
     return new Promise((resolve) => {
       const timer = this.#scheduler.setTimeout(() => resolve(false), timeoutMs);
       void this.#until(finished).then(() => {
         this.#scheduler.clearTimeout(timer);
-        resolve(true);
+        resolve(done());
       });
     });
   }

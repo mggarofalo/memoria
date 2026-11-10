@@ -184,6 +184,10 @@ test("the config file refuses what it cannot be sure of, and never quotes a toke
   await refuses({ workers: [] }, /non-empty list/);
   await refuses({ workers: [{ ...good, token: TOKEN }] }, /must not hold a token/);
   await refuses({ workers: [{ ...good, availability: { threshold: 3 } }] }, /availability has unknown settings: threshold/);
+  await refuses({ workers: [{ ...good, Token: TOKEN }] }, /workers\[0\] has unknown settings: Token/);
+  await refuses({ workers: [{ ...good, maxConcurent: 99 }] }, /unknown settings: maxConcurent/);
+  await refuses({ workers: [{ ...good, name: ".." }] }, /not \. or \.\./);
+  await refuses({ workers: [{ ...good, name: "." }] }, /not \. or \.\./);
   await refuses({ workers: [{ ...good, availability: { failureThreshold: 0 } }] }, /failureThreshold must be an integer between 1 and 100/);
   await refuses({ workers: [{ ...good, availability: { backoffMs: 10_000, maxBackoffMs: 1_000 } }] }, /maxBackoffMs must not be shorter/);
   await refuses({ workers: [{ ...good, availability: { backoffMs: 120_000 } }] }, /maxBackoffMs must not be shorter/);
@@ -196,6 +200,8 @@ test("the config file refuses what it cannot be sure of, and never quotes a toke
   await refuses({ workers: [good], queue: { embedBatchBytes: 4096 } }, /not both/, { MEMORIA_QMD_EMBED_BATCH_BYTES: "4096" });
   await refuses({ queue: {} }, /required when MEMORIA_QMD_LLM=remote/);
   assert.throws(() => fromFile(path.join(tmpdir(), "memoria-no-such-config.json")), /cannot be read/);
+  const longHost = `http://${"a".repeat(60)}.example:8383`;
+  assert.throws(() => loadConfig({ MEMORIA_QMD_LLM: "remote", MEMORIA_QMD_ALLOW_HTTP_ON_PRIVATE_NETWORK: "1", MEMORIA_QMD_WORKER_URL: longHost, MEMORIA_QMD_WORKER_TOKEN: TOKEN }), /too long to name the worker/);
 });
 
 test("availability settings are allowed in MEMORIA_QMD_WORKERS too, since it is the same list", () => {

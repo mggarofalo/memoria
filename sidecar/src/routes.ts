@@ -1038,8 +1038,8 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         summary: "Pause background work",
         description:
           "Start no more reindex or embedding jobs. A running job runs to its end; cancel it to stop it sooner. Writes still " +
-          "land and queue their jobs, which wait, so new documents are not searchable until `POST /queue:resume`. Held in " +
-          "memory: a restart resumes. Pausing a paused queue changes nothing.",
+          "land and queue their jobs, which wait, so until `POST /queue:resume` new documents are not searchable and deleted " +
+          "ones still are. Held in memory: a restart resumes. Pausing a paused queue changes nothing.",
         response: pauseResponse,
       },
     },

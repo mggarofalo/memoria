@@ -202,6 +202,34 @@ public sealed class AdminControlEndpointTests(AuthApiFactory factory) : IClassFi
 	}
 
 	[Fact]
+	public async Task Drain_AnIpv6ShorthandName_ReachesTheSidecarEncoded()
+	{
+		ScriptSidecar();
+		factory.Sidecar.OnPrefix("POST", "/workers/", (_, _) => FakeSidecar.Json(HttpStatusCode.OK, $$"""{"worker":{{WorkerJson(true)}}}"""));
+		HttpClient admin = await factory.AdminAsync();
+
+		HttpResponseMessage response = await admin.PostAsync("/v1/admin/workers/%5B::1%5D:8383:drain", null);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		Assert.Equal("/workers/%5B%3A%3A1%5D%3A8383:drain", factory.Sidecar.Single().Uri.AbsolutePath);
+	}
+
+	[Theory]
+	[InlineData("""{"error":"no_route","message":"POST /queue:pause is not a route"}""")]
+	[InlineData("")]
+	public async Task ASidecarWithoutTheRoute_Is502_NotAMissingWorker(string body)
+	{
+		ScriptSidecar();
+		factory.Sidecar.On("POST", "/queue:pause", (_, _) => body == "" ? new HttpResponseMessage(HttpStatusCode.NotFound) : FakeSidecar.Json(HttpStatusCode.NotFound, body));
+		HttpClient admin = await factory.AdminAsync();
+
+		HttpResponseMessage response = await admin.PostAsync("/v1/admin/queue:pause", null);
+
+		Assert.Equal(HttpStatusCode.BadGateway, response.StatusCode);
+		Assert.Equal("sidecar_route_missing", await CodeOf(response));
+	}
+
+	[Fact]
 	public async Task Drain_AnUnknownWorker_Is404WithTheSidecarsCode()
 	{
 		ScriptSidecar();

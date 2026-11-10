@@ -176,6 +176,7 @@ function workerFromEntry(env: NodeJS.ProcessEnv, item: unknown, at: string, name
   if (typeof item !== "object" || item === null) throw new Error(`${at} must be an object`);
   const w = item as Record<string, unknown>;
   if ("token" in w) throw new Error(`${at} must not hold a token; name an environment variable with tokenEnv`);
+  readObject(w, at, WORKER_KEYS);
   const name = readWorkerName(w.name, at, names);
   if (typeof w.url !== "string") throw new Error(`${at}.url is required`);
   const url = checkWorkerUrl(w.url, `${at}.url`, env);
@@ -201,6 +202,7 @@ function readObject(value: unknown, at: string, keys: readonly string[]): Record
   return value as Record<string, unknown>;
 }
 
+const WORKER_KEYS = ["name", "url", "tokenEnv", "capabilities", "priority", "maxConcurrent", "availability"] as const;
 const AVAILABILITY_KEYS = ["failureThreshold", "backoffMs", "maxBackoffMs"] as const;
 
 function readAvailability(value: unknown, at: string): Partial<WorkerAvailability> | undefined {
@@ -215,7 +217,8 @@ function readAvailability(value: unknown, at: string): Partial<WorkerAvailabilit
 }
 
 function readWorkerName(name: unknown, at: string, names: Set<string>): string {
-  if (typeof name !== "string" || !/^[\w.-]{1,64}$/.test(name)) throw new Error(`${at}.name must be letters, digits, dots, dashes or underscores`);
+  // A dot segment would be normalized out of the URL that drains it, so it could never be drained.
+  if (typeof name !== "string" || !/^[\w.-]{1,64}$/.test(name) || name === "." || name === "..") throw new Error(`${at}.name must be letters, digits, dots, dashes or underscores, and not . or ..`);
   if (names.has(name)) throw new Error(`${at}.name repeats "${name}"`);
   names.add(name);
   return name;
@@ -339,6 +342,8 @@ function loadWorkers(env: NodeJS.ProcessEnv, file: ConfigFile): PoolWorkerConfig
   const url = checkWorkerUrl(raw, "MEMORIA_QMD_WORKER_URL", env);
   const token = resolveSecret(env, "MEMORIA_QMD_WORKER_TOKEN");
   checkWorkerToken(token, url, "MEMORIA_QMD_WORKER_TOKEN");
+  // The worker is named by its host and port, which drain and enable then take, up to 64 characters.
+  if (url.host.length > 64) throw new Error("MEMORIA_QMD_WORKER_URL's host and port are over 64 characters, too long to name the worker. Use MEMORIA_QMD_WORKERS to give it a name");
   return [{ name: url.host, url: raw, token, capabilities: [...CAPABILITIES], priority: 100, maxConcurrent: 4 }];
 }
 

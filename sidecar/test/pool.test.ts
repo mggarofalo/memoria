@@ -722,3 +722,21 @@ test("the interactive reserve can be set, and background work always keeps one s
     await all.done();
   }
 });
+
+test("a drained embedder does not count toward the comparison, so one worker left is not compared with nothing", async () => {
+  const compared = await fleet();
+  try {
+    await compared.pool.refresh();
+    assert.ok(compared.a.count("/v1/embed") > 0, "two embedders in rotation are compared");
+  } finally {
+    await compared.done();
+  }
+  const f = await fleet();
+  try {
+    f.pool.drain("b");
+    await f.pool.refresh();
+    assert.equal(f.a.count("/v1/embed") + f.b.count("/v1/embed"), 0, "with one left in rotation there is no comparison");
+  } finally {
+    await f.done();
+  }
+});

@@ -408,7 +408,7 @@ export class WorkerPool {
   }
 
   #probeDue(): boolean {
-    const embedders = this.#entries.filter((e) => e.config.capabilities.includes("embed")).length;
+    const embedders = this.#entries.filter((e) => !e.drained && e.config.capabilities.includes("embed")).length;
     return embedders > 1 && (this.#lastProbe === null || this.#now() - this.#lastProbe >= this.#probeEveryMs);
   }
 

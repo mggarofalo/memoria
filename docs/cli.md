@@ -193,7 +193,7 @@ memoria ready
 
 `workers list` shows each inference worker's state, circuits, calls in flight and error rate. `workers drain` takes a worker out of rotation: its calls in flight finish, and it gets no new ones. `workers enable` puts it back.
 
-`queue status` shows jobs by state, whether the queue is paused and persists across restarts, documents set aside, model calls waiting, and the 10 most recent jobs with their ids. `--jobs 0` lists every job the sidecar remembers. `queue retry` runs a failed job again; `queue cancel` stops one that has not finished. `queue pause` starts no more background jobs, and `queue resume` lets them start again. While paused, writes still land but new documents are not searchable.
+`queue status` shows jobs by state, whether the queue is paused and persists across restarts, documents set aside, model calls waiting, and the 10 most recent jobs with their ids. `--jobs 0` lists every job the sidecar remembers. `queue retry` runs a failed job again; `queue cancel` stops one that has not finished. `queue pause` starts no more background jobs, and `queue resume` lets them start again. While paused, writes still land, but new documents are not searchable and deleted ones still are.
 
 `reindex` rescans and embeds every collection, or the ones named with `--collection`. `--no-embed` only rescans, and `--force` re-embeds every document, which keeps the workers busy for a long time on a large corpus.
 

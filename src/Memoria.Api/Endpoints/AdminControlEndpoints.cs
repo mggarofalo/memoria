@@ -26,6 +26,7 @@ public static partial class AdminControlEndpoints
 			.AddEndpointFilter(ForwardRefusalsAsync)
 			.ProducesProblem(StatusCodes.Status401Unauthorized)
 			.ProducesProblem(StatusCodes.Status403Forbidden)
+			.ProducesProblem(StatusCodes.Status404NotFound)
 			.ProducesProblem(StatusCodes.Status429TooManyRequests)
 			.ProducesProblem(StatusCodes.Status502BadGateway)
 			.ProducesProblem(StatusCodes.Status503ServiceUnavailable)
@@ -60,14 +61,12 @@ public static partial class AdminControlEndpoints
 			.WithDescription(
 				"Takes the worker out of rotation. Calls in flight finish and it gets no new ones; `inFlight` shows them leave. "
 				+ "Held in the sidecar's memory, so a sidecar restart puts it back. Draining a drained worker changes nothing.")
-			.ProducesProblem(StatusCodes.Status404NotFound)
 			.ProducesValidationProblem();
 
 		admin.MapPost("/workers/{name}:enable", EnableWorkerAsync)
 			.WithName("enableWorker")
 			.WithSummary("Put a drained worker back")
 			.WithDescription("Returns the worker to rotation. Enabling a worker that is not drained changes nothing.")
-			.ProducesProblem(StatusCodes.Status404NotFound)
 			.ProducesValidationProblem();
 	}
 
@@ -85,7 +84,7 @@ public static partial class AdminControlEndpoints
 			.WithSummary("Pause background work")
 			.WithDescription(
 				"Starts no more reindex or embedding jobs. A running job runs to its end; cancel it to stop it sooner. Writes still land "
-				+ "and queue, so new documents are not searchable until the queue resumes. Held in the sidecar's memory, so a sidecar restart resumes.");
+				+ "and queue, so until the queue resumes new documents are not searchable and deleted ones still are. Held in the sidecar's memory, so a sidecar restart resumes.");
 
 		admin.MapPost("/queue:resume", ResumeQueueAsync)
 			.WithName("resumeQueue")
@@ -97,7 +96,6 @@ public static partial class AdminControlEndpoints
 			.WithSummary("Retry a failed job")
 			.WithDescription("Queues a failed job again under the same id. 409 unless it has failed.")
 			.Produces<JobInfo>(StatusCodes.Status202Accepted)
-			.ProducesProblem(StatusCodes.Status404NotFound)
 			.ProducesProblem(StatusCodes.Status409Conflict)
 			.ProducesValidationProblem();
 
@@ -108,7 +106,6 @@ public static partial class AdminControlEndpoints
 				"Stops a job that has not finished. A waiting job ends at once; a running one stops at its next safe point, so it may still "
 				+ "read `running` here. A cancelled job reports `failed` with the error `Cancelled`. 409 if it has already finished.")
 			.Produces<JobInfo>(StatusCodes.Status202Accepted)
-			.ProducesProblem(StatusCodes.Status404NotFound)
 			.ProducesProblem(StatusCodes.Status409Conflict)
 			.ProducesValidationProblem();
 	}
@@ -144,6 +141,15 @@ public static partial class AdminControlEndpoints
 		try
 		{
 			return await next(context);
+		}
+		catch (SidecarException ex) when (ex.StatusCode == HttpStatusCode.NotFound && ex.Code is "no_route" or SidecarException.Malformed)
+		{
+			// The sidecar has no such route: it is older than this API, not a name the caller got wrong.
+			return TypedResults.Problem(
+				statusCode: StatusCodes.Status502BadGateway,
+				title: "Search backend does not offer this operation",
+				detail: "The sidecar does not have this route. Run the API and the sidecar from the same release.",
+				extensions: new Dictionary<string, object?> { ["code"] = "sidecar_route_missing", ["upstreamStatus"] = 404 });
 		}
 		catch (SidecarException ex) when (ex.StatusCode is HttpStatusCode.BadRequest or HttpStatusCode.NotFound or HttpStatusCode.Conflict)
 		{

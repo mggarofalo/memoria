@@ -9,6 +9,17 @@ import (
 	"github.com/mggarofalo/memoria/cli/internal/termsafe"
 )
 
+// Escape makes server text safe for one line of a format. A one-line result takes
+// Plain for a table and Inline for markdown.
+type Escape func(string) string
+
+var (
+	// Plain strips what a terminal would act on.
+	Plain Escape = termsafe.Line
+	// Inline also escapes what markdown would act on.
+	Inline Escape = inlineText
+)
+
 func yesNo(b bool) string {
 	if b {
 		return "yes"
@@ -58,8 +69,8 @@ func WorkersMarkdown(w io.Writer, list *api.WorkerList) error {
 }
 
 // WorkerLine is the one-line summary a drain or enable reports.
-func WorkerLine(wk *api.WorkerInfo) string {
-	return fmt.Sprintf("Worker %s is %s, with %d calls in flight.", termsafe.Line(wk.Name), termsafe.Line(workerState(wk)), wk.InFlight)
+func WorkerLine(wk *api.WorkerInfo, esc Escape) string {
+	return fmt.Sprintf("Worker %s is %s, with %d calls in flight.", esc(wk.Name), esc(workerState(wk)), wk.InFlight)
 }
 
 func countsLine(c api.JobCounts) string {
@@ -67,7 +78,8 @@ func countsLine(c api.JobCounts) string {
 }
 
 // QueueLine is the one-line summary a pause or resume reports.
-func QueueLine(state *api.QueueState) string {
+// It takes an Escape like the other lines, though it holds only counts.
+func QueueLine(state *api.QueueState, _ Escape) string {
 	verb := "running"
 	if state.Paused {
 		verb = "paused"
@@ -147,6 +159,6 @@ func QueueMarkdown(w io.Writer, status *api.QueueStatus, limit int) error {
 }
 
 // JobLine is the one-line summary a retry, cancel or reindex reports.
-func JobLine(verb string, job *api.JobInfo) string {
-	return fmt.Sprintf("%s job %s (%s, collections: %s).", verb, termsafe.Line(job.Id), termsafe.Line(job.State), termsafe.Line(jobCollections(job)))
+func JobLine(verb string, job *api.JobInfo, esc Escape) string {
+	return fmt.Sprintf("%s job %s (%s, collections: %s).", verb, esc(job.Id), esc(job.State), esc(jobCollections(job)))
 }

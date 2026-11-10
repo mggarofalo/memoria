@@ -152,7 +152,7 @@ The routes under `/v1/admin` other than `/v1/admin/keys` operate the backend. Ea
 | `POST /v1/admin/workers/{name}:drain` | Take the worker out of rotation. Calls in flight finish, and it gets no new ones. `404` with code `unknown_worker` for a name not in the pool. |
 | `POST /v1/admin/workers/{name}:enable` | Put it back. |
 | `GET /v1/admin/queue` | Jobs by state, whether the queue is paused and persistent, documents set aside, model calls by priority class, and the jobs the sidecar remembers, newest first. |
-| `POST /v1/admin/queue:pause` | Start no more background jobs. A running job runs to its end. Writes still queue, and new documents are not searchable until the queue resumes. |
+| `POST /v1/admin/queue:pause` | Start no more background jobs. A running job runs to its end. Writes still queue, and until the queue resumes new documents are not searchable and deleted ones still are. |
 | `POST /v1/admin/queue:resume` | Let waiting jobs start. |
 | `POST /v1/admin/queue/jobs/{id}:retry` | Queue a failed job again under the same id. `409` unless it failed. |
 | `POST /v1/admin/queue/jobs/{id}:cancel` | Stop a job that has not finished. `409` if it has. |
@@ -160,7 +160,7 @@ The routes under `/v1/admin` other than `/v1/admin/keys` operate the backend. Ea
 
 **Who may call them.** These act on every collection at once, so they need the `admin` scope and a key that is not bound to particular collections: an admin-only key, or an admin key with `allCollections: true`. A key that lists collections gets `403` with code `collection_scoped_key`, even with the `admin` scope, and a key without `admin` gets `403`. Neither reaches the sidecar. Like key management, they are unavailable when `Memoria:Auth:Mode` is `Disabled`. Every call is audited under its operation name, such as `drainWorker`.
 
-**What lasts.** Drain and pause are held in the sidecar's memory, not in the API or on disk: a sidecar restart puts every worker back and resumes the queue. To keep a worker out, remove it from the sidecar's configuration ([docs/workers.md](workers.md#the-configuration-file)). A worker name or job id the sidecar could not hold is refused with `400` before the sidecar is called. The sidecar's own refusals (`400`, `404`, `409`) pass through with its `code`.
+**What lasts.** Drain and pause are held in the sidecar's memory, not in the API or on disk: a sidecar restart puts every worker back and resumes the queue. To keep a worker out, remove it from the sidecar's configuration ([docs/workers.md](workers.md#the-configuration-file)). A worker name or job id the sidecar could not hold is refused with `400` before the sidecar is called. The sidecar's own refusals (`400`, `404`, `409`) pass through with its `code`. A sidecar that does not have the route at all, because it is older than the API, gets `502` with code `sidecar_route_missing`.
 
 ### Collection scoping
 

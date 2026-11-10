@@ -829,3 +829,34 @@ test("POST /workers/{name}:drain and :enable change one worker, and refuse a nam
     await app.close();
   }
 });
+
+test("shutdown with a paused queue still waits for the job already running, and only for it", async () => {
+  let release = () => {};
+  const queue = new JobQueue(async (request) => {
+    if (request.reason === "running") await new Promise<void>((r) => (release = r));
+    return result;
+  });
+  const running = queue.enqueue(req({ reason: "running" }));
+  await new Promise((r) => setImmediate(r));
+  queue.pause();
+  const waiting = queue.enqueue(req({ collections: ["other"], reason: "waiting" }));
+  let settled: boolean | undefined;
+  const drained = queue.drain(60_000).then((done) => (settled = done));
+  await new Promise((r) => setImmediate(r));
+  assert.equal(settled, undefined, "it does not cut the running job off");
+  release();
+  assert.equal(await drained, false, "and says a job is still waiting");
+  assert.equal(running.state, "succeeded");
+  assert.equal(waiting.state, "queued");
+});
+
+test("shutdown with a paused queue gives up on a running job at the timeout", async () => {
+  const scheduler = new ManualScheduler();
+  const queue = new JobQueue(async () => never, { scheduler });
+  queue.enqueue(req());
+  await new Promise((r) => setImmediate(r));
+  queue.pause();
+  const drained = queue.drain(1_000);
+  await scheduler.advance(1_000);
+  assert.equal(await drained, false);
+});
