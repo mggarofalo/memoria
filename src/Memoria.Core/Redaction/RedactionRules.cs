@@ -312,6 +312,16 @@ internal static class RedactionRules
 		Pattern(@";[ \t]*(?i:Password|Pwd|User[ ]Password)[ \t]*=[ \t]*(?<secret>[^;""'\r\n\\]+)"),
 		c => !ValueShapes.IsPlaceholder(c.JudgedValue) && !ValueShapes.IsCallOrMember(c.JudgedValue.Trim()));
 
+	/// <summary>
+	/// A Basic credential encoded in code from a literal: <c>`Basic ${btoa("user:pw")}`</c>, or <c>Buffer.from("user:pw")</c> and Python's
+	/// <c>base64.b64encode(b"user:pw")</c> after <c>Basic</c>. The password in the literal is replaced, as in <c>curl -u</c>, so the code and the user name stay readable.
+	/// </summary>
+	public static readonly RedactionRule BasicAuthLiteral = new(
+		"basic-auth-literal",
+		Pattern(
+			@"(?i:\bbasic)[ \t]+(?:\$\{[ \t]*|""[ \t]*\+[ \t]*|'[ \t]*\+[ \t]*)(?:(?:window\.)?btoa|Buffer\.from|base64\.b64encode)\([ \t]*b?(?:""[^""\r\n:]*:(?<secret>[^""\s][^""\r\n]*)""|'[^'\r\n:]*:(?<secret>[^'\s][^'\r\n]*)'|`[^`$\r\n:]*:(?<secret>[^`$\s][^`$\r\n]*)`)"),
+		SecretHeuristics.IsCommandCredential);
+
 	/// <summary><c>Authorization</c> and <c>Proxy-Authorization</c> headers with a Bearer, Basic, Token, or ApiKey scheme, in shell, JSON at any escaping depth, and URL-encoded form.</summary>
 	public static readonly RedactionRule AuthorizationHeader = new(
 		"authorization-header",
@@ -363,6 +373,16 @@ internal static class RedactionRules
 		"mysql-password",
 		Pattern(@"\s-p(?:'(?<secret>[^'\r\n]+)|""(?<secret>[^""\r\n]+)|(?<secret>[^\s""'`|;&]+))"),
 		SecretHeuristics.IsMysqlPassword);
+
+	/// <summary>
+	/// The Mongo shell's <c>-p</c>, as in <c>mongosh -u admin -p x</c> or <c>mongo -px</c>. The value may follow a space, so a value
+	/// that starts with a dash is the next flag, and <c>-p</c> alone prompts for the password.
+	/// </summary>
+	public static readonly RedactionRule MongoPassword = new(
+		"mongo-password",
+		Pattern(@"\s-p[ \t]*(?:'(?<secret>[^'\r\n]+)'|""(?<secret>[^""\r\n]+)""|(?<secret>[^\s""'`|;&\-][^\s""'`|;&]*))"),
+		SecretHeuristics.IsMongoPassword,
+		literal: "-p");
 
 	/// <summary>The plain text passed to PowerShell's <c>ConvertTo-SecureString</c>.</summary>
 	public static readonly RedactionRule SecureStringPassword = new(
@@ -598,6 +618,7 @@ internal static class RedactionRules
 		UrlToken,
 		UserInfoPassword,
 		ConnectionStringPassword,
+		BasicAuthLiteral,
 		AuthorizationHeader,
 		DigestResponse,
 		QueryCredential,
@@ -608,6 +629,7 @@ internal static class RedactionRules
 		SessionCookieValue,
 		CommandPassword,
 		MysqlPassword,
+		MongoPassword,
 		SecureStringPassword,
 		CredentialArgument,
 		NetrcPassword,

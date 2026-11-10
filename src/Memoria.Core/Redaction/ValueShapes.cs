@@ -267,7 +267,8 @@ internal static partial class ValueShapes
 			return IsNameBody(text.AsSpan(1));
 		}
 
-		return text.EndsWith(')') && IsTemplateBody(text.AsSpan(2, text.Length - 3).Trim().ToString().Split(' ')[0]);
+		// A substitution that prints a literal, as $(printf 'x'), holds the literal and refers to nothing.
+		return text.EndsWith(')') && IsTemplateBody(text.AsSpan(2, text.Length - 3).Trim().ToString().Split(' ')[0]) && !CodeValues.PrintsLiteral(text);
 	}
 
 	/// <summary><c>%s</c>, <c>%(name)s</c>, and <c>%NAME%</c>. A leading percent alone proves nothing.</summary>
@@ -403,8 +404,9 @@ internal static partial class ValueShapes
 	/// <summary>A name before <c>(...)</c> or <c>[...]</c>, closed, with generic arguments allowed: <c>table.Column&lt;string&gt;(type: "x")</c>.</summary>
 	private static bool IsCallPrefix(string value)
 	{
+		// $(printf 'x') is a shell printing a literal, not a call of $.
 		int open = value.IndexOfAny(['(', '[']);
-		if (open <= 0 || !value.AsSpan(open).ContainsAny(')', ']'))
+		if (open <= 0 || !value.AsSpan(open).ContainsAny(')', ']') || CodeValues.PrintsLiteral(value))
 		{
 			return false;
 		}

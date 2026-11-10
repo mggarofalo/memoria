@@ -255,12 +255,77 @@ internal static partial class CodeValues
 			&& command is not ("printf" or "echo");
 	}
 
-	/// <summary>The data a span's code carries: <c>Tr0ub4dor</c> in <c>$(printf 'Tr0ub4dor')</c>, and <c>Pr0dP4ss</c> in <c>${DB_PASSWORD:-Pr0dP4ss}</c>.</summary>
+	/// <summary>
+	/// The data a span's code carries: <c>Tr0ub4dor</c> in <c>$(printf 'Tr0ub4dor')</c> and in <c>$(echo Tr0ub4dor)</c>, <c>Pr0dP4ss</c> in
+	/// <c>${DB_PASSWORD:-Pr0dP4ss}</c>, and <c>a8F3…</c> in <c>${prefix + "a8F3…"}</c>, where a template joins a literal to code.
+	/// </summary>
 	private static string DataIn(string body, bool command)
 	{
-		string literals = command ? string.Join(' ', QuotedLiteral().Matches(body).Select(static match => match.Groups["text"].Value)) : string.Empty;
+		string literals = command ? PrintedText(body) : JoinedLiterals(body);
 		Match fallback = ShellDefault().Match(body);
 		return fallback.Success ? literals + " " + fallback.Groups["text"].Value : literals;
+	}
+
+	/// <summary>
+	/// What a command substitution carries: its quoted literals. <c>printf</c> and <c>echo</c> print their words, bare or quoted, but not a
+	/// flag, a format such as <c>%s</c> or a variable. Piped on, as in <c>$(echo $RANDOM | md5sum)</c>, what they print is input to code.
+	/// </summary>
+	private static string PrintedText(string body)
+	{
+		string unquoted = QuotedLiteral().Replace(body, " ");
+		string[] words = unquoted.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+		if (words.Length == 0 || !IsPrintCommand(words[0]))
+		{
+			return string.Join(' ', QuotedLiteral().Matches(body).Select(static match => match.Groups["text"].Value));
+		}
+
+		if (unquoted.Contains('|', StringComparison.Ordinal))
+		{
+			return string.Empty;
+		}
+
+		IEnumerable<string> quoted = QuotedLiteral().Matches(body).Select(static match => match.Groups["text"].Value);
+		return string.Join(' ', quoted.Concat(words.Skip(1)).Where(static word => word.Length > 0 && word[0] != '-' && !word.AsSpan().ContainsAny('$', '%')));
+	}
+
+	/// <summary><c>printf</c> or <c>echo</c>, by name or by path, as <c>/bin/echo</c>.</summary>
+	private static bool IsPrintCommand(string word)
+	{
+		string name = word[(word.LastIndexOf('/') + 1)..];
+		return name is "printf" or "echo";
+	}
+
+	/// <summary>
+	/// The literals of a value that is one template span joining them to code, as <c>a8F3…</c> in <c>${prefix + "a8F3…"}</c>, or null. Judged
+	/// one by one, since the span's code around them has spaces in it and is not the secret.
+	/// </summary>
+	public static string[]? JoinedLiteralsOf(string value)
+	{
+		if (value.Length < 4 || !value.StartsWith("${", StringComparison.Ordinal) || CloseOf(value, 2, '{', '}') != value.Length)
+		{
+			return null;
+		}
+
+		string literals = JoinedLiterals(value[2..^1]);
+		return literals.Length == 0 ? null : literals.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+	}
+
+	/// <summary>A command substitution that prints a literal, as <c>$(printf 'x')</c> or <c>$(echo x)</c>. It holds that text, and refers to nothing.</summary>
+	public static bool PrintsLiteral(string value)
+	{
+		string body = value.Length > 3 && value.StartsWith("$(", StringComparison.Ordinal) && value[^1] == ')' ? value[2..^1].Trim() : string.Empty;
+		int space = body.IndexOf(' ');
+		string printed = space > 0 && IsPrintCommand(body[..space]) ? PrintedText(body) : string.Empty;
+		return HoldsSecretLikePiece(printed) || HoldsWord(printed);
+	}
+
+	/// <summary>The quoted literals a template joins with <c>+</c>. A literal passed to a call, as in <c>toString("base64url")</c>, is an argument.</summary>
+	private static string JoinedLiterals(string body)
+	{
+		IEnumerable<string> joined = JoinableLiteral().Matches(body)
+			.Where(match => body.AsSpan(0, match.Index).TrimEnd().EndsWith('+') || body.AsSpan(match.Index + match.Length).TrimStart().StartsWith('+'))
+			.Select(static match => match.Groups["text"].Value);
+		return string.Join(' ', joined);
 	}
 
 	/// <summary>The literal a template span only wraps, as <c>a8F3…</c> in <c>${"a8F3…"}</c>, or the value itself.</summary>
@@ -305,11 +370,15 @@ internal static partial class CodeValues
 	[GeneratedRegex(@"""(?<text>[^""]*)""|'(?<text>[^']*)'", RegexOptions.CultureInvariant)]
 	private static partial Regex QuotedLiteral();
 
-	[GeneratedRegex(@"^[A-Za-z_][A-Za-z0-9_]*:?[-=+](?<text>.*)$", RegexOptions.CultureInvariant | RegexOptions.Singleline)]
+	[GeneratedRegex(@"^[A-Za-z_][A-Za-z0-9_]*(?::?[-=+]|/{1,2}[^/]*/)(?<text>.*)$", RegexOptions.CultureInvariant | RegexOptions.Singleline)]
 	private static partial Regex ShellDefault();
 
 	[GeneratedRegex(@"[A-Za-z0-9]+", RegexOptions.CultureInvariant)]
 	private static partial Regex Pieces();
+
+	/// <summary>A quoted literal in a template's code, where a backtick quotes too: <c>${prefix + `x`}</c>.</summary>
+	[GeneratedRegex(@"""(?<text>[^""]*)""|'(?<text>[^']*)'|`(?<text>[^`$]*)`", RegexOptions.CultureInvariant)]
+	private static partial Regex JoinableLiteral();
 
 	[GeneratedRegex(@"[A-Za-z0-9]+(?:_[A-Za-z0-9]+)*", RegexOptions.CultureInvariant)]
 	private static partial Regex Words();

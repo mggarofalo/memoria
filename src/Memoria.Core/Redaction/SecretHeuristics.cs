@@ -297,22 +297,52 @@ internal static class SecretHeuristics
 	/// <summary><c>curl -u user:password</c>. The flag is common, so the line must be a curl command.</summary>
 	public static bool IsCurlUserPassword(SecretCandidate candidate)
 	{
-		return IsUrlPassword(candidate.JudgedValue) && !ValueShapes.IsCodeReference(candidate.JudgedValue) && CommandLines.IsCommand(candidate.Input, candidate.Match.Index, "curl");
+		return IsUrlPassword(candidate.JudgedValue) && !ValueShapes.IsCodeReference(candidate.JudgedValue) && IsOnCommand(candidate, candidate.JudgedValue, "curl");
 	}
 
 	/// <summary><c>-b</c> and <c>--cookie</c> with a value of <c>name=value</c>. A file name has no equals sign.</summary>
 	public static bool IsCurlCookie(SecretCandidate candidate)
 	{
-		return IsSessionCookie(candidate.JudgedValue) && CommandLines.IsCommand(candidate.Input, candidate.Match.Index, "curl");
+		return IsSessionCookie(candidate.JudgedValue) && IsOnCommand(candidate, candidate.JudgedValue, "curl");
 	}
 
 	/// <summary><c>mysql -pSECRET</c>. A flag with the value attached, so the line must be a MySQL client.</summary>
 	public static bool IsMysqlPassword(SecretCandidate candidate)
 	{
 		string value = candidate.JudgedValue;
-		bool port = value.All(static c => char.IsAsciiDigit(c) || c == ':');
-		return !port && !ValueShapes.IsPlaceholder(value) && CommandLines.IsCommand(candidate.Input, candidate.Match.Index, "mysql", "mysqldump", "mysqladmin", "mariadb", "mariadb-dump");
+		return !IsPortMapping(value) && !ValueShapes.IsPlaceholder(value) && IsOnCommand(candidate, value, "mysql", "mysqldump", "mysqladmin", "mariadb", "mariadb-dump");
 	}
+
+	/// <summary><c>mongosh -p x</c> and the Mongo tools that take the same flag. It is common, so the line must be one of them, and a port is not a password.</summary>
+	public static bool IsMongoPassword(SecretCandidate candidate)
+	{
+		string value = candidate.JudgedValue;
+		return !IsPortMapping(value) && IsCommandCredential(candidate) && IsOnCommand(candidate, value, MongoTools);
+	}
+
+	private static readonly string[] MongoTools = ["mongosh", "mongo", "mongodump", "mongorestore", "mongoexport", "mongoimport", "mongostat", "mongotop", "mongofiles"];
+
+	/// <summary>
+	/// The flag belongs to one of the commands. Quoted mid-sentence, as in <c>apt install mysql -pkg</c> or <c>docker compose up mongo -p
+	/// proj_2024</c>, the command could as well be a word of the sentence or another tool's argument, so the value must read as generated:
+	/// eight characters or more, not words, and not a name with a number on it.
+	/// </summary>
+	private static bool IsOnCommand(SecretCandidate candidate, string value, params string[] names)
+	{
+		CommandPlace place = CommandLines.Place(candidate.Input, candidate.Match.Index, names);
+		string word = CodeValues.WithoutMarkup(value).TrimEnd('.', ',', ';', ':', ')');
+		bool generated = word.Length >= ShortTokenLength && !ValueShapes.IsWordy(word) && !ValueShapes.ReadsAsIdentifierWithDigits(word);
+		return place == CommandPlace.SegmentStart || (place == CommandPlace.MidSentence && generated);
+	}
+
+	/// <summary>A port or a port mapping, as Docker writes one: <c>27017</c>, <c>127.0.0.1:3306:3306</c>, <c>27017-27019:27017/tcp</c>, <c>[::1]:80:80</c>.</summary>
+	private static bool IsPortMapping(string value)
+	{
+		string body = value.EndsWith("/tcp", StringComparison.Ordinal) || value.EndsWith("/udp", StringComparison.Ordinal) ? value[..^4] : value;
+		return body.Any(char.IsAsciiDigit) && body.AsSpan().IndexOfAnyExcept(PortChars) < 0;
+	}
+
+	private static readonly SearchValues<char> PortChars = SearchValues.Create("0123456789.:-[]");
 
 	/// <summary>A cookie header carrying at least one value long and varied enough to be a session id.</summary>
 	public static bool IsSessionCookie(string value)
@@ -380,6 +410,11 @@ internal static class SecretHeuristics
 	private static int ExtendValue(SecretCandidate candidate)
 	{
 		string input = candidate.Input;
+		if (BalancedEnd(input, candidate.Secret.Index, candidate.End) is int closed)
+		{
+			return closed;
+		}
+
 		int end = ExtendPastStrayQuote(input, candidate.Secret.Index, candidate.End);
 		if (end > candidate.End)
 		{
@@ -400,6 +435,54 @@ internal static class SecretHeuristics
 		return hasMore && (FillsLine(input, keyStart, runEnd) || FillsString(input, keyStart, runEnd)) ? runEnd : end;
 	}
 
+	/// <summary>
+	/// An unquoted value that opens a command substitution, a parameter expansion, a list or a braced value runs to its closer on the
+	/// same line, past the quotes and spaces inside it: <c>$(printf 'x')</c>, <c>${A/b/x}</c>, <c>["x"]</c> and <c>{ x }</c> are each one value. Cut at the first quote or
+	/// space, only the opener would be judged, and the secret inside it would be left. Null when there is no such opener or no closer.
+	/// </summary>
+	private static int? BalancedEnd(string input, int start, int end)
+	{
+		if (IsQuoted(input, start))
+		{
+			return null;
+		}
+
+		int open = input[start] is '[' or '{' ? start : input[start] == '$' && start + 1 < input.Length && input[start + 1] is '(' or '{' ? start + 1 : -1;
+		int close = open < 0 ? -1 : CloserOf(input, open);
+		return close > end ? close : null;
+	}
+
+	/// <summary>The index just past the closer that matches the opener, skipping quoted text, or -1 when the line or the window ends first.</summary>
+	private static int CloserOf(string input, int open)
+	{
+		char opener = input[open];
+		char closer = opener switch { '[' => ']', '{' => '}', _ => ')' };
+		int depth = 0;
+		char quote = '\0';
+		int limit = Math.Min(input.Length, open + MaxBalancedValue);
+		for (int i = open; i < limit && input[i] is not ('\n' or '\r'); i++)
+		{
+			char c = input[i];
+			if (quote != '\0')
+			{
+				quote = c == quote ? '\0' : quote;
+				continue;
+			}
+
+			quote = c is '"' or '\'' or '`' ? c : '\0';
+			depth += c == opener ? 1 : c == closer ? -1 : 0;
+			if (depth == 0)
+			{
+				return i + 1;
+			}
+		}
+
+		return -1;
+	}
+
+	/// <summary>How far a balanced value is looked through. A real one is short, and a line of nested code is not a value.</summary>
+	private const int MaxBalancedValue = 256;
+
 	private static bool FillsLine(string input, int keyStart, int runEnd)
 	{
 		return IsAtLineStart(input, keyStart) && (runEnd == input.Length || input[runEnd] is '\r' or '\n');
@@ -416,7 +499,7 @@ internal static class SecretHeuristics
 	/// </summary>
 	private static int ExtendPastStrayQuote(string input, int start, int end)
 	{
-		if (end >= input.Length || input[end] is not ('"' or '\''))
+		if (end >= input.Length || input[end] is not ('"' or '\'' or '`'))
 		{
 			return end;
 		}
@@ -459,13 +542,54 @@ internal static class SecretHeuristics
 	{
 		Group keyGroup = candidate.Match.Groups["key"];
 		KeyKind kind = classify(KeyTail(keyGroup.Value));
-		if (kind == KeyKind.NotSecret)
+		if (kind == KeyKind.NotSecret || IsVariableBeforeColon(candidate, keyGroup))
 		{
 			return false;
 		}
 
-		string value = CodeValues.WithoutMarkup(NormalizeRemainder(WholeValue(candidate)));
-		return !IsBenignCandidate(candidate, keyGroup, value) && JudgeByKind(candidate, keyGroup, kind, value);
+		// What will be replaced if the candidate is accepted, so the judgement covers all of it.
+		int valueEnd = ExtendAssignment(candidate);
+		string whole = valueEnd > candidate.End ? candidate.Input[candidate.Secret.Index..valueEnd] : candidate.JudgedValue;
+		string value = UnwrapBraces(CodeValues.WithoutMarkup(NormalizeRemainder(whole)));
+		if (IsBenignCandidate(candidate, keyGroup, value))
+		{
+			return false;
+		}
+
+		// A list is a secret when any of its items is one: ["x", "y"] under a token's name holds tokens. So is a template that joins one to code.
+		return (ListItems(value) ?? CodeValues.JoinedLiteralsOf(value)) is { } items
+			? items.Any(item => !IsBenignValue(item, keyGroup.Value, readAsCode: false) && JudgeByKind(candidate, keyGroup, kind, item, valueEnd))
+			: JudgeByKind(candidate, keyGroup, kind, value, valueEnd);
+	}
+
+	/// <summary>
+	/// <c>"$PWD":/out</c> in a <c>docker -v</c> mount reads a variable and puts a path after it: the colon is not an assignment. A <c>$</c>
+	/// name with <c>=</c>, as PHP's <c>$password = "x"</c>, still assigns.
+	/// </summary>
+	private static bool IsVariableBeforeColon(SecretCandidate candidate, Group keyGroup)
+	{
+		int keyEnd = keyGroup.Index + keyGroup.Length;
+		ReadOnlySpan<char> separator = candidate.Input.AsSpan(keyEnd, candidate.Secret.Index - keyEnd);
+		return keyGroup.Index > 0 && candidate.Input[keyGroup.Index - 1] == '$' && !separator.Contains('=');
+	}
+
+	/// <summary><c>{ correcthorse }</c> is the braced value itself. With a colon, comma, equals sign or quote inside, it is an object literal and stays whole.</summary>
+	private static string UnwrapBraces(string value)
+	{
+		bool braced = value.Length > 2 && value[0] == '{' && value[^1] == '}' && value.AsSpan(1, value.Length - 2).IndexOfAny(":,=;()\"'`{}") < 0;
+		string inner = braced ? value[1..^1].Trim() : value;
+		return inner.Length > 0 ? inner : value;
+	}
+
+	/// <summary>The items of a list literal such as <c>["a", 'b', c]</c>, unquoted, or null for a value that is not one.</summary>
+	private static string[]? ListItems(string value)
+	{
+		if (value.Length < 3 || value[0] != '[' || value[^1] != ']')
+		{
+			return null;
+		}
+
+		return [.. value[1..^1].Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).Select(static item => item.Trim('"', '\'', '`', '[', ']', ' '))];
 	}
 
 	/// <summary>
@@ -482,13 +606,6 @@ internal static class SecretHeuristics
 		string tail = key[^MaxKeyLength..];
 		int separator = tail.IndexOfAny(['_', '-', '.', ' ']);
 		return separator < 0 ? "" : tail[(separator + 1)..];
-	}
-
-	/// <summary>What will be replaced if the candidate is accepted, so the judgement covers all of it.</summary>
-	private static string WholeValue(SecretCandidate candidate)
-	{
-		int end = ExtendAssignment(candidate);
-		return end > candidate.End ? candidate.Input[candidate.Secret.Index..end] : candidate.JudgedValue;
 	}
 
 	private static bool IsBenignCandidate(SecretCandidate candidate, Group keyGroup, string value)
@@ -517,7 +634,7 @@ internal static class SecretHeuristics
 		return value.StartsWith('$') && !IsUpperSnake(value[1..]);
 	}
 
-	private static bool JudgeByKind(SecretCandidate candidate, Group keyGroup, KeyKind kind, string value)
+	private static bool JudgeByKind(SecretCandidate candidate, Group keyGroup, KeyKind kind, string value, int valueEnd)
 	{
 		int keyEnd = keyGroup.Index + keyGroup.Length;
 		ReadOnlySpan<char> separator = candidate.Input.AsSpan(keyEnd, candidate.Secret.Index - keyEnd);
@@ -530,19 +647,83 @@ internal static class SecretHeuristics
 		bool compact = separator.Contains('=') && !separator.ContainsAny(' ', '\t');
 		return kind switch
 		{
-			KeyKind.Password => IsPasswordValue(value, compact || IsExplicitPasswordForm(candidate, keyGroup.Index, separator)),
+			KeyKind.Password => IsPasswordValue(value, compact || IsExplicitPasswordForm(candidate, keyGroup.Index, separator, valueEnd)),
 			KeyKind.KeyFamily => value.Length >= StrictTokenLength && !ValueShapes.ReadsAsIdentifierWithDigits(value) && IsTokenValue(value),
 			KeyKind.Descriptive => IsHighInformation(value),
 			_ => IsTokenValue(value, compact && IsUpperSnake(keyGroup.Value)),
 		};
 	}
 
-	/// <summary>A quoted literal, or <c>password: value</c> filling its whole line, says plainly that the value is the password.</summary>
-	private static bool IsExplicitPasswordForm(SecretCandidate candidate, int keyStart, ReadOnlySpan<char> separator)
+	/// <summary>
+	/// A quoted literal, or <c>password: value</c> filling its whole line, says plainly that the value is the password. So does one that
+	/// ends a line of such pairs, as in <c>user: app password: letmeinplz</c> or <c>DB_USER=app DB_PASSWORD: letmeinplz</c>. After a word of
+	/// prose, as in <c>database password: production</c>, a bare word is as likely the next word of the sentence, so it stays.
+	/// </summary>
+	private static bool IsExplicitPasswordForm(SecretCandidate candidate, int keyStart, ReadOnlySpan<char> separator, int valueEnd)
 	{
+		bool labelled = separator.Contains(':') && IsLineBlankFrom(candidate.Input, valueEnd);
 		return IsQuoted(candidate.Input, candidate.Secret.Index)
-			|| (separator.Contains(':') && IsWholeYamlLine(candidate.Input, keyStart, candidate.End));
+			|| (labelled && (IsAtLineStart(candidate.Input, keyStart) || FollowsPair(candidate.Input, keyStart)));
 	}
+
+	/// <summary>
+	/// True when the key comes straight after another name and its value, as <c>app</c> in <c>user: app password:</c>, or the whole
+	/// <c>DB_USER=app</c> or <c>user:app</c> before <c>DB_PASSWORD:</c>.
+	/// </summary>
+	private static bool FollowsPair(string input, int keyStart)
+	{
+		int valueEnd = keyStart;
+		while (valueEnd > 0 && input[valueEnd - 1] is ' ' or '	')
+		{
+			valueEnd--;
+		}
+
+		int valueStart = valueEnd;
+		while (valueStart > 0 && !char.IsWhiteSpace(input[valueStart - 1]))
+		{
+			valueStart--;
+		}
+
+		ReadOnlySpan<char> value = input.AsSpan(valueStart, valueEnd - valueStart);
+		int op = value.IndexOfAny('=', ':');
+		bool glued = op > 0 && IsLoginName(value[..op]) && value[(op + 1)..].IndexOfAnyExcept(":=") >= 0;
+		return valueEnd < keyStart && value.Length > 0 && (glued || EndsWithColonName(input, valueStart));
+	}
+
+	/// <summary>True when a login name and a colon end just before the position, with one space or none between, as <c>user: </c> does.</summary>
+	private static bool EndsWithColonName(string input, int position)
+	{
+		int colon = position > 0 && input[position - 1] == ' ' ? position - 2 : position - 1;
+		int nameStart = colon;
+		while (nameStart > 0 && (char.IsAsciiLetterOrDigit(input[nameStart - 1]) || input[nameStart - 1] is '_' or '-' or '.'))
+		{
+			nameStart--;
+		}
+
+		return colon > 0 && input[colon] == ':' && IsLoginName(input.AsSpan(nameStart, colon - nameStart));
+	}
+
+	/// <summary>
+	/// A name that goes with a password in a set of credentials: a user, a host, a database. <c>Error:</c>, <c>Step 2:</c> and <c>level=</c>
+	/// label prose and logs, and the word after them is no password.
+	/// </summary>
+	private static bool IsLoginName(ReadOnlySpan<char> name)
+	{
+		if (name.IsEmpty || name.IndexOfAnyExcept(PairNameChars) >= 0)
+		{
+			return false;
+		}
+
+		int separator = name.LastIndexOfAny("_.-");
+		return LoginNames.Contains(name[(separator + 1)..].ToString());
+	}
+
+	private static readonly HashSet<string> LoginNames = new(StringComparer.OrdinalIgnoreCase)
+	{
+		"user", "username", "login", "uid", "account", "email", "host", "hostname", "server", "db", "dbname", "database", "port",
+	};
+
+	private static readonly SearchValues<char> PairNameChars = SearchValues.Create("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-");
 
 	/// <summary>What a value holds once earlier rules' placeholders are gone. <c>%20Bearer%20[REDACTED:x]</c> leaves the word Bearer, not token-like text.</summary>
 	private static string NormalizeRemainder(string value)
@@ -631,12 +812,7 @@ internal static class SecretHeuristics
 		return i >= 0 && input[i] == '|';
 	}
 
-	/// <summary>A bare word is a password in <c>password: admin</c> on its own line, but not in <c>password: the one you chose</c>.</summary>
-	private static bool IsWholeYamlLine(string input, int keyStart, int valueEnd)
-	{
-		return IsAtLineStart(input, keyStart) && IsLineBlankFrom(input, valueEnd);
-	}
-
+	/// <summary>True when only indentation, a list dash, or <c>export</c> or <c>set</c> stand before the position on its line.</summary>
 	private static bool IsAtLineStart(string input, int position)
 	{
 		for (int i = position - 1; i >= 0 && input[i] is not ('\n' or '\r'); i--)
