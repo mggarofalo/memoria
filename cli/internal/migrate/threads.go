@@ -9,6 +9,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
@@ -43,14 +44,31 @@ func OpenTranscript(file string) (io.ReadCloser, error) {
 	return &zstdTranscript{decoder: decoder, file: handle}, nil
 }
 
+// zstdTranscript is safe to close while it is being read, and more than once. net/http reads a request body on its own goroutine
+// and can still be reading when the server has answered and the caller closes it, and a zstd decoder closed under a read crashes.
 type zstdTranscript struct {
+	mu      sync.Mutex
 	decoder *zstd.Decoder
 	file    *os.File
+	closed  bool
 }
 
-func (z *zstdTranscript) Read(p []byte) (int, error) { return z.decoder.Read(p) }
+func (z *zstdTranscript) Read(p []byte) (int, error) {
+	z.mu.Lock()
+	defer z.mu.Unlock()
+	if z.closed {
+		return 0, os.ErrClosed
+	}
+	return z.decoder.Read(p)
+}
 
 func (z *zstdTranscript) Close() error {
+	z.mu.Lock()
+	defer z.mu.Unlock()
+	if z.closed {
+		return nil
+	}
+	z.closed = true
 	z.decoder.Close()
 	return z.file.Close()
 }

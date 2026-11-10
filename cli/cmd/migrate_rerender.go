@@ -198,10 +198,10 @@ func (a *app) migrateRerender(ctx context.Context, o migrateRerenderOptions) err
 func missingArchive(dirs []string) string {
 	given := map[string]bool{}
 	for _, dir := range dirs {
-		given[strings.ToLower(filepath.Clean(dir))] = true
+		given[strings.ToLower(absolute(dir))] = true
 	}
 	for _, dir := range dirs {
-		clean := filepath.Clean(dir)
+		clean := absolute(dir)
 		if !strings.EqualFold(filepath.Base(clean), "sessions") {
 			continue
 		}
@@ -211,6 +211,13 @@ func missingArchive(dirs []string) string {
 		}
 	}
 	return ""
+}
+
+func absolute(dir string) string {
+	if full, err := filepath.Abs(dir); err == nil {
+		return full
+	}
+	return filepath.Clean(dir)
 }
 
 // overCap is what push could not store for size: larger than the default cap, or named over the cap by the last push here.
@@ -293,6 +300,9 @@ func (g *rerendering) checkUncounted(root *os.Root, item rerenderItem, exports *
 	if len(exports.uncounted) > 0 {
 		family, err := transcripts.Family(item.sessionID, item.transcript)
 		if err != nil {
+			family, err = ownCovers(root, item, exports.uncounted, err)
+		}
+		if err != nil {
 			g.familyUnread(item.name, err)
 			return
 		}
@@ -306,7 +316,7 @@ func (g *rerendering) checkUncounted(root *os.Root, item rerenderItem, exports *
 			g.summary.AcceptedUncounted++
 			g.problem(item.name, migrate.RerenderAcceptedUncounted, "")
 		}
-		item.threads = withoutMessages(family)
+		item.threads = withoutMessages(family, item.transcript)
 	}
 	item.newest = exports.newest
 	g.summary.Threads += len(item.threads)
@@ -323,11 +333,26 @@ func (g *rerendering) familyUnread(name string, err error) {
 	g.problem(name, migrate.RerenderUnreadable, "thread")
 }
 
-// withoutMessages keeps what sending needs, so a session's messages are not held while it is sent.
-func withoutMessages(threads []migrate.Thread) []migrate.Thread {
-	kept := make([]migrate.Thread, len(threads))
-	for i, thread := range threads {
-		kept[i] = migrate.Thread{ID: thread.ID, File: thread.File}
+// ownCovers is the session's own transcript alone, when a sibling thread cannot be read but the exports hold nothing past it:
+// no other thread is then needed to hold them. Otherwise it is the error that stopped the family.
+func ownCovers(root *os.Root, item rerenderItem, uncounted []string, failed error) ([]migrate.Thread, error) {
+	messages, err := migrate.TranscriptMessages(item.transcript)
+	own := []migrate.Thread{{ID: item.sessionID, File: item.transcript, Messages: messages}}
+	if err != nil || !uncountedCovered(root, uncounted, own) {
+		return nil, failed
+	}
+	return own, nil
+}
+
+// withoutMessages keeps what sending needs, so a session's messages are not held while it is sent. A subagent thread with no
+// messages adds nothing to the export and the server would only answer it as partial, so it is left out. The session's own thread
+// always goes, as it is the session the export names.
+func withoutMessages(threads []migrate.Thread, own string) []migrate.Thread {
+	var kept []migrate.Thread
+	for _, thread := range threads {
+		if thread.File == own || len(thread.Messages) > 0 {
+			kept = append(kept, migrate.Thread{ID: thread.ID, File: thread.File})
+		}
 	}
 	return kept
 }

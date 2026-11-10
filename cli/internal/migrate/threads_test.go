@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -116,6 +118,31 @@ func checkReadsAs(t *testing.T, file, text string) {
 	read, err := io.ReadAll(stream)
 	if err != nil || string(read) != text || stream.Close() != nil {
 		t.Fatalf("read %q, err = %v", read, err)
+	}
+}
+
+// net/http can still be reading an upload when the server has answered and the caller closes the body, and then closes it again.
+func TestACompressedUploadTheServerTurnsAwayIsClosedSafely(t *testing.T) {
+	file := put(t, filepath.Join(t.TempDir(), "rollout-"+testID+".jsonl.zst"), compressed(t, rollout(testID, "", "2026-09-12T10:15:09Z", strings.Repeat("words and more words ", 1<<21))))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Connection", "close")
+		w.WriteHeader(http.StatusRequestEntityTooLarge)
+	}))
+	defer server.Close()
+	for range 5 {
+		body, err := OpenTranscript(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if answer, err := http.Post(server.URL, "application/x-ndjson", body); err == nil {
+			_ = answer.Body.Close()
+		}
+		if body.Close() != nil {
+			t.Fatal("a second close failed")
+		}
+		if _, err := body.Read(make([]byte, 8)); !errors.Is(err, os.ErrClosed) {
+			t.Fatalf("a read after close = %v", err)
+		}
 	}
 }
 

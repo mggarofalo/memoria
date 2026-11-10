@@ -657,6 +657,28 @@ func TestCodexsArchiveBesideTheSessionsGivenIsAskedFor(t *testing.T) {
 	}
 }
 
+// A sibling thread that cannot be read does not stop an export its own transcript holds whole, and an empty one is not sent.
+func TestOnlyTheThreadsAnExportNeedsCanStopIt(t *testing.T) {
+	f, archived, _ := subagentFixture(t)
+	body := "---\nsession_id: \"" + rerenderID + "\"\npadding: \"" + strings.Repeat("x", migrate.DefaultMaxDocumentBytes) + "\"\n---\n\n# please\n\n## User\n\nplease\r\nlook\n\n## Assistant\n\nlooked\n"
+	writeFile(t, f.big, body)
+	writeFile(t, filepath.Join(archived, "rollout-copy-"+subagentID+".jsonl"), codexMeta(subagentID, rerenderID, "2026-01-01T00:05:00Z"))
+	if summary, code, _ := f.run(t, nil, "--codex-sessions", archived); code != 0 || summary.WouldSend != 1 || summary.Threads != 1 {
+		t.Fatalf("two copies of a thread it does not need: code = %d, summary = %+v", code, summary)
+	}
+	empty := "98765432-1234-1234-1234-123456789abc"
+	writeFile(t, filepath.Join(archived, "rollout-copy-"+subagentID+".jsonl"), codexMeta(empty, rerenderID, "2026-01-01T00:06:00Z"))
+	server := newSessionServer(t)
+	if summary, code, _ := f.run(t, server, "--apply", "--codex-sessions", archived); code != 0 || summary.Sent != 1 || summary.Threads != 2 || len(server.uploads()) != 2 {
+		t.Fatalf("an empty thread: code = %d, summary = %+v, uploads = %d", code, summary, len(server.uploads()))
+	}
+	for _, call := range server.uploads() {
+		if call.sessionID == empty {
+			t.Fatal("a thread with no messages was sent")
+		}
+	}
+}
+
 func TestASubagentThreadThatCannotBeReadStopsItsExport(t *testing.T) {
 	f, archived, sub := subagentFixture(t)
 	writeFile(t, filepath.Join(archived, "rollout-copy-"+subagentID+".jsonl"), sub)
