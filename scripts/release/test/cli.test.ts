@@ -388,6 +388,14 @@ test("verify-sidecar-image makes the index it needs, compares the version, and r
   const wrongVersion = fakeTools(repo, undefined, undefined, { docker: docker("0", wrong), httpGet: () => JSON.stringify({ version: "9.9.9" }) });
   assert.equal(run(["verify-sidecar-image", "img", "1.2.3"], wrongVersion.tools, (e) => errors.push(e)), 1);
   assert.equal(run(["verify-sidecar-image", "img"], wrongVersion.tools, (e) => errors.push(e)), 1);
+
+  // A sidecar that never answers, such as one with no index, is refused, and still removed.
+  const quiet: string[][] = [];
+  const silent = fakeTools(repo, undefined, undefined, { docker: docker("0", quiet), sleep: () => undefined });
+  const before = errors.length;
+  assert.equal(run(["verify-sidecar-image", "img", "1.2.3"], silent.tools, (e) => errors.push(e)), 1);
+  assert.match(errors[before] as string, /\(no answer\)/);
+  assert.deepEqual(quiet.at(-1), ["rm", "-f", "memoria-verify"]);
 });
 
 test("verify-image refuses a wrong version or a silent container, and still removes it", (t) => {
