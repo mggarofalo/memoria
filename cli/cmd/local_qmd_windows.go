@@ -20,13 +20,13 @@ func localCommand(ctx context.Context, command string, args []string) (*exec.Cmd
 	}
 	extension := strings.ToLower(filepath.Ext(resolved))
 	if extension != ".cmd" && extension != ".bat" {
-		return exec.CommandContext(ctx, resolved, args...), nil
+		return exec.CommandContext(ctx, resolved, args...), nil //nolint:gosec // G204: local QMD, found on PATH, is what verify compares with; no shell is involved
 	}
 	shell := os.Getenv("ComSpec")
 	if shell == "" {
 		shell = "cmd.exe"
 	}
-	run := exec.CommandContext(ctx, shell)
+	run := exec.CommandContext(ctx, shell) //nolint:gosec // G204: cmd.exe is the only way to run a .cmd launcher; CmdLine quotes every argument
 	run.SysProcAttr = &syscall.SysProcAttr{CmdLine: `cmd ` + CmdLine(resolved, args)}
 	return run, nil
 }

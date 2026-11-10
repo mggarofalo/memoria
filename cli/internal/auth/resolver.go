@@ -11,7 +11,7 @@ import (
 
 // Environment variables the CLI reads.
 const (
-	EnvAPIKey            = "MEMORIA_API_KEY"
+	EnvAPIKey            = "MEMORIA_API_KEY" //nolint:gosec // G101: the names of environment variables, not credentials
 	EnvURL               = "MEMORIA_URL"
 	EnvProfile           = "MEMORIA_PROFILE"
 	EnvAllowInsecureHTTP = "MEMORIA_ALLOW_INSECURE_HTTP"

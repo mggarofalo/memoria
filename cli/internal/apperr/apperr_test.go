@@ -195,7 +195,7 @@ func TestFromTransportMoreCases(t *testing.T) {
 		t.Errorf("got %v", got)
 	}
 	existing := New(KindAuth, "x")
-	if FromTransport(fmt.Errorf("wrapped: %w", existing)) != error(existing) {
+	if FromTransport(fmt.Errorf("wrapped: %w", existing)) != error(existing) { //nolint:errorlint // the very same error must come back, not one wrapping it
 		t.Error("a classified error should pass through")
 	}
 }

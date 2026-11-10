@@ -111,7 +111,7 @@ type CutoverPlan struct {
 }
 
 func readIfPresent(path string) ([]byte, bool, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // G304: a client's config file, at the fixed place cutover looks for it
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, false, nil
 	}
@@ -783,7 +783,7 @@ func writeAtomic(path string, data []byte) error {
 	if info, err := os.Stat(path); err == nil {
 		mode = info.Mode().Perm()
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil { //nolint:gosec // G301: a client's own config folder, created as the client would create it
 		return err
 	}
 	temp, err := os.CreateTemp(filepath.Dir(path), ".memoria-cutover-*")

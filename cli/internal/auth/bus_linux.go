@@ -45,7 +45,7 @@ func checkSessionBus() error {
 	if err != nil {
 		return fmt.Errorf("cannot connect to the session bus: %w", err)
 	}
-	return verifySecretsOwner(conn, uint32(os.Getuid()))
+	return verifySecretsOwner(conn, uint32(os.Getuid())) //nolint:gosec // G115: a uid is a uint32 on Linux, so the conversion cannot overflow
 }
 
 // busSocketFromEnvironment finds the bus to check. An address that is set and cannot

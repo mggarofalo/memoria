@@ -98,7 +98,7 @@ func readQueries(path string) ([]string, error) {
 	if path == "" {
 		return nil, nil
 	}
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // G304: the queries file is the one the user names with --queries
 	if err != nil {
 		return nil, apperr.New(apperr.KindUsage, "the file of queries cannot be read")
 	}
@@ -148,7 +148,7 @@ func (a *app) migrateVerify(ctx context.Context, o migrateVerifyOptions) error {
 	run, cancel := newPushRun(ctx, a, s, migratePushOptions{})
 	defer cancel()
 	if o.seed == 0 {
-		o.seed = rand.Uint64()
+		o.seed = rand.Uint64() //nolint:gosec // G404: picks which documents to sample, and the seed is printed so a run can be repeated
 	}
 	result, problems := run.verifyAll(jobs, verifyInputs{options: o, queries: queries, counts: counts})
 	report, err := verifyReportPath(s)
@@ -358,7 +358,7 @@ func sampleOf(names []string, size int, seed uint64) []string {
 	if len(names) <= size {
 		return names
 	}
-	picked := rand.New(rand.NewPCG(seed, seed)).Perm(len(names))[:size]
+	picked := rand.New(rand.NewPCG(seed, seed)).Perm(len(names))[:size] //nolint:gosec // G404: a reproducible sample, from the printed seed; nothing secret depends on it
 	slices.Sort(picked)
 	sample := make([]string, 0, size)
 	for _, index := range picked {

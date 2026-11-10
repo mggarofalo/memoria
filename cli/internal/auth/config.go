@@ -95,7 +95,7 @@ func LoadConfig() (*Config, error) {
 	case err != nil:
 		return nil, fmt.Errorf("failed to check config: %w", err)
 	}
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // G304: the CLI's own config, whose path and permissions were checked above
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config: %w", err)
 	}

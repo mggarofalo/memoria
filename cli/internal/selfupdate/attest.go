@@ -85,15 +85,15 @@ func releaseCertificateIdentity(tag string) (verify.CertificateIdentity, error) 
 func (a *sigstoreAttester) Verify(ctx context.Context, subject Subject) error {
 	bundles, err := a.fetchBundles(ctx, subject.Digest)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrAttestation, err)
+		return fmt.Errorf("%w: %w", ErrAttestation, err)
 	}
 	trusted, err := a.trustedWithin(ctx)
 	if err != nil {
-		return fmt.Errorf("%w: cannot get the Sigstore trust root: %v", ErrAttestation, err)
+		return fmt.Errorf("%w: cannot get the Sigstore trust root: %w", ErrAttestation, err)
 	}
 	identity, err := a.identity(subject.Tag)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrAttestation, err)
+		return fmt.Errorf("%w: %w", ErrAttestation, err)
 	}
 	entities := make([]verify.SignedEntity, 0, len(bundles))
 	for _, b := range bundles {
@@ -101,7 +101,7 @@ func (a *sigstoreAttester) Verify(ctx context.Context, subject Subject) error {
 	}
 	want := expectation{subject: subject, repoURI: a.repoURI}
 	if err := verifyEntities(entities, want, trusted, identity, publicGoodOptions()...); err != nil {
-		return fmt.Errorf("%w: %v", ErrAttestation, err)
+		return fmt.Errorf("%w: %w", ErrAttestation, err)
 	}
 	return nil
 }

@@ -1,17 +1,32 @@
 version: "2"
 
 linters:
-  # Only complexity. govet and gofmt already run as their own CI steps.
-  default: none
+  # golangci-lint's standard set (errcheck, govet, ineffassign, staticcheck, unused), plus complexity, error
+  # wrapping, response bodies and gosec. gofmt still runs as its own CI step.
+  default: standard
   enable:
     - gocyclo
+    - errorlint
+    - bodyclose
+    - gosec
   settings:
     gocyclo:
       min-complexity: 10
+    errcheck:
+      # Writing output: a failed write to stdout or stderr has nowhere left to be reported.
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
   exclusions:
     # Skips files with the standard "Code generated ... DO NOT EDIT." header,
     # which is how internal/api/client.gen.go is left out.
     generated: strict
+    rules:
+      # Tests build paths, run binaries and write files on purpose, all inside their own temp directories.
+      - path: _test\.go
+        linters:
+          - gosec
 
 issues:
   max-issues-per-linter: 0

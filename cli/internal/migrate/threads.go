@@ -30,7 +30,7 @@ func IsTranscriptName(name string) bool {
 
 // OpenTranscript opens a raw transcript as JSON lines. A compressed one is decompressed as it is read, never whole.
 func OpenTranscript(file string) (io.ReadCloser, error) {
-	handle, err := os.Open(file)
+	handle, err := os.Open(file) //nolint:gosec // G304: a transcript under the folders the user names with --codex-sessions
 	if err != nil {
 		return nil, err
 	}

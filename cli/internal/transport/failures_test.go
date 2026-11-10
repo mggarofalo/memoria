@@ -31,11 +31,11 @@ func TestGuardReportsTransportFailures(t *testing.T) {
 func TestClassifiedDialRefusalSurvivesWrapping(t *testing.T) {
 	refusal := apperr.New(apperr.KindInsecure, "refused")
 	wrapped := errors.Join(errors.New("dial"), refusal)
-	if got := classifyDialRefusal(wrapped); !errors.Is(got, refusal) || got != error(refusal) {
+	if got := classifyDialRefusal(wrapped); !errors.Is(got, refusal) || got != error(refusal) { //nolint:errorlint // the refusal itself must come back, unwrapped
 		t.Fatalf("got %v", got)
 	}
 	plain := errors.New("plain")
-	if got := classifyDialRefusal(plain); got != plain {
+	if got := classifyDialRefusal(plain); got != plain { //nolint:errorlint // an unclassified error must come back as it was
 		t.Fatalf("got %v", got)
 	}
 }

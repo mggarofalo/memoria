@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 
@@ -215,10 +216,19 @@ func CollectionsMarkdown(w io.Writer, list *api.CollectionList) error {
 	return writeText(w, &b)
 }
 
+// needsEmbedding is the count of documents waiting for vectors. The server may leave it out, and a
+// pointer printed with %d is its address, so a missing count says so instead.
+func needsEmbedding(status *api.IndexStatus) string {
+	if status.NeedsEmbedding == nil {
+		return "unknown"
+	}
+	return strconv.FormatInt(int64(*status.NeedsEmbedding), 10)
+}
+
 // StatusTable renders index status as a summary and a per-collection table.
 func StatusTable(w io.Writer, status *api.IndexStatus) error {
 	var b strings.Builder
-	fmt.Fprintf(&b, "documents: %d\nneeds embedding: %d\nvector index: %t\n\n", status.TotalDocuments, status.NeedsEmbedding, status.HasVectorIndex)
+	fmt.Fprintf(&b, "documents: %d\nneeds embedding: %s\nvector index: %t\n\n", status.TotalDocuments, needsEmbedding(status), status.HasVectorIndex)
 	if err := writeText(w, &b); err != nil {
 		return err
 	}
@@ -232,7 +242,7 @@ func StatusTable(w io.Writer, status *api.IndexStatus) error {
 // StatusMarkdown renders index status as a bullet list.
 func StatusMarkdown(w io.Writer, status *api.IndexStatus) error {
 	var b strings.Builder
-	fmt.Fprintf(&b, "- documents: %d\n- needs embedding: %d\n- vector index: %t\n", status.TotalDocuments, status.NeedsEmbedding, status.HasVectorIndex)
+	fmt.Fprintf(&b, "- documents: %d\n- needs embedding: %s\n- vector index: %t\n", status.TotalDocuments, needsEmbedding(status), status.HasVectorIndex)
 	for _, c := range status.Collections {
 		fmt.Fprintf(&b, "- %s: %d documents\n", inlineText(c.Name), c.Documents)
 	}

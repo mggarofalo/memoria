@@ -525,7 +525,8 @@ func (r *pushRun) askServer(c *pushCollection, missingIsAnAnswer bool, call func
 		if r.waitForPause() != nil {
 			return 0, false
 		}
-		resp, body, err := call()
+		// call's client has read the body into body and closed it, so nothing is left to close here.
+		resp, body, err := call() //nolint:bodyclose // closed by the generated client that read it
 		if err != nil {
 			if !r.retryAfterLoss(err, tries) {
 				return 0, false
