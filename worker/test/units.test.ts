@@ -64,6 +64,15 @@ test("roles, model paths and external servers are configurable, and bad values f
 
 // --- models --------------------------------------------------------------------
 
+test("with no model set, each role serves Memoria's default file, which QMD's cache name also matches", () => {
+  const files = Object.fromEntries(loadConfig({}).roles.map((r) => [r.role, r.modelFile]));
+  // Changing the embed file means re-embedding every index, so it changes only on purpose.
+  assert.deepEqual(files, { embed: "Qwen3-Embedding-0.6B-Q8_0.gguf", rerank: "Qwen3-Reranker-4B.Q8_0.gguf", generate: "qmd-query-expansion-1.7B-q4_k_m.gguf" });
+  const cache = () => ["hf_Qwen_Qwen3-Embedding-0.6B-Q8_0.gguf", "hf_giladgd_Qwen3-Reranker-4B.Q8_0.gguf"];
+  assert.match(findModel("/m", files.embed!, cache), /hf_Qwen_Qwen3-Embedding-0\.6B-Q8_0\.gguf$/);
+  assert.match(findModel("/m", files.rerank!, cache), /hf_giladgd_Qwen3-Reranker-4B\.Q8_0\.gguf$/);
+});
+
 test("findModel accepts the bare name and QMD's prefixed cache name", () => {
   const list = () => ["hf_ggml-org_embeddinggemma-300M-Q8_0.gguf", "hf_tobil_qmd-query-expansion-1.7B-q4_k_m.gguf.ipull", "other.gguf"];
   assert.match(findModel("/m", "embeddinggemma-300M-Q8_0.gguf", list), /hf_ggml-org_embeddinggemma-300M-Q8_0\.gguf$/);

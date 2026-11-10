@@ -16,7 +16,7 @@ memoria-qmd sidecar ── index.sqlite, full-text and vector search, fusion, ll
 memoria-worker ── auth, validation, truncation, health
     │  HTTP, loopback only
     ▼
-llama-server × 3 ── embeddinggemma-300M, Qwen3-Reranker-0.6B, qmd-query-expansion-1.7B
+llama-server × 3 ── Qwen3-Embedding-0.6B, Qwen3-Reranker-4B, qmd-query-expansion-1.7B
 ```
 
 ## Turning it on
@@ -113,6 +113,35 @@ These are runtime controls, held in the sidecar's memory and never written anywh
 **Draining** a worker (`POST /workers/{name}:drain`) stops new calls to it. Calls in flight finish, and `inFlight` in `GET /workers` shows them leave. Heartbeats go on, so its state stays visible, but it gets no trial calls and no comparison probe. `POST /workers/{name}:enable` puts it back. A drained worker does not count toward `llm.workersUp` on `/ready`, so with every worker drained `/ready` reads `degraded` and searches run as in [Degraded mode](#degraded-mode). Draining does not change cache keys, so a worker that comes back unchanged keeps its cached answers.
 
 **Pausing** the queue (`POST /queue:pause`) starts no more reindex or embedding jobs. A running job runs to its end; cancel it to stop it sooner. Writes still land on disk and queue their jobs, so nothing is lost, but until `POST /queue:resume` new documents are not searchable and deleted ones still are. Do not pause while a document has to leave search, such as one holding a leaked secret. `GET /queue` reports `paused`. On shutdown a paused queue waits for the job already running, as an unpaused one does, but not for the jobs waiting behind it. Those persist in the queue's database and run after the restart.
+
+## The models
+
+Memoria does not use QMD's default embedding and reranking models. `deploy/compose.yaml` and the worker's defaults name these instead:
+
+| Role | Model | File | QMD's name for it |
+|---|---|---|---|
+| Embedding | Qwen3-Embedding-0.6B, 1024 dimensions | `Qwen3-Embedding-0.6B-Q8_0.gguf` | `hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf` |
+| Reranking | Qwen3-Reranker-4B | `Qwen3-Reranker-4B.Q8_0.gguf` | `hf:giladgd/Qwen3-Reranker-4B-GGUF/Qwen3-Reranker-4B.Q8_0.gguf` |
+| Expansion | QMD's own, unchanged | `qmd-query-expansion-1.7B-q4_k_m.gguf` | `hf:tobil/qmd-query-expansion-1.7B-gguf/qmd-query-expansion-1.7B-q4_k_m.gguf` |
+
+**Why.** Measured on a redacted copy of the real corpus with 61 known-item questions:
+
+| Configuration | Recall at 5 | Recall at 10 | MRR | Median latency |
+|---|---|---|---|---|
+| QMD's stock blend, expansion on | 0.632 | 0.774 | 0.409 | 3.3 s |
+| Fixed blend, expansion off | 0.707 | 0.784 | 0.484 | 1.7 s |
+| Qwen3-Embedding-0.6B, fixed blend, expansion off | 0.772 | 0.833 | 0.512 | 1.7 s |
+| Qwen3-Embedding-0.6B and the 4B reranker, fixed blend, expansion off | 0.778 | 0.858 | 0.561 | 3.2 s |
+
+Qwen3-Embedding with the fixed blend beat the stock setup on recall at 5 by 0.14 (p = 0.004), and with the 4B reranker MRR rose 0.152 (p = 0.01). Expansion doubled latency and added nothing. The fixed blend is the patch described in [deployment.md](deployment.md#memory-and-large-documents). Search cannot turn expansion off yet: a plain query is always expanded.
+
+**The reranker file must carry rerank metadata.** The worker scores with the template in `tokenizer.chat_template.rerank`. giladgd's 4B GGUFs have it, word for word the same as QMD's 0.6B. Other conversions may not. EmbeddingGemma 2 does not load in the llama.cpp QMD bundles.
+
+**On the RTX 5080,** with llama.cpp b12110 on CUDA, the three take about 9.6 GB of VRAM, against 4.2 GB for QMD's defaults; the 4B's server holds about 4.7 GB of it. Reranking 10 passages of 3,000 characters takes about 0.85 s, embedding runs at about 62 chunks a second, and a reranked search took 6 to 11 s while the same GPU was embedding. The Mac has not run the 4B. In-process QMD with two 4B contexts reached 15 GB; the worker runs it as two slots of 4,096 tokens.
+
+**Getting the files.** The worker finds a model in `MEMORIA_WORKER_MODEL_DIR`, or QMD's cache, by file name, with or without QMD's `hf_<owner>_` prefix. Download them from Hugging Face into a folder of their own, copy the expansion model in beside them, point `MEMORIA_WORKER_MODEL_DIR` at it, and check each file's SHA-256 against the one Hugging Face lists. Do not fetch them by running `qmd` with `QMD_EMBED_MODEL` or `QMD_RERANK_MODEL` set: QMD writes those into `models:` in its `index.yml`, where they then outrank the environment, and a later search under other names scored nothing.
+
+**Changing the embedding model is a re-embed.** Vectors are keyed by the model's name, and the sidecar refuses a worker serving another. An index embedded with QMD's default embeddinggemma needs `MEMORIA_QMD_EMBED_DIMENSIONS` set to the new length and then `POST /reindex` with `force: true` and no collection. `MEMORIA_QMD_EMBED_DIMENSIONS` defaults to embeddinggemma's 768, which compose overrides.
 
 ## How calls are routed
 

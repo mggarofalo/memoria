@@ -13,12 +13,14 @@ export type Role = "embed" | "rerank" | "generate";
 export const ROLES: readonly Role[] = ["embed", "rerank", "generate"];
 
 /**
- * QMD's default models, by file name. The sidecar checks that the embed file
- * matches what its index was built with, so changing these needs a re-embed.
+ * Memoria's default models, by file name: Qwen3-Embedding-0.6B and the 4B
+ * reranker, chosen over QMD's own defaults on measured retrieval
+ * (docs/workers.md#the-models). The sidecar checks that the embed file matches
+ * what its index was built with, so changing these needs a re-embed.
  */
 export const DEFAULT_MODEL_FILES: Readonly<Record<Role, string>> = {
-  embed: "embeddinggemma-300M-Q8_0.gguf",
-  rerank: "qwen3-reranker-0.6b-q8_0.gguf",
+  embed: "Qwen3-Embedding-0.6B-Q8_0.gguf",
+  rerank: "Qwen3-Reranker-4B.Q8_0.gguf",
   generate: "qmd-query-expansion-1.7B-q4_k_m.gguf",
 };
 

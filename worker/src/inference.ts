@@ -132,9 +132,10 @@ async function mapLimited<T, R>(items: readonly T[], limit: number, run: (item: 
 }
 
 /**
- * The rerank template in `qwen3-reranker-0.6b-q8_0.gguf`'s
- * `tokenizer.chat_template.rerank` metadata. This backend is specific to that
- * model, which is the one QMD ships.
+ * The rerank template in the Qwen3 rerankers' `tokenizer.chat_template.rerank`
+ * metadata. `qwen3-reranker-0.6b-q8_0.gguf`, which QMD ships, and
+ * `Qwen3-Reranker-4B.Q8_0.gguf` from giladgd/Qwen3-Reranker-4B-GGUF, the
+ * default here, carry the same text. This backend is specific to that template.
  */
 export const QWEN3_RERANK_TEMPLATE = {
   head: '<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be "yes" or "no".<|im_end|>\n<|im_start|>user\n<Instruct>: Given a web search query, retrieve relevant passages that answer the query\n<Query>: ',

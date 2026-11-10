@@ -12,15 +12,18 @@ import { RemoteLlm } from "../src/llm/remote.ts";
 const url = process.env.MEMORIA_QMD_WORKER_URL?.trim();
 const skip = url ? false : "set MEMORIA_QMD_WORKER_URL";
 
+// Memoria's defaults, as deploy/compose.yaml sets them. QMD's own names select another
+// worker's models, such as QMD's stock embeddinggemma with MEMORIA_QMD_EMBED_DIMENSIONS=768.
 const MODELS = {
-  embed: "hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf",
-  rerank: "hf:ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF/qwen3-reranker-0.6b-q8_0.gguf",
+  embed: process.env.QMD_EMBED_MODEL?.trim() || "hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf",
+  rerank: process.env.QMD_RERANK_MODEL?.trim() || "hf:giladgd/Qwen3-Reranker-4B-GGUF/Qwen3-Reranker-4B.Q8_0.gguf",
   generate: "hf:tobil/qmd-query-expansion-1.7B-gguf/qmd-query-expansion-1.7B-q4_k_m.gguf",
 };
+const DIMENSIONS = Number(process.env.MEMORIA_QMD_EMBED_DIMENSIONS?.trim() || 1024);
 
 function live(): RemoteLlm {
   return new RemoteLlm({
-    worker: { url: url!, token: process.env.MEMORIA_QMD_WORKER_TOKEN?.trim() || undefined, embedDimensions: 768 },
+    worker: { url: url!, token: process.env.MEMORIA_QMD_WORKER_TOKEN?.trim() || undefined, embedDimensions: DIMENSIONS },
     models: MODELS,
     fallback: null,
     onDegraded: (entry) => console.error(entry),
@@ -31,10 +34,10 @@ test("the worker reports its models loaded", { skip }, async () => {
   assert.deepEqual(await live().refreshStatus(), { embed: true, rerank: true, generate: true });
 });
 
-test("embeddings have the index's 768 dimensions, and related text is closer", { skip }, async () => {
+test("embeddings have the index's dimensions, and related text is closer", { skip }, async () => {
   const [a, b, c] = await live().embedBatch(["task: search result | query: how do I bake bread", "title: Baking | text: Knead the dough and bake until golden.", "title: Markets | text: Stocks closed lower on Tuesday."], { model: MODELS.embed });
   assert.ok(a && b && c, "all three embedded");
-  assert.equal(a.embedding.length, 768);
+  assert.equal(a.embedding.length, DIMENSIONS);
   const cosine = (x: number[], y: number[]) => {
     const dot = x.reduce((sum, v, i) => sum + v * y[i]!, 0);
     return dot / Math.sqrt(x.reduce((s, v) => s + v * v, 0) * y.reduce((s, v) => s + v * v, 0));

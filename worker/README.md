@@ -8,7 +8,7 @@ This has run on a Windows desktop with an RTX 5080 and llama.cpp b12110. [`docs/
 
 - Node 22.18 or newer. The worker has no runtime npm dependencies and runs from source, so there is no install or build step.
 - `llama-server` from [llama.cpp](https://github.com/ggml-org/llama.cpp), built for your GPU: CUDA on the desktop, Metal on a Mac.
-- The three GGUF models, in QMD's cache (`~/.cache/qmd/models`) or at paths you set.
+- The three GGUF models: Qwen3-Embedding-0.6B, Qwen3-Reranker-4B and QMD's expansion model, in `MEMORIA_WORKER_MODEL_DIR`, QMD's cache (`~/.cache/qmd/models`) or at paths you set. [`docs/workers.md`](../docs/workers.md#the-models) says which files and how to fetch them. They take about 9.6 GB of VRAM together.
 
 ## Run it
 
