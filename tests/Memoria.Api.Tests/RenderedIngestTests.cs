@@ -663,6 +663,81 @@ public sealed class RenderedIngestTests(AuthApiFactory factory) : IClassFixture<
 	}
 
 	[Fact]
+	public async Task A_rendered_write_the_sidecar_refused_holds_nothing_and_does_not_block_the_takeover()
+	{
+		FakeCorpus corpus = new(factory.Sidecar);
+		HttpClient client = await WriterAsync();
+		string id = Guid.NewGuid().ToString();
+		string path = $"2026-01-15_{id[..8]}.md";
+		corpus.OnWrite = static _ => TooLarge();
+
+		HttpResponseMessage refused = await PostAsync(client, path, RenderedPart(id, "never stored", 0));
+		IngestRecord? row = await factory.Services.GetRequiredService<IIngestLedger>().FindAsync(DocumentIngestor.IdentityOf("c", path), default);
+		Assert.NotNull(row);
+		Assert.Null(row.MessageCount);
+		Assert.Empty(row.Paths);
+		corpus.OnWrite = static _ => null;
+		HttpResponseMessage session = await PostSessionAsync(client, ClaudeLine("user", "newword"), projectDirectory: OwnFolder, sessionId: id, updated: Stamp.AddHours(1));
+
+		Assert.Equal(HttpStatusCode.RequestEntityTooLarge, refused.StatusCode);
+		Assert.Equal(HttpStatusCode.Accepted, session.StatusCode);
+		Assert.Contains("newword", corpus.Files[path], StringComparison.Ordinal);
+	}
+
+	[Fact]
+	public async Task A_refused_resend_of_a_stored_export_keeps_its_path_and_what_it_holds()
+	{
+		FakeCorpus corpus = new(factory.Sidecar);
+		HttpClient client = await WriterAsync();
+		string id = Guid.NewGuid().ToString();
+		string path = $"2026-01-15_{id[..8]}.md";
+		string export = RenderedPart(id, "stored first", 3);
+		Assert.Equal(HttpStatusCode.Accepted, (await PostAsync(client, path, export)).StatusCode);
+		corpus.OnWrite = static _ => TooLarge();
+
+		HttpResponseMessage refused = await PostAsync(client, path, RenderedPart(id, "never stored", 3), updated: Stamp.AddMinutes(1));
+		corpus.OnWrite = static _ => null;
+		IngestRecord? row = await factory.Services.GetRequiredService<IIngestLedger>().FindAsync(DocumentIngestor.IdentityOf("c", path), default);
+		HttpResponseMessage cut = await PostSessionAsync(client, ClaudeLine("user", "only one"), projectDirectory: OwnFolder, sessionId: id, updated: Stamp.AddHours(1));
+
+		Assert.Equal(HttpStatusCode.RequestEntityTooLarge, refused.StatusCode);
+		Assert.Equal([path], row!.Paths);
+		Assert.Equal(4, row.MessageCount);
+		Assert.Equal("session_shrank", (await ReadAsync(cut)).GetProperty("code").GetString());
+		Assert.Equal(export, corpus.Files[path]);
+	}
+
+	[Fact]
+	public async Task A_rendered_write_whose_answer_was_lost_holds_the_takeover_until_it_is_sent_again()
+	{
+		FakeCorpus corpus = new(factory.Sidecar);
+		HttpClient client = await WriterAsync();
+		string id = Guid.NewGuid().ToString();
+		string path = $"2026-01-15_{id[..8]}.md";
+		string export = RenderedPart(id, "landed unseen", 3);
+		// The file lands, and the answer does not come back, so what it holds is unknown.
+		corpus.OnWrite = written =>
+		{
+			corpus.Files[written] = export;
+			return Busy();
+		};
+
+		HttpResponseMessage lost = await PostAsync(client, path, export);
+		corpus.OnWrite = static _ => null;
+		HttpResponseMessage held = await PostSessionAsync(client, ClaudeLine("user", "newword"), projectDirectory: OwnFolder, sessionId: id, updated: Stamp.AddHours(1));
+
+		Assert.Equal(HttpStatusCode.ServiceUnavailable, lost.StatusCode);
+		Assert.Equal("session_shrank", (await ReadAsync(held)).GetProperty("code").GetString());
+		Assert.Equal(export, corpus.Files[path]);
+
+		// Sending the export again records what it holds, and a session that reaches that far takes it over.
+		Assert.Equal(HttpStatusCode.Accepted, (await PostAsync(client, path, export)).StatusCode);
+		HttpResponseMessage whole = await PostSessionAsync(client, string.Concat(Enumerable.Range(0, 4).Select(static n => ClaudeLine(n % 2 == 0 ? "user" : "assistant", $"m{n}", n))), projectDirectory: OwnFolder, sessionId: id, updated: Stamp.AddHours(1));
+		Assert.Equal(HttpStatusCode.Accepted, whole.StatusCode);
+		Assert.Contains("m3", corpus.Files[path], StringComparison.Ordinal);
+	}
+
+	[Fact]
 	public async Task A_session_waits_for_a_rendered_write_still_running()
 	{
 		_ = new FakeCorpus(factory.Sidecar);

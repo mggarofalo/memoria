@@ -116,6 +116,8 @@ memoria migrate verify --qmd-config ~/.config/qmd/index.yml --queries queries.tx
 
 `push` can be stopped at any time, and running it again continues. It exits 1 if anything was not stored, and a private report under the CLI's config folder names those files. The summary does not, as it may reach shared logs.
 
+**A document whose answer never came.** If a document got a 5xx, a timeout or a lost connection, the server cannot tell whether it landed. It counts that path as holding text of unknown length, so the first upload of that document's session is refused with 409 `session_shrank`, and nothing changes. Run `push` again before that session's next upload: it sends such a document again, and the server then records what it holds. A document the server refused with a 4xx was not stored, holds nothing and blocks nothing: the sidecar answers 4xx only before a file lands.
+
 **The `--accept-*` flags.** These change only the exit code. Everything they cover stays counted and is not stored.
 
 | Flag | What it says |
@@ -243,7 +245,7 @@ This is a separate step, and no command does it. Leave local QMD and its index a
 The hook that pushes sessions is not in this repository, and `cutover` does not add or change one. It reports what is set for `SessionEnd`. For a migrated session to be replaced rather than doubled, the hook has to:
 
 - **Send `projectDirectory`** to `POST /v1/ingest/session`, the session's folder name under Claude Code's projects folder. Without it, a session cannot show it is the original, so it never takes over its migrated documents.
-- **Surface `session_shrank`.** A 409 with this code means the upload holds fewer messages than the documents reach. Nothing was changed, and someone has to decide, so it must not be retried quietly or dropped.
+- **Surface `session_shrank`.** A 409 with this code means the upload holds fewer messages than the documents reach. Nothing was changed, and someone has to decide, so it must not be retried quietly or dropped. One cause is not a shorter copy: an export whose `push` never got an answer, which [running `push` again](#5-push-everything-then-verify) clears.
 - **Report a transcript with no `cwd`.** With none, the server cannot match the folder, so the session stores beside its export. The hook should say so rather than look like a success.
 
 The agent-skills hook's hosted mode, from [Cut over](#6-cut-over), does all three. It holds a `session_shrank` upload in its spool and logs it on every run as needing attention, rather than sending it again.

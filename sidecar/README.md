@@ -169,6 +169,8 @@ Conflicts:
 - 409 `not_a_directory` and 409 `is_directory`: what they say.
 - 409 `path_changed`: a directory on the path changed during the operation.
 
+Every 4xx from `POST /documents` comes before the file lands, so it means nothing was written, and `Memoria.Api` relies on that. A check that fails after the rename answers 500 `landed_unverified` instead: the file was written, and whether it is where it was asked to be is unknown.
+
 A write goes to a hidden temp file in the target's directory, is flushed, and is renamed over the target after containment has been checked again. A reader never sees half a document, and a hard link or symlink at the target is replaced rather than written through. An overwrite keeps the old file's POSIX permission bits. On Windows the new file takes its ACL from the directory, so an ACL set on the old file alone is lost. A delete renames the file aside and checks again before unlinking it.
 
 #### Deleting

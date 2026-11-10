@@ -383,8 +383,13 @@ async function writeAndCommit(target: ResolvedTarget, scratch: string, content: 
   await hooks.onStep?.("written");
   await commit(target, scratch, hooks);
   await hooks.onStep?.("renamed");
-  // Too late to undo, but a caller must not be told a swapped write went where it asked.
-  await assertContained(target);
+  // Too late to undo, but a caller must not be told a swapped write went where it asked. Nor that nothing landed: a 4xx says the file
+  // was never written, and Memoria.Api takes it at its word, so anything failing here is a 5xx.
+  try {
+    await assertContained(target);
+  } catch (err) {
+    throw new HttpError(500, "landed_unverified", `the file was written and then its path failed a check, so what it holds there is unknown: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 export async function writeDocument(target: ResolvedTarget, content: string, hooks: IngestHooks = {}): Promise<WriteResult> {
