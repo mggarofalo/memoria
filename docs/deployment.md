@@ -177,7 +177,7 @@ docker build -t memoria-qmd:local sidecar
 
 ### First run
 
-The sidecar never creates an index, so make one first. This makes an empty collection root under `/corpus` for each name and indexes it, and running it again changes nothing:
+The sidecar never creates an index, so make one first. This makes an empty collection root under `/corpus` for each name and indexes it. Running it again, with any names in any order, adds only the collections the index does not have. A collection it already has keeps its root, rules, contexts and documents, and is not scanned, and a collection left off the command is not touched. It reads and writes no config file:
 
 ```bash
 docker compose -f deploy/compose.yaml run --rm --no-deps memoria-qmd \
