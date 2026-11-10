@@ -752,3 +752,18 @@ test("a force job with nothing to resume asks for everything, whatever the clock
   await runEmbedFarm(deps, opts({ force: true }));
   assert.equal(seen[0], "9999-12-31T23:59:59.999Z");
 });
+
+test("a call refused by shutdown stops the run at once, with no retry and no wait, and the job waits for the next start", async () => {
+  let calls = 0;
+  const w = world({ a: ["one", "two"], b: ["three"] }, {
+    capacity: () => 1,
+    embed: async () => {
+      calls++;
+      throw new WorkerError("closing", "embed", "pool", "the sidecar is shutting down");
+    },
+  });
+  await assert.rejects(runEmbedFarm(w.deps, opts({ maxBatchChunks: 1 })), JobDeferred);
+  assert.equal(calls, 1, "nothing more was asked once shutdown refused one");
+  assert.deepEqual(w.sleeps, [], "no backoff was waited out");
+  assert.deepEqual(w.deadLetters, []);
+});

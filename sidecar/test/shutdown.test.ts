@@ -159,3 +159,88 @@ test("with nothing in flight, shutdown does not wait out its budget", async () =
   await shutDown({ closeServer: async () => {}, jobs: queue, backend: new FakeBackend({ collections: [], docs: [] }), closeStore: () => {}, log: { warn: () => assert.fail("nothing to warn about") } }, 10_000);
   assert.ok(Date.now() - started < 500);
 });
+
+// --- what review found ---------------------------------------------------------------------------------------------
+
+test("a heartbeat during the drain marks no worker down, so a call still fails as closing and loads no model here", async () => {
+  const mock = await new MockWorker(8).start();
+  let fellBack = 0;
+  const fallback = { embedBatch: async () => (fellBack++, []), tokenize: async () => (fellBack++, []), detokenize: async () => "" };
+  const llm = new RemoteLlm({ models: { embed: `hf:x/${EMBED_FILE}`, rerank: "r", generate: "g" }, workers: [{ name: "only", url: mock.url, token: undefined, capabilities: ["embed", "rerank", "generate"], priority: 1, maxConcurrent: 2 }], embedDimensions: 8, fallback });
+  try {
+    await llm.refreshStatus();
+    llm.lifecycle.refuseNew();
+    await llm.refreshStatus();
+    assert.notEqual(llm.pool.workers()[0]!.state, "down");
+    assert.deepEqual(await llm.embedBatch(["query"]), [null]);
+    await assert.rejects(llm.embedDocuments(["chunk"]), (err: unknown) => err instanceof WorkerError && err.code === "closing");
+    assert.equal(fellBack, 0);
+  } finally {
+    await llm.dispose();
+    await mock.stop();
+  }
+});
+
+test("with nothing to drain, a request in flight keeps its worker calls until it answers", async () => {
+  const backend = new FakeBackend({ collections: [], docs: [] });
+  const order: string[] = [];
+  let answer!: () => void;
+  const answered = new Promise<void>((resolve) => (answer = resolve));
+  setTimeout(() => {
+    order.push(`answered, worker calls ${backend.workerCalls}`);
+    answer();
+  }, 300);
+  const started = Date.now();
+  await shutDown({
+    closeServer: () => answered,
+    jobs: new JobQueue(async () => result),
+    backend: { stopWorkerCalls: () => backend.stopWorkerCalls(), abortWorkerCalls: () => (order.push("abort"), backend.abortWorkerCalls()), close: async () => {} },
+    closeStore: () => {},
+    log: { warn: () => assert.fail("nothing to warn about") },
+  }, 10_000);
+  assert.deepEqual(order, ["answered, worker calls refused", "abort"]);
+  assert.ok(Date.now() - started < 1_000);
+});
+
+test("a server that fails to close does not end shutdown early", async () => {
+  let closed = false;
+  await shutDown({
+    closeServer: () => Promise.reject(new Error("close failed")),
+    jobs: new JobQueue(async () => result),
+    backend: { stopWorkerCalls: () => {}, abortWorkerCalls: () => {}, close: async () => void (closed = true) },
+    closeStore: () => {},
+    log: { warn: () => {} },
+  }, 100);
+  assert.ok(closed);
+});
+
+test("a write's job queued during the drain is not held for the window, so the drain runs it", async () => {
+  let ran = 0;
+  const queue = new JobQueue(async () => (ran++, result), { debounceMs: 60_000 });
+  queue.stopping();
+  queue.enqueue(req(), { debounce: true });
+  assert.equal(await queue.drain(1_000), true);
+  assert.equal(ran, 1);
+});
+
+test("an operator's cancel during shutdown still cancels, and a parked job cancelled is counted once", async () => {
+  const running = new JobQueue((_r, ctx) => new Promise<JobResult>((_resolve, reject) => ctx.signal.addEventListener("abort", () => reject(new Error("stopped")))));
+  const job = running.enqueue(req());
+  await sleep(10);
+  running.stopping();
+  running.cancel(job.id);
+  await running.settled(1_000);
+  assert.equal(job.state, "failed", "cancelled, not parked for the next start");
+
+  const parking = new JobQueue(async () => {
+    throw new JobDeferred("No worker can embed right now");
+  });
+  parking.stopping();
+  const parked = parking.enqueue(req());
+  await parking.drain(1_000);
+  assert.equal(parked.state, "queued");
+  assert.equal(parking.pending, 0);
+  parking.cancel(parked.id);
+  assert.equal(parked.state, "failed");
+  assert.equal(parking.pending, 0, "not counted out a second time");
+});

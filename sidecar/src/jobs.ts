@@ -240,6 +240,10 @@ export class JobQueue {
   #suspended = false;
   /** Shutdown has begun: a job that does not succeed now was stopped by it, and waits for the next start. */
   #stopping = false;
+  /** Jobs stopped by shutdown and kept for the next start. No longer pending here. */
+  readonly #parked = new Set<string>();
+  /** The running job was cancelled by an operator, which shutdown must not turn into a park. */
+  #cancelRequested = false;
   /** No job starts while set. In memory only, so a restart always resumes. */
   #paused = false;
   // Replaced at most once: see `adoptStore`.
@@ -422,7 +426,8 @@ export class JobQueue {
   // --- submitting ------------------------------------------------------------
 
   enqueue(request: ReindexRequest, options: EnqueueOptions = {}): Job {
-    return options.debounce ? this.#enqueueDebounced(request) : this.#enqueueImmediate(request);
+    // Once shutdown has begun, a write's job is not held for the window: the drain is its only chance to run before exit.
+    return options.debounce && !this.#stopping ? this.#enqueueDebounced(request) : this.#enqueueImmediate(request);
   }
 
   #enqueueImmediate(request: ReindexRequest): Job {
@@ -585,7 +590,7 @@ export class JobQueue {
   }
 
   #ended(job: Job, entry: PersistedJob, err: unknown, signal: AbortSignal): RunEnding {
-    if (this.#stopping) {
+    if (this.#stopping && !this.#cancelRequested) {
       this.#park(job, entry);
       return "parked";
     }
@@ -604,6 +609,7 @@ export class JobQueue {
     job.error = null;
     entry.dueAt = null;
     entry.deferred = false;
+    this.#parked.add(job.id);
   }
 
   #context(job: Job, entry: PersistedJob, signal: AbortSignal): JobRunContext {
@@ -632,6 +638,7 @@ export class JobQueue {
 
   #finishRun(job: Job, ending: RunEnding): void {
     this.#abort = null;
+    this.#cancelRequested = false;
     this.#active = null;
     if (ending === "finished") job.finishedAt = new Date().toISOString();
     if (ending !== "deferred") this.#pending--;
@@ -713,6 +720,7 @@ export class JobQueue {
     const job = this.get(id);
     if (!job) return null;
     if (job === this.#active) {
+      this.#cancelRequested = true;
       this.#abort?.abort();
       return job;
     }
@@ -721,7 +729,8 @@ export class JobQueue {
     job.state = "failed";
     job.error = "Cancelled";
     job.finishedAt = new Date().toISOString();
-    this.#pending--;
+    // A parked job already left the count when shutdown stopped it.
+    if (!this.#parked.delete(job.id)) this.#pending--;
     this.#persist(job);
     this.#settle();
     return job;

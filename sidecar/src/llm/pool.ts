@@ -288,18 +288,22 @@ export class WorkerPool {
   }
 
   async refresh(): Promise<void> {
+    // At shutdown no worker is asked, so none is marked down for it.
+    if (this.#lifecycle?.refusing) return;
     await Promise.all(this.#entries.map((entry) => this.#heartbeat(entry)));
     await this.#compareEmbeddings();
     this.#wake();
   }
 
   async #heartbeat(entry: Entry): Promise<void> {
+    if (this.#lifecycle?.refusing) return;
     const wasDown = entry.reachable === false;
     try {
       entry.health = parseHealth(await entry.client.get("health", "/health"));
       entry.capabilities = parseCapabilities(await entry.client.get("capabilities", "/capabilities"));
     } catch (err) {
       if (!(err instanceof WorkerError) && !(err instanceof ResponseViolation)) throw err;
+      if (err instanceof WorkerError && err.code === "closing") return;
       entry.reachable = false;
       entry.health = null;
       return;
@@ -335,13 +339,22 @@ export class WorkerPool {
       const capability: Capability = key === "documents" ? "embed" : key;
       const breaker = entry.breakers[key];
       if (breaker.state !== "open" || !breaker.allows(now) || !this.#servesRole(entry, capability)) continue;
+      if (this.#lifecycle?.refusing) return;
       breaker.begin(now);
-      if (await this.#tryRole(capability, entry)) {
-        breaker.success();
-        entry.refusals[key] = 0;
-      } else {
-        breaker.failure(this.#now());
-      }
+      this.#trialEnded(entry, key, await this.#tryRole(capability, entry));
+    }
+  }
+
+  #trialEnded(entry: Entry, key: CircuitKey, passed: boolean): void {
+    const breaker = entry.breakers[key];
+    if (passed) {
+      breaker.success();
+      entry.refusals[key] = 0;
+    } else if (this.#lifecycle?.refusing) {
+      // Refused by shutdown, which says nothing about the worker.
+      breaker.settle();
+    } else {
+      breaker.failure(this.#now());
     }
   }
 
@@ -566,6 +579,8 @@ export class WorkerPool {
    * failure if no attempt succeeds, or `no_worker` if nobody could be tried.
    */
   async dispatch<T>(capability: Capability, klass: PriorityClass, operation: string, work: (target: DispatchTarget) => Promise<T>): Promise<T> {
+    // Before choosing a worker, so a pool with none up still says why the call did not go.
+    if (this.#lifecycle?.refusing) throw this.#lifecycle.error(operation, "pool");
     const tried = new Set<Entry>();
     let lastError: WorkerError | undefined;
     for (let attempt = 0; attempt < 2; attempt++) {

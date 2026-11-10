@@ -9,8 +9,9 @@ import type { QmdBackend } from "./store.ts";
  *    is accepted. Requests and calls already in flight go on.
  * 2. Jobs run for what is left of the budget, so what was accepted is indexed. One
  *    that needs a worker stops at its next call and waits for the next start.
- * 3. At the budget's end, the running job is kept as waiting, worker calls still
- *    in flight are cut off, and requests have a moment to answer without them.
+ * 3. Then the running job is kept as waiting, and requests keep their worker
+ *    calls for what is left of the budget. At its end, calls still in flight are
+ *    cut off, and requests have a moment to answer without them.
  * 4. The index and the job store close.
  *
  * Steps 3 and 4 take at most `FINAL_MS` each beyond the budget, and closing the
@@ -36,6 +37,8 @@ export async function shutDown(parts: ShutdownParts, budgetMs: number): Promise<
   parts.backend.stopWorkerCalls();
   parts.jobs.stopping();
   const server = parts.closeServer();
+  // Awaited only after the drain: a failure to close must not end the process before the jobs are kept.
+  server.catch(() => {});
   // Index what was accepted in the debounce window. A timeout loses nothing: the
   // jobs are persisted and resume at the next start.
   if (!(await parts.jobs.drain(left()))) {
@@ -44,8 +47,10 @@ export async function shutDown(parts: ShutdownParts, budgetMs: number): Promise<
   // A job still running is about to lose the index under it. That is not its
   // failure, so it stays queued in the store and resumes at the next start.
   parts.jobs.suspend();
+  // Requests keep their worker calls for what is left of the budget, and lose them only once it is spent.
+  const answered = await within(server, left());
   parts.backend.abortWorkerCalls();
-  if (!(await within(server, Math.max(left(), FINAL_MS)))) parts.log.warn({}, "requests still open at shutdown");
+  if (!answered && !(await within(server, FINAL_MS))) parts.log.warn({}, "requests still open at shutdown");
   if (!(await parts.jobs.settled(FINAL_MS))) parts.log.warn({}, "a reindex job was still stopping at shutdown");
   await parts.backend.close();
   parts.closeStore();
