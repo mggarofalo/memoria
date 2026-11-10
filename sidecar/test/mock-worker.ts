@@ -67,8 +67,9 @@ export class MockWorker {
     const body: unknown = raw === "" ? undefined : JSON.parse(raw);
     const path = (request.url ?? "/").split("?")[0]!;
     this.requests.push({ method: request.method ?? "", path, authorization: request.headers.authorization, body });
-    const handler = this.handlers.get(`${request.method} ${path}`);
-    const reply = handler ? await handler(body, request) : { status: 404, body: { error: "no_route" } };
+    const route = `${request.method} ${path}`;
+    const handler = this.handlers.has(route) ? this.handlers.get(route) : undefined;
+    const reply = typeof handler === "function" ? await handler(body, request) : { status: 404, body: { error: "no_route" } };
     const text = typeof reply.body === "string" ? reply.body : JSON.stringify(reply.body);
     response.writeHead(reply.status ?? 200, { "content-type": "application/json" });
     response.end(text);
