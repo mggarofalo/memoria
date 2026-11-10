@@ -82,7 +82,7 @@ Other tools depend on these names. Changing them is a breaking change.
 |---|---|
 | `memoria_<version>_{linux,darwin}_{amd64,arm64}.tar.gz` | `memoria` |
 | `memoria_<version>_windows_{amd64,arm64}.zip` | `memoria.exe` |
-| `memoria-sidecar_<version>.tar.gz` | `dist/` including `dist/VERSION`, `package.json`, `package-lock.json`, `.env.example`, `README.md`, the service scripts in `scripts/`, `deploy/windows/MemoriaService.psm1` |
+| `memoria-sidecar_<version>.tar.gz` | `dist/` including `dist/VERSION`, `package.json`, `package-lock.json`, `.env.example`, `README.md`, `scripts/install-service.ps1`, `scripts/uninstall-service.ps1`, `scripts/patch-qmd.ts`, `deploy/windows/MemoriaService.psm1` |
 | `memoria-worker_<version>.tar.gz` | `src/` including `src/VERSION`, `scripts/`, `package.json`, `package-lock.json`, `README.md`, `deploy/windows/MemoriaService.psm1` |
 | `checksums.txt` | SHA-256 of each archive above, in `sha256sum` format |
 
@@ -139,4 +139,4 @@ The notes must never carry a tracker reference, because this repository is publi
 node --test "scripts/release/test/**/*.test.ts"
 ```
 
-It has no dependencies. `npm test` and `npm run typecheck` in `sidecar/` include it, which is how CI reaches it.
+It has no dependencies. `npm test` and `npm run typecheck` in `sidecar/` include it. CI runs `npm run test:coverage` in `scripts/release/`, with its gates in `scripts/release/.c8rc.json`, and the release workflow runs its tests again before building.

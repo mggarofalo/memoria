@@ -458,7 +458,7 @@ Then check the network boundary, below.
 
 QMD itself is never reachable from anywhere. The sidecar is the only process
 that opens the index; it binds the model host's LAN address, requires the
-shared secret on every route except `/health`, and compares it in constant
+shared secret on every route except `/health` and `/openapi.json`, and compares it in constant
 time. `Memoria.Api` is the only intended caller. If any path exists from a
 client to the sidecar that does not pass through `Memoria.Api`, authentication
 has been bypassed entirely. When auditing the deployment, check that:

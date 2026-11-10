@@ -29,6 +29,7 @@ On the sidecar:
 | `MEMORIA_QMD_WORKERS` | unset | The pool, as a JSON list. See below. |
 | `MEMORIA_QMD_WORKER_URL` | unset | Shorthand for a pool of one. Must not contain credentials. Set this or the list, not both. |
 | `MEMORIA_QMD_WORKER_TOKEN` | unset | The token for `MEMORIA_QMD_WORKER_URL`. Required unless the worker is on loopback. At least 16 characters. `MEMORIA_QMD_WORKER_TOKEN_FILE` reads it from a file instead, which is what a service should use. |
+| `MEMORIA_QMD_ALLOW_HTTP_ON_PRIVATE_NETWORK` | `0` | Required for a plain-http worker URL that is not loopback, such as the example below. Set it only on an encrypted network such as a WireGuard tunnel. |
 | `MEMORIA_QMD_WORKER_POLL_MS` | `10000` | How often each worker's `/health` and `/capabilities` are read. |
 | `MEMORIA_QMD_LLM_FALLBACK` | `1` | Tokenize and embed queries on this host's CPU when no worker answers. Needs the embedding model in QMD's cache on this host, under the name QMD gives it (`hf_<owner>_<file>`). It never downloads one, and a call gives up after 30 s. |
 | `MEMORIA_QMD_EMBED_DIMENSIONS` | `768` | Every embedding must have this length. `0` pins it to the first response. |
@@ -297,7 +298,7 @@ Across-sides agreement now sits between the two within-side figures, so the remo
 
 ## Memory
 
-**A search can allocate over 4 GB of JavaScript heap.** QMD's vector lookup reads a document's whole body once per matching chunk, and this corpus has documents up to 21 MB. One query reached 4.1 GB and, at Node's default limit, the benchmark died of it. That is QMD's behaviour, in-process or remote. `bench:parity` now raises the limit to 6 GiB. The sidecar service does not yet, and it needs to.
+**A search can allocate over 4 GB of JavaScript heap.** QMD's vector lookup reads a document's whole body once per matching chunk, and this corpus has documents up to 21 MB. One query reached 4.1 GB and, at Node's default limit, the benchmark died of it. That is QMD's behaviour, in-process or remote. `bench:parity` now raises the limit to 6 GiB. The sidecar service (`npm start` and the NSSM install) runs with 4 GiB, which is under that 4.1 GB query.
 
 **The benchmark cleans up its index copies.** They hold real transcripts. A normal exit and Ctrl-C remove them. A fatal crash runs no code at all, so the next run removes what a dead run left, recognising its own directories by a marker holding the owner's process ID. `--out` is rewritten after each query and marked `partial` until the run ends, so a crash keeps the results so far.
 
