@@ -451,12 +451,21 @@ internal static class RedactionRules
 		Pattern(@"(?:[?&]|%3[Ff]|%26|\\u0026)(?:key|code)=(?<secret>[A-Za-z0-9_.~%\-]{16,})"),
 		c => !ValueShapes.IsPlaceholder(c.Value) && SecretHeuristics.IsTokenValue(c.Value));
 
-	/// <summary>A Microsoft Teams incoming webhook, which authorizes posting with no other credential. The host stays readable.</summary>
+	/// <summary>
+	/// A Microsoft Teams incoming webhook, which authorizes posting with no other credential, on <c>webhook.office.com/webhookb2/</c> or the
+	/// older <c>outlook.office.com/webhook/</c> and <c>outlook.office365.com/webhook/</c>. The host stays readable.
+	/// </summary>
 	public static readonly RedactionRule TeamsWebhook = new(
 		"teams-webhook",
-		Pattern(@"webhook\.office\.com" + Slash + @"webhookb2" + Slash + @"(?<secret>[A-Za-z0-9\-@_/\\%]{40,})"),
+		Pattern(@"(?i:webhook\.office\.com" + Slash + @"webhookb2|outlook\.office(?:365)?\.com" + Slash + @"webhook)" + Slash + @"(?<secret>[A-Za-z0-9\-@_/\\%]{40,})"),
 		c => !ValueShapes.IsPlaceholder(c.Value),
-		literal: "webhook.office.com");
+		literal: null);
+
+	/// <summary>An Okta API token after its <c>SSWS</c> scheme, in any case, as in <c>Authorization: SSWS 00…</c>: <c>00</c> and 40 more characters.</summary>
+	public static readonly RedactionRule OktaToken = new(
+		"okta-token",
+		Pattern(@"(?i:\bssws)[ \t]+(?<secret>00[A-Za-z0-9_\-]{40})(?:$|[^A-Za-z0-9_\-])"),
+		SecretHeuristics.IsPrefixedToken);
 
 	/// <summary>Command line flags with the value after a space or as the next array item: <c>--password x</c>, <c>--api-key x</c>, <c>["--token", "x"]</c>. Judged like an assignment.</summary>
 	public static readonly RedactionRule SecretFlag = new(
@@ -528,7 +537,10 @@ internal static class RedactionRules
 		Provider("hubspot-token", "pat-", @"pat-(?:na|eu|ap)[0-9]-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"),
 		Provider("atlassian-cookie-token", "ATCTT3", @"ATCTT3[A-Za-z0-9_=\-]{32,}"),
 		Provider("supabase-secret", "sb_secret_", @"sb_secret_[A-Za-z0-9_\-]{20,}"),
-		Provider("facebook-token", "EAAC", @"EAAC[A-Za-z0-9]{40,}"),
+		// Facebook's tokens: EAAC at 44 characters or more, as before, and EAA and another capital at 100 or more, the length of user and
+		// page tokens. Square's EAAA at 64 runs first. Base64 lines of 64 or 76 characters, a + or / before the run, or + / = after it, and
+		// upper-case hex are data, so they stay.
+		new("facebook-token", Pattern(Left + @"(?<secret>EAAC[A-Za-z0-9]{40,})|(?:^|[^A-Za-z0-9+/]|\\+[nrtfbv0]|\\u[0-9A-Fa-f]{4}|%[0-9A-Fa-f]{2})(?<secret>EAA[ABD-Z][A-Za-z0-9]{96,})(?:$|[^A-Za-z0-9+/=])"), SecretHeuristics.IsFacebookToken, literal: "EAA"),
 		Provider("huggingface-org-token", "api_org_", @"api_org_[A-Za-z0-9]{30,}"),
 		Provider("gitlab-feature-flag-token", "glffct-", @"glffct-[A-Za-z0-9_\-]{20,}"),
 	];
@@ -564,7 +576,7 @@ internal static class RedactionRules
 	/// </summary>
 	public static readonly RedactionRule UnicodeEscapedToken = new(
 		"unicode-escaped-token",
-		Pattern(@"(?:^|\\[nrtfbv0]|[^A-Za-z0-9._~+\-])(?<secret>(?:[A-Za-z0-9._~+\-]|\\u[0-9A-Fa-f]{4})*\\u[0-9A-Fa-f]{4}(?:[A-Za-z0-9._~+\-]|\\u[0-9A-Fa-f]{4})*)"),
+		Pattern(@"(?:^|\\[nrtfbv0]|[^A-Za-z0-9._~+\-])(?<secret>(?:[A-Za-z0-9._~+\-]|\\{1,2}u[0-9A-Fa-f]{4})*\\{1,2}u[0-9A-Fa-f]{4}(?:[A-Za-z0-9._~+\-]|\\{1,2}u[0-9A-Fa-f]{4})*)"),
 		EncodedTokens.IsUnicodeEscapedCredential,
 		literal: @"\u",
 		skipRejected: true);
@@ -615,6 +627,7 @@ internal static class RedactionRules
 		TwilioAuthToken,
 		DiscordWebhook,
 		TeamsWebhook,
+		OktaToken,
 		MemoriaSharedSecret,
 		UrlPassword,
 		UrlToken,
@@ -669,6 +682,12 @@ internal static class RedactionRules
 		PercentEncodedToken,
 		Base64EncodedToken,
 	];
+
+	/// <summary>
+	/// Rules of ours that know a credential by what surrounds it. Decoded base64 is judged by them too when it reads as text, so
+	/// <c>password=x</c> in a base64 .env file is replaced as it would be written out. Rules that read lines, and imported rules, stay out.
+	/// </summary>
+	public static readonly IReadOnlyList<RedactionRule> Contextual = [.. All.Where(static rule => !rule.Backstop && !rule.LinesMatter && !SelfEvident.Contains(rule))];
 
 	private static RedactionRule Provider(string name, string? literal, string pattern, bool fixedLength = false, bool strictLeft = false)
 	{

@@ -61,11 +61,10 @@ public sealed class RedactionPinTests
 	[InlineData("hubspot-token", "pat-")]
 	[InlineData("atlassian-cookie-token", "ATCTT3")]
 	[InlineData("supabase-secret", "sb_secret_")]
-	[InlineData("facebook-token", "EAAC")]
+	[InlineData("facebook-token", "EAA")]
 	[InlineData("huggingface-org-token", "api_org_")]
 	[InlineData("gitlab-feature-flag-token", "glffct-")]
 	[InlineData("putty-private-key", "Private-Lines:")]
-	[InlineData("teams-webhook", "webhook.office.com")]
 	public void Prefilter_literal_is_pinned(string rule, string literal)
 	{
 		Assert.Equal(literal, RedactionRules.All.Single(r => r.Name == rule).Literal);

@@ -160,6 +160,7 @@ internal static class ReviewCases
 		// Listed misses: common command lines.
 		("mysql-password", "mysql -u root -p{S} db", "Hunter2x"),
 		("mysql-password", "mysqldump -h db -p{S} x", "Hunter2x"),
+		("okta-token", "Authorization: SSWS {S}", "00" + Synthetic.Body(40, 7101)),
 		("mongo-password", "mongosh -u admin -p {S} --quiet", "Hunter2x"),
 		("mongo-password", "mongo -u admin -p{S} db", "Hunter2x"),
 		("basic-auth-literal", "const auth = `Basic ${btoa(\"admin:{S}\")}`;", "Hunter2x"),
