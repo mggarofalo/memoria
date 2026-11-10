@@ -108,6 +108,20 @@ public sealed class HexAndUnicodeEscapeTests
 		Assert.Equal("{\"x\":\"a\\n[REDACTED:unicode-escaped-token]\"}", Redactor.Shared.RedactFragment("{\"x\":\"a\\n" + escaped + "\"}").Text);
 	}
 
+	/// <summary>After a backslash that is not an escape's start, as in a Windows path or regex text, the run is still read.</summary>
+	[Theory]
+	[InlineData("C:\\\\keys\\\\{S}")]
+	[InlineData("C:\\keys\\{S}")]
+	[InlineData("\\s{S}")]
+	[InlineData("x\\a{S}")]
+	public void An_escaped_token_after_another_backslash_is_replaced(string template)
+	{
+		string token = Synthetic.GitHubClassic('p');
+		string escaped = token.Replace("_", "\\u005f", StringComparison.Ordinal);
+
+		Assert.DoesNotContain(token[4..], Redactor.Shared.RedactFragment(template.Replace("{S}", escaped, StringComparison.Ordinal)).Text, StringComparison.Ordinal);
+	}
+
 	[Fact]
 	public void A_mask_written_as_hex_stays()
 	{

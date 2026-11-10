@@ -522,7 +522,7 @@ internal static class RedactionRules
 	/// </summary>
 	public static readonly RedactionRule UnicodeEscapedToken = new(
 		"unicode-escaped-token",
-		Pattern(@"(?:^|[^\\A-Za-z0-9._~+\-]|\\[nrtfbv0])(?<secret>(?:[A-Za-z0-9._~+\-]|\\u[0-9A-Fa-f]{4})*\\u[0-9A-Fa-f]{4}(?:[A-Za-z0-9._~+\-]|\\u[0-9A-Fa-f]{4})*)"),
+		Pattern(@"(?:^|\\[nrtfbv0]|[^A-Za-z0-9._~+\-])(?<secret>(?:[A-Za-z0-9._~+\-]|\\u[0-9A-Fa-f]{4})*\\u[0-9A-Fa-f]{4}(?:[A-Za-z0-9._~+\-]|\\u[0-9A-Fa-f]{4})*)"),
 		EncodedTokens.IsUnicodeEscapedCredential,
 		literal: @"\u",
 		skipRejected: true);
