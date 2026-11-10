@@ -4,7 +4,7 @@ Two processes, two hosts, one ingress.
 
 ```
 laptop / desktop / phone / cloud agents
-        │  HTTP (LAN today; HTTPS via the reverse proxy later)
+        │  HTTP, LAN only
         ▼
   Memoria.Api         Docker, ghcr.io/mggarofalo/memoria, port 8080
         │  plain REST + shared-secret bearer, LAN only
@@ -17,15 +17,14 @@ laptop / desktop / phone / cloud agents
 
 ## Decision: the image holds the API only
 
-The epic left open whether to ship the API and QMD in one image or compose
-them. The image holds `Memoria.Api` alone, and the sidecar runs as its own
+The image holds `Memoria.Api` alone, and the sidecar runs as its own
 service on whichever machine owns the models and index:
 
-- The sidecar needs the GGUF models (about 4 GB resident) and today a GPU.
-  That machine is a Windows desktop; the API host is Linux.
-- The two move independently. The sidecar is heading to the always-on node
-  with the index while model work moves to GPU workers; the API stays put. A
-  combined image would have to be rebuilt and redeployed for either.
+- The sidecar needs the GGUF models (about 4 GB resident) and, unless model
+  work goes to workers, a GPU. That machine is a Windows desktop; the API host
+  is Linux.
+- The two move independently, so a combined image would have to be rebuilt
+  and redeployed when either does.
 - The sidecar is never a public surface. Keeping it out of the API's
   container makes "QMD is reachable only through the API" a network fact,
   not a configuration one.
@@ -93,7 +92,7 @@ in a mode 700 directory, and the plist (also mode 600) holds the path. The agent
 runs as you, so there is no privilege boundary to design around. launchd does not
 rotate logs.
 
-### Not yet confirmed
+### Not confirmed
 
 These need a real install, and none has been done:
 
@@ -198,8 +197,7 @@ docker compose -f deploy/compose.yaml up -d
 
 It publishes port 8080 on `127.0.0.1` by default so only the reverse proxy on
 the same host can reach it. Set `MEMORIA_BIND_ADDRESS` to the host's LAN
-address to let LAN clients connect directly while the proxy entry does not
-exist yet.
+address to let LAN clients connect directly.
 
 Containers reach the sidecar on the desktop over the LAN with no special
 Docker networking: bridge networks NAT outbound traffic.
@@ -318,7 +316,7 @@ Run the sidecar with `--max-old-space-size=4096`. The install script sets it; el
 
 `sidecar/scripts/patch-qmd.ts` runs on install and fixes the SDK's scans. Without it, one search over six 21 MB documents froze for 35 s and needed over 1 GB of heap. With it, the same search took 2 to 3 s and fitted in 512 MiB. The SDK's functions are checked at start, and a sidecar on an unpatched SDK refuses to start. `/ready` shows `sdk.patched`.
 
-The same script carries the fix for QMD's reranker blend (upstream tobi/qmd#1032, not yet merged). A reranked hit's score is now the reranker's own score, and equal scores keep their rank-fusion order. That moves `minScore` too: the top-ranked hits no longer get a score floor from their rank. Stored indexes and cached reranker scores stay valid, so nothing needs re-embedding. Run `npm ci` in `sidecar/` when updating to a build with this fix, or the sidecar refuses to start.
+The same script carries the fix for QMD's reranker blend (upstream tobi/qmd#1032). A reranked hit's score is now the reranker's own score, and equal scores keep their rank-fusion order. That moves `minScore` too: the top-ranked hits no longer get a score floor from their rank. Stored indexes and cached reranker scores stay valid, so nothing needs re-embedding. Run `npm ci` in `sidecar/` when updating to a build with this fix, or the sidecar refuses to start.
 
 `POST /documents` refuses anything over `MEMORIA_QMD_MAX_DOCUMENT_BYTES` (2 MiB) with a 413 `document_too_large`, and writes nothing. The rest of this section is about stalls, meaning time when the sidecar answers nothing else, including `/health`.
 
@@ -420,13 +418,12 @@ back to QMD's global lookup for as long as the two are mismatched.
 ## Exposure is gated
 
 Nothing in this repository exposes Memoria to the internet, and nothing
-should until **homelab hardening** (patching, firewall review) lands: the host
-epic's "patch homelab before public exposure" issue. API keys with collection
+should before the host is hardened: patched, with its firewall reviewed. API keys with collection
 scopes are enforced by default, but a key is only as private as the transport,
 so TLS through the proxy is part of that gate. `Memoria:Auth:Mode = Disabled` is
 for a trusted LAN and must never be set on an exposed host.
 
-Until hardening is done: keep the compose port on `127.0.0.1` or the LAN address,
+Until it is: keep the compose port on `127.0.0.1` or the LAN address,
 do not create the proxy host entry, and do not forward a router port.
 
 ## Deployment checklist

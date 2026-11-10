@@ -40,25 +40,40 @@ Everything is an environment variable. See [`.env.example`](.env.example) for th
 | `MEMORIA_QMD_PORT` | `8282` | Port. |
 | `MEMORIA_QMD_SECRET` | unset | Bearer secret. Required unless bound to loopback. For development: services use the file below. |
 | `MEMORIA_QMD_SECRET_FILE` | unset | Read the secret from this file at startup: one line of UTF-8, with surrounding whitespace ignored. Setting both this and `MEMORIA_QMD_SECRET` is an error. On POSIX the sidecar refuses to start if group or others have any access to the file (`chmod 600`). `MEMORIA_QMD_WORKER_TOKEN_FILE` works the same way. |
-| `MEMORIA_QMD_DB_PATH` | `~/.cache/qmd/index.sqlite` | Index to serve. Must exist. |
+| `MEMORIA_QMD_DB_PATH` | unset | Index to serve. Must exist. Unset means `$XDG_CACHE_HOME/qmd/index.sqlite`, else `~/.cache/qmd/index.sqlite`. |
+| `MEMORIA_QMD_ALLOWED_HOSTS` | unset | DNS names a request may arrive under besides `localhost`, comma-separated. An IP address always works; any other name gets 421 `host_not_allowed`. |
+| `MEMORIA_QMD_MAX_DOCUMENT_BYTES` | `2097152` | Largest document `POST /documents` takes. Larger gets 413 `document_too_large`. Match `Memoria:Ingest:MaxDocumentBytes`. |
+| `MEMORIA_QMD_BODY_LIMIT_BYTES` | `16777216` | Largest request body. |
+| `MEMORIA_QMD_HEADERS_TIMEOUT_MS` | `10000` | How long a request's headers may take to arrive. |
+| `MEMORIA_QMD_REQUEST_TIMEOUT_MS` | `300000` | How long a whole request may take to arrive. |
+| `MEMORIA_QMD_MAX_CONNECTIONS` | `1024` | Connections held at once, in total. |
+| `MEMORIA_QMD_MAX_CONNECTIONS_PER_SOURCE` | `64` | Connections one address may hold. |
+| `MEMORIA_QMD_API_ADDRESSES` | unset | Memoria.Api's addresses, comma-separated, which get the higher limit below. |
+| `MEMORIA_QMD_MAX_CONNECTIONS_PER_API_ADDRESS` | `512` | Connections each of those may hold. |
+| `MEMORIA_QMD_SEARCH_CONCURRENCY` | `4` | Searches run at once. [`docs/deployment.md`](../docs/deployment.md#memory-and-large-documents) says why. |
+| `MEMORIA_QMD_SEARCH_QUEUE` | `16` | Searches that may wait. Past it, 503 `search_busy` with `Retry-After`. |
+| `MEMORIA_QMD_SEARCH_MAX_WAIT_MS` | `10000` | Longest a search waits for a slot before that 503. |
+| `MEMORIA_QMD_SEARCH_MAX_LIMIT` | `100` | Largest `limit` a search may ask for. |
+| `MEMORIA_QMD_FILTER_OVERFETCH` | `4` | A filtered search fetches `limit` times this many candidates. See [Metadata filters](#metadata-filters). |
+| `MEMORIA_QMD_FILTER_MAX_FETCH` | `200` | The most candidates a filtered search fetches. |
 | `MEMORIA_QMD_KEEP_WARM` | `1` | Disable the SDK's 5-minute idle model unload. |
 | `MEMORIA_QMD_WARMUP` | `1` | Load models at startup. |
 | `MEMORIA_QMD_LOG_LEVEL` | `info` | pino level. |
 | `MEMORIA_QMD_REINDEX_DEBOUNCE_MS` | `60000` | Quiet period after a document write before its index update runs. `0` turns the debounce off. |
 | `MEMORIA_QMD_REINDEX_MAX_WAIT_MS` | `300000` | Longest an update can wait from its first write, so steady ingest cannot starve the index. |
 | `MEMORIA_QMD_SHUTDOWN_DRAIN_MS` | `10000` | How long shutdown waits for queued jobs. Keep it under the service manager's stop timeout (15 s in `install-service.ps1`). |
-| `MEMORIA_QMD_LLM` | `local` | `remote` sends model work to a worker. See [`docs/workers.md`](../docs/workers.md), which has the other worker settings and what is still unproven. |
+| `MEMORIA_QMD_LLM` | `local` | `remote` sends model work to a worker. See [`docs/workers.md`](../docs/workers.md), which has the other worker settings and what has not been verified. |
 
 ### As a Windows service
 
-[`scripts/install-service.ps1`](scripts/install-service.ps1) registers the sidecar with [NSSM](https://nssm.cc/) (`winget install NSSM.NSSM`) so it starts at boot and restarts on failure. **It has not been run on a real install yet.** Print the plan first, which needs no elevation and changes nothing, then run it from an elevated shell:
+[`scripts/install-service.ps1`](scripts/install-service.ps1) registers the sidecar with [NSSM](https://nssm.cc/) (`winget install NSSM.NSSM`) so it starts at boot and restarts on failure. **It has not been run on a real install.** Print the plan first, which needs no elevation and changes nothing, then run it from an elevated shell:
 
 ```powershell
 .\scripts\install-service.ps1 -BindHost 192.168.1.20 -AllowHttpOnPrivateNetwork -SecretFile .\secret.txt -CollectionRoot D:\corpus\sessions -WhatIf
 .\scripts\install-service.ps1 -BindHost 192.168.1.20 -AllowHttpOnPrivateNetwork -SecretFile .\secret.txt -CollectionRoot D:\corpus\sessions
 ```
 
-It installs to `%ProgramFiles%\Memoria\memoria-qmd` and runs as `NT SERVICE\memoria-qmd`, with the secret in a file only that account and Administrators can read. Logs land in `%ProgramData%\memoria-qmd\logs` and rotate at 10 MiB. Pass every collection directory as `-CollectionRoot`, or document writes will fail. `scripts/uninstall-service.ps1` removes the service, its files and the secret, and leaves the logs. [`docs/deployment.md`](../docs/deployment.md#running-as-a-service) has the details, including what to do when upgrading an earlier install and what has yet to be confirmed.
+It installs to `%ProgramFiles%\Memoria\memoria-qmd` and runs as `NT SERVICE\memoria-qmd`, with the secret in a file only that account and Administrators can read. Logs land in `%ProgramData%\memoria-qmd\logs` and rotate at 10 MiB. Pass every collection directory as `-CollectionRoot`, or document writes will fail. `scripts/uninstall-service.ps1` removes the service, its files and the secret, and leaves the logs. [`docs/deployment.md`](../docs/deployment.md#running-as-a-service) has the details, including what to do when upgrading an earlier install and what has not been confirmed.
 
 ## The contract
 
@@ -69,6 +84,7 @@ Every route except `/health` and `/openapi.json` requires `Authorization: Bearer
 | Route | What it does |
 |---|---|
 | `GET /health` | Liveness. No auth, no index access. |
+| `GET /openapi.json` | This contract. No auth. |
 | `GET /ready` | Index open, model residency, warmup state, pending jobs. `?requireModels=true` returns 503 until the models are loaded. |
 | `GET /status` | QMD's index status. |
 | `POST /search` | Hybrid search. Either `query` (auto-expanded) or `searches` (typed `lex`/`vec`/`hyde` sub-queries), plus `intent`, `collections`, `limit`, `minScore`, `candidateLimit`, `rerank`, and frontmatter `filters`. |
@@ -80,10 +96,15 @@ Every route except `/health` and `/openapi.json` requires `Authorization: Bearer
 | `DELETE /documents?collection=&path=` | Delete by value: removes the file and queues a debounced update. Idempotent; returns 202 with `deleted: false` when no file existed. |
 | `POST /reindex` | Queue `update` (+ `embed`) for some or all collections, without waiting on the debounce. One worker runs one job at a time. |
 | `GET /reindex/jobs`, `GET /reindex/jobs/{id}` | Job history, which persists across restarts. |
-| `GET /queue`, `POST /queue/jobs/{id}:retry`, `POST /queue/jobs/{id}:cancel` | Queue depth, and operator control of jobs. |
+| `GET /queue` | Jobs by state, model calls by priority class, and calls per worker. |
+| `POST /queue/jobs/{id}:retry` | Queue a failed job again under the same id. 409 unless it has failed. |
+| `POST /queue/jobs/{id}:cancel` | End a waiting job at once. A running job stops at its next safe point, between batches when farming, so a long scan or an in-process embed runs on until it returns. A cancelled job reports `failed` with the error `Cancelled`. 409 if already finished. |
 | `GET /workers` | The worker pool's state, in remote LLM mode. |
-| `GET /queue/dead-letters`, `POST /queue/dead-letters:clear` | Documents no worker could embed, and letting them try again. |
+| `GET /queue/dead-letters` | Documents set aside, and why. `GET /queue` has the count. |
+| `POST /queue/dead-letters:clear` | Let them embed again, and queue a job to do it. |
 | `POST /cache:purge` | Drop every cached rerank score and expansion. |
+
+These are sidecar routes. `Memoria.Api` does not expose them.
 
 ### Search example
 
@@ -148,12 +169,12 @@ The two routes follow different rules. A write has to produce a document QMD can
 
 A pattern miss returns 400 `pattern_mismatch`. Blank content returns 400 `empty_content`, because QMD skips a blank file and the previous text would stay searchable.
 
-These return 409:
+Conflicts:
 
-- `case_conflict`: the path differs only in case or normalization from an existing entry at some level. Use the existing name. Otherwise `KEEP.md` would overwrite `keep.md` on NTFS and APFS while the metadata index recorded the wrong key. This applies on case-sensitive hosts too.
-- `hard_link`: overwriting a file with more than one hard link. Deleting one is allowed, because it removes that name only and leaves the file's other names alone.
-- `not_a_directory`, `is_directory`: what they say.
-- `path_changed`: a directory on the path changed during the operation.
+- 409 `case_conflict`: the path differs only in case or normalization from an existing entry at some level. Use the existing name. Otherwise `KEEP.md` would overwrite `keep.md` on NTFS and APFS while the metadata index recorded the wrong key. This applies on case-sensitive hosts too.
+- 409 `hard_link`: overwriting a file with more than one hard link. Deleting one is allowed, because it removes that name only and leaves the file's other names alone.
+- 409 `not_a_directory` and 409 `is_directory`: what they say.
+- 409 `path_changed`: a directory on the path changed during the operation.
 
 A write goes to a hidden temp file in the target's directory, is flushed, and is renamed over the target after containment has been checked again. A reader never sees half a document, and a hard link or symlink at the target is replaced rather than written through. An overwrite keeps the old file's POSIX permission bits. On Windows the new file takes its ACL from the directory, so an ACL set on the old file alone is lost. A delete renames the file aside and checks again before unlinking it.
 
@@ -200,7 +221,29 @@ One worker runs one job at a time. Document writes do not start a scan each: the
 - If any write in a burst asks for embedding, the shared job embeds. An embed run sweeps every unembedded document in the collection, so a separate job would not have spared the others.
 - `POST /reindex` does not wait. An identical job that is already waiting is returned and released to run.
 - So a new document is not searchable, and a deleted one is not gone from search, until the job finishes. Call `POST /reindex` for the collection when that delay matters.
-- On SIGINT or SIGTERM the sidecar releases held jobs and waits up to `MEMORIA_QMD_SHUTDOWN_DRAIN_MS` for them. Jobs persist in `index.sqlite.queue.sqlite` beside the index, so anything unfinished, including after a crash, runs after the next start. See [`docs/workers.md`](../docs/workers.md#the-job-queue).
+- On SIGINT or SIGTERM the sidecar releases held jobs and waits up to `MEMORIA_QMD_SHUTDOWN_DRAIN_MS` for them. Jobs persist in `index.sqlite.queue.sqlite` beside the index, so anything unfinished, including after a crash, runs after the next start. See [The job queue](#the-job-queue).
+
+### The job queue
+
+Reindex jobs persist in their own SQLite file beside the index (`index.sqlite.queue.sqlite`). It is not inside QMD's schema, so rebuilding the index leaves jobs alone. This uses Node's built-in `node:sqlite`, which adds no dependency but prints an experimental warning on Node 22.
+
+**A job accepted before a crash runs after the restart,** under the same id. A held job keeps its due time. A job that was running goes back to queued and runs again. A job found running by 5 restarts in a row, with no progress between them, is marked failed, on the assumption that it is what keeps killing the process. Retries during an outage do not count, a document reaching the index clears the count, and so does `:retry`. A clean shutdown leaves a running job queued, which does not count either.
+
+**Resuming is safe in remote mode because a document is written whole.** Its vectors build up in memory and go to the index in one transaction, replacing what it had.
+
+**QMD's own write is not atomic.** Its `insertEmbedding` writes two tables with no transaction, so a kill between them leaves a row claiming a vector that does not exist, and the document reads as complete for good. The farm's transaction closes this for remote mode, but in-process embedding still goes through the SDK. So every start, in both LLM modes, removes such rows and logs how many, and those documents embed again. Between a kill and the next start the index may be short a vector, and only a restart repairs it.
+
+**A damaged queue file does not stop search.** A row that cannot be read is moved to `jobs_quarantine`. Only a file SQLite reports as corrupt, or as not a database, is renamed to `*.corrupt-<time>`, and the last 3 of those are kept. Either way the jobs involved will not run, which a warning says. Any other trouble opening it leaves the file untouched and runs with jobs in memory, with a warning: that covers a file from a newer version and one held by another process.
+
+**One sidecar owns a queue file.** It holds an exclusive SQLite lock for as long as it runs, and the operating system releases that if the process dies. A second sidecar on the same file runs with its jobs in memory and says so, and `/ready` shows `jobs.persistent: false`. It tries again every 30 s, and when the file comes free it takes over the file and its waiting jobs.
+
+A later write failure, such as a full disk, is logged and the queue carries on in memory, writing what it missed if the store recovers. `/ready` shows `jobs.persistent` and `GET /queue` shows `persistence`, so this cannot go unnoticed. Writes never wait on a lock, because they run on the event loop.
+
+**What is stored:** the request, timestamps, result counts, attempts, worker names, and error text. A reason names a file path at most. Document bodies and tokens are never stored, and a test reads the database's raw bytes to check.
+
+**States are unchanged:** `queued`, `running`, `succeeded`, `failed`. So is the debounce. New fields on a job (`priority`, `attempts`, `worker`) are additions.
+
+How embedding jobs behave in remote mode, including dead letters, is in [`docs/workers.md`](../docs/workers.md#embedding-jobs-in-remote-mode).
 
 ## Develop
 

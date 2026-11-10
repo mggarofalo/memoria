@@ -57,9 +57,11 @@ It compares, per collection:
   - a sample of documents, fetched and compared with the local text, apart from redaction
   - with --queries, a file of one query a line, the top 10 from local QMD and from the server
 
-It exits 1 if a file is not held, is held at another version, or a sampled document does not
-match. Overlap never fails it: local QMD ranks differently and may use another embedder, so
-100% is not expected, and no threshold has been measured. It reports the number.
+It exits 1 if the counts differ with no takeover to explain it, a file is not held or is held at
+another version, two local files share a composed name, a local file or folder cannot be read, a
+path could not be checked, a sampled document does not match or could not be read or fetched, or
+a query could not run. Low overlap never fails it: local QMD ranks differently and may use another
+embedder, so 100% is not expected, and no threshold has been measured. It reports the number.
 
 A sampled document whose differences all sit beside redaction marks, but cannot be lined up, is
 counted as could not compare and named in the report. It does not fail the run, but it may be missing

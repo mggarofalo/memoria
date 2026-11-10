@@ -1,4 +1,4 @@
-# Memoria.Api on the always-on host (homelab today). The memoria-qmd sidecar
+# Memoria.Api on the always-on host. The memoria-qmd sidecar
 # is a separate service on the model host; point MEMORIA_SIDECAR_URL at it.
 # See docs/deployment.md.
 #

@@ -2,11 +2,7 @@ namespace Memoria.Api.Configuration;
 
 /// <summary>
 /// Root of the <c>Memoria</c> configuration section. Each child is one
-/// concern the host owns. Sections that later epics add keep this shape:
-/// the control plane adds
-/// <c>Workers</c> (the inference pool: name, url, token reference,
-/// capabilities, priority, availability thresholds) and <c>Queue</c>
-/// (concurrency, batch budget, priority classes). See docs/configuration.md.
+/// concern the host owns. See docs/configuration.md.
 /// </summary>
 public sealed class MemoriaOptions
 {
@@ -30,7 +26,7 @@ public sealed class IngestOptions
 	public int MaxDocumentBytes { get; set; } = 2 * 1024 * 1024;
 
 	/// <summary>The largest raw transcript one request may send. It is read as a stream, so this limits work, not memory.</summary>
-	public long MaxSessionBytes { get; set; } = 384L * 1024 * 1024;
+	public long MaxSessionBytes { get; set; } = 256L * 1024 * 1024;
 
 	/// <summary>Transcripts over 8 MiB handled at once. It keeps the API inside its memory limit. Past it, an upload gets 503 with <c>Retry-After</c>. A slow large upload holds its place until it ends.</summary>
 	public int MaxConcurrentLargeUploads { get; set; } = 2;
@@ -174,7 +170,7 @@ public sealed class McpOptions
 /// <summary>How to reach the memoria-qmd sidecar.</summary>
 public sealed class SidecarOptions
 {
-	/// <summary>Base URL of the sidecar, e.g. <c>http://192.168.1.20:8282</c>. Never hardcode it; the host moves.</summary>
+	/// <summary>Base URL of the sidecar, e.g. <c>http://192.168.1.20:8282</c>. Never hardcode it.</summary>
 	public string BaseUrl { get; set; } = "http://127.0.0.1:8282";
 
 	/// <summary>The <c>MEMORIA_QMD_SECRET</c> the sidecar expects. Required unless the sidecar is on loopback.</summary>
