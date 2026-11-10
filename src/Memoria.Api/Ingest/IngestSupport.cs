@@ -456,15 +456,22 @@ public static class RequestBody
 	}
 
 	/// <summary>
-	/// Raises the server's own limit, which is 30 MB unless told otherwise. Call it before anything can refuse the request: the server
-	/// discards an unread body after an answer, and a body over its limit breaks the connection, so the caller would see a reset instead of the answer.
+	/// Raises the server's own limit, which is 30 MB unless told otherwise. Call it before anything can refuse the request.
+	/// <para>
+	/// The server's limit is set past <paramref name="limit"/>, by as much again, and <see cref="Open"/> enforces the limit itself.
+	/// After an answer, Kestrel reads and discards what is left of the body, up to its own limit, and only then closes. A body
+	/// that runs past its limit is cut off with a reset instead, which can reach the caller before the answer does: a caller
+	/// still sending, as one that sends the whole body before reading, sees a broken connection, not the 413 and its code.
+	/// The room past the limit is what lets an oversized upload, of up to twice the limit, read its 413. Nothing past the
+	/// limit is kept: it is read only to be thrown away.
+	/// </para>
 	/// </summary>
 	public static void AllowUpTo(HttpContext context, long limit)
 	{
 		ArgumentNullException.ThrowIfNull(context);
 		if (context.Features.Get<IHttpMaxRequestBodySizeFeature>() is { IsReadOnly: false } feature)
 		{
-			feature.MaxRequestBodySize = limit;
+			feature.MaxRequestBodySize = limit > long.MaxValue / 2 ? long.MaxValue : limit * 2;
 		}
 	}
 

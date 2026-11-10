@@ -73,6 +73,28 @@ func (z *zstdTranscript) Close() error {
 	return z.file.Close()
 }
 
+// DefaultMaxSessionBytes is the server's default Memoria:Ingest:MaxSessionBytes: the largest transcript one session upload may
+// send. A larger one is refused with 413, so it is not sent at all.
+const DefaultMaxSessionBytes int64 = 256 << 20
+
+// TranscriptSize is how many bytes sending a transcript sends: its size, or, for a compressed one, what it decompresses to,
+// counted as it streams.
+func TranscriptSize(file string) (int64, error) {
+	if !strings.HasSuffix(strings.ToLower(file), compressedSuffix) {
+		info, err := os.Stat(file)
+		if err != nil {
+			return 0, err
+		}
+		return info.Size(), nil
+	}
+	stream, err := OpenTranscript(file)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = stream.Close() }()
+	return io.Copy(io.Discard, stream)
+}
+
 // ErrSeveralThreads is two files holding the same thread of a session, which this does not choose between.
 var ErrSeveralThreads = errors.New("more than one transcript holds the same thread")
 

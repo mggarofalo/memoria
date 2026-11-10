@@ -30,6 +30,9 @@ const (
 	RerenderNotReached = "not_reached"
 	// RerenderShorter is a transcript with fewer messages than its exports reach. The exports are the only copy of the rest.
 	RerenderShorter = "transcript_shorter"
+	// RerenderTooLarge is a transcript larger than the server's limit on one session upload, so it is not sent: the server would
+	// refuse it whole, and the export stays the only copy.
+	RerenderTooLarge = "transcript_too_large"
 	// RerenderUncounted is an export that does not say how many messages it reaches, so nothing can show the transcript has them all.
 	RerenderUncounted = "export_uncounted"
 	// RerenderAcceptedUncounted is an uncounted export sent anyway on the owner's --accept-uncounted. It is named in the report.
@@ -382,6 +385,8 @@ type RerenderSummary struct {
 	NotReached   int            `json:"notReached"`
 	// Shorter is transcripts with fewer messages than their exports reach, which are not sent.
 	Shorter int `json:"transcriptShorter"`
+	// TooLarge is documents with a transcript over the session upload limit, which are not sent.
+	TooLarge int `json:"transcriptTooLarge"`
 	// Uncounted is exports that do not say how many messages they reach, and whose body does not show the transcript has them all.
 	Uncounted int `json:"exportUncounted"`
 	// AcceptedUncounted is those sent anyway, because the owner passed --accept-uncounted after looking. They are in Sent too.
@@ -399,7 +404,7 @@ func (s *RerenderSummary) RefusedTotal() int {
 
 // NotHeld is every over-cap document that is not now held through its session.
 func (s *RerenderSummary) NotHeld() int {
-	return s.Partial + s.RefusedTotal() + s.NoSessionID + s.NoTranscript + s.Several + s.Unreadable + s.NotReached + s.Shorter + s.Uncounted
+	return s.Partial + s.RefusedTotal() + s.NoSessionID + s.NoTranscript + s.Several + s.Unreadable + s.NotReached + s.Shorter + s.TooLarge + s.Uncounted
 }
 
 // Accounted reports whether every over-cap document is in exactly one count.

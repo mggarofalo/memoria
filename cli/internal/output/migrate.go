@@ -47,7 +47,8 @@ func rawLine(raw *migrate.RawSessions) string {
 	if raw.Problem != "" {
 		return "raw Codex sessions: " + row(raw.Problem)
 	}
-	return row(fmt.Sprintf("raw Codex sessions: %d files, %d bytes, %d unreadable, could go to %s", raw.Files, raw.Bytes, raw.Unreadable, raw.Target))
+	return row(fmt.Sprintf("raw Codex sessions: %d files, %d bytes, %d unreadable, could go to %s; largest %d bytes as sent, %d over the server's default %d byte session limit",
+		raw.Files, raw.Bytes, raw.Unreadable, raw.Target, raw.Largest, raw.OverSessionLimit, migrate.DefaultMaxSessionBytes))
 }
 
 // MigratePlanMarkdown renders the plan as a bullet list.

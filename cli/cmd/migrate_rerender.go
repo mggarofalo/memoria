@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -31,6 +32,8 @@ type migrateRerenderOptions struct {
 	apply     bool
 	// acceptUncounted sends exports that neither count their messages nor show it in their body. Never on by default.
 	acceptUncounted bool
+	// maxSessionBytes is the server's limit on one session upload. A transcript over it is not sent.
+	maxSessionBytes int64
 }
 
 func newMigrateRerenderCmd(a *app) *cobra.Command {
@@ -79,6 +82,7 @@ Only a private report names the files.`,
 	f.StringArrayVar(&o.codexDirs, "codex-sessions", nil, "A folder of raw Codex transcripts (required); repeatable, as for archived sessions")
 	f.BoolVar(&o.apply, "apply", false, "Send. Without this, only report what would be sent")
 	f.BoolVar(&o.acceptUncounted, "accept-uncounted", false, "Send an export that neither counts its messages nor shows them all in its body. Named in the report")
+	f.Int64Var(&o.maxSessionBytes, "max-session-bytes", migrate.DefaultMaxSessionBytes, "The server's Memoria:Ingest:MaxSessionBytes. A transcript larger than this, decompressed, is not sent")
 	return cmd
 }
 
@@ -153,6 +157,7 @@ func readHead(root *os.Root, name string) ([]byte, time.Time, error) {
 type rerendering struct {
 	job             pushJob
 	acceptUncounted bool
+	maxSessionBytes int64
 	summary         migrate.RerenderSummary
 	problems        []migrate.RerenderProblem
 	items           []rerenderItem
@@ -165,6 +170,9 @@ func (g *rerendering) problem(name, status, reason string) {
 func (a *app) migrateRerender(ctx context.Context, o migrateRerenderOptions) error {
 	if len(o.codexDirs) == 0 {
 		return apperr.New(apperr.KindUsage, "--codex-sessions is required: it is where the raw transcripts are")
+	}
+	if o.maxSessionBytes <= 0 {
+		return apperr.New(apperr.KindUsage, "--max-session-bytes must be a positive number of bytes")
 	}
 	targets, err := parseTargets(o.targets)
 	if err != nil {
@@ -189,9 +197,9 @@ func (a *app) migrateRerender(ctx context.Context, o migrateRerenderOptions) err
 		a.warn("Codex also keeps transcripts in " + archive + ", which was not given. Add --codex-sessions " + archive + " so a thread archived there is found")
 	}
 	if !o.apply {
-		return a.rerenderDry(ctx, jobs, transcripts, o.acceptUncounted)
+		return a.rerenderDry(ctx, jobs, transcripts, o)
 	}
-	return a.rerenderApply(ctx, jobs, transcripts, o.acceptUncounted)
+	return a.rerenderApply(ctx, jobs, transcripts, o)
 }
 
 // missingArchive is Codex's archived_sessions folder beside a sessions folder given, when it is there and was not given too.
@@ -233,8 +241,8 @@ func overCap(job pushJob, root *os.Root, reported map[string]bool) []string {
 }
 
 // find matches each over-cap document to its transcript, and counts what cannot be matched.
-func find(job pushJob, transcripts *migrate.Transcripts, reported map[string]bool, acceptUncounted bool) (*rerendering, error) {
-	g := &rerendering{job: job, acceptUncounted: acceptUncounted, summary: migrate.RerenderSummary{Name: job.collection.Name, Target: job.target, Refused: map[string]int{}}}
+func find(job pushJob, transcripts *migrate.Transcripts, reported map[string]bool, o migrateRerenderOptions) (*rerendering, error) {
+	g := &rerendering{job: job, acceptUncounted: o.acceptUncounted, maxSessionBytes: o.maxSessionBytes, summary: migrate.RerenderSummary{Name: job.collection.Name, Target: job.target, Refused: map[string]int{}}}
 	root, err := os.OpenRoot(job.collection.Path)
 	if err != nil {
 		return nil, apperr.New(apperr.KindUsage, "collection %s: its folder cannot be opened", job.collection.Name)
@@ -318,9 +326,40 @@ func (g *rerendering) checkUncounted(root *os.Root, item rerenderItem, exports *
 		}
 		item.threads = withoutMessages(family, item.transcript)
 	}
+	if !g.fitsUpload(item) {
+		return
+	}
 	item.newest = exports.newest
 	g.summary.Threads += len(item.threads)
 	g.items = append(g.items, item)
+}
+
+// fitsUpload says whether every thread of a document is within the server's limit on one session upload, counted as it would be
+// sent, decompressed. One over it is not sent, and nor is the rest of the document: the server would refuse it whole, so its
+// export would still be the only copy of its messages. Sending it anyway would only be cut off.
+func (g *rerendering) fitsUpload(item rerenderItem) bool {
+	for _, thread := range item.threads {
+		size, err := migrate.TranscriptSize(thread.File)
+		if err != nil {
+			g.summary.Unreadable++
+			g.threadProblem(item.name, migrate.RerenderUnreadable, "transcript", otherThread(item, thread.ID))
+			return false
+		}
+		if size > g.maxSessionBytes {
+			g.summary.TooLarge++
+			g.threadProblem(item.name, migrate.RerenderTooLarge, fmt.Sprintf("%d bytes, over the %d byte limit", size, g.maxSessionBytes), otherThread(item, thread.ID))
+			return false
+		}
+	}
+	return true
+}
+
+// otherThread is a thread's id for the report, or "" for the session's own.
+func otherThread(item rerenderItem, id string) string {
+	if id == item.sessionID {
+		return ""
+	}
+	return id
 }
 
 func (g *rerendering) familyUnread(name string, err error) {
@@ -373,7 +412,7 @@ func uncountedCovered(root *os.Root, names []string, family []migrate.Thread) bo
 }
 
 // rerenderDry needs no server, so its private report is not one server's. It still names what could not be matched.
-func (a *app) rerenderDry(ctx context.Context, jobs []pushJob, transcripts *migrate.Transcripts, accept bool) error {
+func (a *app) rerenderDry(ctx context.Context, jobs []pushJob, transcripts *migrate.Transcripts, o migrateRerenderOptions) error {
 	report, err := migrate.PushReportPath("dry-run")
 	if err != nil {
 		return err
@@ -381,7 +420,7 @@ func (a *app) rerenderDry(ctx context.Context, jobs []pushJob, transcripts *migr
 	result := &migrate.RerenderResult{DryRun: true, ReportFile: strings.TrimSuffix(report, "-report.json") + "-rerender.json"}
 	var problems []migrate.RerenderProblem
 	for _, job := range jobs {
-		g, err := find(job, transcripts, nil, accept)
+		g, err := find(job, transcripts, nil, o)
 		if err != nil {
 			return err
 		}
@@ -394,7 +433,7 @@ func (a *app) rerenderDry(ctx context.Context, jobs []pushJob, transcripts *migr
 	return firstOf(a.presentRerender(ctx, result), written, rerenderOutcome(result))
 }
 
-func (a *app) rerenderApply(ctx context.Context, jobs []pushJob, transcripts *migrate.Transcripts, accept bool) error {
+func (a *app) rerenderApply(ctx context.Context, jobs []pushJob, transcripts *migrate.Transcripts, o migrateRerenderOptions) error {
 	s, err := a.connect()
 	if err != nil {
 		return err
@@ -408,7 +447,7 @@ func (a *app) rerenderApply(ctx context.Context, jobs []pushJob, transcripts *mi
 	result := &migrate.RerenderResult{ReportFile: strings.TrimSuffix(pushReport, "-report.json") + "-rerender.json"}
 	var problems []migrate.RerenderProblem
 	for _, job := range jobs {
-		g, err := find(job, transcripts, reportedOverCap(pushReport, job), accept)
+		g, err := find(job, transcripts, reportedOverCap(pushReport, job), o)
 		if err != nil {
 			return err
 		}

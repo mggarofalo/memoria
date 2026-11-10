@@ -652,7 +652,8 @@ public sealed class IngestBodyLimitTests(AuthApiFactory factory) : IClassFixture
 			.PostAsync("/v1/ingest/session?collection=c&format=word&sessionId=x&updated=2026-01-01T00:00:00Z", new StringContent("", Encoding.UTF8, "application/x-ndjson"));
 
 		Assert.Equal(HttpStatusCode.BadRequest, refused.StatusCode);
-		Assert.Equal(268435456, probe.Feature.MaxRequestBodySize);
+		// Twice the limit, so the server can read what is left of a body it refused and the caller sees the answer.
+		Assert.Equal(2L * 268435456, probe.Feature.MaxRequestBodySize);
 	}
 
 	[Fact]
@@ -664,7 +665,7 @@ public sealed class IngestBodyLimitTests(AuthApiFactory factory) : IClassFixture
 
 		await AuthApiFactory.Authorized(app.CreateClient(), key).PostAsync("/v1/documents", new StringContent("not json", Encoding.UTF8, "application/json"));
 
-		Assert.Equal((2L * 2097152) + 65536, probe.Feature.MaxRequestBodySize);
+		Assert.Equal(2 * ((2L * 2097152) + 65536), probe.Feature.MaxRequestBodySize);
 	}
 
 	[Fact]
