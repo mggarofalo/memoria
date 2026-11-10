@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { WorkerClient, WorkerError, type OperationTimeouts } from "./client.ts";
+import { WorkerClient, WorkerError, type OperationTimeouts, type WorkerLifecycle } from "./client.ts";
 import { cosineOf } from "./probe.ts";
 import type { Capability, LlmCallSink, PoolLoad, PoolWorkerConfig, PriorityClass, WorkerView } from "./types.ts";
 import { parseCapabilities, parseHealth, ResponseViolation, type WorkerCapabilities, type WorkerHealth } from "./validate.ts";
@@ -172,6 +172,8 @@ export interface WorkerPoolOptions {
   onDisagreement?: (workers: readonly string[]) => void;
   /** Slots per worker that background work may not use, when the worker has more than that. */
   interactiveReserve?: number;
+  /** Stops every call at shutdown: see `WorkerLifecycle`. */
+  lifecycle?: WorkerLifecycle;
 }
 
 type Attempt<T> = { ok: true; value: T } | { ok: false; error: WorkerError; retry: boolean };
@@ -210,6 +212,7 @@ function newEntry(config: PoolWorkerConfig, pool: BreakerOptions, options: Worke
       ...(options.timeouts ? { timeouts: options.timeouts } : {}),
       ...(options.fetch ? { fetch: options.fetch } : {}),
       ...(onCall ? { onCall } : {}),
+      ...(options.lifecycle ? { lifecycle: options.lifecycle } : {}),
     }),
     breakers: { embed: new Breaker(breaker), rerank: new Breaker(breaker), generate: new Breaker(breaker), documents: new Breaker(breaker) },
     reachable: null,
@@ -243,6 +246,7 @@ export class WorkerPool {
   readonly #probeEveryMs: number;
   readonly #onDisagreement: ((workers: readonly string[]) => void) | undefined;
   readonly #interactiveReserve: number;
+  readonly #lifecycle: WorkerLifecycle | undefined;
   #lastProbe: number | null = null;
   #disagreeing: readonly string[] = [];
   readonly #waiters: Array<() => void> = [];
@@ -260,6 +264,7 @@ export class WorkerPool {
     this.#probeEveryMs = options.probeEveryMs ?? 60_000;
     this.#onDisagreement = options.onDisagreement;
     this.#interactiveReserve = options.interactiveReserve ?? 1;
+    this.#lifecycle = options.lifecycle;
     const breaker = { ...DEFAULT_BREAKER, ...options.breaker };
     // Heartbeats would drown the per-call log, and they say nothing about model work.
     const sink = options.onCall;
@@ -502,7 +507,9 @@ export class WorkerPool {
     for (const resolve of this.#waiters.splice(0)) resolve();
   }
 
-  #takeFreeSlot(candidates: Entry[], key: CircuitKey, klass: PriorityClass): Entry | null {
+  #takeFreeSlot(candidates: Entry[], key: CircuitKey, klass: PriorityClass, operation: string): Entry | null {
+    // A call still waiting for a slot when shutdown begins does not start.
+    if (this.#lifecycle?.refusing) throw this.#lifecycle.error(operation, "pool");
     if (klass === "background" && this.#waiting.interactive > 0) return null;
     const free = candidates.find((e) => e.inFlight.interactive + e.inFlight.background < this.#limit(e, klass));
     if (!free) return null;
@@ -542,7 +549,7 @@ export class WorkerPool {
           continue;
         }
         if (candidates.length === 0) return null;
-        const taken = this.#takeFreeSlot(candidates, key, klass);
+        const taken = this.#takeFreeSlot(candidates, key, klass, operation);
         if (taken) return taken;
         if (this.#now() >= deadline) throw new WorkerError("saturated", operation, "pool", "no worker had a free slot before the deadline");
         await this.#waitForChange();
@@ -593,6 +600,11 @@ export class WorkerPool {
 
   #failed(entry: Entry, key: CircuitKey, err: unknown): Attempt<never> {
     const breaker = entry.breakers[key];
+    if (err instanceof WorkerError && err.code === "closing") {
+      // Shutdown stopped it, not the worker.
+      breaker.settle();
+      return { ok: false, error: err, retry: false };
+    }
     if (!(err instanceof WorkerError)) {
       this.#record(entry, false);
       breaker.failure(this.#now());

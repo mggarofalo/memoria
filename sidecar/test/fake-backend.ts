@@ -392,6 +392,16 @@ export class FakeBackend implements QmdBackend {
     return { embed: "fake-embed", rerank: "fake-rerank", generate: "fake-generate", loaded: { embed: r, rerank: r, generate: r }, resident: r };
   }
 
+  workerCalls: "open" | "refused" | "aborted" = "open";
+
+  stopWorkerCalls(): void {
+    if (this.workerCalls === "open") this.workerCalls = "refused";
+  }
+
+  abortWorkerCalls(): void {
+    this.workerCalls = "aborted";
+  }
+
   async close(): Promise<void> {
     this.closed = true;
   }

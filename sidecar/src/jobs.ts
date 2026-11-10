@@ -206,6 +206,9 @@ export interface QueuePersistence {
   healthy: boolean;
 }
 
+/** How one run of a job ended for the queue: done with, waiting on a retry, or stopped by shutdown. */
+type RunEnding = "finished" | "deferred" | "parked";
+
 export class JobQueue {
   readonly #runner: JobRunner;
   readonly #keep: number;
@@ -235,6 +238,8 @@ export class JobQueue {
   #idleWaiters: Array<() => void> = [];
   #storeHealthy = true;
   #suspended = false;
+  /** Shutdown has begun: a job that does not succeed now was stopped by it, and waits for the next start. */
+  #stopping = false;
   /** No job starts while set. In memory only, so a restart always resumes. */
   #paused = false;
   // Replaced at most once: see `adoptStore`.
@@ -367,9 +372,20 @@ export class JobQueue {
   }
 
   /**
-   * Stop for shutdown. Whatever is running will be cut off, so the store keeps it
-   * as waiting and it resumes at the next start without counting as a crash. Its
-   * failure as the index closes under it is not recorded, because it did not fail.
+   * Shutdown has begun, and worker calls are refused. Jobs still run, so what was
+   * accepted is indexed, but one that does not succeed from here was stopped by
+   * shutdown, not failed: it is kept as waiting, with no retry delay, and runs again
+   * at the next start. It no longer counts as pending, so `drain` need not wait it out.
+   */
+  stopping(): void {
+    this.#stopping = true;
+  }
+
+  /**
+   * Stop for shutdown. Whatever is running is signalled to stop, and the store keeps
+   * it as waiting, so it resumes at the next start without counting as a crash. Its
+   * failure as it stops, or as the index closes under it, is not recorded, because
+   * it did not fail.
    */
   suspend(): void {
     if (this.#active) {
@@ -377,8 +393,22 @@ export class JobQueue {
       if (entry && this.#store) this.#saveAsWaiting(this.#store, entry);
     }
     this.#suspended = true;
+    this.#stopping = true;
+    this.#abort?.abort();
     for (const timer of this.#held.values()) this.#scheduler.clearTimeout(timer);
     this.#held.clear();
+  }
+
+  /** Resolves true once no job is running, or false after `timeoutMs`. */
+  settled(timeoutMs: number): Promise<boolean> {
+    if (this.#active === null) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      const timer = this.#scheduler.setTimeout(() => resolve(false), timeoutMs);
+      void this.#until(() => this.#active === null).then(() => {
+        this.#scheduler.clearTimeout(timer);
+        resolve(true);
+      });
+    });
   }
 
   #saveAsWaiting(store: JobStore, entry: PersistedJob): void {
@@ -541,19 +571,39 @@ export class JobQueue {
     this.#persist(job);
     const abort = new AbortController();
     this.#abort = abort;
-    let deferred = false;
+    let ending: RunEnding = "finished";
     try {
       job.result = await this.#runner(job.request, this.#context(job, entry, abort.signal));
       job.state = "succeeded";
       entry.deferrals = 0;
       entry.crashes = 0;
     } catch (err) {
-      deferred = err instanceof JobDeferred && !abort.signal.aborted;
-      if (deferred) this.#defer(job, (err as JobDeferred).message);
-      else this.#fail(job, err);
+      ending = this.#ended(job, entry, err, abort.signal);
     } finally {
-      this.#finishRun(job, deferred);
+      this.#finishRun(job, ending);
     }
+  }
+
+  #ended(job: Job, entry: PersistedJob, err: unknown, signal: AbortSignal): RunEnding {
+    if (this.#stopping) {
+      this.#park(job, entry);
+      return "parked";
+    }
+    if (err instanceof JobDeferred && !signal.aborted) {
+      this.#defer(job, err.message);
+      return "deferred";
+    }
+    this.#fail(job, err);
+    return "finished";
+  }
+
+  /** Stopped by shutdown: waiting again, due at once, for the next start. */
+  #park(job: Job, entry: PersistedJob): void {
+    job.state = "queued";
+    job.startedAt = null;
+    job.error = null;
+    entry.dueAt = null;
+    entry.deferred = false;
   }
 
   #context(job: Job, entry: PersistedJob, signal: AbortSignal): JobRunContext {
@@ -580,13 +630,11 @@ export class JobQueue {
     job.error = errorText(err);
   }
 
-  #finishRun(job: Job, deferred: boolean): void {
+  #finishRun(job: Job, ending: RunEnding): void {
     this.#abort = null;
     this.#active = null;
-    if (!deferred) {
-      job.finishedAt = new Date().toISOString();
-      this.#pending--;
-    }
+    if (ending === "finished") job.finishedAt = new Date().toISOString();
+    if (ending !== "deferred") this.#pending--;
     this.#persist(job);
     this.#settle();
     this.#pump();

@@ -18,7 +18,41 @@ export type WorkerErrorCode =
   | "model_mismatch"
   | "no_worker"
   | "saturated"
-  | "deadline";
+  | "deadline"
+  | "closing";
+
+/**
+ * Whether worker calls may go, for shutdown. Once `refuseNew` is called no call
+ * starts, an embedding batch included; once `abortInFlight` is, those still
+ * waiting on a worker end at once. Both fail as `closing`, which says nothing
+ * against the worker.
+ */
+export class WorkerLifecycle {
+  readonly #abort = new AbortController();
+  #refusing = false;
+
+  get refusing(): boolean {
+    return this.#refusing;
+  }
+
+  get signal(): AbortSignal {
+    return this.#abort.signal;
+  }
+
+  refuseNew(): void {
+    this.#refusing = true;
+  }
+
+  abortInFlight(): void {
+    this.#refusing = true;
+    this.#abort.abort();
+  }
+
+  /** The error for a call refused or cut off by shutdown. */
+  error(operation: string, worker: string): WorkerError {
+    return new WorkerError("closing", operation, worker, "the sidecar is shutting down");
+  }
+}
 
 export class WorkerError extends Error {
   readonly code: WorkerErrorCode;
@@ -60,6 +94,8 @@ export interface WorkerClientOptions {
   maxResponseBytes?: number;
   fetch?: typeof globalThis.fetch;
   onCall?: LlmCallSink;
+  /** Shared by every client of one pool, so shutdown stops them all at once. */
+  lifecycle?: WorkerLifecycle;
 }
 
 const SAFE_CODE = /^[a-z][a-z0-9_]{0,63}$/;
@@ -78,6 +114,7 @@ export class WorkerClient {
   readonly #maxBytes: number;
   readonly #fetch: typeof globalThis.fetch;
   readonly #onCall: LlmCallSink | undefined;
+  readonly #lifecycle: WorkerLifecycle | undefined;
 
   constructor(options: WorkerClientOptions) {
     const base = new URL(options.url);
@@ -91,16 +128,19 @@ export class WorkerClient {
     this.#maxBytes = options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
     this.#fetch = options.fetch ?? globalThis.fetch;
     this.#onCall = options.onCall;
+    this.#lifecycle = options.lifecycle;
   }
 
   /** `withinMs` shortens the deadline, for a search with only so long left. */
   post(operation: string, timeout: keyof OperationTimeouts, path: string, body: unknown, batchSize: number, withinMs?: number | null): Promise<unknown> {
     const ms = Math.min(this.#timeouts[timeout], withinMs ?? Infinity);
     if (ms <= 0) return Promise.reject(new WorkerError("deadline", operation, this.name, "the search's time ran out first"));
+    if (this.#lifecycle?.refusing) return Promise.reject(this.#lifecycle.error(operation, this.name));
     return this.#request(operation, ms, path, batchSize, { method: "POST", body: JSON.stringify(body) });
   }
 
   get(operation: string, path: string): Promise<unknown> {
+    if (this.#lifecycle?.refusing) return Promise.reject(this.#lifecycle.error(operation, this.name));
     return this.#request(operation, this.#timeouts.status, path, 0, { method: "GET" });
   }
 
@@ -116,7 +156,7 @@ export class WorkerClient {
           headers,
           // A redirect would resend the bearer token to wherever it points.
           redirect: "error",
-          signal: AbortSignal.timeout(timeoutMs),
+          signal: this.#signal(timeoutMs),
         });
       } catch (err) {
         throw this.#networkError(operation, err);
@@ -138,6 +178,12 @@ export class WorkerClient {
     }
   }
 
+  /** The call's own deadline, and shutdown's. */
+  #signal(timeoutMs: number): AbortSignal {
+    const timeout = AbortSignal.timeout(timeoutMs);
+    return this.#lifecycle ? AbortSignal.any([timeout, this.#lifecycle.signal]) : timeout;
+  }
+
   #headers(hasBody: boolean): Record<string, string> {
     const headers: Record<string, string> = { accept: "application/json" };
     if (hasBody) headers["content-type"] = "application/json";
@@ -152,6 +198,7 @@ export class WorkerClient {
   }
 
   #networkError(operation: string, err: unknown): WorkerError {
+    if (this.#lifecycle?.signal.aborted) return this.#lifecycle.error(operation, this.name);
     const name = (err as { name?: unknown }).name;
     if (name === "TimeoutError" || name === "AbortError") {
       return new WorkerError("timeout", operation, this.name, "no response before the deadline");
