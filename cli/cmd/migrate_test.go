@@ -159,7 +159,7 @@ func TestAPatternThatCannotBeReadFailsLoudlyAndNotAsAZero(t *testing.T) {
 	}
 	tool := filepath.Join(dir, "RedactionCheck.dll")
 	writeFile(t, tool, "")
-	if code := h.run("migrate", "report", "--qmd-config", config, "--tool", tool, "--no-gitleaks"); code != apperr.ExitUsage || !strings.Contains(h.stderr.String(), "refused") {
+	if code := h.run("migrate", "report", "--qmd-config", config, "--tool", tool, "--no-gitleaks", "--no-trufflehog"); code != apperr.ExitUsage || !strings.Contains(h.stderr.String(), "refused") {
 		t.Fatalf("code = %d, stderr = %q", code, h.stderr.String())
 	}
 	if len(h.checkArgs) != 0 {
@@ -305,7 +305,7 @@ func (f *migrateFixture) fakeCheck(output string, err error) *[][]string {
 }
 
 func (f *migrateFixture) report(args ...string) int {
-	return f.h.run(append([]string{"migrate", "report", "--qmd-config", f.config, "--tool", f.tool, "--no-gitleaks"}, args...)...)
+	return f.h.run(append([]string{"migrate", "report", "--qmd-config", f.config, "--tool", f.tool, "--no-gitleaks", "--no-trufflehog"}, args...)...)
 }
 
 func TestMigrateReportGivesTheToolExactlyThePlansFiles(t *testing.T) {
@@ -405,9 +405,9 @@ func TestMigrateReportRefusesBadInput(t *testing.T) {
 	t.Setenv("PATH", dir)
 	for name, args := range map[string][]string{
 		"no tool":     {"migrate", "report", "--qmd-config", f.config},
-		"a bad tool":  {"migrate", "report", "--qmd-config", f.config, "--tool", filepath.Join(dir, "absent.dll"), "--no-gitleaks"},
-		"a folder":    {"migrate", "report", "--qmd-config", f.config, "--tool", dir, "--no-gitleaks"},
-		"no config":   {"migrate", "report", "--tool", f.tool, "--no-gitleaks"},
+		"a bad tool":  {"migrate", "report", "--qmd-config", f.config, "--tool", filepath.Join(dir, "absent.dll"), "--no-gitleaks", "--no-trufflehog"},
+		"a folder":    {"migrate", "report", "--qmd-config", f.config, "--tool", dir, "--no-gitleaks", "--no-trufflehog"},
+		"no config":   {"migrate", "report", "--tool", f.tool, "--no-gitleaks", "--no-trufflehog"},
 		"no gitleaks": {"migrate", "report", "--qmd-config", f.config, "--tool", f.tool},
 	} {
 		if code := f.h.run(args...); code != apperr.ExitUsage {
@@ -496,7 +496,7 @@ func TestAConfigWithNoCollectionsIsAClearError(t *testing.T) {
 	f := newMigrateFixture(t)
 	config := filepath.Join(t.TempDir(), "index.yml")
 	writeFile(t, config, "colections:\n  notes:\n    path: /tmp\n")
-	for _, args := range [][]string{{"migrate", "plan", "--qmd-config", config}, {"migrate", "report", "--qmd-config", config, "--tool", f.tool, "--no-gitleaks"}} {
+	for _, args := range [][]string{{"migrate", "plan", "--qmd-config", config}, {"migrate", "report", "--qmd-config", config, "--tool", f.tool, "--no-gitleaks", "--no-trufflehog"}} {
 		if code := f.h.run(args...); code == 0 || !strings.Contains(f.h.stderr.String(), "no collections") {
 			t.Errorf("%v: code = %d, stderr = %q", args, code, f.h.stderr.String())
 		}
@@ -518,7 +518,7 @@ func TestAFolderWithNoMatchingFilesWarnsAndExitsZero(t *testing.T) {
 	tool := filepath.Join(dir, "tool.dll")
 	writeFile(t, tool, "")
 	h.checkOutput = `[{"files":0,"changed":0,"refused":0,"skipped":0,"replacements":{},"filesByRule":{},"gitleaksRan":false,"gitleaksFindings":{}}]`
-	if code := h.run("migrate", "report", "--qmd-config", config, "--tool", tool, "--no-gitleaks"); code != 0 || !strings.Contains(h.stderr.String(), "no file in its folder") {
+	if code := h.run("migrate", "report", "--qmd-config", config, "--tool", tool, "--no-gitleaks", "--no-trufflehog"); code != 0 || !strings.Contains(h.stderr.String(), "no file in its folder") {
 		t.Fatalf("report: code = %d, stderr = %q", code, h.stderr.String())
 	}
 }

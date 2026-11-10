@@ -273,6 +273,13 @@ jobs:
           tar -xzf gitleaks.tar.gz -C "$RUNNER_TEMP" gitleaks
           echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
           rm gitleaks.tar.gz
+      # The report's look that is independent of the engine's rules, with verification off, so it calls no service.
+      - name: Install trufflehog
+        run: |
+          curl -fsSL -o trufflehog.tar.gz https://github.com/trufflesecurity/trufflehog/releases/download/v3.99.8/trufflehog_3.99.8_linux_amd64.tar.gz
+          echo "7c3b02f160f28929a467e29e20fba98746e0729f6e37c3c25761e4f8789abe08  trufflehog.tar.gz" | sha256sum -c -
+          tar -xzf trufflehog.tar.gz -C "$RUNNER_TEMP" trufflehog
+          rm trufflehog.tar.gz
       - name: Run the checks
         run: node scripts/e2e/run.ts
 

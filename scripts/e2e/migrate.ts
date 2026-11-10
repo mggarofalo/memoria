@@ -4,6 +4,7 @@
  * real tool, with gitleaks where it is installed.
  */
 import { spawn, spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { pause, redactionCheckDll, repo, type Harness } from "./harness.ts";
@@ -76,7 +77,7 @@ function rowsOf(out: string): { notes: ReportRow | undefined; clean: ReportRow |
 }
 
 function reportJson(h: Harness, config: string, tool: string): string {
-  const json = h.memoria(["migrate", "report", "--qmd-config", config, "--tool", tool, "--no-gitleaks", "--format", "json"]);
+  const json = h.memoria(["migrate", "report", "--qmd-config", config, "--tool", tool, "--no-gitleaks", "--no-trufflehog", "--format", "json"]);
   const { notes, clean } = rowsOf(json.out);
   const replaced = Object.keys(notes?.replacements ?? {}).length > 0;
   h.check("migrate report: the real rules ran over exactly the plan's files", json.code === 0 && notes?.files === 2 && notes.changed === 1 && replaced && clean?.changed === 0, json.out + json.err);
@@ -86,7 +87,7 @@ function reportJson(h: Harness, config: string, tool: string): string {
 
 /** `scripts/redaction-report.sh` shows the tool's output as it is, and the CLI would hide a leak from it. */
 function toolAlone(h: Harness, tool: string, notes: string, secret: string): void {
-  const run = spawnSync("dotnet", [tool, "--no-gitleaks", notes], { encoding: "utf8", timeout: 120_000 });
+  const run = spawnSync("dotnet", [tool, "--no-gitleaks", "--no-trufflehog", notes], { encoding: "utf8", timeout: 120_000 });
   const all = run.stdout + run.stderr;
   // Given a folder, it reads every Markdown file in it, which is why the CLI gives it a list.
   h.check("redaction check: printed by itself, it counts the file, and says gitleaks did not run", run.status === 0 && /documents changed: [1-9]/.test(all) && all.includes("NOT RUN"), all.slice(0, 400));
@@ -96,7 +97,7 @@ function toolAlone(h: Harness, tool: string, notes: string, secret: string): voi
 /** A file gone by the time it is read is counted and not named, and does not end the report. */
 function missingFile(h: Harness, tool: string, notes: string): void {
   const input = JSON.stringify([{ paths: [path.join(notes, "gone-secretfilename.md"), path.join(notes, "plain.md")] }]);
-  const run = spawnSync("dotnet", [tool, "--json", "--no-gitleaks", "--lists-on-stdin"], { input, encoding: "utf8", timeout: 120_000 });
+  const run = spawnSync("dotnet", [tool, "--json", "--no-gitleaks", "--no-trufflehog", "--lists-on-stdin"], { input, encoding: "utf8", timeout: 120_000 });
   const row = (JSON.parse(run.stdout || "[{}]") as Array<{ files?: number; skipped?: number }>)[0];
   h.check("redaction check: a file it cannot read is counted, the rest are read, and it exits 1", run.status === 1 && row?.files === 2 && row.skipped === 1, run.stdout + run.stderr);
   h.check("redaction check: that file is not named", !(run.stdout + run.stderr).includes("secretfilename"), run.stdout + run.stderr);
@@ -112,9 +113,9 @@ function wideName(h: Harness, tool: string, secret: string): void {
     const row = (JSON.parse(run.stdout || "[{}]") as Array<{ changed?: number; skipped?: number }>)[0];
     h.check(`redaction check: file names outside ASCII are read, not skipped, ${label}`, row?.changed === names.length && row.skipped === 0, run.stdout + run.stderr);
   };
-  read("as UTF-8", spawnSync("dotnet", [tool, "--json", "--no-gitleaks", "--lists-on-stdin"], { input, encoding: "utf8", timeout: 120_000 }));
+  read("as UTF-8", spawnSync("dotnet", [tool, "--json", "--no-gitleaks", "--no-trufflehog", "--lists-on-stdin"], { input, encoding: "utf8", timeout: 120_000 }));
   if (process.platform !== "win32") return;
-  const line = `/c chcp 437 >nul && dotnet "${tool}" --json --no-gitleaks --lists-on-stdin`;
+  const line = `/c chcp 437 >nul && dotnet "${tool}" --json --no-gitleaks --no-trufflehog --lists-on-stdin`;
   read("under code page 437", spawnSync("cmd", [line], { input, encoding: "utf8", timeout: 120_000, windowsVerbatimArguments: true }));
 }
 
@@ -149,7 +150,7 @@ func main() {
   const input = JSON.stringify([{ paths: [path.join(notes, "plain.md")] }]);
   for (const mode of ["stops", "exits", "garbage"]) {
     const env = { ...process.env, FAKE_GITLEAKS: mode, [name]: folder + path.delimiter + (process.env[name] ?? "") };
-    const run = spawnSync("dotnet", [tool, "--json", "--lists-on-stdin"], { input, env, encoding: "utf8", timeout: 120_000 });
+    const run = spawnSync("dotnet", [tool, "--json", "--no-trufflehog", "--lists-on-stdin"], { input, env, encoding: "utf8", timeout: 120_000 });
     const row = (JSON.parse(run.stdout || "[{}]") as Array<{ gitleaksUnscanned?: number }>)[0];
     h.check(`redaction check: gitleaks that ${mode}: counted as unscanned, and exits 1`, run.status === 1 && row?.gitleaksUnscanned === 1, run.stdout + run.stderr);
   }
@@ -186,7 +187,7 @@ function gitleaksReads(h: Harness, tool: string): void {
     const folder = h.privatePath(`migrate-reads-${index}`);
     item.files.forEach((text, file) => write(folder, `doc-${file}.md`, text));
     const config = planConfig(h, folder, { pattern: "**/*.md" }, 200 + index);
-    const run = h.memoria(["migrate", "report", "--qmd-config", config, "--tool", tool, "--format", "json"]);
+    const run = h.memoria(["migrate", "report", "--qmd-config", config, "--tool", tool, "--no-trufflehog", "--format", "json"]);
     const row = (JSON.parse(run.out || "[{}]") as Array<{ gitleaksFindings?: Record<string, number>; gitleaksUnscanned?: number }>)[0];
     const found = Object.values(row?.gitleaksFindings ?? {}).reduce((sum, count) => sum + count, 0);
     h.check(`migrate report: real gitleaks finds a token in ${item.label}, and exits 1`, run.code === 1 && found >= 1 && row?.gitleaksUnscanned === 0 && !run.out.includes(token), { code: run.code, found, err: run.err.slice(0, 200) });
@@ -204,19 +205,19 @@ function gitleaksIgnore(h: Harness, tool: string): void {
   write(folder, "sub/doc.md", `# Doc\n\nfirst\n${line}\n`);
   const config = planConfig(h, folder, { pattern: "**/*.md" }, 500);
   const findings = h.privatePath("migrate-findings.txt");
-  const listed = h.memoria(["migrate", "report", "--qmd-config", config, "--tool", tool, "--gitleaks-findings", findings, "--format", "json"]);
+  const listed = h.memoria(["migrate", "report", "--qmd-config", config, "--tool", tool, "--no-trufflehog", "--gitleaks-findings", findings, "--format", "json"]);
   const written = readFileSync(findings, "utf8").trim();
   h.check("migrate report: --gitleaks-findings writes the fingerprint of a finding, collection first, and the run still fails", listed.code === 1 && written === "c/sub/doc.md:generic-api-key:4" && !written.includes(token), { code: listed.code, written });
 
   const ignore = h.privatePath("migrate-reviewed.gitleaksignore");
   writeFileSync(ignore, `# reviewed: a fixture line\n${written}\n`);
-  const passed = h.memoria(["migrate", "report", "--qmd-config", config, "--tool", tool, "--gitleaks-ignore", ignore, "--format", "json"]);
+  const passed = h.memoria(["migrate", "report", "--qmd-config", config, "--tool", tool, "--no-trufflehog", "--gitleaks-ignore", ignore, "--format", "json"]);
   const row = (JSON.parse(passed.out || "[{}]") as Array<{ gitleaksFindings?: Record<string, number>; gitleaksIgnored?: number }>)[0];
   h.check("migrate report: a finding the ignore file lists is counted as ignored, and the run exits 0", passed.code === 0 && row?.gitleaksIgnored === 1 && Object.keys(row?.gitleaksFindings ?? {}).length === 0, passed.out + passed.err);
 
   for (const [label, entry] of [["another line", "c/sub/doc.md:generic-api-key:5"], ["another collection", "d/sub/doc.md:generic-api-key:4"], ["another rule", "c/sub/doc.md:github-pat:4"]]) {
     writeFileSync(ignore, `${entry}\n`);
-    const run = h.memoria(["migrate", "report", "--qmd-config", config, "--tool", tool, "--gitleaks-ignore", ignore, "--format", "json"]);
+    const run = h.memoria(["migrate", "report", "--qmd-config", config, "--tool", tool, "--no-trufflehog", "--gitleaks-ignore", ignore, "--format", "json"]);
     h.check(`migrate report: an ignore entry for ${label} does not excuse the finding`, run.code === 1, run.out + run.err);
   }
   gitleaksIgnoreAcrossDocuments(h, tool, line);
@@ -233,7 +234,7 @@ function gitleaksIgnoreAcrossDocuments(h: Harness, tool: string, line: string): 
   write(folder, "c.md", `x\n\n\n${line} and ${line}\n`);
   const config = planConfig(h, folder, { pattern: "**/*.md" }, 501);
   const findings = h.privatePath("migrate-findings-many.txt");
-  h.memoria(["migrate", "report", "--qmd-config", config, "--tool", tool, "--gitleaks-findings", findings, "--format", "json"]);
+  h.memoria(["migrate", "report", "--qmd-config", config, "--tool", tool, "--no-trufflehog", "--gitleaks-findings", findings, "--format", "json"]);
   const written = readFileSync(findings, "utf8").trim().split(/\r?\n/).sort();
   const expected = ["c/b.md:generic-api-key:3", "c/c.md:generic-api-key:4", "c/c.md:generic-api-key:4"];
   h.check("migrate report: each document's findings are fingerprinted at their own line, one a finding", JSON.stringify(written) === JSON.stringify(expected), written);
@@ -241,7 +242,7 @@ function gitleaksIgnoreAcrossDocuments(h: Harness, tool: string, line: string): 
   const ignore = h.privatePath("migrate-reviewed-many.gitleaksignore");
   const ignored = (entries: string[]) => {
     writeFileSync(ignore, entries.join("\n") + "\n");
-    const run = h.memoria(["migrate", "report", "--qmd-config", config, "--tool", tool, "--gitleaks-ignore", ignore, "--format", "json"]);
+    const run = h.memoria(["migrate", "report", "--qmd-config", config, "--tool", tool, "--no-trufflehog", "--gitleaks-ignore", ignore, "--format", "json"]);
     return { code: run.code, row: (JSON.parse(run.out || "[{}]") as Array<{ gitleaksIgnored?: number }>)[0] };
   };
   const once = ignored([...new Set(expected)]);
@@ -253,7 +254,7 @@ function gitleaksIgnoreAcrossDocuments(h: Harness, tool: string, line: string): 
 /** Forces the unexpected: a NUL in a path. The Windows event log gets what an unhandled exception says. */
 function crash(h: Harness, tool: string): void {
   const input = JSON.stringify([{ paths: ["secretfilename\0.md"] }]);
-  const run = spawnSync("dotnet", [tool, "--no-gitleaks", "--lists-on-stdin"], { input, encoding: "utf8", timeout: 120_000 });
+  const run = spawnSync("dotnet", [tool, "--no-gitleaks", "--no-trufflehog", "--lists-on-stdin"], { input, encoding: "utf8", timeout: 120_000 });
   const all = run.stdout + run.stderr;
   h.check("redaction check: when it cannot finish it exits 3, with no stack and no file name", run.status === 3 && all.includes("could not finish") && !all.includes("secretfilename") && !all.includes("   at "), all.slice(0, 400));
 }
@@ -269,9 +270,10 @@ async function leavesNothing(h: Harness, tool: string, secret: string): Promise<
   for (let i = 0; i < 300; i++) write(folder, `doc-${i}.md`, `# Doc ${i}\n\nthe key is ${secret} here\n`);
   const temp = h.privatePath("migrate-temp");
   mkdirSync(temp);
-  // With gitleaks where it is installed, as that is the path that once needed copies.
+  // With each scanner where it is installed, as gitleaks once needed copies, and trufflehog writes what it reads to disk past 10 MB.
   const hasGitleaks = spawnSync("gitleaks", ["version"]).status === 0;
-  const child = spawn("dotnet", [tool, ...(hasGitleaks ? [] : ["--no-gitleaks"]), folder], { stdio: "ignore", env: { ...process.env, TMPDIR: temp, TEMP: temp, TMP: temp } });
+  const hasTrufflehog = spawnSync("trufflehog", ["--version"]).status === 0;
+  const child = spawn("dotnet", [tool, ...(hasGitleaks ? [] : ["--no-gitleaks"]), ...(hasTrufflehog ? [] : ["--no-trufflehog"]), folder], { stdio: "ignore", env: { ...process.env, TMPDIR: temp, TEMP: temp, TMP: temp } });
   let exited = false;
   child.once("exit", () => (exited = true));
   let seen = 0;
@@ -290,7 +292,7 @@ async function leavesNothing(h: Harness, tool: string, secret: string): Promise<
 async function writesNoList(h: Harness, config: string, tool: string): Promise<void> {
   const temp = h.privatePath("migrate-cli-temp");
   mkdirSync(temp);
-  const child = h.startMemoria(["migrate", "report", "--qmd-config", config, "--tool", tool, "--no-gitleaks"], { TMPDIR: temp, TEMP: temp, TMP: temp });
+  const child = h.startMemoria(["migrate", "report", "--qmd-config", config, "--tool", tool, "--no-gitleaks", "--no-trufflehog"], { TMPDIR: temp, TEMP: temp, TMP: temp });
   const exit: { code?: number | null } = {};
   child.once("exit", (status) => (exit.code = status));
   let seen = 0;
@@ -310,21 +312,84 @@ function realGitleaks(h: Harness, config: string, tool: string): void {
   }
   gitleaksReads(h, tool);
   gitleaksIgnore(h, tool);
-  const run = h.memoria(["migrate", "report", "--qmd-config", config, "--tool", redactionCheckDll(), "--format", "json"]);
+  const run = h.memoria(["migrate", "report", "--qmd-config", config, "--tool", redactionCheckDll(), "--no-trufflehog", "--format", "json"]);
   const { notes } = rowsOf(run.out);
   h.check("migrate report: with real gitleaks, it reads the redacted text on stdin and finds nothing left", run.code === 0 && notes?.gitleaksRan === true && notes.files === 2, run.out + run.err);
   const clean = h.privatePath("migrate-leak");
   // A shape redaction leaves on purpose, so that a finding shows this pipe really reaches gitleaks.
   write(clean, "leak.md", `# Leak\n\n${"AW" + "S_SECRET_VALUE"} = "${"wJalrXUtnFEMI" + "K7MDENGbPxRfiCY" + "zzzzzzzzzzzzzz"}"\n`);
-  const direct = spawnSync("dotnet", [redactionCheckDll(), "--json", clean], { encoding: "utf8", timeout: 120_000 });
+  const direct = spawnSync("dotnet", [redactionCheckDll(), "--json", "--no-trufflehog", clean], { encoding: "utf8", timeout: 120_000 });
   const row = (JSON.parse(direct.stdout || "[{}]") as Array<{ gitleaksRan?: boolean }>)[0];
   h.check("redaction check: with real gitleaks, the pipe gives back a report it can read", row?.gitleaksRan === true && [0, 1].includes(direct.status ?? -1), direct.stdout + direct.stderr);
+}
+
+/**
+ * A line trufflehog reports and redaction does not leave whole: a JDBC URL, whose password redaction replaces, and which trufflehog's
+ * detector still matches. So a finding can only come from trufflehog reading the redacted text. The password is made at run time.
+ */
+function trufflehogOnlyLine(h: Harness): string {
+  const password = h.remember(randomBytes(12).toString("base64url"));
+  return `${"jd" + "bc"}:mysql://db.example.com:3306/app?user=admin&password=${password}`;
+}
+
+/** Only where trufflehog is installed: CI has a pinned one. Without it, this says plainly that it did not run. */
+async function realTrufflehog(h: Harness, tool: string): Promise<void> {
+  if (spawnSync("trufflehog", ["--version"], { encoding: "utf8" }).status !== 0) {
+    console.log("NOT RUN migrate report: with real trufflehog (it is not on this machine)");
+    return;
+  }
+  const folder = h.privatePath("migrate-trufflehog");
+  write(folder, "sub/doc.md", `# Doc\n\nfirst\n${trufflehogOnlyLine(h)}\n`);
+  // Starting like a PDF made trufflehog read no further, behind too few blanks.
+  write(folder, "pdf.md", `%PDF-1.7\n${trufflehogOnlyLine(h)}\n`);
+  const config = planConfig(h, folder, { pattern: "**/*.md" }, 502);
+  const findings = h.privatePath("migrate-trufflehog-findings.txt");
+  const found = h.memoria(["migrate", "report", "--qmd-config", config, "--tool", tool, "--no-gitleaks", "--gitleaks-findings", findings, "--format", "json"]);
+  const written = readFileSync(findings, "utf8").trim().split(/\r?\n/).sort();
+  const row = (JSON.parse(found.out || "[{}]") as Array<{ trufflehogRan?: boolean; trufflehogFindings?: Record<string, number>; trufflehogUnscanned?: number }>)[0];
+  h.check("migrate report: real trufflehog reads the redacted text, finds what gitleaks's rules do not, and the run fails", found.code === 1 && row?.trufflehogRan === true && row.trufflehogFindings?.["trufflehog-jdbc"] === 2 && row.trufflehogUnscanned === 0, { code: found.code, row, err: found.err.slice(0, 300) });
+  h.check("migrate report: each trufflehog finding is fingerprinted at its document and line, a document starting %PDF included", JSON.stringify(written) === JSON.stringify(["c/pdf.md:trufflehog-jdbc:2", "c/sub/doc.md:trufflehog-jdbc:4"]), written);
+  trufflehogIgnore(h, config, tool, written);
+  await trufflehogLeavesNothing(h, tool);
+}
+
+/** The same ignore file serves both scanners, as a trufflehog finding's rule is trufflehog-<detector>. */
+function trufflehogIgnore(h: Harness, config: string, tool: string, written: string[]): void {
+  const ignore = h.privatePath("migrate-trufflehog.gitleaksignore");
+  writeFileSync(ignore, `# reviewed: a fixture line\n${written.join("\n")}\n`);
+  const passed = h.memoria(["migrate", "report", "--qmd-config", config, "--tool", tool, "--gitleaks-ignore", ignore, ...(spawnSync("gitleaks", ["version"]).status === 0 ? [] : ["--no-gitleaks"]), "--format", "json"]);
+  const clean = (JSON.parse(passed.out || "[{}]") as Array<{ trufflehogIgnored?: number }>)[0];
+  h.check("migrate report: trufflehog findings the ignore file lists do not fail the run, with gitleaks on too where it is installed", passed.code === 0 && clean?.trufflehogIgnored === 2, passed.out + passed.err);
+}
+
+/** Past 10 MB trufflehog writes what it reads to a temporary file, so the tool gives it less than that at a time, and nothing is written. */
+async function trufflehogLeavesNothing(h: Harness, tool: string): Promise<void> {
+  const folder = h.privatePath("migrate-trufflehog-big");
+  const block = "plain words of an ordinary session transcript, nothing secret in them\n".repeat(2600);
+  for (let i = 0; i < 120; i++) write(folder, `doc-${i}.md`, `# Doc ${i}\n\n${block}`);
+  write(folder, "huge.md", `# Huge\n\n${block.repeat(70)}${trufflehogOnlyLine(h)}\n`);
+  const temp = h.privatePath("migrate-trufflehog-temp");
+  mkdirSync(temp);
+  const child = spawn("dotnet", [tool, "--json", "--no-gitleaks", folder], { stdio: ["ignore", "pipe", "ignore"], env: { ...process.env, TMPDIR: temp, TEMP: temp, TMP: temp } });
+  let out = "";
+  child.stdout.setEncoding("utf8").on("data", (text: string) => (out += text));
+  let exited = false;
+  child.once("exit", () => (exited = true));
+  let seen = 0;
+  const started = Date.now();
+  while (!exited && Date.now() - started < 300_000) {
+    seen += written(temp);
+    await pause(5);
+  }
+  seen += written(temp);
+  const row = (JSON.parse(out.trim() || "[{}]") as Array<{ trufflehogFindings?: Record<string, number>; trufflehogUnscanned?: number }>)[0];
+  h.check("redaction check: over about 35 MB, with a 12 MB document, trufflehog reads it all, finds the line at its end, and nothing reaches its temp folder", exited && seen === 0 && row?.trufflehogFindings?.["trufflehog-jdbc"] === 1 && row.trufflehogUnscanned === 0, { exited, seen, row });
 }
 
 function report(h: Harness, config: string, notes: string, secret: string): void {
   const tool = redactionCheckDll();
   const json = reportJson(h, config, tool);
-  const table = h.memoria(["migrate", "report", "--qmd-config", config, "--tool", tool, "--no-gitleaks"]);
+  const table = h.memoria(["migrate", "report", "--qmd-config", config, "--tool", tool, "--no-gitleaks", "--no-trufflehog"]);
   h.check("migrate report: the table counts by rule, which shows the check could see the file", table.code === 0 && table.out.includes("replacements in 1 files"), table.out + table.err);
   h.check("migrate report: without gitleaks, it says that is a weaker check", table.err.includes("weaker check") && table.out.includes("NOT RUN"), table.out + table.err);
   const all = json + table.out + table.err;
@@ -454,5 +519,6 @@ export async function migrate(h: Harness): Promise<void> {
   gitleaksThatFails(h, redactionCheckDll(), notes);
   wideName(h, redactionCheckDll(), secret);
   realGitleaks(h, config, redactionCheckDll());
+  await realTrufflehog(h, redactionCheckDll());
   conformance(h);
 }
