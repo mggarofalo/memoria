@@ -42,7 +42,7 @@ docs/migration.md for the order.`,
 type migratePlanOptions struct {
 	qmdConfig   string
 	targets     []string
-	codexDir    string
+	codexDirs   []string
 	codexTarget string
 	acceptSkips bool
 }
@@ -78,7 +78,8 @@ credential needs the server's own rules, so 'migrate report' counts those.`,
 	f := cmd.Flags()
 	f.StringVar(&o.qmdConfig, "qmd-config", "", "Path to QMD's index.yml (required). There is no default")
 	f.StringArrayVar(&o.targets, "target", nil, "Send a collection to another name, as local=target; repeatable. Each keeps its name otherwise")
-	f.StringVar(&o.codexDir, "codex-sessions", "", "Also count the raw Codex transcripts in this folder")
+	// An array so a second one is seen and refused: see planCodexDir.
+	f.StringArrayVar(&o.codexDirs, "codex-sessions", nil, "Also count the raw Codex transcripts in this folder. One folder; run plan again for another")
 	f.StringVar(&o.codexTarget, "codex-target", defaultCodexTarget, "The collection raw Codex sessions would go to")
 	f.BoolVar(&o.acceptSkips, "accept-skips", false, "Exit 0 even if a file or folder could not be read. They stay counted")
 	return cmd
@@ -144,6 +145,22 @@ type migratePlanResult struct {
 	Codex       *migrate.RawSessions `json:"rawCodexSessions,omitempty"`
 }
 
+// planCodexDir is the raw Codex folder plan counts, or "" for none, once its target is
+// known to be valid and to clash with no collection's. Given twice, a plain string flag
+// would keep only the last and count nothing of the first, so that is refused.
+func planCodexDir(o migratePlanOptions, collections []migrate.Collection, targets map[string]string) (string, error) {
+	if !sources.ValidCollection(o.codexTarget) {
+		return "", apperr.New(apperr.KindUsage, "--codex-target must be a name with no slash or surrounding space")
+	}
+	if len(o.codexDirs) > 1 {
+		return "", apperr.New(apperr.KindUsage, "--codex-sessions takes one folder here, and given more than once only the last would be counted: run plan once for each folder")
+	}
+	if len(o.codexDirs) == 0 {
+		return "", refuseSharedTargets(collections, targets, "")
+	}
+	return o.codexDirs[0], refuseSharedTargets(collections, targets, o.codexTarget)
+}
+
 func (a *app) migratePlan(ctx context.Context, o migratePlanOptions) error {
 	targets, err := parseTargets(o.targets)
 	if err != nil {
@@ -153,14 +170,8 @@ func (a *app) migratePlan(ctx context.Context, o migratePlanOptions) error {
 	if err != nil {
 		return err
 	}
-	if !sources.ValidCollection(o.codexTarget) {
-		return apperr.New(apperr.KindUsage, "--codex-target must be a name with no slash or surrounding space")
-	}
-	extra := ""
-	if o.codexDir != "" {
-		extra = o.codexTarget
-	}
-	if err := refuseSharedTargets(collections, targets, extra); err != nil {
+	codexDir, err := planCodexDir(o, collections, targets)
+	if err != nil {
 		return err
 	}
 	result := migratePlanResult{Collections: make([]migrate.Plan, 0, len(collections))}
@@ -168,8 +179,8 @@ func (a *app) migratePlan(ctx context.Context, o migratePlanOptions) error {
 		plan, _ := migrate.Inventory(collection, targetOf(collection.Name, targets))
 		result.Collections = append(result.Collections, plan)
 	}
-	if o.codexDir != "" {
-		raw := migrate.InventoryRaw(o.codexDir, o.codexTarget)
+	if codexDir != "" {
+		raw := migrate.InventoryRaw(codexDir, o.codexTarget)
 		result.Codex = &raw
 	}
 	raw, err := json.Marshal(result)

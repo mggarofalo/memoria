@@ -104,6 +104,8 @@ func TestMigratePlanRefusesBadTargets(t *testing.T) {
 		"a shared target": {"--target", "notes=sessions"},
 		"a bad codex":     {"--codex-target", "a/b"},
 		"shared by codex": {"--codex-sessions", f.notes, "--codex-target", "notes"},
+		// A string flag would keep only the second, and count none of the first.
+		"two codex folders": {"--codex-sessions", t.TempDir(), "--codex-sessions", t.TempDir()},
 	} {
 		args := append([]string{"migrate", "plan", "--qmd-config", f.config}, target...)
 		if code := f.h.run(args...); code != apperr.ExitUsage {
