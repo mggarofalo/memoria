@@ -28,6 +28,8 @@ public static class IngestEndpoints
 			.WithMemoriaScope(MemoriaScopes.Ingest)
 			.WithTags("Ingest")
 			.AddEndpointFilter(AdminKeyEndpoints.RequireApiKeyModeAsync)
+			// After authorization, so a key without the scope gets 403 whatever it sends.
+			.AddEndpointFilter(IngestBody.RequireContentTypeAsync)
 			.AddEndpointFilter(ComeBackWhenOutOfMemoryAsync)
 			.ProducesProblem(StatusCodes.Status401Unauthorized)
 			.ProducesProblem(StatusCodes.Status403Forbidden)
@@ -64,7 +66,7 @@ public static class IngestEndpoints
 				"Renders the envelope to frontmatter, redacts the whole document, and stores it. No caller can turn redaction off: only an operator can, for a named collection, "
 				+ "and `redaction` in the response says which applied. A document redaction cannot finish is refused with 422. `source` and `sourceId` are its identity: sending them again overwrites, and `updated` orders versions, "
 				+ "so an older version gets 409. The response counts what was replaced, by rule, with no values. The document becomes searchable when the job finishes.")
-			.Accepts<DocumentIngestRequest>("application/json")
+			.TakesBody<DocumentIngestRequest>("application/json")
 			.ProducesValidationProblem()
 			.ProducesProblem(StatusCodes.Status409Conflict)
 			.ProducesProblem(StatusCodes.Status413PayloadTooLarge)
@@ -90,7 +92,7 @@ public static class IngestEndpoints
 				"For moving an old corpus. The body is the markdown as it is, frontmatter included, and it is stored at `path` as it came, except that all of it goes through the collection's redaction decision. `frontmatter` in the answer says whether "
 				+ "the sidecar could read the frontmatter: anything but `read` means the document is searchable but matches no date, project or tag filter. Safe to send again: the path is the identity, an equal `updated` overwrites with the same result, and an older one gets 409. "
 				+ "Past the size limit it gets 413, and past the limit on large documents at once it gets 503 with `Retry-After`, so pause before sending again. It cannot delete.")
-			.Accepts<string>("text/markdown")
+			.TakesBody<string>("text/markdown")
 			.ProducesValidationProblem()
 			.ProducesProblem(StatusCodes.Status409Conflict)
 			.ProducesProblem(StatusCodes.Status413PayloadTooLarge)
@@ -113,7 +115,7 @@ public static class IngestEndpoints
 				+ "207 means not all of it is stored: `parts` and `read` say why, the session stays `partial`, and when `retryable` is true sending the same upload again finishes it. "
 				+ "A transcript with no messages, or that lost any, is never 202. An older version than the one stored gets 409, as does a second upload of the session while one is running, a file the ledger does not say is this session's, "
 				+ "and messages that do not start with the stored ones, unless `allowShrink` is set. Parts it no longer has are deleted last, and a part someone deleted stays deleted.")
-			.Accepts<Stream>("application/x-ndjson")
+			.TakesBody<Stream>("application/x-ndjson")
 			.Produces<SessionIngestResult>(StatusCodes.Status207MultiStatus)
 			.ProducesValidationProblem()
 			.ProducesProblem(StatusCodes.Status409Conflict)

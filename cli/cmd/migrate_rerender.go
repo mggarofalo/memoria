@@ -625,7 +625,7 @@ func (r *pushRun) sendTranscript(c *pushCollection, thread migrate.Thread, updat
 			return judgeSession(status, answered, answer)
 		}
 		waited += wait
-		if !r.sleep(wait) {
+		if !r.sleep(wait, waitInProgress) {
 			r.stopForInterrupt()
 			return migrate.RerenderNotReached, ""
 		}

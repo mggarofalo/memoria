@@ -530,17 +530,19 @@ func TestAnAnswerThatAsksForATimeIsWaitedFor(t *testing.T) {
 		name   string
 		answer pushAnswer
 		want   time.Duration
+		says   string
 	}{
-		{"in progress", pushAnswer{status: http.StatusConflict, code: "ingest_in_progress", retryAfter: "7"}, 7 * time.Second},
-		{"in progress, no time named", pushAnswer{status: http.StatusConflict, code: "ingest_in_progress"}, time.Second},
-		{"busy", pushAnswer{status: http.StatusServiceUnavailable, code: "ingest_busy", retryAfter: "9"}, 0},
-		{"rate limited", pushAnswer{status: http.StatusTooManyRequests, retryAfter: "11"}, 0},
+		{"in progress", pushAnswer{status: http.StatusConflict, code: "ingest_in_progress", retryAfter: "7"}, 7 * time.Second, "A write of this document is still running on the server; waiting 7s."},
+		{"in progress, no time named", pushAnswer{status: http.StatusConflict, code: "ingest_in_progress"}, time.Second, "still running on the server; waiting 1s."},
+		{"busy", pushAnswer{status: http.StatusServiceUnavailable, code: "ingest_busy", retryAfter: "9"}, 0, "The server is busy with other large documents, so every worker waits; its Retry-After asks for 9s; waiting"},
+		{"rate limited", pushAnswer{status: http.StatusTooManyRequests, retryAfter: "11"}, 0, "Rate limited (HTTP 429): this key has used its requests for now, so every worker waits; its Retry-After asks for 11s; waiting 11s."},
+		{"unavailable", pushAnswer{status: http.StatusBadGateway}, time.Second, "The server is unavailable; waiting 1s."},
 	} {
-		t.Run(c.name, func(t *testing.T) { checkWait(t, c.answer, c.want) })
+		t.Run(c.name, func(t *testing.T) { checkWait(t, c.answer, c.want, c.says) })
 	}
 }
 
-func checkWait(t *testing.T, answer pushAnswer, want time.Duration) {
+func checkWait(t *testing.T, answer pushAnswer, want time.Duration, says string) {
 	t.Helper()
 	f := newPushFixture(t)
 	server := newPushServer(t, func(call pushCall, attempt int) pushAnswer {
@@ -553,6 +555,10 @@ func checkWait(t *testing.T, answer pushAnswer, want time.Duration) {
 	checkPush(t, summary, code, 0, 3, 0)
 	checkCalls(t, server, "a.md", 2)
 	checkSlept(t, f.h.slept, want)
+	// A wait says why, so a rate limit never reads as a server that is down.
+	if out := f.h.stderr.String(); !strings.Contains(out, says) || strings.Contains(out, "not ready") {
+		t.Fatalf("stderr = %q, want it to say %q", out, says)
+	}
 }
 
 // checkSlept takes a want of 0 for a pause, which is held until its time passes, and this fake sleep returns at once.
@@ -578,7 +584,7 @@ func TestABusyServerPausesEveryWorker(t *testing.T) {
 	a := f.h.app()
 	run, cancel := newPushRun(t.Context(), a, nil, migratePushOptions{workers: 2})
 	defer cancel()
-	run.pauseFor(time.Hour)
+	run.pauseFor(time.Hour, "held for the test")
 	if err := run.waitForPause(); err != nil {
 		t.Fatal(err)
 	}
@@ -1300,4 +1306,35 @@ func TestAnOlderCopyGoesWhenTheServerHoldsNothing(t *testing.T) {
 	summary, code, _ = f.result(t, server)
 	checkPush(t, summary, code, 0, 3, 0)
 	checkCalls(t, server, "a.md", 2)
+}
+
+func TestAWaitIsShownRounded(t *testing.T) {
+	for wait, want := range map[time.Duration]string{
+		10*time.Second + 999*time.Millisecond: "11s",
+		11*time.Second - 3*time.Microsecond:   "11s",
+		time.Minute:                           "1m0s",
+		250*time.Millisecond + 40:             "250ms",
+	} {
+		if got := shownWait(wait); got != want {
+			t.Errorf("shownWait(%v) = %q, want %q", wait, got, want)
+		}
+	}
+}
+
+func TestEveryWaitSaysWhatItIsFor(t *testing.T) {
+	for _, c := range []struct {
+		action migrate.Action
+		named  time.Duration
+		want   string
+	}{
+		{migrate.ActionHold, 0, "Rate limited (HTTP 429): this key has used its requests for now, so every worker waits"},
+		{migrate.ActionHold, time.Minute, "Rate limited (HTTP 429): this key has used its requests for now, so every worker waits; its Retry-After asks for 1m0s"},
+		{migrate.ActionPause, 0, "The server is busy with other large documents, so every worker waits"},
+		{migrate.ActionResendThenReport, 0, "The server failed this request, or it arrived too slowly"},
+		{migrate.ActionResend, time.Second, "The server is unavailable; its Retry-After asks for 1s"},
+	} {
+		if got := waitReason(c.action, c.named); got != c.want {
+			t.Errorf("waitReason(%v, %v) = %q, want %q", c.action, c.named, got, c.want)
+		}
+	}
 }

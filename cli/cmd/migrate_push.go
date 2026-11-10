@@ -276,6 +276,8 @@ type pushRun struct {
 	mu         sync.Mutex
 	stopped    error
 	pauseUntil time.Time
+	// pauseWhy says what the pause in force waits for, as the run reports it.
+	pauseWhy string
 }
 
 func newPushRun(ctx context.Context, a *app, s *session, o migratePushOptions) (*pushRun, context.CancelFunc) {
@@ -675,7 +677,7 @@ func (r *pushRun) sendOnce(c *pushCollection, name string, updated time.Time, si
 	}
 	if wait := inProgressWait(answer); wait > 0 && *waited < inProgressBudget {
 		*waited += wait
-		if !r.sleep(wait) {
+		if !r.sleep(wait, waitInProgress) {
 			r.stopForInterrupt()
 			return pushed{}, stepAbandoned
 		}
@@ -720,7 +722,7 @@ func (r *pushRun) retryAfterLoss(err error, tries retries) bool {
 		r.stop(apperr.New(apperr.KindUnavailable, "the server stopped answering. Progress is saved, so run this again to continue"))
 		return false
 	}
-	return r.sleep(resendWait(attempt))
+	return r.sleep(resendWait(attempt), waitNoAnswer)
 }
 
 func resendWait(attempt int) time.Duration {
@@ -728,8 +730,9 @@ func resendWait(attempt int) time.Duration {
 	return min(wait, longestResend)
 }
 
-func (r *pushRun) sleep(wait time.Duration) bool {
-	r.a.info("The server is not ready; waiting " + wait.String() + ".")
+// sleep waits, saying why first: the run can wait for minutes, and a reason is what tells a rate limit from an outage.
+func (r *pushRun) sleep(wait time.Duration, why string) bool {
+	r.a.info(why + "; waiting " + shownWait(wait) + ".")
 	return r.a.sleep(r.ctx, wait) == nil
 }
 
@@ -798,8 +801,8 @@ func (r *pushRun) retryAnswer(outcome pushed, resp *http.Response, tries retries
 	wait, limit := retryPlan(outcome.action, named, attempt)
 	if outcome.action != migrate.ActionWait && attempt+1 < limit && wait <= maxRetryWait {
 		if outcome.action == migrate.ActionPause || outcome.action == migrate.ActionHold {
-			r.pauseFor(wait)
-		} else if !r.sleep(wait) {
+			r.pauseFor(wait, waitReason(outcome.action, named))
+		} else if !r.sleep(wait, waitReason(outcome.action, named)) {
 			r.stopForInterrupt()
 			return pushed{action: migrate.ActionStop}, false
 		}
@@ -816,6 +819,40 @@ func (r *pushRun) retryAnswer(outcome pushed, resp *http.Response, tries retries
 
 func (r *pushRun) stopForInterrupt() {
 	r.stop(apperr.New(apperr.KindGeneric, "stopped before the end. Progress is saved, so run this again to continue"))
+}
+
+// shownWait is a wait as a person reads it. A shared pause is what is left of it, such as 10.999996s, so it is rounded.
+func shownWait(wait time.Duration) string {
+	if wait >= time.Second {
+		return wait.Round(time.Second).String()
+	}
+	return wait.Round(time.Millisecond).String()
+}
+
+// What a wait is for, as the run reports it.
+const (
+	waitInProgress = "A write of this document is still running on the server"
+	waitNoAnswer   = "The server did not answer"
+)
+
+// waitReason names what an answer that is retried after a wait said. A server's named time is mentioned, as it is honoured.
+func waitReason(action migrate.Action, named time.Duration) string {
+	var why string
+	switch action {
+	case migrate.ActionHold:
+		why = "Rate limited (HTTP 429): this key has used its requests for now, so every worker waits"
+	case migrate.ActionPause:
+		why = "The server is busy with other large documents, so every worker waits"
+	case migrate.ActionResendThenReport:
+		// 500, or 408 for an upload that arrived too slowly, which says nothing about the server.
+		why = "The server failed this request, or it arrived too slowly"
+	default:
+		why = "The server is unavailable"
+	}
+	if named > 0 {
+		why += "; its Retry-After asks for " + named.String()
+	}
+	return why
 }
 
 // retryPlan is how long to wait, and how many tries to allow. A server's named time is honoured, with a floor so a zero does not spin.
@@ -835,12 +872,12 @@ func retryPlan(action migrate.Action, named time.Duration, attempt int) (time.Du
 }
 
 // pauseFor holds every worker, not just this one, as the room it ran out of is shared.
-func (r *pushRun) pauseFor(wait time.Duration) {
+func (r *pushRun) pauseFor(wait time.Duration, why string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	until := time.Now().Add(wait)
 	if until.After(r.pauseUntil) {
-		r.pauseUntil = until
+		r.pauseUntil, r.pauseWhy = until, why
 	}
 }
 
@@ -849,12 +886,12 @@ func (r *pushRun) waitForPause() error {
 		return err
 	}
 	r.mu.Lock()
-	wait := time.Until(r.pauseUntil)
+	wait, why := time.Until(r.pauseUntil), r.pauseWhy
 	r.mu.Unlock()
 	if wait <= 0 {
 		return nil
 	}
-	if !r.sleep(wait) {
+	if !r.sleep(wait, why) {
 		r.stopForInterrupt()
 		return r.ctx.Err()
 	}

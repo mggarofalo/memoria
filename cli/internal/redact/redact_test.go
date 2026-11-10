@@ -67,6 +67,46 @@ func TestDiagnosticKeepsOrdinaryText(t *testing.T) {
 	}
 }
 
+func TestDiagnosticKeepsTheServersPlaceholderButNotATokenBesideIt(t *testing.T) {
+	r := New()
+	// The server's own 401 hint.
+	hint := "A valid API key is required: Authorization: Bearer <key>."
+	if got := r.Diagnostic(hint); got != hint {
+		t.Fatalf("Diagnostic(%q) = %q", hint, got)
+	}
+	for _, input := range []string{
+		"<api-key>",
+		"Authorization: <token>, then retry",
+		`{"detail":"Authorization: Bearer <your_key>"}`,
+	} {
+		if got := r.Diagnostic(input); got != input {
+			t.Errorf("Diagnostic(%q) = %q", input, got)
+		}
+	}
+	for _, input := range []string{
+		hint + " Authorization: Bearer opaque-token-value",
+		"Authorization: Bearer <key> Bearer opaque-token-value",
+		"Authorization: Bearer <key>opaque-token-value",
+		"Authorization: Bearer <opaque-token-value-7>",
+		"Authorization: Bearer <keyopaquetokenvaluexxxxxxxxxxxxxxx>",
+		"Authorization: <key> Authorization: opaque-token-value",
+		"Authorization: Bearer <key> mem_aaaabbbb_ccccdddd",
+	} {
+		got := r.Diagnostic(input)
+		if strings.Contains(got, "opaque-token-value") || strings.Contains(got, "ccccdddd") || strings.Contains(got, "xxxxxxxx") {
+			t.Errorf("Diagnostic(%q) = %q kept a token", input, got)
+		}
+		if !strings.Contains(got, Placeholder) {
+			t.Errorf("Diagnostic(%q) = %q has no placeholder", input, got)
+		}
+	}
+	// A key the CLI holds is scrubbed first, whatever surrounds it.
+	r.Add(secret)
+	if got := r.Diagnostic("Authorization: Bearer <" + secret + ">"); strings.Contains(got, "feedface") {
+		t.Fatalf("a known key in brackets survived: %q", got)
+	}
+}
+
 func TestWritersReportOriginalLength(t *testing.T) {
 	r := New()
 	r.Add(secret)
