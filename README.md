@@ -14,8 +14,8 @@ Memoria does **not** reimplement retrieval. QMD stays the engine; its SQLite ind
 |---|---|---|
 | `Memoria.Api` | ASP.NET Core (.NET 10) | REST API, outward MCP server, API-key auth, ingest |
 | `Memoria.Core` | .NET 10 class library | Document envelope, search contracts, redaction, session rendering, sidecar client |
-| `sidecar/` (`memoria-qmd`) | TypeScript, Node 22, QMD SDK | REST over the QMD SDK; runs with the models and index, LAN-only behind a shared secret |
-| `worker/` (`memoria-worker`) | TypeScript, Node 22, `llama-server` | Optional: serves QMD's models from a GPU host to the sidecar |
+| `sidecar/` (`memoria-qmd`) | TypeScript, Node 26, QMD SDK | REST over the QMD SDK; runs with the models and index, LAN-only behind a shared secret |
+| `worker/` (`memoria-worker`) | TypeScript, Node 26, `llama-server` | Optional: serves QMD's models from a GPU host to the sidecar |
 | `cli/` (`memoria`) | Go + cobra + keyring | Client; credentials in the OS keyring |
 | QMD | GGUF models, SQLite | Retrieval engine, never exposed directly |
 

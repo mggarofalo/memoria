@@ -5,7 +5,7 @@
 
 # The full image for its compiler, as better-sqlite3 builds from source. The runtime below is
 # the same Debian release, so what this builds runs there.
-FROM node:22-bookworm AS build
+FROM node:26-bookworm AS build
 WORKDIR /app
 
 # The patch has to be here before the install: `npm ci` runs it as postinstall, and the
@@ -29,7 +29,7 @@ RUN npm prune --omit=dev --no-audit --no-fund
 # the image cannot: it is a fact about the image, as well as a setting.
 RUN rm -rf node_modules/@node-llama-cpp
 
-FROM node:22-bookworm-slim AS runtime
+FROM node:26-bookworm-slim AS runtime
 WORKDIR /app
 
 ENV NODE_ENV=production \

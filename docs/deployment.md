@@ -151,7 +151,7 @@ Deploy a specific release. `latest` is there for looking around, and `edge` is f
 
 | Property | API | Sidecar |
 |---|---|---|
-| Base | `mcr.microsoft.com/dotnet/aspnet:10.0` | `node:22-bookworm-slim` |
+| Base | `mcr.microsoft.com/dotnet/aspnet:10.0` | `node:26-bookworm-slim` |
 | User | non-root (`$APP_UID`) | non-root (`node`, uid 1000) |
 | Port | 8080 | 8282, published by nothing |
 | Health check | `dotnet Memoria.Api.dll --health-check` | `/health` from inside the container |

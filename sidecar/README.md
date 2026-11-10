@@ -12,7 +12,7 @@ In production it runs from its image, beside `Memoria.Api`, with model work on w
 
 From a checkout:
 
-Requirements: Node 22.18 or newer, an existing QMD index (`qmd update` has been run on this host), and the three models in QMD's cache.
+Requirements: Node 26.13 or newer, an existing QMD index (`qmd update` has been run on this host), and the three models in QMD's cache.
 
 ```bash
 cd sidecar
@@ -222,7 +222,7 @@ One worker runs one job at a time. Document writes do not start a scan each: the
 
 ### The job queue
 
-Reindex jobs persist in their own SQLite file beside the index (`index.sqlite.queue.sqlite`). It is not inside QMD's schema, so rebuilding the index leaves jobs alone. This uses Node's built-in `node:sqlite`, which adds no dependency but prints an experimental warning on Node 22.
+Reindex jobs persist in their own SQLite file beside the index (`index.sqlite.queue.sqlite`). It is not inside QMD's schema, so rebuilding the index leaves jobs alone. This uses Node's built-in `node:sqlite`, which adds no dependency.
 
 **A job accepted before a crash runs after the restart,** under the same id. A held job keeps its due time. A job that was running goes back to queued and runs again. A job found running by 5 restarts in a row, with no progress between them, is marked failed, on the assumption that it is what keeps killing the process. Retries during an outage do not count, a document reaching the index clears the count, and so does `:retry`. A clean shutdown leaves a running job queued, which does not count either.
 

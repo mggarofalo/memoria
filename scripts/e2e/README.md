@@ -21,7 +21,7 @@ Three groups say NOT RUN there, as they need what this layout forbids: the conne
 
 ## Running the suite
 
-It needs Node 22.18+, Go and the .NET SDK. It exits non-zero if any check fails. It connects from loopback addresses such as `127.0.0.2`, which Linux and Windows answer without setup. macOS does not, so the auth checks fail there.
+It needs Node 26.13+, Go and the .NET SDK. It exits non-zero if any check fails. It connects from loopback addresses such as `127.0.0.2`, which Linux and Windows answer without setup. macOS does not, so the auth checks fail there.
 
 ## What it touches
 

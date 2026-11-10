@@ -1,5 +1,5 @@
 /**
- * Entry point: `node scripts/e2e/run.ts [--no-build]`. Needs Node 22.18+, Go, the
+ * Entry point: `node scripts/e2e/run.ts [--no-build]`. Needs Node 26.13+, Go, the
  * .NET SDK, and `npm ci` in sidecar/. See README.md.
  */
 import { auditTrail, authModes, finishExpiry, knownGood, revocation, rotation, startExpiry } from "./auth-keys.ts";
