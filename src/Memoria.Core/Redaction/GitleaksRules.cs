@@ -68,19 +68,23 @@ internal static class GitleaksRules
 			buildPattern: () => RedactionRules.Pattern(pattern));
 	}
 
-	/// <summary>Words that name a thing with an id of its own. In an assignment rule's name, after its keyword, they say the value is that id.</summary>
+	/// <summary>Words that name a thing with an id of its own. Ending an assignment rule's name, alone or before an id word, they say the value is that id.</summary>
 	private static readonly HashSet<string> IdentifierWords = new(StringComparer.OrdinalIgnoreCase)
 	{
 		"task", "tasks", "item", "items", "trace", "span", "app", "apps", "application", "project", "projects", "account", "accounts", "user", "users",
-		"org", "organization", "team", "workspace", "issue", "ticket", "order", "job", "build", "run", "commit", "page", "document", "file", "folder",
-		"channel", "thread", "message", "event", "request", "record", "customer", "invoice", "deployment", "release", "device", "node", "site",
+		"org", "organization", "team", "workspace", "issue", "ticket", "order", "job", "build", "run", "commit", "page", "document", "folder",
+		"channel", "thread", "customer", "invoice", "deployment", "release", "device", "node", "site",
 	};
+
+	private static readonly HashSet<string> IdWords = new(StringComparer.OrdinalIgnoreCase) { "id", "ids", "uuid", "guid" };
 
 	/// <summary>
 	/// An assignment rule matches a name, its keyword, up to 20 more name characters, then an operator and the value, and accepts the
-	/// value by its shape alone: 24 of upstream's accept only digits, hex or a UUID. When the words after the keyword name a thing, as in
-	/// <c>heroku app id: </c> before a UUID or <c>plaid item_id: </c> before hex, and no word of the name is a credential's, the value is
-	/// that thing's id. <c>heroku app token</c> and <c>datadog app key</c> are credentials' names, so their values still go.
+	/// value by its shape alone: 24 of upstream's accept only digits, hex or a UUID. When the name ends by naming a thing, as
+	/// <c>asana task: </c> does before digits, or names a thing's id, as <c>heroku app id: </c> does before a UUID and <c>plaid item_id: </c>
+	/// before hex, and no word of it is a credential's, the value is that id. The name must end so: one ending in any other word, such as
+	/// <c>heroku app token</c>, <c>HEROKU_APP_TOKEN2</c>, <c>heroku app bearer</c> or <c>asana_app_pat</c>, may name a credential the
+	/// word list does not know, so its value still goes. A bare <c>heroku id</c> says no thing, so its value goes too.
 	/// </summary>
 	internal static bool NamesAnIdentifier(SecretCandidate candidate, IReadOnlyList<string> keywords)
 	{
@@ -93,9 +97,26 @@ internal static class GitleaksRules
 			.Select(static found => found.At + found.Length)
 			.DefaultIfEmpty(-1)
 			.Max();
-		return keywordEnd >= 0
-			&& SecretKeyNames.SplitWords(name[keywordEnd..]).Any(IdentifierWords.Contains)
-			&& SecretKeyNames.Classify(name) == KeyKind.NotSecret;
+		return keywordEnd >= 0 && EndsByNamingAThing(SecretKeyNames.SplitWords(name[keywordEnd..])) && SecretKeyNames.Classify(name) == KeyKind.NotSecret;
+	}
+
+	/// <summary>
+	/// <c>task</c>, or <c>app id</c>: a thing's word last, or a thing's word and then an id word. A number after it, as in <c>task 1203</c>,
+	/// is the thing's own and names nothing, so it is passed over. <c>TOKEN2</c> is one word, not a number.
+	/// </summary>
+	private static bool EndsByNamingAThing(List<string> words)
+	{
+		while (words.Count > 0 && words[^1].All(char.IsAsciiDigit))
+		{
+			words.RemoveAt(words.Count - 1);
+		}
+
+		if (words.Count == 0)
+		{
+			return false;
+		}
+
+		return IdWords.Contains(words[^1]) ? words.Count >= 2 && IdentifierWords.Contains(words[^2]) : IdentifierWords.Contains(words[^1]);
 	}
 
 	/// <summary>The ending the translator draws for upstream's <c>\b</c> or common ending: any character but a letter, a digit or <c>_</c>.</summary>

@@ -22,6 +22,11 @@ public sealed class KeywordIdentifierTests
 		"datadog span id = " + Synthetic.Hex(40, 5115),
 		"\"asanaProjectId\": \"" + Synthetic.Digits(16, 5116) + "\"",
 		"heroku user: " + Uuid(5117),
+		"asana task id: " + Synthetic.Digits(16, 5118),
+		"asana workspace: " + Synthetic.Digits(16, 5119),
+		"heroku team uuid: " + Uuid(5143),
+		"plaid account_ids: " + Synthetic.Hex(24, 5148),
+		"datadog org: " + Synthetic.Hex(40, 5149),
 	];
 
 	/// <summary>Each line and the value in it, which must not survive, whichever rule takes it.</summary>
@@ -40,6 +45,16 @@ public sealed class KeywordIdentifierTests
 			("DATADOG_TRACE_TOKEN=", Synthetic.Hex(40, 5141)),
 			// Only the words after the keyword say what the value is.
 			("project asana => ", Synthetic.Digits(16, 5142)),
+			// A name that ends in any word but a thing's or an id's may name a credential the word lists do not know.
+			("HEROKU_APP_TOKEN2=", Uuid(5150)),
+			("heroku app tokens: ", Uuid(5155)),
+			("heroku app bearer: ", Uuid(5160)),
+			("datadog app key2: ", Synthetic.Hex(40, 5165)),
+			("asana_app_pat=", Synthetic.Digits(16, 5166)),
+			("asana task token2: ", Synthetic.Digits(16, 5167)),
+			// An id that names no thing.
+			("heroku id: ", Uuid(5168)),
+			("asana client_id: ", Synthetic.Digits(16, 5173)),
 		})
 		{
 			data.Add(name + value, value);
