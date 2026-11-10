@@ -21,7 +21,11 @@ public sealed class KeywordIdentifierTests
 		"datadog trace_id: " + Synthetic.Hex(40, 5114),
 		"datadog span id = " + Synthetic.Hex(40, 5115),
 		"\"asanaProjectId\": \"" + Synthetic.Digits(16, 5116) + "\"",
-		"heroku user: " + Uuid(5117),
+		"heroku user id: " + Uuid(5117),
+		"heroku app guid: " + Uuid(5174),
+		"Opened asana task 12 3: " + Synthetic.Digits(16, 5179),
+		// The last of several keywords is the one the name follows.
+		"jira_confluence_page: " + Synthetic.Body(20, 5180).ToLowerInvariant() + Synthetic.Hex(4, 5181),
 		"asana task id: " + Synthetic.Digits(16, 5118),
 		"asana workspace: " + Synthetic.Digits(16, 5119),
 		"heroku team uuid: " + Uuid(5143),
@@ -52,8 +56,14 @@ public sealed class KeywordIdentifierTests
 			("datadog app key2: ", Synthetic.Hex(40, 5165)),
 			("asana_app_pat=", Synthetic.Digits(16, 5166)),
 			("asana task token2: ", Synthetic.Digits(16, 5167)),
-			// An id that names no thing.
+			// An id that names no thing, a thing a credential can belong to, and more than a thing.
 			("heroku id: ", Uuid(5168)),
+			("heroku user: ", Uuid(5182)),
+			("asana_service_account=", Synthetic.Digits(16, 5187)),
+			("DATADOG_SERVICE_ACCOUNT=", Synthetic.Hex(40, 5188)),
+			("datadog application: ", Synthetic.Hex(40, 5189)),
+			// A name that ends as a thing's but holds a credential's word before the keyword.
+			("secret_asana_task: ", Synthetic.Digits(16, 5190)),
 			("asana client_id: ", Synthetic.Digits(16, 5173)),
 		})
 		{
