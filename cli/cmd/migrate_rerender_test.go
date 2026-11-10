@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
+
 	"github.com/mggarofalo/memoria/cli/internal/apperr"
 	"github.com/mggarofalo/memoria/cli/internal/auth"
 	"github.com/mggarofalo/memoria/cli/internal/migrate"
@@ -529,5 +531,162 @@ func TestAnUncountedExportGoesWhenItsBodyIsTheTranscripts(t *testing.T) {
 		if c.name == "short, accepted" {
 			checkAccepted(t, f, report)
 		}
+	}
+}
+
+func codexMessage(role, text string) string {
+	quoted, _ := json.Marshal(text)
+	return `{"timestamp":"2026-01-01T00:00:01Z","type":"response_item","payload":{"type":"message","role":"` + role + `","content":[{"type":"input_text","text":` + string(quoted) + `}]}}` + "\n"
+}
+
+func codexMeta(id, root, start string) string {
+	return `{"timestamp":"` + start + `","type":"session_meta","payload":{"id":"` + id + `","session_id":"` + root + `","timestamp":"` + start + `","cwd":"/w"}}` + "\n"
+}
+
+func zstdOf(t *testing.T, text string) string {
+	t.Helper()
+	var out strings.Builder
+	writer, err := zstd.NewWriter(&out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(writer, text); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return out.String()
+}
+
+const subagentID = "12345678-1234-1234-1234-123456789abc"
+
+// subagentFixture is a session whose subagent thread Codex has archived, compressed, and the hook exporter's one export of both, as
+// Python writes it on Windows, padded over the cap in its frontmatter.
+func subagentFixture(t *testing.T) (*rerenderFixture, string, string) {
+	t.Helper()
+	f := newRerenderFixture(t)
+	writeFile(t, f.transcript, codexMeta(rerenderID, rerenderID, "2026-01-01T00:00:00Z")+codexMessage("user", "please\r\nlook")+codexMessage("assistant", "looked"))
+	sub := codexMeta(subagentID, rerenderID, "2026-01-01T00:05:00Z") + codexMessage("user", "sub task") + codexMessage("assistant", "sub done")
+	archived := t.TempDir()
+	writeFile(t, filepath.Join(archived, "rollout-2026-01-01T00-05-00-"+subagentID+".jsonl.zst"), zstdOf(t, sub))
+	body := "---\nsession_id: \"" + rerenderID + "\"\npadding: \"" + strings.Repeat("x", migrate.DefaultMaxDocumentBytes) + "\"\n---\n\n# please\n\n" +
+		"## User\n\nplease\r\nlook\n\n## Assistant\n\nlooked\n\n## User\n\nsub task\n\n## Assistant\n\nsub done\n"
+	writeFile(t, f.big, strings.ReplaceAll(body, "\n", "\r\n"))
+	return f, archived, sub
+}
+
+// The hook exporter wrote a session's subagent threads into its export too, so each of them goes, as its own session, and only
+// when every one of them is found.
+func TestAnExportOfASessionAndItsSubagentsSendsEveryThread(t *testing.T) {
+	f, archived, sub := subagentFixture(t)
+	if summary, code, _ := f.run(t, nil); code != apperr.ExitGeneric || summary.Uncounted != 1 {
+		t.Fatalf("without the archive: code = %d, summary = %+v", code, summary)
+	}
+	server := newSessionServer(t)
+	summary, code, _ := f.run(t, server, "--apply", "--codex-sessions", archived)
+	if code != 0 || summary.Sent != 1 || summary.Threads != 2 {
+		t.Fatalf("code = %d, summary = %+v, stderr = %q", code, summary, f.h.stderr.String())
+	}
+	checkThreadsSent(t, server, sub)
+	if summary, code, _ := f.run(t, server, "--apply", "--codex-sessions", archived); code != 0 || summary.Already != 1 || len(server.uploads()) != 2 {
+		t.Fatalf("again: code = %d, summary = %+v", code, summary)
+	}
+}
+
+// checkThreadsSent is each thread sent under its own id, the compressed one as its JSON lines.
+func checkThreadsSent(t *testing.T, server *sessionServer, sub string) {
+	t.Helper()
+	calls := server.uploads()
+	if len(calls) != 2 || calls[0].sessionID != rerenderID || calls[1].sessionID != subagentID || calls[1].body != sub {
+		t.Fatalf("calls = %+v", calls)
+	}
+}
+
+func TestAThreadThatDoesNotGoIsNamedAndTheRestStillGo(t *testing.T) {
+	f, archived, _ := subagentFixture(t)
+	server := newSessionServer(t)
+	server.answer = func(attempt int) (int, string) {
+		if attempt == 0 {
+			return http.StatusRequestEntityTooLarge, ""
+		}
+		return http.StatusAccepted, ""
+	}
+	summary, code, report := f.run(t, server, "--apply", "--codex-sessions", archived)
+	if code != apperr.ExitGeneric || summary.Refused["http_413"] != 1 || summary.Sent != 0 || len(server.uploads()) != 2 {
+		t.Fatalf("code = %d, summary = %+v", code, summary)
+	}
+	checkThreadProblem(t, report, "", "http_413")
+	server.answer = func(int) (int, string) { return http.StatusMultiStatus, "" }
+	server.held = map[string]string{rerenderID: time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano)}
+	if summary, _, report = f.run(t, server, "--apply", "--codex-sessions", archived); summary.Partial != 1 {
+		t.Fatalf("summary = %+v", summary)
+	}
+	checkThreadProblem(t, report, subagentID, "partial")
+}
+
+func checkThreadProblem(t *testing.T, report, thread, reason string) {
+	t.Helper()
+	if problems := rerenderProblems(t, report); len(problems) != 1 || problems[0].Thread != thread || problems[0].Reason != reason {
+		t.Fatalf("problems = %+v", problems)
+	}
+}
+
+func TestCodexsArchiveBesideTheSessionsGivenIsAskedFor(t *testing.T) {
+	home := t.TempDir()
+	sessions, archive := filepath.Join(home, "sessions"), filepath.Join(home, "archived_sessions")
+	if missingArchive([]string{sessions}) != "" {
+		t.Fatal("an archive that is not there was asked for")
+	}
+	for _, dir := range []string{sessions, archive} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := missingArchive([]string{sessions + string(filepath.Separator)}); got != archive {
+		t.Fatalf("got %q", got)
+	}
+	if got := missingArchive([]string{sessions, archive}); got != "" {
+		t.Fatalf("an archive given was asked for: %q", got)
+	}
+	f := newRerenderFixture(t)
+	f.codex = sessions
+	writeFile(t, filepath.Join(sessions, "rollout-"+rerenderID+".jsonl"), transcriptFor(rerenderID))
+	if _, code, _ := f.run(t, nil); code != 0 || !strings.Contains(f.h.stderr.String(), "--codex-sessions "+archive) {
+		t.Fatalf("code = %d, stderr = %q", code, f.h.stderr.String())
+	}
+}
+
+// A sibling thread that cannot be read does not stop an export its own transcript holds whole, and an empty one is not sent.
+func TestOnlyTheThreadsAnExportNeedsCanStopIt(t *testing.T) {
+	f, archived, _ := subagentFixture(t)
+	body := "---\nsession_id: \"" + rerenderID + "\"\npadding: \"" + strings.Repeat("x", migrate.DefaultMaxDocumentBytes) + "\"\n---\n\n# please\n\n## User\n\nplease\r\nlook\n\n## Assistant\n\nlooked\n"
+	writeFile(t, f.big, body)
+	writeFile(t, filepath.Join(archived, "rollout-copy-"+subagentID+".jsonl"), codexMeta(subagentID, rerenderID, "2026-01-01T00:05:00Z"))
+	if summary, code, _ := f.run(t, nil, "--codex-sessions", archived); code != 0 || summary.WouldSend != 1 || summary.Threads != 1 {
+		t.Fatalf("two copies of a thread it does not need: code = %d, summary = %+v", code, summary)
+	}
+	empty := "98765432-1234-1234-1234-123456789abc"
+	writeFile(t, filepath.Join(archived, "rollout-copy-"+subagentID+".jsonl"), codexMeta(empty, rerenderID, "2026-01-01T00:06:00Z"))
+	server := newSessionServer(t)
+	if summary, code, _ := f.run(t, server, "--apply", "--codex-sessions", archived); code != 0 || summary.Sent != 1 || summary.Threads != 2 || len(server.uploads()) != 2 {
+		t.Fatalf("an empty thread: code = %d, summary = %+v, uploads = %d", code, summary, len(server.uploads()))
+	}
+	for _, call := range server.uploads() {
+		if call.sessionID == empty {
+			t.Fatal("a thread with no messages was sent")
+		}
+	}
+}
+
+func TestASubagentThreadThatCannotBeReadStopsItsExport(t *testing.T) {
+	f, archived, sub := subagentFixture(t)
+	writeFile(t, filepath.Join(archived, "rollout-copy-"+subagentID+".jsonl"), sub)
+	if summary, code, _ := f.run(t, nil, "--codex-sessions", archived); code != apperr.ExitGeneric || summary.Several != 1 {
+		t.Fatalf("two copies: code = %d, summary = %+v", code, summary)
+	}
+	writeFile(t, filepath.Join(archived, "rollout-copy-"+subagentID+".jsonl"), codexMeta("98765432-1234-1234-1234-123456789abc", rerenderID, "2026-01-01T00:06:00Z")+`{"type":"response_item","payload":`+strings.Repeat(" ", 16*1024*1024)+"}\n")
+	if summary, code, _ := f.run(t, nil, "--codex-sessions", archived); code != apperr.ExitGeneric || summary.Unreadable != 1 {
+		t.Fatalf("a line too long: code = %d, summary = %+v", code, summary)
 	}
 }
