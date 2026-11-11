@@ -6,7 +6,7 @@ namespace Memoria.Core.Tests.Redaction;
 /// <summary>
 /// Where <see cref="PemBlock"/>'s walk from a BEGIN marker stops, line by line: the marker's own forms, prose and
 /// elisions before and after the body, short last lines, and prefixed lines. Each case asserts the exact end of the
-/// span, so a walk that stops one line early or runs one line late fails. Every key is synthetic.
+/// span, or that there is none, so a walk that stops one line early or runs one line late fails. Every key is synthetic.
 /// </summary>
 public sealed class PemBlockWalkTests
 {
@@ -145,7 +145,7 @@ public sealed class PemBlockWalkTests
 	}
 
 	[Fact]
-	public void A_dash_after_the_marker_on_its_own_line_is_prose_not_a_list_mark()
+	public void A_dash_after_the_marker_on_its_line_is_prose_not_a_list_mark()
 	{
 		Assert.Null(Walk($"{Begin} - {SixteenA}\n{End}"));
 	}

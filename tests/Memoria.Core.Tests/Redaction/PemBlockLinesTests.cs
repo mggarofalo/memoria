@@ -88,7 +88,7 @@ public sealed class PemBlockLinesTests
 	}
 
 	[Fact]
-	public void A_word_after_the_last_full_line_keeps_the_next_line_out()
+	public void A_token_after_a_word_on_the_last_line_does_not_join()
 	{
 		string input = $"{L1}\n{L2}\n{L3} x9Kq8Zr7Lm=\n";
 
