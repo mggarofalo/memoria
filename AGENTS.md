@@ -99,6 +99,7 @@ The only version in this repository is a `vX.Y.Z` tag, computed from Conventiona
 |---|---|---|---|
 | Cyclomatic complexity, per function | CA1502, a build error. Limit in `CodeMetricsConfig.txt` | ESLint `complexity`. Limit in `eslint.config.mjs` | golangci-lint `gocyclo`. Limit in `cli/.golangci.yml` |
 | Coverage | **Branch**. `scripts/coverage-dotnet.sh` merges both test projects | **Branch and line**. `npm run test:coverage` in each package, limits in its `.c8rc.json` | **Statement**, not branch. `scripts/coverage-go.sh` |
+| Promises nobody awaits | Partly: CS4014, for an unawaited call inside an async method, is an error under `TreatWarningsAsErrors` | Sidecar and worker: type-aware ESLint `no-floating-promises`, `no-misused-promises` and `await-thenable`, in `eslint.config.mjs` | Not applicable |
 | Mutation (the mutation runner, never a hook) | Stryker.NET, `stryker/*.json` | StrykerJS, `stryker*.json` in `sidecar/` and `worker/` | Gremlins, `cli/.gremlins.yaml` |
 
 - **Limits:** complexity 10 per function, and coverage 90 percent or better. Never loosen a limit; tighten it when the code allows.
@@ -110,6 +111,8 @@ The only version in this repository is a `vX.Y.Z` tag, computed from Conventiona
 ### Git hooks
 
 `lefthook.yml` runs on pre-commit, scoped to the language you staged: format, lint, complexity, and tests. The TypeScript and Go tests run with their coverage gates. The C# tests run without coverage collection, which made a commit take four minutes, and CI's Build & Test keeps the C# coverage gate. A commit that changes only docs, skills or a package README runs the tests that hold them to the code. The hook warns, without stopping the commit, when the local Node is older than `package.json`'s engines. Mutation testing never runs in a hook. `git commit --no-verify` exists for emergencies; CI runs the same gates.
+
+Most of a TypeScript job's time is its tests. Measured on Windows, for the sidecar: typecheck 2.5 s, ESLint 3.6 s and `test:coverage` 14 s. For the worker: 1.7 s, 2.0 s and 11 s. ESLint took 0.4 s in each before the type-aware rules, which have it build the TypeScript program itself.
 
 Hooks work from PowerShell, cmd, and Git Bash: `scripts/run-sh.mjs` finds the `sh` that ships with Git for Windows and says what to do if there is none. Run a script by hand the same way: `node scripts/run-sh.mjs scripts/coverage-dotnet.sh`. `-race` is left to CI because it needs cgo.
 
