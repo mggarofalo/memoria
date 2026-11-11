@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
@@ -360,6 +360,34 @@ test("an older build's table goes only once it is moved, and a fault other than 
   moveLegacyLetters(index, again);
   again.merge([row("h", "a.md", T1)]);
   assert.deepEqual(paths(again), ["a.md"], "it settles when there was no table to move, too");
+});
+
+test("the index's log is emptied after the older build's table is pruned or dropped, as its frames hold the paths, and not otherwise", async () => {
+  const file = path.join(await tempDir("memoria-letters-"), "index.sqlite");
+  const index = new DatabaseSync(file);
+  const { store } = await queueFile();
+  const wal = (): number => statSync(`${file}-wal`).size;
+  try {
+    index.exec("PRAGMA journal_mode = WAL");
+    index.exec("CREATE TABLE documents (hash TEXT, path TEXT, active INTEGER)");
+    index.exec("INSERT INTO documents VALUES ('h', 'a.md', 1)");
+    index.exec("CREATE TABLE memoria_dead_letters (hash TEXT NOT NULL, path TEXT NOT NULL, reason TEXT NOT NULL, at TEXT NOT NULL, worker_set TEXT NOT NULL, PRIMARY KEY (hash, path))");
+    index.prepare("INSERT INTO memoria_dead_letters VALUES ('h', 'a.md', 'refused', ?, 'w')").run(T1);
+    const inMemory = new DeadLetterBook(null, clock(T2).now);
+    moveLegacyLetters(index, inMemory);
+    assert.ok(wal() > 0, "nothing pruned, so the log is left alone");
+    index.prepare("INSERT INTO memoria_dead_letters VALUES ('g', 'secret/deleted.md', 'refused', ?, 'w')").run(T1);
+    moveLegacyLetters(index, inMemory);
+    assert.equal(wal(), 0, "after a prune");
+    index.prepare("INSERT INTO memoria_dead_letters VALUES ('g', 'secret/deleted.md', 'refused', ?, 'w')").run(T1);
+    assert.ok(wal() > 0);
+    moveLegacyLetters(index, new DeadLetterBook(store.deadLetters(), clock(T2).now));
+    assert.equal(legacyTable(index), false);
+    assert.equal(wal(), 0, "after the drop");
+  } finally {
+    index.close();
+    store.close();
+  }
 });
 
 test("a queue file an earlier build made gains the table and keeps its schema version, so that build can still open it", async () => {

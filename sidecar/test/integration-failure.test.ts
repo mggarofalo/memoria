@@ -1222,9 +1222,67 @@ test("a queue file that fails leaves status, a scan and search working, with a w
     assert.ok(warnings.some((m) => m.includes("set aside from embedding could not be read or tidied: disk I/O error")), warnings.join("\n"));
   } finally {
     await backend.close();
+  }
+  try {
+    const unheard = await openBackend({ dbPath, keepWarm: false, deadLetters: new DeadLetterBook(failing), llm: remoteOptions([worker("only", mock)]) });
+    try {
+      assert.equal((await unheard.getStatus()).documentsSetAside, 0, "and with no one to warn, too");
+    } finally {
+      await unheard.close();
+    }
+  } finally {
     await mock.stop();
   }
 });
+
+test("in local mode status reads no set-aside, and warns of nothing", { skip }, async () => {
+  const { dbPath } = await fixture();
+  const warnings: string[] = [];
+  const backend = await openBackend({ dbPath, keepWarm: false, deadLetters: new DeadLetterBook(null), onLlmWarning: (m) => void warnings.push(m) });
+  try {
+    assert.equal((await backend.getStatus()).documentsSetAside, 0);
+    assert.deepEqual(backend.deadLetters(), []);
+    assert.deepEqual(warnings, []);
+  } finally {
+    await backend.close();
+  }
+});
+
+test("a sidecar that takes over the queue file later moves an older build's table at its next embed", { skip }, async () => {
+  const { dbPath } = await fixture();
+  await withLegacyTable(dbPath, new Date().toISOString());
+  const mock = await new MockWorker(8).start();
+  const letters = new DeadLetterBook(null);
+  const backend = await openBackend({ dbPath, keepWarm: false, deadLetters: letters, llm: remoteOptions([worker("only", mock)]) });
+  const store = new SqliteJobStore(queueDbPathFor(dbPath));
+  try {
+    assert.notEqual(await legacyTableIn(dbPath), undefined, "kept while the file was not this sidecar's");
+    letters.adopt(store.deadLetters());
+    await backend.embed({ force: false });
+    assert.equal(await legacyTableIn(dbPath), undefined, "moved at the embed, without waiting for a scan");
+  } finally {
+    await backend.close();
+    store.close();
+    await mock.stop();
+  }
+});
+
+test("a set-aside of a document whose row is no longer active goes at the next embed", { skip }, () =>
+  withSetAside(async ({ dbPath, backend, letters }) => {
+    const [held] = letters.all();
+    await withSdk(dbPath, (db) => db.prepare("UPDATE documents SET active = 0 WHERE path = ?").run(held!.path));
+    await backend.embed({ force: false });
+    assert.deepEqual(letters.all(), []);
+  }));
+
+test("set-asides are listed oldest first", { skip }, () =>
+  withSetAside(async ({ backend, letters }) => {
+    const [held] = letters.all();
+    const at = Date.parse(held!.at);
+    letters.put({ ...held!, path: "middle.md", at: new Date(at - 30_000).toISOString() });
+    letters.put({ ...held!, path: "earliest.md", at: new Date(at - 60_000).toISOString() });
+    assert.deepEqual(backend.deadLetters().map((l) => l.path), ["earliest.md", "middle.md", held!.path]);
+  }));
 
 
 test("the same content under a new path is tried afresh, and a deleted document leaves no record", { skip }, () =>
