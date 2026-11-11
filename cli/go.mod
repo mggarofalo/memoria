@@ -5,7 +5,7 @@ go 1.27.4
 require (
 	github.com/Masterminds/semver/v3 v3.5.0
 	github.com/bmatcuk/doublestar/v4 v4.10.4
-	github.com/godbus/dbus/v5 v5.2.2
+	github.com/godbus/dbus/v5 v5.2.4
 	github.com/golang/snappy v1.0.0
 	github.com/in-toto/attestation v1.2.0
 	github.com/klauspost/compress v1.20.4
@@ -15,7 +15,7 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/zalando/go-keyring v0.2.8
 	go.yaml.in/yaml/v3 v3.0.6
-	golang.org/x/sys v0.49.0
+	golang.org/x/sys v0.50.0
 	golang.org/x/term v0.47.0
 	golang.org/x/text v0.43.0
 )
