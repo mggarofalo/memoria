@@ -12,6 +12,6 @@
     ],
     "ignore-methods": ["ConfigureAwait"],
     "reporters": ["cleartext", "html", "json"],
-    "thresholds": { "high": 95, "low": 90, "break": 0 }
+    "thresholds": { "high": 100, "low": 98, "break": 98 }
   }
 }
