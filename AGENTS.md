@@ -9,7 +9,7 @@ dotnet restore Memoria.slnx     # .NET packages
 (cd cli && go mod download)     # Go CLI dependencies
 ```
 
-Requires **.NET 10 SDK**, **Go 1.27.3+**, and **Node 26.13+** (for `sidecar/`). A running instance additionally needs an index on the sidecar host, and in local LLM mode QMD's models. For the `qmd` CLI, use the one the sidecar installs, patched as its SDK is: `node sidecar/node_modules/@tobilu/qmd/bin/qmd` from a checkout, or `node node_modules/@tobilu/qmd/bin/qmd` inside the image (`docker compose -f deploy/compose.yaml run --rm --no-deps memoria-qmd node_modules/@tobilu/qmd/bin/qmd status`: the image's entrypoint is already `node`). Never a global `npm i -g @tobilu/qmd`: it is stock, and a newer one migrates the index to a schema the sidecar refuses to serve.
+Requires **.NET 10 SDK**, **Go 1.27.4+**, and **Node 26.13+** (for `sidecar/`). A running instance additionally needs an index on the sidecar host, and in local LLM mode QMD's models. For the `qmd` CLI, use the one the sidecar installs, patched as its SDK is: `node sidecar/node_modules/@tobilu/qmd/bin/qmd` from a checkout, or `node node_modules/@tobilu/qmd/bin/qmd` inside the image (`docker compose -f deploy/compose.yaml run --rm --no-deps memoria-qmd node_modules/@tobilu/qmd/bin/qmd status`: the image's entrypoint is already `node`). Never a global `npm i -g @tobilu/qmd`: it is stock, and a newer one migrates the index to a schema the sidecar refuses to serve.
 
 ```bash
 (cd sidecar && npm ci)          # memoria-qmd sidecar dependencies
@@ -38,7 +38,8 @@ Single-trunk model: `main` is the only long-lived branch. Cut a short-lived
 If a PR looks like a blocker, report it and stop — do not close it.
 
 `main` is protected by the `main protection` ruleset: no direct pushes, no force
-pushes, no deletion, and all seven required CI checks must pass. Those job names
+pushes, no deletion, a branch must be up to date with `main`, and all eight required
+CI checks must pass. Merged branches are deleted automatically. Those job names
 must not change, and they must always report, so path filtering in `ci.yml`
 happens per job and never under `on:`. `non_fast_forward` has no
 API bypass — recovering from a bad merge means temporarily disabling "Block force
@@ -87,7 +88,7 @@ The sidecar's `npm test` and `npm run typecheck` also cover `worker/` and `scrip
 docker build -t memoria-api:local .                       # the image CI publishes to ghcr.io/mggarofalo/memoria
 ```
 
-Seven gates are required status checks on `main`: `Build & Test`, `Code Formatting`, `CLI Build & Test`, `CLI Lint`, `Sidecar Build & Test`, `Worker Build & Test` and `Docker Image`. `Sidecar Build & Test` and `Worker Build & Test` run the Node commands above, and `Docker Image` (`.github/workflows/docker.yml`) builds and verifies the image on every event, and a separate `Publish Image` job publishes it on pushes to `main` and release tags.
+Eight gates are required status checks on `main`: `Build & Test`, `Code Formatting`, `CLI Build & Test`, `CLI Lint`, `Sidecar Build & Test`, `Worker Build & Test`, `Docker Image` and `Sidecar Image`. `Sidecar Build & Test` and `Worker Build & Test` run the Node commands above, and `Docker Image` (`.github/workflows/docker.yml`) builds and verifies the image on every event, and a separate `Publish Image` job publishes it on pushes to `main` and release tags.
 
 ### Releases
 
