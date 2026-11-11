@@ -3,7 +3,7 @@
 # Memoria.Api only. The memoria-qmd sidecar has its own image, sidecar/Dockerfile,
 # and compose runs the two side by side. See docs/deployment.md.
 
-FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+FROM mcr.microsoft.com/dotnet/sdk:11.0 AS build
 WORKDIR /src
 
 # Restore first so dependency layers cache independently of source changes.
@@ -24,7 +24,7 @@ RUN dotnet publish src/Memoria.Api/Memoria.Api.csproj \
     -p:UseAppHost=false \
     -p:Version=$MEMORIA_VERSION
 
-FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
+FROM mcr.microsoft.com/dotnet/aspnet:11.0 AS runtime
 WORKDIR /app
 
 ENV ASPNETCORE_URLS=http://0.0.0.0:8080 \
