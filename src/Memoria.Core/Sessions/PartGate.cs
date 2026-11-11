@@ -26,13 +26,19 @@ internal static class PartGate
 	/// <exception cref="RedactionException">Replacing what the gate found did not make the part clean.</exception>
 	public static RedactedMarkdown Clean(string document, SessionPart part, List<SessionFieldRefusal> refusals)
 	{
+		return Clean(document, part, refusals, Redactor.Shared);
+	}
+
+	/// <summary>As above, checking with <paramref name="redactor"/>, so a test can give it a check that cannot finish.</summary>
+	internal static RedactedMarkdown Clean(string document, SessionPart part, List<SessionFieldRefusal> refusals, Redactor redactor)
+	{
 		string frontmatter = FrontmatterOf(document);
 		Body body = Body.Parse(document[frontmatter.Length..], part);
 		string bodyBefore = body.Render();
 		for (int i = 0; i < MaxReplacements * 2; i++)
 		{
 			string current = frontmatter + body.Render();
-			if (FindHit(current, body, part, refusals, out GateHit? found))
+			if (FindHit(redactor, current, body, part, refusals, out GateHit? found))
 			{
 				continue;
 			}
@@ -77,11 +83,11 @@ internal static class PartGate
 	}
 
 	/// <summary>True when the check could not finish, so the body was replaced and the part must be checked again.</summary>
-	private static bool FindHit(string text, Body body, SessionPart part, List<SessionFieldRefusal> refusals, out GateHit? hit)
+	private static bool FindHit(Redactor redactor, string text, Body body, SessionPart part, List<SessionFieldRefusal> refusals, out GateHit? hit)
 	{
 		try
 		{
-			hit = Redactor.Shared.FindFirstHit(text);
+			hit = redactor.FindFirstHit(text);
 			return false;
 		}
 		catch (RedactionException exception) when (Redactor.IsCausedByText(exception.Failure) && body.RefuseAll(exception.RuleName, part, refusals))
@@ -101,7 +107,7 @@ internal static class PartGate
 	private static string ReplaceField(string frontmatter, GateHit hit, SessionPart part, List<SessionFieldRefusal> refusals)
 	{
 		string[] lines = frontmatter.Split('\n');
-		int line = LineAt(lines, hit.Start);
+		int line = frontmatter.AsSpan(0, hit.Start).Count('\n');
 		int first = line;
 		while (first > 0 && lines[first].StartsWith(' '))
 		{
@@ -125,21 +131,6 @@ internal static class PartGate
 		string replacement = isList ? $"{key}: [\"{FieldMarker}\"]" : $"{key}: \"{FieldMarker}\"";
 		refusals.Add(new SessionFieldRefusal(part.Number, key, hit.Rule));
 		return string.Join('\n', lines[..first].Append(replacement).Concat(lines[(last + 1)..]));
-	}
-
-	private static int LineAt(string[] lines, int position)
-	{
-		int offset = 0;
-		for (int i = 0; i < lines.Length; i++)
-		{
-			offset += lines[i].Length + 1;
-			if (position < offset)
-			{
-				return i;
-			}
-		}
-
-		return lines.Length - 1;
 	}
 
 	/// <summary>The title and messages of a part, which together render exactly as <see cref="SessionFrontmatter.Body"/> writes them.</summary>
