@@ -236,7 +236,6 @@ public sealed partial class ApiKeyAuthenticationHandler(
 		bool withheld = required == MemoriaScopes.Admin && Context.User.HasClaim(static c => c.Type == MemoriaClaims.AdminWithheld);
 		return endpoint?.Metadata.GetMetadata<MemoriaUnboundKeyAttribute>() is not null
 			&& (required is null || withheld || Context.User.HasClaim(MemoriaClaims.Scope, required))
-			// Stryker disable once Equality : a key that holds the route's scope is refused there only for a collection claim, so when this line runs, a claim of any other type means one of that type too.
 			&& Context.User.HasClaim(static c => c.Type == MemoriaClaims.Collection);
 	}
 
