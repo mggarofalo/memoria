@@ -146,6 +146,7 @@ public sealed class SqliteIngestLedger(ControlDatabase database) : IIngestLedger
 
 	private const string Columns = "version_ticks, state, lease_until_ticks, paths, lease_owner, message_count, content_hash, messages_digest, deleted_paths";
 
+	// Stryker disable once String : an empty format is Guid's default "D", which spells the same unique id with dashes. The id is only a prefix of this process's own tokens, compared with StartsWith, so either spelling tells this process's leases from any other's.
 	private readonly string _instance = Guid.NewGuid().ToString("N");
 
 	public async Task<IngestClaim> ClaimAsync(IngestClaimRequest request, CancellationToken cancellationToken)
@@ -338,6 +339,7 @@ public sealed class SqliteIngestLedger(ControlDatabase database) : IIngestLedger
 
 		return leased with
 		{
+			// Stryker disable once Equality : when the two versions are equal, either branch gives the same value.
 			Version = record.Version > soFar.Version ? record.Version : soFar.Version,
 			// A document that does not say how many it holds refuses a takeover rather than guess: allowShrink is how someone says the session really is the whole of it.
 			MessageCount = (record.MessageCount ?? long.MaxValue) > (soFar.MessageCount ?? 0) ? record.MessageCount ?? long.MaxValue : soFar.MessageCount,
@@ -386,6 +388,7 @@ public sealed class SqliteIngestLedger(ControlDatabase database) : IIngestLedger
 
 		return released with
 		{
+			// Stryker disable once Equality : when the version equals the clock, either branch gives the same value.
 			Version = landed.Version < landed.Now ? landed.Version : landed.Now,
 			State = state,
 			MessageCount = landed.MessageCount ?? row.MessageCount,
