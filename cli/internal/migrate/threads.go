@@ -177,6 +177,8 @@ func sessionKey(sessionID, id any) string {
 // its last session_meta, so one whose last names another session is left out, as the exporter left it out. A thread that names the
 // session only in a later session_meta is not looked for, so an export holding one is not covered, and is not sent.
 func (t *Transcripts) Family(id, own string) ([]Thread, error) {
+	// The transcripts found are held by their real paths, so own is too, or it would be found again among them.
+	own = canonical(own)
 	files := []string{own}
 	for _, head := range t.heads()[id] {
 		if !strings.EqualFold(head.file, own) {

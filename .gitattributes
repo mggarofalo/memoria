@@ -22,6 +22,7 @@ go.sum    text eol=lf
 *.mjs     text eol=lf
 *.cjs     text eol=lf
 *.ps1     text eol=lf
+*.psm1    text eol=lf
 
 # Everything else
 *.json  text eol=lf
@@ -30,6 +31,8 @@ go.sum    text eol=lf
 *.md    text eol=lf
 *.sh    text eol=lf
 *.toml  text eol=lf
+*.jsonl text eol=lf
+*.txt   text eol=lf
 Dockerfile text eol=lf
 
 # Binary

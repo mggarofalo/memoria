@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -15,7 +14,7 @@ import (
 // The runbook is read by someone moving their only copy of a corpus, so what it says about a command is pinned to the command.
 func readRunbook(t *testing.T) string {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join("..", "..", "docs", "migration.md"))
+	data, err := os.ReadFile(repoPath("docs/migration.md"))
 	if err != nil {
 		t.Fatal(err)
 	}

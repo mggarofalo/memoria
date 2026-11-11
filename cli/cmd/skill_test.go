@@ -13,7 +13,7 @@ import (
 
 // These tests read files outside the Go module, which the test cache does not watch, so a cached
 // pass can be stale. Run them with: go test -count=1 ./cmd -run Skill
-const skillPath = "../../skills/memoria/SKILL.md"
+var skillPath = repoPath("skills/memoria/SKILL.md")
 
 func readSkill(t *testing.T) string {
 	t.Helper()
@@ -140,7 +140,7 @@ func TestTheSkillHasFrontmatterBothAgentsRead(t *testing.T) {
 }
 
 // activeSkillDirs are where an agent loads skills from when working in this repository.
-var activeSkillDirs = []string{"../../.claude/skills", "../../.agents/skills", "../../.codex/skills"}
+var activeSkillDirs = []string{repoPath(".claude/skills"), repoPath(".agents/skills"), repoPath(".codex/skills")}
 
 // holdsThisSkill finds the skill by what it says, as a copy can sit under any folder's name.
 func holdsThisSkill(path string) bool {
@@ -218,7 +218,7 @@ func TestNoExampleInTheSkillPrintsRawJSON(t *testing.T) {
 
 // A pull request changing only the skill must still run these tests.
 func TestCIRunsTheseTestsWhenOnlyTheSkillChanges(t *testing.T) {
-	data, err := os.ReadFile("../../.github/workflows/ci.yml")
+	data, err := os.ReadFile(repoPath(".github/workflows/ci.yml"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,7 +234,7 @@ func TestCIRunsTheseTestsWhenOnlyTheSkillChanges(t *testing.T) {
 }
 
 func TestTheTriggerPromptsAreBalanced(t *testing.T) {
-	data, err := os.ReadFile("../../skills/evals/memoria-triggers.json")
+	data, err := os.ReadFile(repoPath("skills/evals/memoria-triggers.json"))
 	if err != nil {
 		t.Fatal(err)
 	}

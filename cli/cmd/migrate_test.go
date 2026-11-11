@@ -278,7 +278,7 @@ func TestAReportWithoutGitleaksSaysItIsWeaker(t *testing.T) {
 }
 
 func TestTheRedactionToolIsBuiltByARequiredJob(t *testing.T) {
-	data, err := os.ReadFile("../../.github/workflows/ci.yml")
+	data, err := os.ReadFile(repoPath(".github/workflows/ci.yml"))
 	if err != nil {
 		t.Fatal(err)
 	}

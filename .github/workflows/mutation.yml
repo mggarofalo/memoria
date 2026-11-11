@@ -123,14 +123,14 @@ jobs:
           path: cli/reports/
           retention-days: 30
 
-  # Real Go branch coverage. A slow report, never a gate: statement coverage in
-  # CI is what blocks. gobco has no per-file exclusion or threshold of its own,
-  # so scripts/coverage-go-branch.sh does that part.
+  # Real Go branch coverage. A slow report with no threshold: statement coverage
+  # in CI is what blocks. gobco has no per-file exclusion of its own, so
+  # scripts/coverage-go-branch.sh does that part, and fails when a package
+  # could not be counted.
   cli-branch:
     name: Go Branch Coverage (report)
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Setup Go
