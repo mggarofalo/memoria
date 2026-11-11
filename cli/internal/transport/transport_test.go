@@ -108,22 +108,32 @@ func TestClassify(t *testing.T) {
 func TestEvaluate(t *testing.T) {
 	cases := []struct {
 		url      string
-		allow    bool
+		allow    Allowance
 		wantWarn bool
 		wantErr  bool
 	}{
-		{"https://8.8.8.8", false, false, false},
-		{"http://127.0.0.1", false, false, false},
-		{"http://localhost", false, false, false},
-		{"http://192.168.1.1", false, true, false},
-		{"http://memoria.lan", false, false, true},
-		{"http://memoria.internal:8080", false, false, true},
-		{"http://[fd00:ec2::254]", false, false, true},
-		{"http://169.254.169.254", false, false, true},
-		{"http://memoria.lan", true, true, false},
-		{"http://8.8.8.8", false, false, true},
-		{"http://8.8.8.8", true, true, false},
-		{"http://memoria.example.com", true, true, false},
+		{"https://8.8.8.8", AllowNone, false, false},
+		{"http://127.0.0.1", AllowNone, false, false},
+		{"http://[::1]:8080", AllowNone, false, false},
+		{"http://localhost", AllowNone, false, false},
+		{"http://192.168.1.1", AllowNone, false, true},
+		{"http://10.255.255.1", AllowNone, false, true},
+		{"http://[fd00::1]", AllowNone, false, true},
+		{"http://192.168.1.1", AllowPrivate, true, false},
+		{"http://172.16.0.1:8080", AllowPrivate, true, false},
+		{"http://192.168.1.1", AllowInsecure, true, false},
+		{"http://memoria.lan", AllowNone, false, true},
+		{"http://memoria.lan", AllowPrivate, false, true},
+		{"http://memoria.internal:8080", AllowNone, false, true},
+		{"http://[fd00:ec2::254]", AllowNone, false, true},
+		{"http://[fd00:ec2::254]", AllowPrivate, false, true},
+		{"http://169.254.169.254", AllowNone, false, true},
+		{"http://169.254.169.254", AllowPrivate, false, true},
+		{"http://memoria.lan", AllowInsecure, true, false},
+		{"http://8.8.8.8", AllowNone, false, true},
+		{"http://8.8.8.8", AllowPrivate, false, true},
+		{"http://8.8.8.8", AllowInsecure, true, false},
+		{"http://memoria.example.com", AllowInsecure, true, false},
 	}
 	for _, c := range cases {
 		warning, err := Evaluate(mustParse(t, c.url), c.allow)
@@ -136,6 +146,45 @@ func TestEvaluate(t *testing.T) {
 		if err != nil && apperr.ExitCode(err) != apperr.ExitInsecure {
 			t.Errorf("exit = %d", apperr.ExitCode(err))
 		}
+	}
+}
+
+func TestPrivateRefusalNamesItsOptIn(t *testing.T) {
+	_, err := Evaluate(mustParse(t, "http://10.255.255.1"), AllowNone)
+	if err == nil || !strings.Contains(err.Error(), "--allow-private-http") || strings.Contains(err.Error(), "10.255.255.1") {
+		t.Fatalf("err = %v", err)
+	}
+	_, err = Evaluate(mustParse(t, "http://8.8.8.8"), AllowPrivate)
+	if err == nil || !strings.Contains(err.Error(), "--allow-insecure-http") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestAllowanceOf(t *testing.T) {
+	for _, c := range []struct {
+		insecure, private bool
+		want              Allowance
+	}{
+		{false, false, AllowNone},
+		{false, true, AllowPrivate},
+		{true, false, AllowInsecure},
+		{true, true, AllowInsecure},
+	} {
+		if got := AllowanceOf(c.insecure, c.private); got != c.want {
+			t.Errorf("AllowanceOf(%v, %v) = %v, want %v", c.insecure, c.private, got, c.want)
+		}
+	}
+}
+
+func TestNewClientRefusesPrivateHTTPWithoutItsOptIn(t *testing.T) {
+	if _, err := NewClient(Options{BaseURL: mustParse(t, "http://192.168.1.20:8080"), Key: testKey}); err == nil {
+		t.Fatal("plain http to a private address was allowed with no opt-in")
+	}
+	if _, err := NewClient(Options{BaseURL: mustParse(t, "http://192.168.1.20:8080"), Key: testKey, AllowPrivateHTTP: true}); err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if _, err := NewClient(Options{BaseURL: mustParse(t, "http://8.8.8.8"), Key: testKey, AllowPrivateHTTP: true}); err == nil {
+		t.Fatal("the private opt-in let plain http reach a public address")
 	}
 }
 

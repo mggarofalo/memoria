@@ -73,6 +73,15 @@ func (a *app) allowInsecure() bool {
 	return a.flags.allowInsecure || a.getenv(auth.EnvAllowInsecureHTTP) == "1"
 }
 
+func (a *app) allowPrivate() bool {
+	return a.flags.allowPrivate || a.getenv(auth.EnvAllowPrivateHTTP) == "1"
+}
+
+// plainHTTP is how far this invocation has opted in to plain http.
+func (a *app) plainHTTP() transport.Allowance {
+	return transport.AllowanceOf(a.allowInsecure(), a.allowPrivate())
+}
+
 // parseURL validates the server URL and applies the plain-http rules, showing
 // any warning. It runs before the key is read from any store.
 func (a *app) parseURL(raw string) (*url.URL, error) {
@@ -83,7 +92,7 @@ func (a *app) parseURL(raw string) (*url.URL, error) {
 	if err != nil {
 		return nil, err
 	}
-	warning, err := transport.Evaluate(base, a.allowInsecure())
+	warning, err := transport.Evaluate(base, a.plainHTTP())
 	if err != nil {
 		return nil, err
 	}
@@ -129,6 +138,9 @@ func (a *app) resolveKey(resolver *auth.Resolver, profile string, base *url.URL)
 		return auth.Resolved{}, err
 	}
 	a.redactor.Add(resolved.Credential.Reveal())
+	if err := checkExplicitKeyOrigin(resolved, resolver); err != nil {
+		return auth.Resolved{}, err
+	}
 	if err := checkStoredKeyOrigin(resolved, profile, base); err != nil {
 		return auth.Resolved{}, err
 	}
@@ -161,6 +173,24 @@ func (a *app) checkFileBackend(resolved auth.Resolved, profile string) error {
 	// --quiet must not hide it.
 	a.warn("using the key from the credentials file, for " + resolved.Origin)
 	return nil
+}
+
+// checkExplicitKeyOrigin holds a key from --api-key or MEMORIA_API_KEY to a server
+// named the same way, by --api-url or MEMORIA_URL. Such a key is tied to no server,
+// so taking the server from config.json would send it wherever that file says, and
+// that file is the one a poisoned XDG_CONFIG_HOME or HOME supplies. The server the
+// config names is not repeated: it is not one the user chose here.
+func checkExplicitKeyOrigin(resolved auth.Resolved, resolver *auth.Resolver) error {
+	if resolved.Stored() || resolver.ExplicitURL() {
+		return nil
+	}
+	label := "--api-key"
+	if resolved.Source == auth.SourceEnv {
+		label = auth.EnvAPIKey
+	}
+	return apperr.New(apperr.KindInsecure,
+		"a key from %s is sent only to a server named the same way: pass --api-url or set %s. It is never sent to the server in config.json, which is not tied to that key",
+		label, auth.EnvURL)
 }
 
 // checkStoredKeyOrigin holds a stored key to the origin recorded with it in the
@@ -202,6 +232,7 @@ func (a *app) httpClient(base *url.URL, key string, timeout time.Duration) (*htt
 		BaseURL:           base,
 		Key:               key,
 		AllowInsecureHTTP: a.allowInsecure(),
+		AllowPrivateHTTP:  a.allowPrivate(),
 		Timeout:           timeout,
 		UserAgent:         "memoria-cli/" + Version,
 	}

@@ -19,6 +19,7 @@ import (
 	"github.com/mggarofalo/memoria/cli/internal/api"
 	"github.com/mggarofalo/memoria/cli/internal/apperr"
 	"github.com/mggarofalo/memoria/cli/internal/auth"
+	"github.com/mggarofalo/memoria/cli/internal/childenv"
 	"github.com/mggarofalo/memoria/cli/internal/migrate"
 	"github.com/mggarofalo/memoria/cli/internal/output"
 	"github.com/mggarofalo/memoria/cli/internal/transport"
@@ -486,12 +487,14 @@ func (r *pushRun) serverHits(c *pushCollection, o migrateVerifyOptions, query st
 	return keys, true
 }
 
-// runLocalQMD runs the local command. Its stderr is left behind, as a failure there could quote a path or a query.
+// runLocalQMD runs the local command. Its stderr is left behind, as a failure there could quote a path or a query. It, and
+// cmd.exe in front of it on Windows, need no credential, so none is inherited.
 func runLocalQMD(ctx context.Context, command string, args []string) ([]byte, error) {
 	run, err := localCommand(ctx, command, args)
 	if err != nil {
 		return nil, err
 	}
+	run.Env = childenv.Environ()
 	var stdout bytes.Buffer
 	run.Stdout = &stdout
 	if err := run.Run(); err != nil {
