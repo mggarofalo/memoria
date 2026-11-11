@@ -26,9 +26,9 @@
     "dev": "node src/main.ts"
   },
   "dependencies": {
-    "@fastify/swagger": "^9.9.2",
+    "@fastify/swagger": "^9.9.3",
     "@tobilu/qmd": "2.8.3",
-    "fastify": "^5.12.7",
+    "fastify": "^5.12.8",
     "picomatch": "^4.0.5",
     "yaml": "^2.9.1"
   },
