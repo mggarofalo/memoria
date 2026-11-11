@@ -4,6 +4,8 @@ using Memoria.Api.Sidecar;
 using Memoria.Core.Sidecar;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 
 namespace Memoria.Api.Tests;
@@ -66,30 +68,53 @@ public sealed class ReadinessCacheTests : IDisposable
 		Assert.Equal(1, ReadyProbes);
 	}
 
+	/// <summary>
+	/// The order is forced, not timed: the first caller's probe is held at the sidecar until the test lets it go, that caller
+	/// gives up while it is held, and a second arrives after. The probe's own timeout is on a clock whose timers never fire, so
+	/// only a caller's cancellation could end it early, which is what this rules out.
+	/// </summary>
 	[Fact]
 	public async Task A_caller_who_gives_up_does_not_cancel_the_probe_others_wait_on()
 	{
+		using WebApplicationFactory<Program> app = _cached.WithWebHostBuilder(static builder => builder.ConfigureTestServices(static services => services.AddSingleton<TimeProvider>(new TimersNeverFire())));
+		TaskCompletionSource asked = new(TaskCreationOptions.RunContinuationsAsynchronously);
 		using ManualResetEventSlim release = new();
 		_factory.Sidecar.On("GET", "/ready", (_, _) =>
 		{
-			release.Wait(TimeSpan.FromSeconds(10));
+			asked.TrySetResult();
+			Assert.True(release.Wait(TimeSpan.FromSeconds(30)), "the test never released the probe");
 			return FakeSidecar.Json(HttpStatusCode.OK, SidecarFixtures.Readiness("ready", resident: true));
 		});
-		HttpClient client = _cached.CreateClient();
+		HttpClient client = app.CreateClient();
 		using CancellationTokenSource impatient = new();
 
 		Task<HttpResponseMessage> leaving = client.GetAsync("/ready", impatient.Token);
-		await Task.Delay(100);
-		Task<HttpResponseMessage> staying = client.GetAsync("/ready");
-		await Task.Delay(100);
+		await asked.Task.WaitAsync(TimeSpan.FromSeconds(30));
 		await impatient.CancelAsync();
-		await Task.Delay(100);
+		await Assert.ThrowsAnyAsync<OperationCanceledException>(() => leaving);
+		Task<HttpResponseMessage> staying = client.GetAsync("/ready");
 		release.Set();
 
 		Assert.Equal(HttpStatusCode.OK, (await staying).StatusCode);
-		await Assert.ThrowsAnyAsync<OperationCanceledException>(() => leaving);
 		Assert.Equal(1, ReadyProbes);
 		Assert.DoesNotContain(true, _factory.Sidecar.CancelledBeforeAnswer);
+	}
+
+	/// <summary>The system's clock, except that a timer never fires: nothing here times out unless a test says so.</summary>
+	private sealed class TimersNeverFire : TimeProvider
+	{
+		public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period) => new Idle();
+
+		private sealed class Idle : ITimer
+		{
+			public bool Change(TimeSpan dueTime, TimeSpan period) => true;
+
+			public void Dispose()
+			{
+			}
+
+			public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+		}
 	}
 
 	[Fact]
