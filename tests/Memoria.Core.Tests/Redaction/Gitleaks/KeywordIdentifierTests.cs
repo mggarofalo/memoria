@@ -88,4 +88,68 @@ public sealed class KeywordIdentifierTests
 		Assert.DoesNotContain(value, redacted, StringComparison.Ordinal);
 		Assert.Contains("[REDACTED:", redacted, StringComparison.Ordinal);
 	}
+
+	/// <summary>Written out here rather than read from the engine, so a word taken from its list fails a case.</summary>
+	[Theory]
+	[InlineData("task")]
+	[InlineData("tasks")]
+	[InlineData("item")]
+	[InlineData("items")]
+	[InlineData("trace")]
+	[InlineData("span")]
+	[InlineData("project")]
+	[InlineData("projects")]
+	[InlineData("org")]
+	[InlineData("organization")]
+	[InlineData("team")]
+	[InlineData("workspace")]
+	[InlineData("issue")]
+	[InlineData("ticket")]
+	[InlineData("order")]
+	[InlineData("job")]
+	[InlineData("build")]
+	[InlineData("run")]
+	[InlineData("commit")]
+	[InlineData("page")]
+	[InlineData("document")]
+	[InlineData("folder")]
+	[InlineData("channel")]
+	[InlineData("thread")]
+	[InlineData("customer")]
+	[InlineData("invoice")]
+	[InlineData("deployment")]
+	[InlineData("release")]
+	[InlineData("device")]
+	[InlineData("node")]
+	[InlineData("site")]
+	public void Each_things_word_alone_names_an_id(string word)
+	{
+		string line = $"asana {word}: " + Synthetic.Digits(16, 5200 + word.Length);
+		Assert.Equal(line, Redactor.Shared.RedactFragment(line).Text);
+	}
+
+	/// <summary>A holder's word names an id only before an id word; alone it may name a credential's holder, as a service account does.</summary>
+	[Theory]
+	[InlineData("app")]
+	[InlineData("apps")]
+	[InlineData("application")]
+	[InlineData("account")]
+	[InlineData("accounts")]
+	[InlineData("user")]
+	[InlineData("users")]
+	public void A_holders_word_names_an_id_only_before_an_id_word(string word)
+	{
+		string id = Synthetic.Digits(16, 5300 + word.Length);
+		string named = $"asana {word}_id: {id}";
+		Assert.Equal(named, Redactor.Shared.RedactFragment(named).Text);
+		Assert.DoesNotContain(id, Redactor.Shared.RedactFragment($"asana {word}: {id}").Text, StringComparison.Ordinal);
+	}
+
+	/// <summary>A keyword written twice: what follows the last one is the name's end, so the second <c>asana</c> is not a word of it.</summary>
+	[Fact]
+	public void The_last_keyword_ends_the_providers_part_of_the_name()
+	{
+		string line = "asana_asana_task: " + Synthetic.Digits(16, 5400);
+		Assert.Equal(line, Redactor.Shared.RedactFragment(line).Text);
+	}
 }
