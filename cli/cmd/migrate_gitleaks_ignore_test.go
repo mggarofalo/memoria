@@ -12,16 +12,18 @@ import (
 	"github.com/mggarofalo/memoria/cli/internal/migrate"
 )
 
-// withFakeGitleaks puts an empty gitleaks on PATH, so the report's check for it passes. The tool is faked, so it never runs.
+// withFakeGitleaks puts an empty gitleaks and trufflehog on PATH, so the report's checks for them pass. The tool is faked, so
+// neither ever runs.
 func withFakeGitleaks(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()
-	name := "gitleaks"
-	if runtime.GOOS == "windows" {
-		name += ".exe"
-	}
-	if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatal(err)
+	for _, name := range []string{"gitleaks", "trufflehog"} {
+		if runtime.GOOS == "windows" {
+			name += ".exe"
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	t.Setenv("PATH", dir)
 }
@@ -43,7 +45,7 @@ func TestMigrateReportPassesTheIgnoreAndFindingsFilesToTheTool(t *testing.T) {
 	if !strings.Contains(args, "--gitleaks-ignore "+ignore) || !strings.Contains(args, "--gitleaks-findings "+findings) || strings.Contains(args, "--no-gitleaks") {
 		t.Fatalf("args = %v", f.h.checkArgs)
 	}
-	if out := f.h.stdout.String(); !strings.Contains(out, "notes: 2 gitleaks finding(s) listed in the ignore file") {
+	if out := f.h.stdout.String(); !strings.Contains(out, "notes: 2 finding(s) listed in the ignore file") {
 		t.Fatalf("stdout = %q", out)
 	}
 }
@@ -68,8 +70,8 @@ func TestMigrateReportRefusesAnIgnoreFileItCannotUse(t *testing.T) {
 	cases := map[string][]string{
 		"missing":               {"--gitleaks-ignore", filepath.Join(t.TempDir(), "absent")},
 		"a folder":              {"--gitleaks-ignore", t.TempDir()},
-		"ignore, no gitleaks":   {"--gitleaks-ignore", ignore, "--no-gitleaks"},
-		"findings, no gitleaks": {"--gitleaks-findings", filepath.Join(t.TempDir(), "out"), "--no-gitleaks"},
+		"ignore, no gitleaks":   {"--gitleaks-ignore", ignore, "--no-gitleaks", "--no-trufflehog"},
+		"findings, no gitleaks": {"--gitleaks-findings", filepath.Join(t.TempDir(), "out"), "--no-gitleaks", "--no-trufflehog"},
 	}
 	for name, extra := range cases {
 		f.fakeCheck("["+cleanCheck+","+cleanCheck+"]", nil)

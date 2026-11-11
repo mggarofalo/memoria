@@ -68,7 +68,10 @@ func MigratePlanMarkdown(w io.Writer, plans []migrate.Plan, raw *migrate.RawSess
 }
 
 // gitleaksCaveat keeps a count of 0 from reading as proof.
-const gitleaksCaveat = "Gitleaks is best effort: it can miss a token at a chunk boundary, so 0 findings is not proof that nothing is left."
+const gitleaksCaveat = "Gitleaks is best effort: it can miss a token at a chunk boundary, so 0 findings is not proof that nothing is left. Its rules are also the ones the redaction engine imports, so its 0 says mostly that they were imported faithfully."
+
+// trufflehogCaveat says which count is the independent one, and that it is not proof either.
+const trufflehogCaveat = "Trufflehog's detectors are its own, run without verification, so its count is the look independent of the engine's rules. Its 0 is not proof either: it can miss a form it does not know."
 
 // wrappedCaveat says what redaction gives up to keep the text after a secret, and what it still removes more of than the secret.
 const wrappedCaveat = "Redaction keeps what follows a secret. So a token wrapped across lines, whose last piece reads as an ordinary word or number, can keep that piece, up to about 12 characters, with the rest removed. A Cookie header's whole line goes, as any cookie in it may be live."
@@ -80,6 +83,44 @@ func anyGitleaks(reports []migrate.Report) bool {
 		}
 	}
 	return false
+}
+
+func anyTrufflehog(reports []migrate.Report) bool {
+	for i := range reports {
+		if reports[i].TrufflehogRan {
+			return true
+		}
+	}
+	return false
+}
+
+func trufflehogSummary(report *migrate.Report) string {
+	if !report.TrufflehogRan {
+		return "NOT RUN"
+	}
+	count := 0
+	for _, findings := range report.TrufflehogResults {
+		count += findings
+	}
+	return fmt.Sprint(count)
+}
+
+// scannerLines are each scanner's findings by rule, what the ignore file excused, and what trufflehog could not read.
+func scannerLines(r *migrate.Report) []string {
+	var lines []string
+	for _, rule := range ruleNames(r.GitleaksResults) {
+		lines = append(lines, fmt.Sprintf("gitleaks %s: %d left after redaction", rule, r.GitleaksResults[rule]))
+	}
+	for _, rule := range ruleNames(r.TrufflehogResults) {
+		lines = append(lines, fmt.Sprintf("%s: %d left after redaction", rule, r.TrufflehogResults[rule]))
+	}
+	if ignored := r.GitleaksIgnored + r.TrufflehogIgnored; ignored > 0 {
+		lines = append(lines, fmt.Sprintf("%d finding(s) listed in the ignore file, so they do not fail the run", ignored))
+	}
+	if r.TrufflehogUnscanned > 0 {
+		lines = append(lines, fmt.Sprintf("%d document(s) trufflehog could not read", r.TrufflehogUnscanned))
+	}
+	return lines
 }
 
 func gitleaksSummary(report *migrate.Report) string {
@@ -107,9 +148,9 @@ func MigrateReportTable(w io.Writer, reports []migrate.Report) error {
 	rows := make([]string, 0, len(reports))
 	for i := range reports {
 		r := &reports[i]
-		rows = append(rows, row(r.Name, r.Files, r.Changed, r.Refused, r.Skipped, r.Unscanned, gitleaksSummary(r)))
+		rows = append(rows, row(r.Name, r.Files, r.Changed, r.Refused, r.Skipped, r.Unscanned, gitleaksSummary(r), trufflehogSummary(r)))
 	}
-	if err := table(w, "COLLECTION\tFILES\tCHANGED\tREFUSED\tSKIPPED\tUNSCANNED\tGITLEAKS FINDINGS", rows); err != nil {
+	if err := table(w, "COLLECTION\tFILES\tCHANGED\tREFUSED\tSKIPPED\tUNSCANNED\tGITLEAKS FINDINGS\tTRUFFLEHOG FINDINGS", rows); err != nil {
 		return err
 	}
 	var b strings.Builder
@@ -118,11 +159,8 @@ func MigrateReportTable(w io.Writer, reports []migrate.Report) error {
 		for _, rule := range ruleNames(r.Replacements) {
 			b.WriteString(row(fmt.Sprintf("%s: %s: %d replacements in %d files", r.Name, rule, r.Replacements[rule], r.FilesByRule[rule])) + "\n")
 		}
-		for _, rule := range ruleNames(r.GitleaksResults) {
-			b.WriteString(row(fmt.Sprintf("%s: gitleaks %s: %d left after redaction", r.Name, rule, r.GitleaksResults[rule])) + "\n")
-		}
-		if r.GitleaksIgnored > 0 {
-			b.WriteString(row(fmt.Sprintf("%s: %d gitleaks finding(s) listed in the ignore file, so they do not fail the run", r.Name, r.GitleaksIgnored)) + "\n")
+		for _, line := range scannerLines(r) {
+			b.WriteString(row(r.Name+": "+line) + "\n")
 		}
 		if r.CredentialNames > 0 {
 			b.WriteString(row(fmt.Sprintf("%s: %d file name(s) look like a credential, which a server refuses", r.Name, r.CredentialNames)) + "\n")
@@ -130,6 +168,9 @@ func MigrateReportTable(w io.Writer, reports []migrate.Report) error {
 	}
 	if anyGitleaks(reports) {
 		b.WriteString(gitleaksCaveat + "\n")
+	}
+	if anyTrufflehog(reports) {
+		b.WriteString(trufflehogCaveat + "\n")
 	}
 	b.WriteString(wrappedCaveat + "\n")
 	return writeText(w, &b)
@@ -140,15 +181,12 @@ func MigrateReportMarkdown(w io.Writer, reports []migrate.Report) error {
 	var b strings.Builder
 	for i := range reports {
 		r := &reports[i]
-		fmt.Fprintf(&b, "- **%s**: %d files, %d changed, %d refused, %d skipped, %d not scanned by gitleaks, gitleaks findings: %s\n", inlineText(r.Name), r.Files, r.Changed, r.Refused, r.Skipped, r.Unscanned, gitleaksSummary(r))
+		fmt.Fprintf(&b, "- **%s**: %d files, %d changed, %d refused, %d skipped, %d not scanned by gitleaks, gitleaks findings: %s, trufflehog findings: %s\n", inlineText(r.Name), r.Files, r.Changed, r.Refused, r.Skipped, r.Unscanned, gitleaksSummary(r), trufflehogSummary(r))
 		for _, rule := range ruleNames(r.Replacements) {
 			fmt.Fprintf(&b, "  - %s: %d replacements in %d files\n", inlineText(rule), r.Replacements[rule], r.FilesByRule[rule])
 		}
-		for _, rule := range ruleNames(r.GitleaksResults) {
-			fmt.Fprintf(&b, "  - gitleaks %s: %d left after redaction\n", inlineText(rule), r.GitleaksResults[rule])
-		}
-		if r.GitleaksIgnored > 0 {
-			fmt.Fprintf(&b, "  - %d gitleaks finding(s) listed in the ignore file, so they do not fail the run\n", r.GitleaksIgnored)
+		for _, line := range scannerLines(r) {
+			b.WriteString("  - " + inlineText(line) + "\n")
 		}
 		if r.CredentialNames > 0 {
 			fmt.Fprintf(&b, "  - %d file name(s) look like a credential, which a server refuses\n", r.CredentialNames)
@@ -156,6 +194,9 @@ func MigrateReportMarkdown(w io.Writer, reports []migrate.Report) error {
 	}
 	if anyGitleaks(reports) {
 		b.WriteString("\n" + gitleaksCaveat + "\n")
+	}
+	if anyTrufflehog(reports) {
+		b.WriteString("\n" + trufflehogCaveat + "\n")
 	}
 	b.WriteString("\n" + wrappedCaveat + "\n")
 	return writeText(w, &b)

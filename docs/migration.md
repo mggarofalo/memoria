@@ -51,13 +51,21 @@ dotnet build tools/RedactionCheck -c Release
 memoria migrate report --qmd-config ~/.config/qmd/index.yml --tool tools/RedactionCheck/bin/Release/net10.0/RedactionCheck.dll
 ```
 
-It exits 1 if a document was refused, gitleaks found something in the redacted text or could not read it, a file's name looks like a credential, or something could not be read. Gitleaks is best effort: it can miss a token at a chunk boundary, so 0 findings is not proof. Text that survives redaction will be stored and searchable.
+Two scanners then look over the redacted text, so both must be on `PATH`: [gitleaks](https://github.com/gitleaks/gitleaks) and [trufflehog](https://github.com/trufflesecurity/trufflehog). They answer different questions:
+
+- **Gitleaks's count says whether the import is faithful.** The redaction engine imports gitleaks's own rules, so gitleaks finds almost nothing the engine did not already remove. It can still catch the few rules the engine leaves out, such as `generic-api-key`, and a rule that was translated wrongly. Its 0 says little about what neither of them knows.
+- **Trufflehog's count is the independent look.** Its detectors are its own, written apart from gitleaks's, and it runs with verification off, so it calls no service. A 0 from it means a second, unrelated set of patterns also found nothing.
+- **Neither 0 is proof.** Gitleaks can miss a token at a chunk boundary, and both can miss a form neither knows. Text that survives redaction will be stored and searchable.
+
+It exits 1 if a document was refused, a scanner found something in the redacted text or could not read it, a file's name looks like a credential, or something could not be read. `--no-gitleaks` and `--no-trufflehog` go without one scanner, and the report says the check is weaker for it.
+
+Neither scanner's input touches the disk. Each reads the text on its standard input. Trufflehog writes what it reads to a temporary file past 10 MB, so the tool gives it under that at a time, in a process of its own for each batch.
 
 **Stop or go.** Go on only at exit 0. Exit 1 is a stop: do not push until you have dealt with what it counted, by removing the secret from the file, or by leaving that file out with an ignore rule, or by listing a finding you have reviewed (below), and the report comes back clean. If a rule's count looks wrong for your notes, stop and look at the rule, as the report will not show you the text.
 
 #### Findings you have reviewed
 
-Gitleaks can flag text that holds no secret, such as a hash beside the word "api", or prose that reads like an assignment. Once you have looked at a finding and judged it harmless, you can list it by fingerprint, so it no longer fails the run while any other finding still does:
+Either scanner can flag text that holds no secret, such as a hash beside the word "api", prose that reads like an assignment, or a connection string whose password redaction already replaced. Once you have looked at a finding and judged it harmless, you can list it by fingerprint, so it no longer fails the run while any other finding still does:
 
 ```sh
 mkdir -p ~/.config/memoria/migrate-state
@@ -65,7 +73,7 @@ memoria migrate report --qmd-config ~/.config/qmd/index.yml --tool tools/Redacti
   --gitleaks-findings ~/.config/memoria/migrate-state/findings.txt
 ```
 
-`--gitleaks-findings <file>` writes one fingerprint for each finding not already listed, in the form `<collection>/<path>:<rule>:<line>`: the collection's name in your QMD config, the file's path in it, the gitleaks rule, and the line in the redacted document. Open each file at that line, decide, and copy the ones you judge harmless into an ignore file, with a comment line above each saying why:
+`--gitleaks-findings <file>` writes one fingerprint for each finding not already listed, in the form `<collection>/<path>:<rule>:<line>`: the collection's name in your QMD config, the file's path in it, the rule, and the line in the redacted document. A trufflehog finding's rule is `trufflehog-<detector>`, such as `trufflehog-jdbc`, so one ignore file covers both scanners. Trufflehog says what it found and not where, so the tool finds that text again in the redacted documents, and each place it appears is a finding of its own. One it found only in a decoded form, which the text does not hold as such, has no place and cannot be listed. Open each file at that line, decide, and copy the ones you judge harmless into an ignore file, with a comment line above each saying why:
 
 ```text
 # a list of git blob hashes; the keyword is in a file name, and the value is a SHA-1

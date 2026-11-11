@@ -23,6 +23,11 @@ type CheckResult struct {
 	GitleaksResults map[string]int `json:"gitleaksFindings"`
 	// GitleaksIgnored is the findings the --gitleaks-ignore file lists by fingerprint. They do not fail the run.
 	GitleaksIgnored int `json:"gitleaksIgnored"`
+	// The second scanner. Gitleaks's rules are also the engine's, so trufflehog's own detectors are the independent look.
+	TrufflehogRan       bool           `json:"trufflehogRan"`
+	TrufflehogUnscanned int            `json:"trufflehogUnscanned"`
+	TrufflehogResults   map[string]int `json:"trufflehogFindings"`
+	TrufflehogIgnored   int            `json:"trufflehogIgnored"`
 }
 
 // Report is a collection's redaction check. Skipped also counts what the plan could not read, so a folder that was
@@ -32,10 +37,11 @@ type Report struct {
 	CheckResult
 }
 
-// Clean reports whether nothing was refused and gitleaks, if it ran, read everything and found nothing. Even so,
-// gitleaks is best effort: it can miss a token at a chunk boundary, so this is no proof that nothing is left.
+// Clean reports whether nothing was refused and each scanner that ran read everything and found nothing. Even so,
+// neither is proof: gitleaks can miss a token at a chunk boundary, and both can miss a form they do not know.
 func (r CheckResult) Clean() bool {
-	return r.Refused == 0 && r.CredentialNames == 0 && r.Unscanned == 0 && len(r.GitleaksResults) == 0
+	return r.Refused == 0 && r.CredentialNames == 0 && r.Unscanned == 0 && len(r.GitleaksResults) == 0 &&
+		r.TrufflehogUnscanned == 0 && len(r.TrufflehogResults) == 0
 }
 
 // ParseCheck reads the tool's output: one JSON line, the last on stdout, with one result for
