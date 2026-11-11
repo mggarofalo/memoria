@@ -13,7 +13,7 @@ import { createInterface } from "node:readline";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { buildApp } from "../src/app.ts";
-import { DeadLetterBook } from "../src/dead-letters.ts";
+import { DeadLetterBook, MemoryDeadLetters, type DeadLetterRow } from "../src/dead-letters.ts";
 import type { PoolWorkerConfig } from "../src/llm/types.ts";
 import { replaceDocumentVectors, sweepExpiredCache, type SdkDb, type SdkHandles } from "../src/llm/wire.ts";
 import { queueDbPathFor, SqliteJobStore } from "../src/queue-store.ts";
@@ -1147,30 +1147,79 @@ test("a set-aside outlives a restart, in the queue's file, and ends when the wor
   }
 });
 
-test("an older build's set-asides in the index move to the queue's file once, and the index keeps no table of ours", { skip }, async () => {
-  const { dbPath } = await fixture();
-  const at = new Date().toISOString();
+/** An index as an older build left it: a set-aside for `sub/delta.md`, and one for a path no document has. */
+async function withLegacyTable(dbPath: string, at: string): Promise<void> {
   await withSdk(dbPath, (db) => {
     const hash = (db.prepare("SELECT hash FROM documents WHERE path = 'sub/delta.md'").get() as { hash: string }).hash;
     db.exec("CREATE TABLE memoria_dead_letters (hash TEXT NOT NULL, path TEXT NOT NULL, reason TEXT NOT NULL, at TEXT NOT NULL, worker_set TEXT NOT NULL, PRIMARY KEY (hash, path))");
     db.prepare("INSERT INTO memoria_dead_letters VALUES (?, 'sub/delta.md', 'refused', ?, 'older')").run(hash, at);
+    db.prepare("INSERT INTO memoria_dead_letters VALUES ('gone', 'secret/deleted.md', 'refused', ?, 'older')").run(at);
   });
-  const mock = await new MockWorker(8).start();
-  const run1 = queueLetters(dbPath);
-  const backend = await openBackend({ dbPath, keepWarm: false, deadLetters: run1.letters, llm: remoteOptions([worker("only", mock)]) });
-  await backend.close();
-  run1.close();
-  await mock.stop();
+}
 
-  const run2 = queueLetters(dbPath);
+const legacyTableIn = (dbPath: string): Promise<unknown> => withSdk(dbPath, (db) => db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'memoria_dead_letters'").get());
+
+for (const mode of ["remote", "local"] as const) {
+  test(`an older build's set-asides in the index move to the queue's file, in ${mode} mode, and the index keeps no table of ours`, { skip }, async () => {
+    const { dbPath } = await fixture();
+    const at = new Date().toISOString();
+    await withLegacyTable(dbPath, at);
+    const mock = await new MockWorker(8).start();
+    const run1 = queueLetters(dbPath);
+    const backend = await openBackend({ dbPath, keepWarm: false, deadLetters: run1.letters, ...(mode === "remote" ? { llm: remoteOptions([worker("only", mock)]) } : {}) });
+    await backend.close();
+    run1.close();
+    await mock.stop();
+
+    const run2 = queueLetters(dbPath);
+    try {
+      assert.deepEqual(run2.letters.all().map((l) => [l.path, l.reason, l.at, l.workerSet]), [["sub/delta.md", "refused", at, "older"]], "moved with what it said, less the deleted document's");
+    } finally {
+      run2.close();
+    }
+    assert.equal(await legacyTableIn(dbPath), undefined, "dropped from the index");
+  });
+}
+
+test("a process holding no queue file keeps an older build's set-asides in memory and leaves their table in the index", { skip }, async () => {
+  const { dbPath } = await fixture();
+  await withLegacyTable(dbPath, new Date().toISOString());
+  const mock = await new MockWorker(8).start();
+  const letters = new DeadLetterBook(null);
+  const backend = await openBackend({ dbPath, keepWarm: false, deadLetters: letters, llm: remoteOptions([worker("only", mock)]) });
   try {
-    assert.deepEqual(run2.letters.all().map((l) => [l.path, l.reason, l.at, l.workerSet]), [["sub/delta.md", "refused", at, "older"]], "moved with what it said");
+    assert.deepEqual(letters.all().map((l) => l.path), ["sub/delta.md"], "the deleted document's is not kept");
   } finally {
-    run2.close();
+    await backend.close();
+    await mock.stop();
   }
-  const left = await withSdk(dbPath, (db) => db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'memoria_dead_letters'").get());
-  assert.equal(left, undefined, "dropped from the index");
+  assert.notEqual(await legacyTableIn(dbPath), undefined, "kept for the process that holds the file");
+  const left = await withSdk(dbPath, (db) => (db.prepare("SELECT path FROM memoria_dead_letters").all() as Array<{ path: string }>).map((r) => r.path));
+  assert.deepEqual(left, ["sub/delta.md"], "less the deleted document's, whose path may be sensitive");
 });
+
+test("a queue file that fails leaves status, a scan and search working, with a warning", { skip }, async () => {
+  const { dbPath } = await fixture();
+  const mock = await new MockWorker(8).start();
+  const failing = new (class extends MemoryDeadLetters {
+    override all(): DeadLetterRow[] {
+      throw new Error("disk I/O error");
+    }
+  })();
+  const warnings: string[] = [];
+  const backend = await openBackend({ dbPath, keepWarm: false, deadLetters: new DeadLetterBook(failing), onLlmWarning: (m) => void warnings.push(m), llm: remoteOptions([worker("only", mock)]) });
+  try {
+    assert.equal((await backend.getStatus()).documentsSetAside, 0);
+    assert.equal(backend.llmHealth().documentsSetAside, 0);
+    assert.equal((await backend.update({})).removed, 0);
+    assert.ok((await backend.search({ query: "nested", limit: 5, minScore: 0, rerank: false })).length > 0);
+    assert.ok(warnings.some((m) => m.includes("set aside from embedding could not be read or tidied: disk I/O error")), warnings.join("\n"));
+  } finally {
+    await backend.close();
+    await mock.stop();
+  }
+});
+
 
 test("the same content under a new path is tried afresh, and a deleted document leaves no record", { skip }, () =>
   withSetAside(async ({ dbPath, corpus, backend, letters }) => {

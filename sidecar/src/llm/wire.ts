@@ -1,5 +1,5 @@
 import { existsSync, readdirSync } from "node:fs";
-import type { DeadLetterBook, DeadLetterRow } from "../dead-letters.ts";
+import { documentHolds, moveLegacyLetters, type DeadLetterBook, type DeadLetterRow } from "../dead-letters.ts";
 import type { EmbedSummary } from "../jobs.ts";
 import { isBusy, withShortBusyTimeout } from "../sqlite-busy.ts";
 import type { BackendEmbedOptions, BackendSearchOptions, LlmOptions, OpenBackendOptions, SearchHit, SearchOutcome } from "../store.ts";
@@ -51,12 +51,6 @@ const WORKER_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const CACHE_SWEEP_MS = 60 * 60 * 1000;
 const DEFAULT_EMBED_BATCH_BYTES = 256 * 1024;
 const EMBED_BATCH_CHUNKS = 32;
-
-/**
- * Where earlier builds kept set-asides: in the index, beside QMD's tables. They now live in
- * the queue's file (src/dead-letters.ts). A table found here is moved there once, then dropped.
- */
-const LEGACY_DEAD_LETTERS = "memoria_dead_letters";
 
 /** A refusal can be the worker's doing. So it holds only for this set of workers, and not for long. */
 const DEAD_LETTER_RETRY_MS = 24 * 60 * 60 * 1000;
@@ -187,8 +181,6 @@ export interface WiredRemote {
   search(run: (options: BackendSearchOptions) => Promise<SearchHit[]>, options: BackendSearchOptions): Promise<SearchOutcome>;
   deadLetters(): DeadLetter[];
   clearDeadLetters(): number;
-  /** After a scan: set-asides of documents no row holds any more go, as their paths may be sensitive. */
-  pruneDeadLetters(): void;
   close(): void;
 }
 
@@ -216,45 +208,16 @@ function heldLetters(letters: DeadLetterBook, llm: RemoteLlm, fingerprint: strin
   return letters.all().filter((l) => l.workerSet === set && l.at > since && l.at <= until);
 }
 
-/**
- * The one-time move of an older build's set-asides out of the index. Copied once per process,
- * then the table is dropped; a busy index leaves the drop for the next pending query.
- */
-function moveLegacyLetters(db: SdkDb, letters: DeadLetterBook, moved: { copied: boolean }): void {
-  if (!hasDeadLetterTable(db)) return;
-  if (!moved.copied) {
-    const rows = db.prepare(`SELECT hash, path, reason, at, worker_set FROM ${LEGACY_DEAD_LETTERS}`).all() as Array<{ hash: string; path: string; reason: string; at: string; worker_set: string }>;
-    letters.merge(rows.map((r) => ({ hash: r.hash, path: r.path, reason: r.reason, at: r.at, workerSet: r.worker_set })));
-    moved.copied = true;
-  }
-  try {
-    politeWrite(db, () => db.exec(`DROP TABLE ${LEGACY_DEAD_LETTERS}`));
-  } catch (err) {
-    if (!(err instanceof IndexBusy)) throw err;
-  }
-}
-
-/** Does any document row hold this content under this path, or with `active`, an active one? */
-function documentHolds(db: SdkDb, active: boolean): (hash: string, path: string) => boolean {
-  const statement = db.prepare(`SELECT 1 FROM documents WHERE hash = ? AND path = ?${active ? " AND active = 1" : ""}`);
-  return (hash, path) => statement.get(hash, path) !== undefined;
-}
-
 /** Every free background slot, or fewer when the operator caps it. */
 export function embedCapacity(slots: number, cap: number | undefined): number {
   return cap ? Math.min(slots, cap) : slots;
 }
 
-interface LetterDeps {
-  letters: DeadLetterBook;
-  moved: { copied: boolean };
-}
-
-function farmDeps(handles: SdkHandles, llm: RemoteLlm, model: string, fingerprint: string, cap: number | undefined, { letters, moved }: LetterDeps): FarmDeps {
+function farmDeps(handles: SdkHandles, llm: RemoteLlm, model: string, fingerprint: string, cap: number | undefined, letters: DeadLetterBook): FarmDeps {
   const { db } = handles;
   const pending = (collection: string | undefined, redoBefore: string | undefined): PendingDoc[] => {
     politeWrite(db, () => handles.migrateVectors(model));
-    moveLegacyLetters(db, letters, moved);
+    moveLegacyLetters(db, letters);
     letters.retain(documentHolds(db, true));
     const c = collection ?? null;
     const before = redoBefore ?? null;
@@ -315,10 +278,6 @@ export function sweepExpiredCache(db: SdkDb, onWarning: (message: string) => voi
   }
 }
 
-function hasDeadLetterTable(db: SdkDb): boolean {
-  return db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='${LEGACY_DEAD_LETTERS}'`).get() !== undefined;
-}
-
 export function wireRemote(handles: SdkHandles, config: RemoteLlmConfig, options: OpenBackendOptions, letters: DeadLetterBook): WiredRemote {
   const { db, local } = handles;
   const model = local.embedModelName;
@@ -344,9 +303,7 @@ export function wireRemote(handles: SdkHandles, config: RemoteLlmConfig, options
   sweepExpiredCache(db, warn);
   const sweep = setInterval(() => sweepExpiredCache(db, warn), CACHE_SWEEP_MS);
   sweep.unref();
-  const moved = { copied: false };
-  moveLegacyLetters(db, letters, moved);
-  const deps = farmDeps(handles, llm, model, fingerprint, config.embedConcurrency, { letters, moved });
+  const deps = farmDeps(handles, llm, model, fingerprint, config.embedConcurrency, letters);
   return {
     llm,
     embed: (o) =>
@@ -366,7 +323,6 @@ export function wireRemote(handles: SdkHandles, config: RemoteLlmConfig, options
         .sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0))
         .map((l): DeadLetter => ({ hash: l.hash, path: l.path, reason: l.reason, at: l.at })),
     clearDeadLetters: () => letters.clear(),
-    pruneDeadLetters: () => void letters.retain(documentHolds(db, false)),
     close: () => {
       clearInterval(sweep);
       llm.pool.stop();

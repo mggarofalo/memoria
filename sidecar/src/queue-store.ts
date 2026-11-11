@@ -124,6 +124,8 @@ export class SqliteJobStore implements JobStore {
     this.#db.exec("PRAGMA journal_mode = WAL");
     // A job acknowledged with a 202 has to survive the machine going down.
     this.#db.exec("PRAGMA synchronous = FULL");
+    // A removed row, such as a deleted document's set-aside, is overwritten, not left in free pages.
+    this.#db.exec("PRAGMA secure_delete = ON");
     const { user_version: version } = this.#db.prepare("PRAGMA user_version").get() as { user_version: number };
     if (version > SCHEMA_VERSION) throw new Error(`The job queue at ${path} is from a newer version of memoria-qmd.`);
     this.#createTables();
@@ -183,6 +185,10 @@ export class SqliteJobStore implements JobStore {
         db.prepare("DELETE FROM dead_letters WHERE hash = ? AND path = ?").run(hash, path);
       },
       clear: () => Number(db.prepare("DELETE FROM dead_letters").run().changes),
+      // Until a checkpoint, the removed rows' old pages are still in the write-ahead log.
+      scrub: () => {
+        db.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get();
+      },
     };
   }
 

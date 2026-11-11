@@ -212,7 +212,7 @@ The API runs with a 1 GiB heap (`DOTNET_GCHeapHardLimit`), the least ingest is s
 |---|---|---|
 | `memoria-data` | API keys and the audit log, in `control.db` | **Not rebuildable.** Every key is revoked and the audit trail is gone. Back it up. |
 | `memoria-corpus` | the collection roots: every document | **Not rebuildable** unless every source still exists. Back it up. |
-| `memoria-qmd-index` | the QMD index and the job queue | Rebuildable, by running the first-run command and then `POST /reindex` with `embed: true` on the sidecar, which re-embeds everything on the workers. Backed up anyway, as restoring it is much cheaper: see [Backups](#backups). Deletes are kept in `control.db`, not here. |
+| `memoria-qmd-index` | the QMD index, and the job queue's file, which also holds the documents set aside from embedding | Rebuildable, by running the first-run command and then `POST /reindex` with `embed: true` on the sidecar, which re-embeds everything on the workers. Backed up anyway, as restoring it is much cheaper: see [Backups](#backups). Deletes are kept in `control.db`, not here. |
 | `memoria-qmd-config` | QMD's own config, used only by the `qmd` CLI. Memoria writes no collection there, so unless you add one it names none, and the CLI writes only its model names | Rebuildable. The sidecar reads its collections from the index, and a missing or empty config removes none of them. See [lost collection records](#lost-collection-records). |
 
 Keep them on a local disk, as SQLite's WAL mode does not work over a network share. A volume's name carries the compose project's, `memoria` here; `docker volume ls` shows it.
@@ -244,7 +244,7 @@ Deleting the marker turns the safeguard off for that root, and makes nothing uns
 
 A **busy index**, as when a `qmd` run outside the sidecar holds it, also waits: nothing is removed, a warning is logged, and the next scan tries again.
 
-The sidecar writes with SQLite's `secure_delete` on, so what it deletes is overwritten in the file, not left in free pages. After a scan that removed anything, it folds the write-ahead log into the file and empties it, so old versions of those pages do not linger there either. Some places can still hold deleted text for a while:
+The sidecar writes with SQLite's `secure_delete` on, so what it deletes is overwritten in the file, not left in free pages. After a scan that removed anything, it folds the write-ahead log into the file and empties it, so old versions of those pages do not linger there either. The job queue's file does the same when it removes a set-aside. Some places can still hold deleted text for a while:
 
 - **The full-text index's word lists.** FTS5 keeps a removed document's words, with their positions, so their order can be read back, until it merges the segments that hold them. It merges segments of like size as more is written, so a large old segment can keep them for a long time. `qmd cleanup` merges them all.
 - **The write-ahead log, when the empty fails.** A reader in the middle of a long read stops the log from being emptied, and its frames then stay until SQLite reuses them.
@@ -258,7 +258,7 @@ The sidecar writes with SQLite's `secure_delete` on, so what it deletes is overw
 | What | How |
 |---|---|
 | The collection roots and QMD's config | restic reads the files. |
-| `control.db`, the index and the job queue | `snapshot` copies each live database with SQLite's online backup, as `sqlite3 .backup` does, and checks each copy, and restic backs up the copies. A plain copy of a database in use can be torn. |
+| `control.db`, the index, and the job queue's file, with its jobs and set-aside documents | `snapshot` copies each live database with SQLite's online backup, as `sqlite3 .backup` does, and checks each copy, and restic backs up the copies. A plain copy of a database in use can be torn. |
 
 The index is in the backup because restoring it is much cheaper than rebuilding it. Measured with the scripted worker, 300 documents of 20 KB, 13,455 chunks, took 15 s to embed, and their whole backup took 8 s and stored 8.5 MiB. A real worker embeds far more slowly than the scripted one, and a full corpus is far larger, so re-embedding it takes hours where restoring takes minutes. A daily delta of 40 documents embedded in 3 s on the scripted worker, and its backup took 8 s and stored 5.6 MiB: most of a day's new data is the index's pages, which change throughout.
 
