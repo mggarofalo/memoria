@@ -6,7 +6,9 @@ public sealed record WorkerList(string Mode, IReadOnlyList<WorkerInfo> Workers);
 /// <summary>
 /// One inference worker, as the sidecar sees it. <see cref="Drained"/> means an
 /// operator took it out of rotation; it finishes its <see cref="InFlight"/> calls and
-/// gets no new ones until it is enabled or the sidecar restarts. Never carries a token.
+/// gets no new ones until it is enabled or the sidecar restarts. A model-compatible flag
+/// that is false means the worker reports another model than the sidecar's for that role,
+/// and gets no work in it; null means not checked yet. Never carries a token.
 /// </summary>
 public sealed record WorkerInfo(
 	string Name,
@@ -24,7 +26,9 @@ public sealed record WorkerInfo(
 	double ErrorRate,
 	string? LastHeartbeat,
 	bool? EmbedModelCompatible,
-	bool EmbedDisagrees);
+	bool EmbedDisagrees,
+	bool? RerankModelCompatible = null,
+	bool? GenerateModelCompatible = null);
 
 /// <summary>Each of a worker's circuits: <c>closed</c>, <c>open</c> or <c>half_open</c>. <see cref="Documents"/> is document embedding.</summary>
 public sealed record WorkerCircuits(string Embed, string Rerank, string Generate, string Documents);

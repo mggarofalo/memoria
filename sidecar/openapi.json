@@ -351,6 +351,8 @@
           "priority",
           "maxConcurrent",
           "embedModelCompatible",
+          "rerankModelCompatible",
+          "generateModelCompatible",
           "rerankTransport",
           "lastHeartbeat",
           "inFlight",
@@ -458,6 +460,20 @@
               "null"
             ],
             "description": "False keeps this worker off embedding and tokens. Null until checked."
+          },
+          "rerankModelCompatible": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "False keeps this worker off reranking: it reports another rerank model than the configured one. Null until checked."
+          },
+          "generateModelCompatible": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "False keeps this worker off query expansion: it reports another generate model than the configured one. Null until checked."
           },
           "rerankTransport": {
             "type": [

@@ -339,6 +339,16 @@ export class WorkerPool {
     }
   }
 
+  /**
+   * A worker's response named its model, as an embed response does. Checked like a heartbeat's
+   * report, so a swap between heartbeats is warned about once, as any other mismatch is.
+   */
+  answeredWith(worker: string, role: Capability, reported: unknown): boolean {
+    const entry = this.#entries.find((e) => e.config.name === worker);
+    const file = typeof reported === "string" ? reported : null;
+    return entry ? this.#checkModel(entry, role, file) : this.servesModel(role, file);
+  }
+
   #checkModel(entry: Entry, role: Capability, reported: string | null): boolean {
     const ok = this.servesModel(role, reported);
     if (!ok && entry.modelOk[role] !== false) this.#onModelMismatch?.(entry.config.name, role, reported);
@@ -665,6 +675,11 @@ export class WorkerPool {
       breaker.settle();
       return { ok: false, error: err, retry: false };
     }
+    if (err.code === "no_worker") {
+      // It does not offer the role, which says nothing about how well it works: another may.
+      breaker.settle();
+      return { ok: false, error: err, retry: true };
+    }
     if (isBodySpecific(err) && ++entry.refusals[key] < REFUSAL_STREAK_LIMIT) {
       // The worker answered and refused this request; another would refuse it too.
       breaker.settle();
@@ -673,6 +688,7 @@ export class WorkerPool {
     }
     this.#record(entry, false);
     if (err.code === "model_mismatch") {
+      // Usually already marked, and warned about, by the check that found it.
       entry.modelOk[capability] = false;
       breaker.settle();
     } else {
@@ -695,6 +711,11 @@ export class WorkerPool {
     } catch (err) {
       if (err instanceof ResponseViolation) throw new WorkerError("invalid_response", operation, entry.client.name, err.message);
       throw err;
+    }
+    if (!capabilities.operations.includes(OPERATIONS[capability])) {
+      // Not a wrong model: it does not do this at all. Kept, so routing passes it over from now on.
+      entry.capabilities = capabilities;
+      throw new WorkerError("no_worker", operation, entry.client.name, `the worker does not offer ${capability}`);
     }
     if (!this.#checkModel(entry, capability, capabilities.models[capability])) throw new WorkerError("model_mismatch", operation, entry.client.name, MISMATCH[capability]);
   }
@@ -754,6 +775,8 @@ export class WorkerPool {
         priority: e.config.priority,
         maxConcurrent: e.config.maxConcurrent,
         embedModelCompatible: e.modelOk.embed,
+        rerankModelCompatible: e.modelOk.rerank,
+        generateModelCompatible: e.modelOk.generate,
         rerankTransport: e.capabilities?.rerankTransport ?? null,
         lastHeartbeat: e.lastHeartbeat === null ? null : new Date(e.lastHeartbeat).toISOString(),
         inFlight: e.inFlight.interactive + e.inFlight.background,

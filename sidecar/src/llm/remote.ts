@@ -251,7 +251,7 @@ export class RemoteLlm implements LlmSurface {
     // Checked on every response, not just at startup: a worker restarted with
     // another model between heartbeats must not get vectors into the index.
     const parsed = this.#validated(client.name, "embed", () => parseEmbedResponse(raw, texts.length, this.#dimensions));
-    if (!this.pool.servesIndexModel(parsed.model)) throw new WorkerError("model_mismatch", "embed", client.name, "the worker does not serve the index's embedding model");
+    if (!this.pool.answeredWith(target.name, "embed", parsed.model)) throw new WorkerError("model_mismatch", "embed", client.name, "the worker does not serve the index's embedding model");
     if (isQuery) this.#checkSearchable(client.name, parsed.vectors[0]!.length);
     // Pinned here, after the await and with no await before it, so two first
     // responses in flight cannot both set a different length.
@@ -341,7 +341,7 @@ export class RemoteLlm implements LlmSurface {
   async #probeVector(target: DispatchTarget, text = PROBE_TEXT): Promise<number[]> {
     const raw = await target.client.post("trial", "embedQuery", "/v1/embed", { texts: [text] }, 1, TRIAL_TIMEOUT_MS);
     const parsed = this.#validated(target.client.name, "trial", () => parseEmbedResponse(raw, 1, this.#dimensions));
-    if (!this.pool.servesIndexModel(parsed.model)) throw new WorkerError("model_mismatch", "trial", target.client.name, "the worker does not serve the index's embedding model");
+    if (!this.pool.answeredWith(target.name, "embed", parsed.model)) throw new WorkerError("model_mismatch", "trial", target.client.name, "the worker does not serve the index's embedding model");
     return parsed.vectors[0]!;
   }
 

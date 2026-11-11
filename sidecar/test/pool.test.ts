@@ -480,6 +480,8 @@ test("a worker serving another reranker never reranks, so failover cannot mix tw
     assert.equal(f.a.count("/v1/rerank"), 3);
     assert.equal((await f.llm.embedDocuments(["x"])).worker, "b", "its embedding model is the index's");
     assert.deepEqual(f.mismatches, [`b rerank ${OTHER_RERANKER}`], "said once, not at every heartbeat");
+    const view = f.pool.workers()[1]!;
+    assert.deepEqual([view.embedModelCompatible, view.rerankModelCompatible, view.generateModelCompatible], [true, false, true], "GET /workers says which role it is kept off");
   } finally {
     await f.done();
   }
@@ -516,6 +518,35 @@ test("a worker serving another query-expansion model never expands queries", asy
     await f.llm.expandQuery("auth");
     assert.equal(f.b.count("/v1/complete"), 0);
     assert.equal(f.a.count("/v1/complete"), 1);
+  } finally {
+    await f.done();
+  }
+});
+
+test("a worker caught by its embed response with another model is warned about once, like any other mismatch", async () => {
+  const f = await fleet();
+  try {
+    await f.pool.refresh();
+    f.a.on("POST /v1/embed", (b) => ({ body: { model: "swapped-model.gguf", embeddings: (b.texts as string[]).map(() => [1, 2, 3, 4, 5, 6, 7, 8]) } }));
+    assert.equal((await f.llm.embedDocuments(["x"])).worker, "b");
+    assert.deepEqual(f.mismatches, ["a embed swapped-model.gguf"]);
+  } finally {
+    await f.done();
+  }
+});
+
+test("a worker asked for a role it does not offer is passed over, with no warning and no failure counted", async () => {
+  const f = await fleet();
+  try {
+    f.a.on("GET /capabilities", () => ({ body: { operations: ["embed", "rerank", "tokenize", "detokenize"], models: { embed: EMBED_FILE, rerank: RERANK_FILE, generate: null }, rerankTransport: "llama-server-qmd-tokens" } }));
+    await f.llm.expandQuery("auth");
+    assert.equal(f.a.count("/v1/complete"), 0);
+    assert.equal(f.b.count("/v1/complete"), 1);
+    assert.deepEqual(f.mismatches, []);
+    const view = f.pool.workers()[0]!;
+    assert.equal(view.errorRate, 0);
+    assert.equal(view.generateModelCompatible, null, "not a wrong model: it has none for this");
+    assert.equal(view.circuit, "closed");
   } finally {
     await f.done();
   }

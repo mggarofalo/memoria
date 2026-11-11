@@ -297,7 +297,9 @@ public sealed record SidecarWorker(
 	double QueueDepth,
 	int Calls,
 	double ErrorRate,
-	bool Drained);
+	bool Drained,
+	bool? RerankModelCompatible = null,
+	bool? GenerateModelCompatible = null);
 
 public sealed record SidecarWorkerCircuits(string Embed, string Rerank, string Generate, string Documents);
 

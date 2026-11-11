@@ -17,7 +17,7 @@ const skip = url ? false : "set MEMORIA_QMD_WORKER_URL";
 const MODELS = {
   embed: process.env.QMD_EMBED_MODEL?.trim() || "hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf",
   rerank: process.env.QMD_RERANK_MODEL?.trim() || "hf:giladgd/Qwen3-Reranker-4B-GGUF/Qwen3-Reranker-4B.Q8_0.gguf",
-  generate: "hf:tobil/qmd-query-expansion-1.7B-gguf/qmd-query-expansion-1.7B-q4_k_m.gguf",
+  generate: process.env.QMD_GENERATE_MODEL?.trim() || "hf:tobil/qmd-query-expansion-1.7B-gguf/qmd-query-expansion-1.7B-q4_k_m.gguf",
 };
 const DIMENSIONS = Number(process.env.MEMORIA_QMD_EMBED_DIMENSIONS?.trim() || 1024);
 

@@ -131,7 +131,7 @@ export const workerSchema = {
   $id: "Worker",
   type: "object",
   description: "One worker in the pool. Never includes its URL path or token.",
-  required: ["name", "host", "state", "circuit", "circuits", "embedDisagrees", "capabilities", "priority", "maxConcurrent", "embedModelCompatible", "rerankTransport", "lastHeartbeat", "inFlight", "queueDepth", "calls", "errorRate", "drained"],
+  required: ["name", "host", "state", "circuit", "circuits", "embedDisagrees", "capabilities", "priority", "maxConcurrent", "embedModelCompatible", "rerankModelCompatible", "generateModelCompatible", "rerankTransport", "lastHeartbeat", "inFlight", "queueDepth", "calls", "errorRate", "drained"],
   properties: {
     name: { type: "string" },
     host: { type: "string", description: "Host and port." },
@@ -153,6 +153,8 @@ export const workerSchema = {
     priority: { type: "integer" },
     maxConcurrent: { type: "integer" },
     embedModelCompatible: { type: "boolean", nullable: true, description: "False keeps this worker off embedding and tokens. Null until checked." },
+    rerankModelCompatible: { type: "boolean", nullable: true, description: "False keeps this worker off reranking: it reports another rerank model than the configured one. Null until checked." },
+    generateModelCompatible: { type: "boolean", nullable: true, description: "False keeps this worker off query expansion: it reports another generate model than the configured one. Null until checked." },
     rerankTransport: { type: "string", nullable: true },
     lastHeartbeat: { type: "string", nullable: true },
     inFlight: { type: "integer" },

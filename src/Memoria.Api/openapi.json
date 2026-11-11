@@ -4609,6 +4609,14 @@
           },
           "embedDisagrees": {
             "type": "boolean"
+          },
+          "rerankModelCompatible": {
+            "type": "boolean",
+            "nullable": true
+          },
+          "generateModelCompatible": {
+            "type": "boolean",
+            "nullable": true
           }
         }
       },
