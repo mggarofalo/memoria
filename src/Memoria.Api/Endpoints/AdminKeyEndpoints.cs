@@ -23,8 +23,11 @@ public static partial class AdminKeyEndpoints
 
 	public static IEndpointRouteBuilder MapAdminKeys(this IEndpointRouteBuilder app)
 	{
+		// A key bound to collections cannot manage keys: it could otherwise mint a key wider than itself, or revoke
+		// the keys that are. It is an authorization requirement, so it is decided before the body is read.
 		RouteGroupBuilder keys = app.MapGroup("/v1/admin/keys")
 			.WithMemoriaScope(MemoriaScopes.Admin)
+			.WithMetadata(new MemoriaUnboundKeyAttribute())
 			.DecideContentTypeAfterAuthorization()
 			.WithTags("Admin")
 			.AddEndpointFilter(RequireApiKeyModeAsync)
@@ -39,7 +42,9 @@ public static partial class AdminKeyEndpoints
 				"Creates a key and returns its plaintext. This response is the only time the plaintext exists. "
 				+ "`read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. "
 				+ "A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. "
-				+ "With `Memoria:Auth:DefaultKeyLifetime` set, a key without the `admin` scope and with no `expiresAt` expires that long after it is made.")
+				+ "A key with `admin` acts on every collection, so it cannot list `collections` (400, `admin_key_bound`); give it `allCollections` if it also reads or ingests. "
+				+ "With `Memoria:Auth:DefaultKeyLifetime` set, a key with `read` or `ingest` and no `expiresAt` expires that long after it is made. "
+				+ "`expiresAt` may be at most two years ahead. A key never makes a key wider than itself: one that expires cannot make a key that outlives it (403, `key_exceeds_caller`).")
 			.ProducesValidationProblem();
 
 		keys.MapGet("/", ListAsync)
@@ -50,7 +55,7 @@ public static partial class AdminKeyEndpoints
 		keys.MapDelete("/{id}", RevokeAsync)
 			.WithName("revokeApiKey")
 			.WithSummary("Revoke an API key")
-			.WithDescription("Takes effect on the key's next request. Revoking a revoked key succeeds and keeps the original timestamp.")
+			.WithDescription("Takes effect on the key's next request. Revoking a revoked key succeeds and keeps the original timestamp. A key may always revoke itself, but not an active key that outlives it (403, `key_exceeds_caller`).")
 			.ProducesProblem(StatusCodes.Status404NotFound);
 
 		keys.MapPost("/{id}:rotate", RotateAsync)
@@ -58,7 +63,8 @@ public static partial class AdminKeyEndpoints
 			.WithSummary("Rotate an API key")
 			.WithDescription(
 				"Replaces the key's secret and returns the new plaintext, once. The id, scopes, collections and expiry stay; "
-				+ "the previous token stops working immediately. A revoked or expired key cannot be rotated (409).")
+				+ "the previous token stops working immediately. A revoked or expired key cannot be rotated (409), "
+				+ "nor can a key that outlives the caller's own (403, `key_exceeds_caller`) or one holding `admin` beside a collection list (409, `bound_admin_key`).")
 			.ProducesProblem(StatusCodes.Status404NotFound)
 			.ProducesProblem(StatusCodes.Status409Conflict);
 
@@ -80,7 +86,7 @@ public static partial class AdminKeyEndpoints
 		return await next(context);
 	}
 
-	private static async Task<Results<Created<IssuedApiKey>, ValidationProblem>> CreateAsync(
+	private static async Task<Results<Created<IssuedApiKey>, ValidationProblem, ProblemHttpResult>> CreateAsync(
 		CreateApiKeyRequest request,
 		IApiKeyStore store,
 		TimeProvider timeProvider,
@@ -95,13 +101,20 @@ public static partial class AdminKeyEndpoints
 		Dictionary<string, string[]> errors = Validate(request, now);
 		if (errors.Count > 0)
 		{
-			return TypedResults.ValidationProblem(errors);
+			return TypedResults.ValidationProblem(errors, extensions: ValidationCode(request));
 		}
 
+		ApiKeyRecord? caller = await CallerAsync(store, context, now, cancellationToken);
 		string[] scopes = request.Scopes!.Distinct(StringComparer.Ordinal).ToArray();
 		string[] collections = (request.Collections ?? []).Distinct(StringComparer.Ordinal).ToArray();
-		DateTimeOffset? expiresAt = request.ExpiresAt ?? DefaultExpiry(scopes, now, options.Value.Auth.DefaultKeyLifetime);
-		(ApiKeyRecord record, string token) = ApiKeyRecord.Issue(request.Label!.Trim(), scopes, collections, request.AllCollections == true, expiresAt, now);
+		bool allCollections = request.AllCollections == true;
+		DateTimeOffset? expiresAt = request.ExpiresAt ?? Earliest(DefaultExpiry(scopes, now, options.Value.Auth.DefaultKeyLifetime), caller?.ExpiresAt);
+		if (WiderThanCaller(caller, scopes, collections, allCollections, expiresAt) is { } wider)
+		{
+			return wider;
+		}
+
+		(ApiKeyRecord record, string token) = ApiKeyRecord.Issue(request.Label!.Trim(), scopes, collections, allCollections, expiresAt, now);
 		await store.InsertAsync(record, cancellationToken);
 
 		knownGood.Remember(record.Id, record.Sha256Hash);
@@ -111,10 +124,64 @@ public static partial class AdminKeyEndpoints
 		return TypedResults.Created($"/v1/admin/keys/{record.Id}", new IssuedApiKey(token, ToInfo(record)));
 	}
 
-	/// <summary>When a key with no <c>expiresAt</c> of its own expires: never for an admin key, or with no default lifetime set.</summary>
+	/// <summary>
+	/// When a key with no <c>expiresAt</c> of its own expires: never with no default lifetime set, or for a key whose only scope is
+	/// <c>admin</c>, so the operator is not locked out when every admin key lapses at once. A key that can read or ingest gets the
+	/// default even beside <c>admin</c>.
+	/// </summary>
 	public static DateTimeOffset? DefaultExpiry(IReadOnlyCollection<string> scopes, DateTimeOffset now, TimeSpan? lifetime)
 	{
-		return lifetime is { } span && !scopes.Contains(MemoriaScopes.Admin) ? now + span : null;
+		bool adminOnly = scopes.All(static scope => scope == MemoriaScopes.Admin);
+		return lifetime is { } span && !adminOnly ? now + span : null;
+	}
+
+	/// <summary>The sooner of two expiries, where null is never.</summary>
+	private static DateTimeOffset? Earliest(DateTimeOffset? first, DateTimeOffset? second)
+	{
+		if (first is not { } a)
+		{
+			return second;
+		}
+
+		return second is { } b && b < a ? b : a;
+	}
+
+	/// <summary>
+	/// The calling key's own record, read again now. Null when it has gone, or was revoked or expired since it authenticated,
+	/// so a request already in flight cannot outlive its key.
+	/// </summary>
+	private static async Task<ApiKeyRecord?> CallerAsync(IApiKeyStore store, HttpContext context, DateTimeOffset now, CancellationToken cancellationToken)
+	{
+		ApiKeyRecord? caller = Actor(context) is { } id ? await store.FindAsync(id, cancellationToken) : null;
+		return caller is not null && caller.IsActive(now) ? caller : null;
+	}
+
+	/// <summary>Null when the caller may hand out, rotate or revoke a key of this shape; otherwise the 403 that says why not.</summary>
+	private static ProblemHttpResult? WiderThanCaller(ApiKeyRecord? caller, IReadOnlyCollection<string> scopes, IReadOnlyCollection<string> collections, bool allCollections, DateTimeOffset? expiresAt)
+	{
+		if (caller is null)
+		{
+			return TypedResults.Problem(
+				statusCode: StatusCodes.Status403Forbidden,
+				title: "Calling key is not active",
+				detail: "The key making this request was revoked or expired while it ran.",
+				extensions: new Dictionary<string, object?> { ["code"] = "caller_inactive" });
+		}
+
+		string? dimension = KeyGrant.Exceeds(caller, scopes, collections, allCollections, expiresAt);
+		if (dimension is null)
+		{
+			return null;
+		}
+
+		string why = dimension == "lifetime"
+			? "A key that expires cannot make, rotate or revoke one that outlives it: name an earlier expiresAt, or use a key that does not expire."
+			: $"It would be wider in its {dimension}.";
+		return TypedResults.Problem(
+			statusCode: StatusCodes.Status403Forbidden,
+			title: "Key is wider than the caller",
+			detail: "A key cannot issue, rotate or revoke a key wider than itself. " + why,
+			extensions: new Dictionary<string, object?> { ["code"] = "key_exceeds_caller", ["dimension"] = dimension });
 	}
 
 	private static async Task<Ok<ApiKeyList>> ListAsync(IApiKeyStore store, CancellationToken cancellationToken)
@@ -133,7 +200,16 @@ public static partial class AdminKeyEndpoints
 		KnownGoodKeys knownGood,
 		CancellationToken cancellationToken)
 	{
-		if (!await store.RevokeAsync(id, timeProvider.GetUtcNow(), cancellationToken))
+		// A key may always revoke itself, and revoking a key that no longer works takes nothing away. Otherwise a key
+		// that expires cannot revoke one that outlives it: a short-lived automation key must not lock the operator out.
+		DateTimeOffset now = timeProvider.GetUtcNow();
+		if (await store.FindAsync(id, cancellationToken) is { } target && target.IsActive(now) && target.Id != Actor(context)
+			&& WiderThanCaller(await CallerAsync(store, context, now, cancellationToken), target.Scopes, target.Collections, target.AllCollections, target.ExpiresAt) is { } wider)
+		{
+			return wider;
+		}
+
+		if (!await store.RevokeAsync(id, now, cancellationToken))
 		{
 			return UnknownKey();
 		}
@@ -164,9 +240,25 @@ public static partial class AdminKeyEndpoints
 			return UnknownKey();
 		}
 
-		if (!record.IsActive(timeProvider.GetUtcNow()))
+		DateTimeOffset now = timeProvider.GetUtcNow();
+		if (!record.IsActive(now))
 		{
 			return InactiveKey();
+		}
+
+		if (record.HoldsBoundAdmin)
+		{
+			return TypedResults.Problem(
+				statusCode: StatusCodes.Status409Conflict,
+				title: "Key holds admin beside a collection list",
+				detail: "Such a key can no longer be issued, so it is not rotated either. Issue an admin key without collections, and a read or ingest key for the collections, then revoke this one.",
+				extensions: new Dictionary<string, object?> { ["code"] = "bound_admin_key" });
+		}
+
+		ApiKeyRecord? caller = await CallerAsync(store, context, now, cancellationToken);
+		if (WiderThanCaller(caller, record.Scopes, record.Collections, record.AllCollections, record.ExpiresAt) is { } wider)
+		{
+			return wider;
 		}
 
 		string token = ApiKeyToken.NewToken(id);
@@ -210,8 +302,27 @@ public static partial class AdminKeyEndpoints
 		{
 			errors["expiresAt"] = ["expiresAt must be in the future."];
 		}
+		else if (request.ExpiresAt > now + KeyGrant.MaxLifetime)
+		{
+			errors["expiresAt"] = [$"expiresAt may be at most {KeyGrant.MaxLifetime.TotalDays:0} days ahead. Issue a replacement before the key lapses."];
+		}
 
 		return errors;
+	}
+
+	private const string AdminWithCollections =
+		"A key with the admin scope acts on every collection, so it cannot list collections. Issue the admin key without collections, "
+		+ "with allCollections if it must also read or ingest, and give a bound key only read or ingest.";
+
+	/// <summary>The refusal of <c>admin</c> beside a collection list carries a code, so a client can tell it from a typo.</summary>
+	private static Dictionary<string, object?>? ValidationCode(CreateApiKeyRequest request)
+	{
+		return IsAdminWithCollections(request) ? new Dictionary<string, object?> { ["code"] = "admin_key_bound" } : null;
+	}
+
+	private static bool IsAdminWithCollections(CreateApiKeyRequest request)
+	{
+		return request.Scopes is { } scopes && scopes.Contains(MemoriaScopes.Admin, StringComparer.Ordinal) && request.Collections is not null;
 	}
 
 	private static string? CollectionsProblem(CreateApiKeyRequest request)
@@ -221,6 +332,11 @@ public static partial class AdminKeyEndpoints
 		{
 			bool adminOnly = request.Scopes is { Count: > 0 } && request.Scopes.All(static scope => scope == MemoriaScopes.Admin);
 			return allCollections || adminOnly ? null : "List the collections this key may read, or set allCollections to true to request every collection.";
+		}
+
+		if (IsAdminWithCollections(request))
+		{
+			return AdminWithCollections;
 		}
 
 		if (allCollections)

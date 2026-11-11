@@ -125,8 +125,8 @@ type DocumentMetadata struct {
 
 // HealthReport defines model for HealthReport.
 type HealthReport struct {
-	Status  string `json:"status"`
-	Version string `json:"version"`
+	Status  string  `json:"status"`
+	Version *string `json:"version"`
 }
 
 // HttpValidationProblemDetails defines model for HttpValidationProblemDetails.
@@ -738,7 +738,7 @@ type ClientInterface interface {
 
 	// Health Liveness
 	//
-	// The API process is up. Anonymous. Does not contact the search backend; use `/ready` for that.
+	// The API process is up. Anonymous. Does not contact the search backend; use `/ready` for that. `version`, the exact build and commit, is null unless the request carries a valid API key, so a scanner cannot match the build against advisories.
 	//
 	// Corresponds with GET /health (the `Health` operationId).
 	Health(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -759,7 +759,7 @@ type ClientInterface interface {
 
 	// CreateApiKeyWithBody Issue an API key
 	//
-	// Creates a key and returns its plaintext. This response is the only time the plaintext exists. `read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. With `Memoria:Auth:DefaultKeyLifetime` set, a key without the `admin` scope and with no `expiresAt` expires that long after it is made. Requires the `admin` scope.
+	// Creates a key and returns its plaintext. This response is the only time the plaintext exists. `read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. A key with `admin` acts on every collection, so it cannot list `collections` (400, `admin_key_bound`); give it `allCollections` if it also reads or ingests. With `Memoria:Auth:DefaultKeyLifetime` set, a key with `read` or `ingest` and no `expiresAt` expires that long after it is made. `expiresAt` may be at most two years ahead. A key never makes a key wider than itself: one that expires cannot make a key that outlives it (403, `key_exceeds_caller`). Requires the `admin` scope.
 	//
 	// Takes any type of body and a specified content type.
 	//
@@ -768,7 +768,7 @@ type ClientInterface interface {
 
 	// CreateApiKey Issue an API key
 	//
-	// Creates a key and returns its plaintext. This response is the only time the plaintext exists. `read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. With `Memoria:Auth:DefaultKeyLifetime` set, a key without the `admin` scope and with no `expiresAt` expires that long after it is made. Requires the `admin` scope.
+	// Creates a key and returns its plaintext. This response is the only time the plaintext exists. `read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. A key with `admin` acts on every collection, so it cannot list `collections` (400, `admin_key_bound`); give it `allCollections` if it also reads or ingests. With `Memoria:Auth:DefaultKeyLifetime` set, a key with `read` or `ingest` and no `expiresAt` expires that long after it is made. `expiresAt` may be at most two years ahead. A key never makes a key wider than itself: one that expires cannot make a key that outlives it (403, `key_exceeds_caller`). Requires the `admin` scope.
 	//
 	// Takes a body of the `application/json` content type.
 	//
@@ -777,14 +777,14 @@ type ClientInterface interface {
 
 	// RevokeApiKey Revoke an API key
 	//
-	// Takes effect on the key's next request. Revoking a revoked key succeeds and keeps the original timestamp. Requires the `admin` scope.
+	// Takes effect on the key's next request. Revoking a revoked key succeeds and keeps the original timestamp. A key may always revoke itself, but not an active key that outlives it (403, `key_exceeds_caller`). Requires the `admin` scope.
 	//
 	// Corresponds with DELETE /v1/admin/keys/{id} (the `RevokeApiKey` operationId).
 	RevokeApiKey(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// RotateApiKey Rotate an API key
 	//
-	// Replaces the key's secret and returns the new plaintext, once. The id, scopes, collections and expiry stay; the previous token stops working immediately. A revoked or expired key cannot be rotated (409). Requires the `admin` scope.
+	// Replaces the key's secret and returns the new plaintext, once. The id, scopes, collections and expiry stay; the previous token stops working immediately. A revoked or expired key cannot be rotated (409), nor can a key that outlives the caller's own (403, `key_exceeds_caller`) or one holding `admin` beside a collection list (409, `bound_admin_key`). Requires the `admin` scope.
 	//
 	// Corresponds with POST /v1/admin/keys/{id}:rotate (the `RotateApiKey` operationId).
 	RotateApiKey(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -969,7 +969,7 @@ type ClientInterface interface {
 
 // Health Liveness
 //
-// The API process is up. Anonymous. Does not contact the search backend; use `/ready` for that.
+// The API process is up. Anonymous. Does not contact the search backend; use `/ready` for that. `version`, the exact build and commit, is null unless the request carries a valid API key, so a scanner cannot match the build against advisories.
 //
 // Corresponds with GET /health (the `Health` operationId).
 func (c *Client) Health(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
@@ -1020,7 +1020,7 @@ func (c *Client) ListApiKeys(ctx context.Context, reqEditors ...RequestEditorFn)
 
 // CreateApiKeyWithBody Issue an API key
 //
-// Creates a key and returns its plaintext. This response is the only time the plaintext exists. `read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. With `Memoria:Auth:DefaultKeyLifetime` set, a key without the `admin` scope and with no `expiresAt` expires that long after it is made. Requires the `admin` scope.
+// Creates a key and returns its plaintext. This response is the only time the plaintext exists. `read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. A key with `admin` acts on every collection, so it cannot list `collections` (400, `admin_key_bound`); give it `allCollections` if it also reads or ingests. With `Memoria:Auth:DefaultKeyLifetime` set, a key with `read` or `ingest` and no `expiresAt` expires that long after it is made. `expiresAt` may be at most two years ahead. A key never makes a key wider than itself: one that expires cannot make a key that outlives it (403, `key_exceeds_caller`). Requires the `admin` scope.
 //
 // Takes any type of body and a specified content type.
 //
@@ -1039,7 +1039,7 @@ func (c *Client) CreateApiKeyWithBody(ctx context.Context, contentType string, b
 
 // CreateApiKey Issue an API key
 //
-// Creates a key and returns its plaintext. This response is the only time the plaintext exists. `read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. With `Memoria:Auth:DefaultKeyLifetime` set, a key without the `admin` scope and with no `expiresAt` expires that long after it is made. Requires the `admin` scope.
+// Creates a key and returns its plaintext. This response is the only time the plaintext exists. `read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. A key with `admin` acts on every collection, so it cannot list `collections` (400, `admin_key_bound`); give it `allCollections` if it also reads or ingests. With `Memoria:Auth:DefaultKeyLifetime` set, a key with `read` or `ingest` and no `expiresAt` expires that long after it is made. `expiresAt` may be at most two years ahead. A key never makes a key wider than itself: one that expires cannot make a key that outlives it (403, `key_exceeds_caller`). Requires the `admin` scope.
 //
 // Takes a body of the `application/json` content type.
 //
@@ -1058,7 +1058,7 @@ func (c *Client) CreateApiKey(ctx context.Context, body CreateApiKeyJSONRequestB
 
 // RevokeApiKey Revoke an API key
 //
-// Takes effect on the key's next request. Revoking a revoked key succeeds and keeps the original timestamp. Requires the `admin` scope.
+// Takes effect on the key's next request. Revoking a revoked key succeeds and keeps the original timestamp. A key may always revoke itself, but not an active key that outlives it (403, `key_exceeds_caller`). Requires the `admin` scope.
 //
 // Corresponds with DELETE /v1/admin/keys/{id} (the `RevokeApiKey` operationId).
 func (c *Client) RevokeApiKey(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*http.Response, error) {
@@ -1075,7 +1075,7 @@ func (c *Client) RevokeApiKey(ctx context.Context, id string, reqEditors ...Requ
 
 // RotateApiKey Rotate an API key
 //
-// Replaces the key's secret and returns the new plaintext, once. The id, scopes, collections and expiry stay; the previous token stops working immediately. A revoked or expired key cannot be rotated (409). Requires the `admin` scope.
+// Replaces the key's secret and returns the new plaintext, once. The id, scopes, collections and expiry stay; the previous token stops working immediately. A revoked or expired key cannot be rotated (409), nor can a key that outlives the caller's own (403, `key_exceeds_caller`) or one holding `admin` beside a collection list (409, `bound_admin_key`). Requires the `admin` scope.
 //
 // Corresponds with POST /v1/admin/keys/{id}:rotate (the `RotateApiKey` operationId).
 func (c *Client) RotateApiKey(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*http.Response, error) {
@@ -2977,7 +2977,7 @@ type ClientWithResponsesInterface interface {
 
 	// HealthWithResponse Liveness
 	//
-	// The API process is up. Anonymous. Does not contact the search backend; use `/ready` for that.
+	// The API process is up. Anonymous. Does not contact the search backend; use `/ready` for that. `version`, the exact build and commit, is null unless the request carries a valid API key, so a scanner cannot match the build against advisories.
 	//
 	// Returns a wrapper object for the known response body format(s).
 	//
@@ -3004,7 +3004,7 @@ type ClientWithResponsesInterface interface {
 
 	// CreateApiKeyWithBodyWithResponse Issue an API key
 	//
-	// Creates a key and returns its plaintext. This response is the only time the plaintext exists. `read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. With `Memoria:Auth:DefaultKeyLifetime` set, a key without the `admin` scope and with no `expiresAt` expires that long after it is made. Requires the `admin` scope.
+	// Creates a key and returns its plaintext. This response is the only time the plaintext exists. `read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. A key with `admin` acts on every collection, so it cannot list `collections` (400, `admin_key_bound`); give it `allCollections` if it also reads or ingests. With `Memoria:Auth:DefaultKeyLifetime` set, a key with `read` or `ingest` and no `expiresAt` expires that long after it is made. `expiresAt` may be at most two years ahead. A key never makes a key wider than itself: one that expires cannot make a key that outlives it (403, `key_exceeds_caller`). Requires the `admin` scope.
 	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -3013,7 +3013,7 @@ type ClientWithResponsesInterface interface {
 
 	// CreateApiKeyWithResponse Issue an API key
 	//
-	// Creates a key and returns its plaintext. This response is the only time the plaintext exists. `read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. With `Memoria:Auth:DefaultKeyLifetime` set, a key without the `admin` scope and with no `expiresAt` expires that long after it is made. Requires the `admin` scope.
+	// Creates a key and returns its plaintext. This response is the only time the plaintext exists. `read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. A key with `admin` acts on every collection, so it cannot list `collections` (400, `admin_key_bound`); give it `allCollections` if it also reads or ingests. With `Memoria:Auth:DefaultKeyLifetime` set, a key with `read` or `ingest` and no `expiresAt` expires that long after it is made. `expiresAt` may be at most two years ahead. A key never makes a key wider than itself: one that expires cannot make a key that outlives it (403, `key_exceeds_caller`). Requires the `admin` scope.
 	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -3022,7 +3022,7 @@ type ClientWithResponsesInterface interface {
 
 	// RevokeApiKeyWithResponse Revoke an API key
 	//
-	// Takes effect on the key's next request. Revoking a revoked key succeeds and keeps the original timestamp. Requires the `admin` scope.
+	// Takes effect on the key's next request. Revoking a revoked key succeeds and keeps the original timestamp. A key may always revoke itself, but not an active key that outlives it (403, `key_exceeds_caller`). Requires the `admin` scope.
 	//
 	// Returns a wrapper object for the known response body format(s).
 	//
@@ -3031,7 +3031,7 @@ type ClientWithResponsesInterface interface {
 
 	// RotateApiKeyWithResponse Rotate an API key
 	//
-	// Replaces the key's secret and returns the new plaintext, once. The id, scopes, collections and expiry stay; the previous token stops working immediately. A revoked or expired key cannot be rotated (409). Requires the `admin` scope.
+	// Replaces the key's secret and returns the new plaintext, once. The id, scopes, collections and expiry stay; the previous token stops working immediately. A revoked or expired key cannot be rotated (409), nor can a key that outlives the caller's own (403, `key_exceeds_caller`) or one holding `admin` beside a collection list (409, `bound_admin_key`). Requires the `admin` scope.
 	//
 	// Returns a wrapper object for the known response body format(s).
 	//
@@ -5518,7 +5518,7 @@ func (r GetStatusResponse) ContentType() string {
 
 // HealthWithResponse Liveness
 //
-// The API process is up. Anonymous. Does not contact the search backend; use `/ready` for that.
+// The API process is up. Anonymous. Does not contact the search backend; use `/ready` for that. `version`, the exact build and commit, is null unless the request carries a valid API key, so a scanner cannot match the build against advisories.
 //
 // Returns a wrapper object for the known response body format(s).
 //
@@ -5563,7 +5563,7 @@ func (c *ClientWithResponses) ListApiKeysWithResponse(ctx context.Context, reqEd
 
 // CreateApiKeyWithBodyWithResponse Issue an API key
 //
-// Creates a key and returns its plaintext. This response is the only time the plaintext exists. `read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. With `Memoria:Auth:DefaultKeyLifetime` set, a key without the `admin` scope and with no `expiresAt` expires that long after it is made. Requires the `admin` scope.
+// Creates a key and returns its plaintext. This response is the only time the plaintext exists. `read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. A key with `admin` acts on every collection, so it cannot list `collections` (400, `admin_key_bound`); give it `allCollections` if it also reads or ingests. With `Memoria:Auth:DefaultKeyLifetime` set, a key with `read` or `ingest` and no `expiresAt` expires that long after it is made. `expiresAt` may be at most two years ahead. A key never makes a key wider than itself: one that expires cannot make a key that outlives it (403, `key_exceeds_caller`). Requires the `admin` scope.
 //
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 //
@@ -5578,7 +5578,7 @@ func (c *ClientWithResponses) CreateApiKeyWithBodyWithResponse(ctx context.Conte
 
 // CreateApiKeyWithResponse Issue an API key
 //
-// Creates a key and returns its plaintext. This response is the only time the plaintext exists. `read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. With `Memoria:Auth:DefaultKeyLifetime` set, a key without the `admin` scope and with no `expiresAt` expires that long after it is made. Requires the `admin` scope.
+// Creates a key and returns its plaintext. This response is the only time the plaintext exists. `read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. A key with `admin` acts on every collection, so it cannot list `collections` (400, `admin_key_bound`); give it `allCollections` if it also reads or ingests. With `Memoria:Auth:DefaultKeyLifetime` set, a key with `read` or `ingest` and no `expiresAt` expires that long after it is made. `expiresAt` may be at most two years ahead. A key never makes a key wider than itself: one that expires cannot make a key that outlives it (403, `key_exceeds_caller`). Requires the `admin` scope.
 //
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 //
@@ -5593,7 +5593,7 @@ func (c *ClientWithResponses) CreateApiKeyWithResponse(ctx context.Context, body
 
 // RevokeApiKeyWithResponse Revoke an API key
 //
-// Takes effect on the key's next request. Revoking a revoked key succeeds and keeps the original timestamp. Requires the `admin` scope.
+// Takes effect on the key's next request. Revoking a revoked key succeeds and keeps the original timestamp. A key may always revoke itself, but not an active key that outlives it (403, `key_exceeds_caller`). Requires the `admin` scope.
 //
 // Returns a wrapper object for the known response body format(s).
 //
@@ -5608,7 +5608,7 @@ func (c *ClientWithResponses) RevokeApiKeyWithResponse(ctx context.Context, id s
 
 // RotateApiKeyWithResponse Rotate an API key
 //
-// Replaces the key's secret and returns the new plaintext, once. The id, scopes, collections and expiry stay; the previous token stops working immediately. A revoked or expired key cannot be rotated (409). Requires the `admin` scope.
+// Replaces the key's secret and returns the new plaintext, once. The id, scopes, collections and expiry stay; the previous token stops working immediately. A revoked or expired key cannot be rotated (409), nor can a key that outlives the caller's own (403, `key_exceeds_caller`) or one holding `admin` beside a collection list (409, `bound_admin_key`). Requires the `admin` scope.
 //
 // Returns a wrapper object for the known response body format(s).
 //

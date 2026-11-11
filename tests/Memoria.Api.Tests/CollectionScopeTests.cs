@@ -424,15 +424,27 @@ public sealed class CollectionScopeTests(AuthApiFactory factory) : IClassFixture
 	}
 
 	[Fact]
-	public async Task BackendFailure_AdminWithReadSeesTheFailure_ButNoDocumentDetailsWhenScoped()
+	public async Task BackendFailure_AnUnboundAdminWithReadSeesTheFailure()
+	{
+		factory.Sidecar.On("GET", "/collections", HttpStatusCode.InternalServerError, """{"error":"internal","message":"boom at sidecar","details":{"similarFiles":["codex-sessions/secret.md"]}}""");
+		HttpClient admin = await factory.ClientWithScopesAsync([MemoriaScopes.Read, MemoriaScopes.Admin], allCollections: true);
+
+		string raw = await (await admin.GetAsync("/v1/collections")).Content.ReadAsStringAsync();
+
+		Assert.Contains("boom at sidecar", raw);
+		Assert.Contains("upstreamStatus", raw);
+	}
+
+	[Fact]
+	public async Task BackendFailure_IsHiddenFromAnAdminKeyBoundToCollections()
 	{
 		factory.Sidecar.On("GET", "/collections", HttpStatusCode.InternalServerError, """{"error":"internal","message":"boom at sidecar","details":{"similarFiles":["codex-sessions/secret.md"]}}""");
 		HttpClient scopedAdmin = await factory.ClientWithScopesAsync([MemoriaScopes.Read, MemoriaScopes.Admin], [Allowed]);
 
 		string raw = await (await scopedAdmin.GetAsync("/v1/collections")).Content.ReadAsStringAsync();
 
-		Assert.Contains("boom at sidecar", raw);
-		Assert.Contains("upstreamStatus", raw);
+		Assert.DoesNotContain("boom at sidecar", raw);
+		Assert.DoesNotContain("upstreamStatus", raw);
 		Assert.DoesNotContain("secret.md", raw);
 	}
 

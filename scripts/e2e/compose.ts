@@ -115,7 +115,9 @@ async function firstRun(): Promise<string> {
   check("compose: the first admin key is made", admin !== "");
   compose("up", "-d");
   const health = await until(() => api("/health").catch(() => ({ status: 0, body: {} })), (r) => r.status === 200, 90);
-  check("compose: the API answers, at the version it was built with", health.status === 200 && health.body.version === VERSION, health.body);
+  check("compose: the API answers, and names no version to an anonymous caller", health.status === 200 && health.body.version === null, health.body);
+  const keyed = await api("/health", { key: admin });
+  check("compose: to a key, it names the version it was built with", keyed.status === 200 && keyed.body.version === VERSION, keyed.body);
   check("compose: so does the sidecar, at the same version", (sidecar("/health") as { version?: string }).version === VERSION);
   return admin;
 }

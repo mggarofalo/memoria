@@ -807,7 +807,13 @@ public sealed class IngestTombstoneTests(AuthApiFactory factory) : IClassFixture
 		Assert.Equal(HttpStatusCode.Forbidden, refused.StatusCode);
 		Assert.Equal("restore_needs_admin", (await ReadAsync(refused)).GetProperty("code").GetString());
 
-		(Memoria.Api.Auth.ApiKeyRecord record, string key) = await factory.IssueAsync([MemoriaScopes.Ingest, MemoriaScopes.Admin], ["c"]);
+		// A key holding admin beside a collection list is not given admin, so it cannot restore either.
+		(_, string bound) = await factory.IssueAsync([MemoriaScopes.Ingest, MemoriaScopes.Admin], ["c"]);
+		HttpResponseMessage boundRefused = await AuthApiFactory.Authorized(factory.CreateClient(), bound).PostAsync("/v1/documents?restoreDeleted=true", new StringContent(json, Encoding.UTF8, "application/json"));
+		Assert.Equal(HttpStatusCode.Forbidden, boundRefused.StatusCode);
+		Assert.Equal("restore_needs_admin", (await ReadAsync(boundRefused)).GetProperty("code").GetString());
+
+		(Memoria.Api.Auth.ApiKeyRecord record, string key) = await factory.IssueAsync([MemoriaScopes.Ingest, MemoriaScopes.Admin], allCollections: true);
 		HttpResponseMessage restored = await AuthApiFactory.Authorized(factory.CreateClient(), key).PostAsync("/v1/documents?restoreDeleted=true", new StringContent(json, Encoding.UTF8, "application/json"));
 		Assert.Equal(HttpStatusCode.Accepted, restored.StatusCode);
 		Assert.Single(corpus.Files);

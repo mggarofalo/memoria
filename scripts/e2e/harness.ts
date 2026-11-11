@@ -3,7 +3,7 @@
  * throwaway index, and helpers to run the CLI and record results. See README.md.
  */
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import http from "node:http";
@@ -419,6 +419,24 @@ await store.close();`;
 
   protected controlPath(): string {
     return path.join(this.dir, "control.sqlite");
+  }
+
+  /**
+   * Writes a key straight into the live control database, the way an older version that allowed it would have issued it,
+   * and returns its token. For keys the API now refuses to issue.
+   */
+  plantKey(label: string, scopes: string[], collections: string[]): string {
+    const token = this.remember(`mem_${randomBytes(8).toString("hex")}_${randomBytes(32).toString("hex")}`);
+    const writer = new DatabaseSync(this.controlPath());
+    try {
+      writer.exec("PRAGMA busy_timeout = 5000");
+      writer
+        .prepare("INSERT INTO api_keys (id, sha256_hash, label, scopes, collections, all_collections, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)")
+        .run(token.split("_")[1] ?? "", createHash("sha256").update(token).digest(), label, JSON.stringify(scopes), JSON.stringify(collections), new Date().toISOString());
+    } finally {
+      writer.close();
+    }
+    return token;
   }
 
   /** Moves the write-ahead log into the main file, which otherwise may not yet hold what a scan of it looks for. */

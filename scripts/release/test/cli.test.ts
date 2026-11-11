@@ -335,12 +335,20 @@ test("read-checks proves a token can read without judging what it finds", (t) =>
   assert.match(errors[1] as string, /needs a commit/);
 });
 
-function fakeDocker(calls: string[][], manifests: Record<string, string> = {}): Tools["docker"] {
+const VERIFY_KEY = `mem_${"a".repeat(16)}_${"b".repeat(64)}`;
+
+function fakeDocker(calls: string[][], manifests: Record<string, string> = {}, bootstrapped = `${VERIFY_KEY}\n`): Tools["docker"] {
   return (args) => {
     calls.push(args);
+    if (args[0] === "exec") return bootstrapped;
     const tag = args[3] as string;
     return args[2] === "inspect" ? JSON.stringify({ digest: manifests[tag] }) : "";
   };
+}
+
+/** The API's /health: the version only to the bootstrapped key. */
+function keyedHealth(version: string): Tools["httpGet"] {
+  return (_url, bearer) => JSON.stringify({ status: "ok", version: bearer === VERIFY_KEY ? version : null });
 }
 
 test("verify-image waits for the container, compares the version, and always removes it", (t) => {
@@ -348,12 +356,20 @@ test("verify-image waits for the container, compares the version, and always rem
   repo.commit("feat: a");
   const calls: string[][] = [];
   let polls = 0;
-  const httpGet = (): string | undefined => (++polls < 3 ? undefined : JSON.stringify({ status: "ok", version: "1.2.3" }));
+  const bearers: (string | undefined)[] = [];
+  const answer = keyedHealth("1.2.3");
+  const httpGet: Tools["httpGet"] = (url, bearer) => {
+    bearers.push(bearer);
+    return ++polls < 3 ? undefined : answer(url, bearer);
+  };
   const { tools, lines } = fakeTools(repo, undefined, undefined, { docker: fakeDocker(calls), httpGet });
 
   assert.equal(run(["verify-image", "repo@sha256:abc", "1.2.3"], tools, assert.fail), 0);
 
-  assert.equal(polls, 3);
+  assert.equal(polls, 4);
+  assert.deepEqual(bearers, [undefined, undefined, undefined, VERIFY_KEY]);
+  assert.deepEqual(calls[1], ["exec", "memoria-verify", "dotnet", "Memoria.Api.dll", "--bootstrap-admin-key", "release-verify"]);
+  assert.ok(calls.every((call) => !call.some((arg) => arg.includes(VERIFY_KEY))), "the key goes in no docker argument");
   assert.ok(calls[0]?.includes("repo@sha256:abc"));
   assert.ok(calls[0]?.some((arg) => /^Memoria__Ingest__DigestKey=.{32,}$/.test(arg)), "the image refuses to start without a digest key");
   assert.deepEqual(calls.at(-1), ["rm", "-f", "memoria-verify"]);
@@ -404,7 +420,7 @@ test("verify-image refuses a wrong version or a silent container, and still remo
   const errors: string[] = [];
   const calls: string[][] = [];
 
-  const wrong = fakeTools(repo, undefined, undefined, { docker: fakeDocker(calls), httpGet: () => JSON.stringify({ version: "9.9.9" }) });
+  const wrong = fakeTools(repo, undefined, undefined, { docker: fakeDocker(calls), httpGet: keyedHealth("9.9.9") });
   assert.equal(run(["verify-image", "img", "1.2.3"], wrong.tools, (e) => errors.push(e)), 1);
   assert.match(errors[0] as string, /img reports version 9\.9\.9, expected 1\.2\.3/);
   assert.deepEqual(calls.at(-1), ["rm", "-f", "memoria-verify"]);
@@ -419,6 +435,18 @@ test("verify-image refuses a wrong version or a silent container, and still remo
   assert.equal(run(["verify-image", "img", "1.2.3"], noVersion.tools, (e) => errors.push(e)), 1);
   assert.equal(run(["verify-image", "img"], noVersion.tools, (e) => errors.push(e)), 1);
   assert.match(errors[3] as string, /needs an image and a version/);
+
+  // An image that names its version to anyone, or bootstraps no key, is refused, and still removed.
+  const leaky: string[][] = [];
+  const open = fakeTools(repo, undefined, undefined, { docker: fakeDocker(leaky), httpGet: () => JSON.stringify({ version: "1.2.3" }) });
+  assert.equal(run(["verify-image", "img", "1.2.3"], open.tools, (e) => errors.push(e)), 1);
+  assert.match(errors[4] as string, /names its version to an anonymous caller/);
+  assert.deepEqual(leaky.at(-1), ["rm", "-f", "memoria-verify"]);
+  const keyless: string[][] = [];
+  const noKey = fakeTools(repo, undefined, undefined, { docker: fakeDocker(keyless, {}, "refused: an active admin key exists\n"), httpGet: keyedHealth("1.2.3") });
+  assert.equal(run(["verify-image", "img", "1.2.3"], noKey.tools, (e) => errors.push(e)), 1);
+  assert.match(errors[5] as string, /printed no admin key/);
+  assert.deepEqual(keyless.at(-1), ["rm", "-f", "memoria-verify"]);
 });
 
 test("tag-image points every tag at the digest and confirms each one resolves to it", (t) => {

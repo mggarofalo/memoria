@@ -27,10 +27,17 @@ public sealed record ApiKeyRecord(
 		return !IsRevoked && !IsExpired(now);
 	}
 
+	/// <summary>An active key whose admin scope is honoured: one that holds it and lists no collections.</summary>
 	public bool IsActiveAdmin(DateTimeOffset now)
 	{
-		return IsActive(now) && Scopes.Contains(MemoriaScopes.Admin, StringComparer.Ordinal);
+		return IsActive(now) && Scopes.Contains(MemoriaScopes.Admin, StringComparer.Ordinal) && !HoldsBoundAdmin;
 	}
+
+	/// <summary>
+	/// The key holds <c>admin</c> beside a collection list. Admin is all-or-nothing, so such a key can no longer be
+	/// issued, and one already in the database is not given the scope: see <see cref="KeyGrant"/>.
+	/// </summary>
+	public bool HoldsBoundAdmin => KeyGrant.IsBoundAdmin(Scopes, Collections, AllCollections);
 
 	/// <summary>Creates a record and the plaintext token it was hashed from.</summary>
 	public static (ApiKeyRecord Record, string Token) Issue(

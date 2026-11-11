@@ -134,7 +134,10 @@ async function readiness(h: Harness, ops: string, reader: string): Promise<void>
 export async function operations(h: Harness, admin: string): Promise<void> {
   const make = (args: string[]): string => h.remember(h.memoria(["keys", "create", ...args], { key: admin }).out.trim());
   const ops = make(["--label", "ops", "--scope", "admin"]);
-  const scoped = make(["--label", "ops-scoped", "--scope", "admin", "--scope", "read", "--collection", "notes"]);
+  const refused = h.memoria(["keys", "create", "--label", "ops-scoped", "--scope", "admin", "--scope", "read", "--collection", "notes"], { key: admin });
+  h.check("ops: keys create refuses admin beside a collection: exit 2, and prints no key", refused.code === 2 && refused.out.trim() === "" && refused.err.includes("cannot list collections"), refused.out + refused.err);
+  // One an older version issued, which is not given the admin scope.
+  const scoped = h.plantKey("ops-scoped", ["admin", "read"], ["notes"]);
   const reader = make(["--label", "ops-reader", "--scope", "read", "--collection", "notes"]);
   drainAndEnable(h, ops);
   await refusedCallers(h, scoped, reader, ops);

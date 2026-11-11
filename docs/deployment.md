@@ -130,7 +130,7 @@ The sidecar's container runs as a user, not root, which limits the damage. `side
 
 ## The images
 
-`.github/workflows/docker.yml` publishes both. Every pull request builds them and publishes nothing. Each reports the version it was stamped with on `/health`; see [releasing.md](releasing.md).
+`.github/workflows/docker.yml` publishes both. Every pull request builds them and publishes nothing. Each reports the version it was stamped with on `/health`, the API only to a caller with a key; see [releasing.md](releasing.md).
 
 | Image | Holds |
 |---|---|
@@ -695,7 +695,8 @@ Nothing in this repository exposes Memoria to the internet, and nothing
 should before the host is hardened: patched, with its firewall reviewed. API keys with collection
 scopes are enforced by default, but a key is only as private as the transport,
 so TLS through the proxy is part of that gate. `Memoria:Auth:Mode = Disabled` is
-for a trusted LAN and must never be set on an exposed host.
+for development on loopback, where the host refuses any other address unless
+`Memoria:Auth:AllowDisabledOnNetwork` is set, and must never be set on an exposed host.
 
 Until it is: keep the compose port on `127.0.0.1` or the LAN address,
 do not create the proxy host entry, and do not forward a router port.

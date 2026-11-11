@@ -288,7 +288,9 @@ async function offSwitch(c: Context, secrets: Record<string, string>): Promise<v
   const neighbour = await search(c, "pumaword", SAFE);
   c.h.check("ingest: search next door still has no secret", neighbour.text.includes("pumaword") && !neighbour.text.includes(secret), neighbour.text);
 
-  const adminStatus = await call(`${c.h.apiUrl}/v1/status`, { headers: headersFor(await createKey(c.h, c.admin, "both", ["read", "admin"])) });
+  // An admin key acts on every collection, so one that also reads does too.
+  const both = await call(`${c.h.apiUrl}/v1/admin/keys`, { method: "POST", headers: headersFor(c.admin), body: JSON.stringify({ label: "both", scopes: ["read", "admin"], allCollections: true }) });
+  const adminStatus = await call(`${c.h.apiUrl}/v1/status`, { headers: headersFor(c.h.remember((JSON.parse(both.text) as { key: string }).key)) });
   const readerStatus = await call(`${c.h.apiUrl}/v1/status`, { headers: headersFor(c.reader) });
   c.h.check("ingest: /v1/status lists the off collection for an admin only", JSON.stringify(parsed(adminStatus)["unredactedCollections"]) === `["${OPEN}"]` && parsed(readerStatus)["unredactedCollections"] == null, adminStatus.text);
   await pause(200);

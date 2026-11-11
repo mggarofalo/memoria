@@ -27,8 +27,8 @@ export interface Tools {
   exec: (command: string, args: string[], cwd: string) => void;
   /** Run docker and return stdout. Throws on a non-zero exit. */
   docker: (args: string[]) => string;
-  /** The response body, or undefined while nothing answers successfully. */
-  httpGet: (url: string) => string | undefined;
+  /** The response body, or undefined while nothing answers successfully. A bearer token, when given, goes on stdin, never in an argument. */
+  httpGet: (url: string, bearer?: string) => string | undefined;
   sleep: (ms: number) => void;
   print: (line: string) => void;
 }
@@ -45,7 +45,7 @@ const USAGE = `usage: release <command>
   build <version> [--out d]  build every release asset and checksums.txt (default out: cli/dist)
   notes <tag> --out <file>   write the release notes, refusing any tracker reference
   read-checks <sha>          prove this token can read what validate reads, without judging the result
-  verify-image <ref> <ver>   run an image and refuse unless /health reports the version
+  verify-image <ref> <ver>   run an image and refuse unless /health reports the version to a key, and to no one else
   verify-sidecar-image <ref> <ver>  the same for the sidecar image, which must also hold no llama.cpp binaries
   tag-image <ref@digest> <tag...>  point tags at a verified digest and confirm each resolves to it`;
 
@@ -143,24 +143,40 @@ function readChecksCommand(tools: Tools, sha: string | undefined): void {
 const HEALTH_ATTEMPTS = 30;
 const VERIFY_PORT = 18080;
 
-function reportedVersion(tools: Tools): string | undefined {
+function healthBody(tools: Tools, bearer?: string): string | undefined {
   for (let attempt = 0; attempt < HEALTH_ATTEMPTS; attempt++) {
-    const body = tools.httpGet(`http://127.0.0.1:${VERIFY_PORT}/health`);
-    if (body !== undefined) return (JSON.parse(body) as { version?: string }).version;
+    const body = tools.httpGet(`http://127.0.0.1:${VERIFY_PORT}/health`, bearer);
+    if (body !== undefined) return body;
     tools.sleep(1000);
   }
   return undefined;
 }
 
-/** Run this exact image reference and compare what it reports. The Sidecar URL and the throwaway digest key only satisfy startup validation. */
+function reportedVersion(tools: Tools, bearer?: string): string | undefined {
+  const body = healthBody(tools, bearer);
+  return body === undefined ? undefined : ((JSON.parse(body) as { version?: string | null }).version ?? undefined);
+}
+
+const ADMIN_KEY = /mem_[0-9a-f]{16}_[0-9a-f]{64}/;
+
+/**
+ * Run this exact image reference and compare what it reports. The Sidecar URL and the throwaway digest key only satisfy startup validation.
+ * The API names its version only to a caller with a key, so this bootstraps a throwaway admin key in the container, and refuses an image
+ * that names its version to an anonymous caller.
+ */
 function verifyImageCommand(tools: Tools, image: string | undefined, version: string | undefined): void {
   if (image === undefined || version === undefined) fail("verify-image needs an image and a version");
   const name = "memoria-verify";
   tools.docker(["run", "-d", "--name", name, "-p", `127.0.0.1:${VERIFY_PORT}:8080`, "-e", "Memoria__Sidecar__BaseUrl=http://127.0.0.1:8282", "-e", `Memoria__Ingest__DigestKey=${randomBytes(32).toString("base64url")}`, image]);
   try {
-    const reported = reportedVersion(tools);
+    const anonymous = healthBody(tools);
+    if (anonymous === undefined) fail(`${image} reports version (no answer), expected ${version}`);
+    if ((JSON.parse(anonymous) as { version?: string | null }).version != null) fail(`${image} names its version to an anonymous caller`);
+    const key = ADMIN_KEY.exec(tools.docker(["exec", name, "dotnet", "Memoria.Api.dll", "--bootstrap-admin-key", "release-verify"]))?.[0];
+    if (key === undefined) fail(`${image} printed no admin key from --bootstrap-admin-key`);
+    const reported = reportedVersion(tools, key);
     if (reported !== version) fail(`${image} reports version ${reported ?? "(no answer)"}, expected ${version}`);
-    tools.print(`${image} reports ${reported}`);
+    tools.print(`${image} reports ${reported} to a key, and no version without one`);
   } finally {
     tools.docker(["rm", "-f", name]);
   }

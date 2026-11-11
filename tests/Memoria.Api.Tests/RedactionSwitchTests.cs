@@ -221,7 +221,9 @@ public sealed class RedactionSwitchTests : IClassFixture<AuthApiFactory>, IAsync
 		_factory.Sidecar.On("GET", "/status", HttpStatusCode.OK, SidecarFixtures.Status);
 		_factory.Sidecar.On("GET", "/collections", HttpStatusCode.OK, SidecarFixtures.Collections);
 
-		HttpResponseMessage admin = await (await ClientAsync([MemoriaScopes.Read, MemoriaScopes.Admin], "open")).GetAsync("/v1/status");
+		(_, string adminKey) = await _factory.IssueAsync([MemoriaScopes.Read, MemoriaScopes.Admin], allCollections: true);
+		HttpResponseMessage admin = await AuthApiFactory.Authorized(_configured.CreateClient(), adminKey).GetAsync("/v1/status");
+		HttpResponseMessage bound = await (await ClientAsync([MemoriaScopes.Read, MemoriaScopes.Admin], "open")).GetAsync("/v1/status");
 		HttpResponseMessage reader = await (await ClientAsync([MemoriaScopes.Read], "open")).GetAsync("/v1/status");
 
 		Assert.Equal(HttpStatusCode.OK, admin.StatusCode);
@@ -229,6 +231,8 @@ public sealed class RedactionSwitchTests : IClassFixture<AuthApiFactory>, IAsync
 		Assert.Equal(HttpStatusCode.OK, reader.StatusCode);
 		JsonElement readerStatus = await ReadAsync(reader);
 		Assert.True(!readerStatus.TryGetProperty("unredactedCollections", out JsonElement listed) || listed.ValueKind == JsonValueKind.Null);
+		JsonElement boundStatus = await ReadAsync(bound);
+		Assert.True(!boundStatus.TryGetProperty("unredactedCollections", out JsonElement boundListed) || boundListed.ValueKind == JsonValueKind.Null);
 	}
 
 	[Fact]
