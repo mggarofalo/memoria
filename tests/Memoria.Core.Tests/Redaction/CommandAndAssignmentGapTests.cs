@@ -305,13 +305,19 @@ public sealed class CommandAndAssignmentGapTests
 
 	/// <summary>Each password flag reads back over a bounded number of words, so a flood of them stays linear with a small constant.</summary>
 	[Fact]
+	[Trait("Category", RedactorSafetyTests.TimingCategory)]
 	public void A_flood_of_password_flags_is_read_quickly()
 	{
+		// About 4 times its cost, 0.80 s of this thread's CPU on a plain Debug run.
+		TimeSpan budget = TimeSpan.FromSeconds(3.2);
 		string text = "ran " + string.Concat(Enumerable.Repeat("mongo -p ", 40_000));
-		System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
+		TimeSpan started = ThreadCpuTime.Now();
 
-		Assert.Equal(text, Redact(text));
-		Assert.True(clock.Elapsed < TimeSpan.FromSeconds(10), $"took {clock.Elapsed}");
+		string redacted = Redact(text);
+
+		TimeSpan spent = ThreadCpuTime.Now() - started;
+		Assert.True(spent < budget, $"40,000 password flags took {spent.TotalSeconds:F2} s of CPU, over the budget of {budget.TotalSeconds:F1} s.");
+		Assert.Equal(text, redacted);
 	}
 
 	[Theory]
