@@ -19,6 +19,9 @@ public static class MemoriaClaims
 	public const string Collection = "memoria:collection";
 	public const string AllCollections = "memoria:all-collections";
 	public const string AuthDisabled = "memoria:auth-disabled";
+
+	/// <summary>The key holds <c>admin</c> beside a collection list, and was not given the scope.</summary>
+	public const string AdminWithheld = "memoria:admin-withheld";
 }
 
 /// <summary>
@@ -212,7 +215,8 @@ public sealed partial class ApiKeyAuthenticationHandler(
 			await WriteProblemAsync(
 				StatusCodes.Status403Forbidden,
 				"Key is bound to collections",
-				"Operations act on every collection, so they need an admin key that is not limited to particular collections.",
+				"Operations and key management act on every collection, so they need an admin key that lists no collections. "
+					+ "A key holding admin beside a collection list is not given the admin scope: issue an admin key without collections, then revoke this one.",
 				"collection_scoped_key");
 			return;
 		}
@@ -221,18 +225,35 @@ public sealed partial class ApiKeyAuthenticationHandler(
 		await WriteProblemAsync(StatusCodes.Status403Forbidden, "Insufficient scope", $"This API key lacks the '{required}' scope.", "insufficient_scope");
 	}
 
-	/// <summary>The key has the scope, so what failed is the route's refusal of a key bound to collections.</summary>
+	/// <summary>
+	/// The key has the scope, or had admin withheld for being bound, so what failed is the route's refusal of a key bound
+	/// to collections.
+	/// </summary>
 	private bool IsBoundKeyOnUnboundRoute(Endpoint? endpoint, string? required)
 	{
+		bool withheld = required == MemoriaScopes.Admin && Context.User.HasClaim(static c => c.Type == MemoriaClaims.AdminWithheld);
 		return endpoint?.Metadata.GetMetadata<MemoriaUnboundKeyAttribute>() is not null
-			&& (required is null || Context.User.HasClaim(MemoriaClaims.Scope, required))
+			&& (required is null || withheld || Context.User.HasClaim(MemoriaClaims.Scope, required))
 			&& Context.User.HasClaim(static c => c.Type == MemoriaClaims.Collection);
 	}
 
+	/// <summary>
+	/// A key that holds <c>admin</c> beside a collection list, which can no longer be issued, does not get the scope: admin is
+	/// all-or-nothing, and honouring it on a bound key would let the key escape its binding. It keeps its other scopes, and
+	/// <see cref="MemoriaClaims.AdminWithheld"/> marks it so a refusal can say why.
+	/// </summary>
 	private static ClaimsPrincipal BuildPrincipal(ApiKeyRecord record)
 	{
 		List<Claim> claims = [new(MemoriaClaims.KeyId, record.Id), new(ClaimTypes.Name, record.Label)];
-		claims.AddRange(record.Scopes.Select(static scope => new Claim(MemoriaClaims.Scope, scope)));
+		bool withhold = record.HoldsBoundAdmin;
+		claims.AddRange(record.Scopes
+			.Where(scope => !withhold || scope != MemoriaScopes.Admin)
+			.Select(static scope => new Claim(MemoriaClaims.Scope, scope)));
+		if (withhold)
+		{
+			claims.Add(new Claim(MemoriaClaims.AdminWithheld, "true"));
+		}
+
 		if (record.AllCollections)
 		{
 			claims.Add(new Claim(MemoriaClaims.AllCollections, "true"));

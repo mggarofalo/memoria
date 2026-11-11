@@ -120,7 +120,14 @@ export interface ScopeKeys {
   wide: IssuedKey;
   adminOnly: IssuedKey;
   ingestOnly: IssuedKey;
+  /** Read and admin bound to one collection, as an older version issued: it is not given admin. */
   readAdmin: IssuedKey;
+  /** Read and admin on every collection, the way such a key is issued now. */
+  readAdminWide: IssuedKey;
+}
+
+function planted(token: string): IssuedKey {
+  return { token, id: idOf(token) };
 }
 
 export async function issueScopeKeys(h: Harness, admin: string): Promise<ScopeKeys> {
@@ -129,7 +136,8 @@ export async function issueScopeKeys(h: Harness, admin: string): Promise<ScopeKe
     wide: await issueKey(h, admin, { label: "scope-wide", scopes: ["read"], allCollections: true }),
     adminOnly: await issueKey(h, admin, { label: "scope-admin", scopes: ["admin"] }),
     ingestOnly: await issueKey(h, admin, { label: "scope-ingest", scopes: ["ingest"], collections: ["notes"] }),
-    readAdmin: await issueKey(h, admin, { label: "scope-read-admin", scopes: ["read", "admin"], collections: ["notes"] }),
+    readAdmin: planted(h.plantKey("scope-read-admin", ["read", "admin"], ["notes"])),
+    readAdminWide: await issueKey(h, admin, { label: "scope-read-admin-wide", scopes: ["read", "admin"], allCollections: true }),
   };
 }
 
@@ -169,11 +177,13 @@ async function restRefused(h: Harness, keys: ScopeKeys): Promise<void> {
 
 export async function scopeMatrix(h: Harness, keys: ScopeKeys): Promise<void> {
   await restReadable(h, "a collection-scoped key", keys.scoped.token);
-  await restReadable(h, "a read and admin key scoped to one collection", keys.readAdmin.token);
+  await restReadable(h, "an old read and admin key scoped to one collection", keys.readAdmin.token);
   await restWide(h, keys.wide.token);
   await restRefused(h, keys);
-  const management = await h.request({ path: ADMIN_KEYS, key: keys.readAdmin.token });
-  h.check("a read and admin key also manages keys", management.status === 200, management.status);
+  const bound = await h.request({ path: ADMIN_KEYS, key: keys.readAdmin.token });
+  h.check("an old read and admin key scoped to one collection cannot manage keys", bound.status === 403 && codeOf(bound) === "collection_scoped_key", bound.status);
+  const management = await h.request({ path: ADMIN_KEYS, key: keys.readAdminWide.token });
+  h.check("a read and admin key on every collection also manages keys", management.status === 200, management.status);
 }
 
 function mcpSession(h: Harness, key: string, calls: Array<[string, object]>): Map<number, Reply> {

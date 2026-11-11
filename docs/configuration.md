@@ -95,13 +95,14 @@ claude mcp add --transport http memoria http://<api-host>:8080/mcp \
 
 | Key | Default | Purpose |
 |---|---|---|
-| `Mode` | `ApiKey` | `ApiKey` requires a key on every `/v1` and MCP route. `Disabled` turns authentication off for development on a trusted LAN; it must be set explicitly and logs a loud warning at startup. The value must be exactly one of those two, case-sensitive. Anything else stops the host, including `1`, `disabled`, ` Disabled `, `ApiKey,Disabled`, and a key that is set but empty. |
+| `Mode` | `ApiKey` | `ApiKey` requires a key on every `/v1` and MCP route. `Disabled` turns authentication off for development; it must be set explicitly and logs a loud warning at startup. With `Disabled`, the host refuses to start unless every address it would listen on is loopback (`localhost` or a loopback IP), unless `AllowDisabledOnNetwork` is `true`. The value must be exactly one of those two, case-sensitive. Anything else stops the host, including `1`, `disabled`, ` Disabled `, `ApiKey,Disabled`, and a key that is set but empty. |
+| `AllowDisabledOnNetwork` | `false` | `true` lets `Mode = Disabled` listen on an address that is not loopback, such as the default `0.0.0.0`, where every caller can read every collection. Startup then logs a critical line naming the addresses. The check reads `Kestrel:Endpoints`, `urls` (`ASPNETCORE_URLS`, `--urls`, or the default) and `ASPNETCORE_HTTP_PORTS`/`HTTPS_PORTS`, all of them, before anything binds; a Unix socket or named pipe counts as the network. Ignored in `ApiKey` mode. |
 | `DatabasePath` | unset | The SQLite control database holding keys and audit records. **Required in `ApiKey` mode**: without it the host refuses to start. It is durable state, separate from QMD's index, and belongs on a local volume (SQLite's WAL mode does not work over a network share). Not needed in `Disabled` mode. |
 | `RateLimit:Enabled` | `true` | Enforce per-key limits. |
 | `RateLimit:PermitLimit` | `120` | Requests one key may make per window, counting ones that end in `403`. Over the limit: `429` with `Retry-After`. |
 | `RateLimit:Window` | `00:01:00` | Length of the fixed window. |
 | `TrustedProxies` | empty | Proxies whose `X-Forwarded-For` is believed, as IPs or CIDR ranges. Empty means the socket address is the client and the header is ignored, and loopback is not trusted implicitly. A `/0` range or an unparseable entry stops the host. See [the reverse proxy section](deployment.md#reverse-proxy-and-tls): behind a proxy this must be set. |
-| `DefaultKeyLifetime` | unset | How long a key without the `admin` scope lasts when it is issued with no `expiresAt`, as a `d.hh:mm:ss` span between an hour and ten years. Unset, such keys never expire. Admin keys never get one, so the operator is not locked out when they all lapse at once. A key's own `expiresAt` wins. `deploy/compose.yaml` sets a year. |
+| `DefaultKeyLifetime` | unset | How long a key with `read` or `ingest` lasts when it is issued with no `expiresAt`, as a `d.hh:mm:ss` span between an hour and two years (`730.00:00:00`). Unset, such keys never expire. Only a key whose sole scope is `admin` never gets one, so the operator is not locked out when every admin key lapses at once; `admin` beside `read` or `ingest` does not exempt a key. A key's own `expiresAt` wins, within the [two-year cap](#keys). `deploy/compose.yaml` sets a year. |
 | `FailedAuth:Enabled` | `true` | Limit failed authentication per client address. |
 | `FailedAuth:PermitLimit` | `20` | Failed attempts one address may make per window. Past it, a credential from that address gets `429` and `Retry-After` with no database lookup until the window ends, unless its secret matches a key this process already knows. Requests that authenticate spend nothing. An IPv6 client is counted by its /64. |
 | `FailedAuth:Window` | `00:01:00` | Length of the fixed window. |
@@ -122,16 +123,21 @@ then manage keys over REST with that key:
 
 | Route | Does |
 |---|---|
-| `POST /v1/admin/keys` | Issue a key. Body: `label`, `scopes`, then `collections` or `allCollections: true`, and optionally `expiresAt`, else `DefaultKeyLifetime` applies to a key without `admin`. |
+| `POST /v1/admin/keys` | Issue a key. Body: `label`, `scopes`, then `collections` or `allCollections: true`, and optionally `expiresAt`, else `DefaultKeyLifetime` applies to a key with `read` or `ingest`. A key with `admin` cannot list `collections`: `400` with code `admin_key_bound`. `expiresAt` more than two years ahead is `400`. |
 | `GET /v1/admin/keys` | List keys, with no key material. |
 | `DELETE /v1/admin/keys/{id}` | Revoke. |
-| `POST /v1/admin/keys/{id}:rotate` | New secret, same id, scopes and expiry. The old token stops working at once. Revoked or expired keys get `409`. |
+| `POST /v1/admin/keys/{id}:rotate` | New secret, same id, scopes and expiry. The old token stops working at once. Revoked or expired keys get `409`. A key that would outlive the caller gets `403` with code `key_exceeds_caller`. |
 
 ```bash
 curl -s -X POST http://localhost:8080/v1/admin/keys \
   -H "Authorization: Bearer $ADMIN_KEY" -H "Content-Type: application/json" \
   -d '{"label":"laptop","scopes":["read"],"collections":["claude-sessions"]}' | jq -r .key
 ```
+
+**Who may manage keys.** Key management needs the `admin` scope and a key bound to no collection, as [operations](#operations) do: a key that lists collections gets `403` with code `collection_scoped_key`, decided before the body is read. A key never issues or rotates a key wider than itself. `admin` grants the right to issue `read` and `ingest` keys on any collection, so in practice the limit is lifetime: a key with an `expiresAt` cannot issue a key that expires later or never, nor rotate one (`403`, `key_exceeds_caller`, with `dimension` naming what is wider). A key it issues with no `expiresAt` of its own ends when the issuer does, if that is sooner than `DefaultKeyLifetime`.
+
+**Lifetime cap.** `expiresAt` may be at most two years (730 days) ahead, for every key, and `DefaultKeyLifetime` may be at most as long. Rotating keeps a key's expiry, so issue a replacement before a key lapses.
+
 
 ### Scopes
 
@@ -141,13 +147,19 @@ Scopes do not imply one another.
 |---|---|
 | `read` | Search, documents, collections, status, and the MCP endpoint. |
 | `ingest` | The ingest routes: `/v1/documents`, `/v1/ingest/session` and `/v1/ingest/rendered`. |
-| `admin` | Key management, [operations](#operations) on the workers and the queue, and backend detail: the full `/ready` report and how the backend failed. |
+| `admin` | Key management, [operations](#operations) on the workers and the queue, restoring deleted content on ingest, and backend detail: the full `/ready` report, `unredactedCollections`, and how the backend failed. All-or-nothing: it acts on every collection, so a key with `admin` cannot list collections. See [admin keys bound to collections](#admin-keys-bound-to-collections). |
 
 `admin` does **not** imply `read`. A key used to manage keys is not a key that
 reads the corpus, so day-to-day clients never carry key-management power and a
 bootstrapped key reads nothing. An admin can issue itself a reader, but that
 leaves an audit record and a separate key to revoke. Give a key both scopes if
 you want both.
+
+### Admin keys bound to collections
+
+Earlier versions issued `admin` beside a `collections` list. Such a key was not really bound: it could issue an all-collections key or revoke the others. Issuing one is now refused, and one already in the control database is **not given the `admin` scope**. It keeps its other scopes on its own collections, so a bound `admin` and `read` key still reads them, but every admin route answers `403` with code `collection_scoped_key`, `/ready` gives it the status word alone, and it sees no backend detail. It also no longer counts as an admin for `--bootstrap-admin-key`, so a deployment whose only admin key was bound can bootstrap a new one.
+
+To find them, look for the warning startup logs for each one, event id `3201`, which names the key id, or run `memoria keys list` and look for a key whose scopes include `admin` and whose collections are not empty. To replace one, issue an admin key without collections (with `allCollections: true` if it must also read or ingest), give a bound key only `read` or `ingest` for the collections, move the clients over, and revoke the old key.
 
 ### Operations
 
@@ -236,8 +248,8 @@ which blocks the sidecar.
 
 | Route | Why |
 |---|---|
-| `/health` | Liveness; contacts nothing and reveals only the version. |
-| `/ready` | Orchestrators need it without a credential. It answers 200 with `status` of `ready`, `warming` or `degraded` whenever the sidecar answers, because losing GPU workers makes search rank worse and must not take the API out of rotation. It answers 503 only when the sidecar cannot be reached (`status` of `not_ready` to these callers), or with `?strict=true` for anything but `ready`. Anonymous and non-admin callers get the status word alone, with `reason` and `sidecar` null: no index paths, counts or sidecar details. An admin key gets the full report, including `jobs.stuck` and `llm.documentsSetAside`. |
+| `/health` | Liveness; contacts nothing. `version` is null unless the request carries a valid key, so a scanner cannot read the exact build and commit. Any valid key, of any scope, gets it. |
+| `/ready` | Orchestrators need it without a credential. It answers 200 with `status` of `ready`, `warming` or `degraded` whenever the sidecar answers, because losing GPU workers makes search rank worse and must not take the API out of rotation. It answers 503 only when the sidecar cannot be reached (`status` of `not_ready` to these callers), or with `?strict=true` for anything but `ready`. Anonymous and non-admin callers get the status word alone, with `reason` and `sidecar` null: no index paths, counts or sidecar details. An admin key bound to no collection gets the full report, including `jobs.stuck` and `llm.documentsSetAside`. |
 | `/openapi/v1.json` | The spec is public and carries no data. |
 
 ### Audit and logs
@@ -414,7 +426,7 @@ Every collection is redacted unless an operator names it here:
 - **The value and the name are exact.** `disabled`, `off`, `false` and ` Disabled ` all leave redaction on, and the server warns at startup about a value it did not recognize. A differently cased collection name is a different collection, and is redacted.
 - **Search results from an unredacted collection can reach cloud models.** They go wherever the caller sends them, along with any credential the text holds. Treat every credential ingested into the collection as exposed to those models.
 - **A switch changes future ingest only.** Turning redaction back on does not clean what is already stored. Older documents stay as they were written until they are ingested again or deleted, so re-ingest or delete them, and rotate any credential they held. Turning redaction off does not change older documents either.
-- **It is visible.** Startup logs a warning naming each unredacted collection. The ingest response and the audit record say `redaction: "disabled"`, and `GET /v1/status` lists `unredactedCollections` for a key that has `admin` as well as `read`. The per-rule counts, refusals and the check on finished parts do not apply to such a collection, so they are empty.
+- **It is visible.** Startup logs a warning naming each unredacted collection. The ingest response and the audit record say `redaction: "disabled"`, and `GET /v1/status` lists `unredactedCollections` for a key that has `admin` as well as `read` and is bound to no collection. The per-rule counts, refusals and the check on finished parts do not apply to such a collection, so they are empty.
 
 ## `Memoria:Logging` — what the log may hold
 
@@ -428,7 +440,7 @@ Query strings and request paths carry search text and document paths, so they ar
 
 | Key | Default | Purpose |
 |---|---|---|
-| `Urls` | `http://0.0.0.0:8080` | Kestrel bind address. `0.0.0.0` makes the API reachable on the LAN so the laptop can use it; nothing routes it beyond the LAN until homelab hardening lands. Override with `ASPNETCORE_URLS` or `--urls`. |
+| `Urls` | `http://0.0.0.0:8080` | Kestrel bind address. `0.0.0.0` makes the API reachable on the LAN so the laptop can use it; nothing routes it beyond the LAN until homelab hardening lands. Override with `ASPNETCORE_URLS` or `--urls`. With `Memoria:Auth:Mode = Disabled` it must be loopback, such as `http://127.0.0.1:8080`, unless `Memoria:Auth:AllowDisabledOnNetwork` is `true`. |
 | `Logging:Console:FormatterName` | `json` | One JSON object per line, UTC timestamps, scopes included. `appsettings.Development.json` switches to `simple` for a readable terminal. |
 
 ## Local development
@@ -441,9 +453,11 @@ Query strings and request paths carry search text and document paths, so they ar
       "BaseUrl": "http://127.0.0.1:8282",
       "Secret": "the value you exported as MEMORIA_QMD_SECRET"
     },
-    // Anonymous, on a trusted LAN only. Or set Auth:DatabasePath to develop with keys.
+    // Anonymous, so loopback only. Or set Auth:DatabasePath to develop with keys.
     "Auth": { "Mode": "Disabled" }
-  }
+  },
+  // Disabled mode refuses the default 0.0.0.0 bind.
+  "Urls": "http://127.0.0.1:8080"
 }
 ```
 

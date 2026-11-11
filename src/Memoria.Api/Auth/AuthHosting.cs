@@ -76,15 +76,45 @@ public static partial class AuthHosting
 	public static async Task InitializeMemoriaAuthAsync(this WebApplication app)
 	{
 		AuthOptions auth = app.Services.GetRequiredService<IOptions<MemoriaOptions>>().Value.Auth;
+		ILogger logger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Memoria.Api.Auth");
 		if (auth.IsDisabled)
 		{
-			LogAuthDisabled(app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Memoria.Api.Auth"));
+			RefuseDisabledOnNetwork(logger, app.Configuration, auth.AllowDisabledOnNetwork);
 			return;
 		}
 
 		IApiKeyStore store = app.Services.GetRequiredService<IApiKeyStore>();
 		await store.InitializeAsync();
-		await app.Services.GetRequiredService<KnownGoodKeys>().LoadAsync(store, app.Services.GetRequiredService<TimeProvider>().GetUtcNow());
+		DateTimeOffset now = app.Services.GetRequiredService<TimeProvider>().GetUtcNow();
+		await app.Services.GetRequiredService<KnownGoodKeys>().LoadAsync(store, now);
+		foreach (ApiKeyRecord bound in (await store.ListAsync()).Where(record => record.IsActive(now) && record.HoldsBoundAdmin))
+		{
+			LogBoundAdmin(logger, bound.Id);
+		}
+	}
+
+	/// <summary>Disabled mode starts only on loopback, unless the operator opted in to the network. It says so loudly either way.</summary>
+	internal static void RefuseDisabledOnNetwork(ILogger logger, IConfiguration configuration, bool allowOnNetwork)
+	{
+		LogAuthDisabled(logger);
+		IReadOnlyList<string> addresses = DisabledAuthGuard.ListenAddresses(configuration);
+		string[] network = DisabledAuthGuard.OnNetwork(addresses);
+		if (network.Length == 0)
+		{
+			LogDisabledOnLoopback(logger, string.Join(';', addresses));
+			return;
+		}
+
+		string listed = string.Join(';', network);
+		if (!allowOnNetwork)
+		{
+			LogDisabledRefused(logger, listed);
+			throw new InvalidOperationException(
+				$"Memoria:Auth:Mode is Disabled and the host would listen on {listed}, which is not loopback. Every caller there could read every collection. "
+				+ "Listen on loopback only (ASPNETCORE_URLS=http://127.0.0.1:8080), turn API keys on, or set Memoria:Auth:AllowDisabledOnNetwork to true if you mean it.");
+		}
+
+		LogDisabledOnNetwork(logger, listed);
 	}
 
 	private static void TryAddTimeProvider(this IServiceCollection services)
@@ -135,6 +165,18 @@ public static partial class AuthHosting
 		});
 	}
 
-	[LoggerMessage(EventId = 3200, Level = LogLevel.Warning, Message = "AUTHENTICATION IS DISABLED (Memoria:Auth:Mode = Disabled). Every caller can read every collection. Use this only for development on a trusted LAN; never expose this host.")]
+	[LoggerMessage(EventId = 3200, Level = LogLevel.Warning, Message = "AUTHENTICATION IS DISABLED (Memoria:Auth:Mode = Disabled). Every caller can read every collection. Use this only for development; never expose this host.")]
 	private static partial void LogAuthDisabled(ILogger logger);
+
+	[LoggerMessage(EventId = 3201, Level = LogLevel.Warning, Message = "API key {KeyId} holds the admin scope beside a collection list, so it is not given the admin scope. Admin acts on every collection. Issue an admin key without collections, and a read or ingest key for the collections, then revoke this one.")]
+	private static partial void LogBoundAdmin(ILogger logger, string keyId);
+
+	[LoggerMessage(EventId = 3202, Level = LogLevel.Warning, Message = "Authentication is disabled, listening on loopback only: {Addresses}")]
+	private static partial void LogDisabledOnLoopback(ILogger logger, string addresses);
+
+	[LoggerMessage(EventId = 3203, Level = LogLevel.Critical, Message = "REFUSING TO START: authentication is disabled and the host would listen on {Addresses}, which is not loopback. Listen on loopback, turn API keys on, or set Memoria:Auth:AllowDisabledOnNetwork to true.")]
+	private static partial void LogDisabledRefused(ILogger logger, string addresses);
+
+	[LoggerMessage(EventId = 3204, Level = LogLevel.Critical, Message = "AUTHENTICATION IS DISABLED ON THE NETWORK at {Addresses} (Memoria:Auth:AllowDisabledOnNetwork = true). Anyone who can reach these addresses can read every collection.")]
+	private static partial void LogDisabledOnNetwork(ILogger logger, string addresses);
 }

@@ -103,6 +103,13 @@ public sealed class AuthOptions
 	/// <summary>True only for the exact opt-out, so an invalid value can never open anything.</summary>
 	public bool IsDisabled => string.Equals(Mode, AuthModes.Disabled, StringComparison.Ordinal);
 
+	/// <summary>
+	/// With <see cref="AuthModes.Disabled"/>, the host refuses to start unless every address it listens on is loopback.
+	/// True lets it listen on the network anyway, where every caller can read every collection. Ignored in
+	/// <see cref="AuthModes.ApiKey"/> mode.
+	/// </summary>
+	public bool AllowDisabledOnNetwork { get; set; }
+
 	/// <summary>The SQLite control database holding keys and audit records. Durable state: put it on a volume, apart from QMD's index. Required in <see cref="AuthModes.ApiKey"/> mode.</summary>
 	public string? DatabasePath { get; set; }
 
@@ -119,9 +126,9 @@ public sealed class AuthOptions
 	public string[]? TrustedProxies { get; set; }
 
 	/// <summary>
-	/// How long a key without the <c>admin</c> scope lasts when <c>POST /v1/admin/keys</c> names no <c>expiresAt</c>. Unset, such a
-	/// key never expires, as before. Admin keys, the bootstrap key among them, are never given one: losing every admin key at once
-	/// would lock the operator out. A key's own <c>expiresAt</c> always wins.
+	/// How long a key with <c>read</c> or <c>ingest</c> lasts when <c>POST /v1/admin/keys</c> names no <c>expiresAt</c>. Unset, such a
+	/// key never expires, as before. A key whose only scope is <c>admin</c>, the bootstrap key among them, is never given one: losing
+	/// every admin key at once would lock the operator out. A key's own <c>expiresAt</c> always wins. At most two years.
 	/// </summary>
 	public TimeSpan? DefaultKeyLifetime { get; set; }
 }

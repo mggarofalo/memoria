@@ -130,7 +130,7 @@ The sidecar's container runs as a user, not root, which limits the damage. `side
 
 ## The images
 
-`.github/workflows/docker.yml` publishes both. Every pull request builds them and publishes nothing. Each reports the version it was stamped with on `/health`; see [releasing.md](releasing.md).
+`.github/workflows/docker.yml` publishes both. Every pull request builds them and publishes nothing. Each reports the version it was stamped with on `/health`, the API only to a caller with a key; see [releasing.md](releasing.md).
 
 | Image | Holds |
 |---|---|
