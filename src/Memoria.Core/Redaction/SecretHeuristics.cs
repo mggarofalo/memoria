@@ -562,7 +562,7 @@ internal static class SecretHeuristics
 		int valueEnd = ExtendAssignment(candidate);
 		string whole = valueEnd > candidate.End ? candidate.Input[candidate.Secret.Index..valueEnd] : candidate.JudgedValue;
 		string value = UnwrapBraces(CodeValues.WithoutMarkup(NormalizeRemainder(whole)));
-		if (IsBenignCandidate(candidate, keyGroup, value))
+		if (IsBenignCandidate(candidate, keyGroup, value, kind))
 		{
 			return false;
 		}
@@ -634,8 +634,17 @@ internal static class SecretHeuristics
 		return separator < 0 ? "" : tail[(separator + 1)..];
 	}
 
-	private static bool IsBenignCandidate(SecretCandidate candidate, Group keyGroup, string value)
+	/// <summary>
+	/// A value that holds no secret where it stands. A template that builds a path of words counts only under a name that describes a
+	/// secret, such as <c>secretName</c>, since under a password's or a token's name its words can be the secret.
+	/// </summary>
+	private static bool IsBenignCandidate(SecretCandidate candidate, Group keyGroup, string value, KeyKind kind)
 	{
+		if (kind == KeyKind.Descriptive && CodeValues.IsTemplatedPath(value))
+		{
+			return true;
+		}
+
 		string input = candidate.Input;
 		int start = candidate.Secret.Index;
 

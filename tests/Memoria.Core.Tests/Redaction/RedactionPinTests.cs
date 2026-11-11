@@ -99,7 +99,7 @@ public sealed class RedactionPinTests
 
 		Assert.Equal(sid, Redactor.Redact(sid).Text);
 		Assert.Equal($"the account {sid} sent it", Redactor.Redact($"the account {sid} sent it").Text);
-		foreach (string separator in new[] { ":", " ", ", " })
+		foreach (string separator in new[] { ":", " ", ", ", "\n", "\r\n", "\", \"" })
 		{
 			Assert.Equal($"{sid}{separator}[REDACTED:twilio-auth-token]", Redactor.Redact(sid + separator + token).Text);
 		}

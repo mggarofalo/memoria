@@ -70,12 +70,39 @@ internal static partial class CodeValues
 	/// <remarks>
 	/// Beside a span, any word of four letters or digits is taken for the secret, as <c>Summerpassword</c> in
 	/// <c>${PREFIX}Summerpassword</c>. A secret-sounding name with a literal beside its span is rarely clean code. Markup tags and
-	/// upper-case names such as <c>MEMORIA_WORKER_TOKEN_FILE</c> are not words here, because they name things. Words that are a path's
-	/// segments, as in <c>memoria/${env}/api-key</c>, are a place, so they are code too; see <see cref="IsPathOfWords"/>.
+	/// upper-case names such as <c>MEMORIA_WORKER_TOKEN_FILE</c> are not words here, because they name things.
 	/// </remarks>
 	public static bool IsInterpolationOnly(string value)
 	{
-		return Remainder(value) is string rest && !HoldsSecretLikePiece(rest) && (!HoldsWord(rest) || IsPathOfWords(rest));
+		return Remainder(value) is string rest && !HoldsSecretLikePiece(rest) && !HoldsWord(rest);
+	}
+
+	/// <summary>
+	/// A template that builds a path of words from its literal text alone, as <c>memoria/${env}/api-key</c> or
+	/// <c>${home}/.config/memoria/token</c> does. A span that carries data of its own, such as a shell default, does not count, as the data
+	/// could be the secret. Only a name that describes a secret, such as <c>secretName</c> or <c>tokenPath</c>, may hold one: under a
+	/// password's or a token's name, words between slashes can be the secret itself, as in <c>${SALT}/hunter/two</c>.
+	/// </summary>
+	public static bool IsTemplatedPath(string value)
+	{
+		StringBuilder literal = new();
+		int from = 0;
+		bool spans = false;
+		while (NextSpan(value, from) is (int start, int end))
+		{
+			string body = value[(start + 2)..Math.Min(value.Length, Math.Max(start + 2, end - 1))];
+			if (IsBareLiteral(body) || DataIn(body, value[start + 1] == '(').Trim().Length > 0)
+			{
+				return false;
+			}
+
+			literal.Append(value, from, start - from).Append(' ');
+			from = Math.Min(end, value.Length);
+			spans = true;
+		}
+
+		string rest = literal.Append(value, from, value.Length - from).ToString();
+		return spans && !HoldsSecretLikePiece(rest) && IsPathOfWords(rest);
 	}
 
 	/// <summary>

@@ -551,11 +551,11 @@ internal static class RedactionRules
 
 	/// <summary>
 	/// A 32-digit hex value on a line that names Twilio, however it is written, or just after an account's SID, as in <c>AC…:token</c> for
-	/// basic auth. Alone it is only a hash, so the name or the SID is what makes it a credential. The SID itself stays.
+	/// basic auth, <c>"AC…", "token"</c>, or the token on the next line. Alone it is only a hash, so the name or the SID is what makes it a credential. The SID itself stays.
 	/// </summary>
 	public static readonly RedactionRule TwilioAuthToken = new(
 		"twilio-auth-token",
-		Pattern(@"(?i:twilio)[^\r\n]{0,60}?[^A-Za-z0-9](?<secret>[0-9a-fA-F]{32})(?:$|[^A-Za-z0-9])|(?:^|[^A-Za-z0-9])AC[0-9a-f]{32}[:,;=/| \t]{1,3}(?<secret>[0-9a-fA-F]{32})(?:$|[^A-Za-z0-9])"),
+		Pattern(@"(?i:twilio)[^\r\n]{0,60}?[^A-Za-z0-9](?<secret>[0-9a-fA-F]{32})(?:$|[^A-Za-z0-9])|(?:^|[^A-Za-z0-9])AC[0-9a-f]{32}[:,;=/|\s""']{1,6}(?<secret>[0-9a-fA-F]{32})(?:$|[^A-Za-z0-9])"),
 		c => !ValueShapes.IsPlaceholder(c.Value));
 
 	/// <summary>Percent-encoded text whose decoded form holds a credential, such as a token with <c>%5F</c> for its underscore. See <see cref="EncodedTokens"/>.</summary>

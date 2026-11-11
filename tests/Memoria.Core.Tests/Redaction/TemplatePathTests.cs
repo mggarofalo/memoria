@@ -12,7 +12,6 @@ public sealed class TemplatePathTests
 	[InlineData("const secretName = `memoria/${env}/api-key`;")]
 	[InlineData("const tokenPath = `${home}/.config/memoria/token`;")]
 	[InlineData("password_file=\"${SECRETS_DIR}/db/password.txt\"")]
-	[InlineData("api_key: `projects/${project}/secrets/api-key/versions/1`")]
 	[InlineData("export TOKEN_FILE=\"$(pwd)/run/worker-token\"")]
 	public void A_template_that_builds_a_path_of_words_stays(string line)
 	{
@@ -30,6 +29,11 @@ public sealed class TemplatePathTests
 			{ "token = `${base}/vault/" + "xqzvbtrkplmnvbcxwqyt" + "zz`", "xqzvbtrkplmnvbcxwqyt" + "zz" },
 			{ "DB_PASSWORD=\"${DB_PASSWORD:-Pr0d" + "P4ss}/data/db\"", "Pr0d" + "P4ss" },
 			{ "password = `${PREFIX}/Summer" + "password`", "Summer" + "password" },
+			// A password's or a token's name keeps words between slashes: they can be the passphrase itself.
+			{ "password: `${SALT}/hunter/two`", "hunter/two" },
+			{ "secret = `${x}/correct/horse/battery`", "correct/horse/battery" },
+			// A span's own data can be the secret, under any name.
+			{ "secretName = `${a}/x/${b:-hunterxyz}/y`", "hunterxyz" },
 		};
 	}
 
