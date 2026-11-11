@@ -8,7 +8,7 @@ import { SqliteJobStore } from "../src/queue-store.ts";
 import { FINAL_MS, shutDown } from "../src/shutdown.ts";
 import { FakeBackend } from "./fake-backend.ts";
 import { tempDir } from "./helpers.ts";
-import { EMBED_FILE, MockWorker } from "./mock-worker.ts";
+import { EMBED_FILE, GENERATE_URI, MockWorker, RERANK_URI } from "./mock-worker.ts";
 
 const result: JobResult = { update: { collections: 1, indexed: 1, updated: 0, unchanged: 0, removed: 0, skipped: 0, needsEmbedding: 0 }, embed: null, metadata: { documents: 1, withMetadata: 0 } };
 const req = (over: Partial<ReindexRequest> = {}): ReindexRequest => ({ collections: ["c"], embed: true, force: false, reason: "test", ...over });
@@ -64,7 +64,7 @@ test("a refused call leaves the worker's circuit alone and loads no model here",
   const mock = await new MockWorker(8).start();
   let fellBack = 0;
   const fallback = { embedBatch: async () => (fellBack++, []), tokenize: async () => [], detokenize: async () => "" };
-  const llm = new RemoteLlm({ models: { embed: `hf:x/${EMBED_FILE}`, rerank: "r", generate: "g" }, workers: [{ name: "only", url: mock.url, token: undefined, capabilities: ["embed", "rerank", "generate"], priority: 1, maxConcurrent: 2 }], embedDimensions: 8, fallback });
+  const llm = new RemoteLlm({ models: { embed: `hf:x/${EMBED_FILE}`, rerank: RERANK_URI, generate: GENERATE_URI }, workers: [{ name: "only", url: mock.url, token: undefined, capabilities: ["embed", "rerank", "generate"], priority: 1, maxConcurrent: 2 }], embedDimensions: 8, fallback });
   try {
     await llm.refreshStatus();
     llm.lifecycle.refuseNew();
@@ -166,7 +166,7 @@ test("a heartbeat during the drain marks no worker down, so a call still fails a
   const mock = await new MockWorker(8).start();
   let fellBack = 0;
   const fallback = { embedBatch: async () => (fellBack++, []), tokenize: async () => (fellBack++, []), detokenize: async () => "" };
-  const llm = new RemoteLlm({ models: { embed: `hf:x/${EMBED_FILE}`, rerank: "r", generate: "g" }, workers: [{ name: "only", url: mock.url, token: undefined, capabilities: ["embed", "rerank", "generate"], priority: 1, maxConcurrent: 2 }], embedDimensions: 8, fallback });
+  const llm = new RemoteLlm({ models: { embed: `hf:x/${EMBED_FILE}`, rerank: RERANK_URI, generate: GENERATE_URI }, workers: [{ name: "only", url: mock.url, token: undefined, capabilities: ["embed", "rerank", "generate"], priority: 1, maxConcurrent: 2 }], embedDimensions: 8, fallback });
   try {
     await llm.refreshStatus();
     llm.lifecycle.refuseNew();

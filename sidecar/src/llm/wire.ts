@@ -303,6 +303,7 @@ export function wireRemote(handles: SdkHandles, config: RemoteLlmConfig, options
     statusPollMs: config.statusPollMs ?? 10_000,
     indexDimensions: () => indexDimensions(db),
     onDisagreement: (workers) => warn(workers.length > 0 ? `Workers ${workers.join(", ")} embedded the same text differently, so their vectors may not be comparable. Check they run the same model build.` : "Workers embed alike again."),
+    onModelMismatch: (worker, role, reported) => warn(`Worker ${worker} serves ${reported ?? "no model"} for ${role}, not the configured ${role} model, so it gets no ${role} work until it does.`),
     ...timeouts,
     ...optionalRemote(config, options),
   });

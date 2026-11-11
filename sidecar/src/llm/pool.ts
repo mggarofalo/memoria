@@ -130,8 +130,11 @@ interface Entry {
   health: WorkerHealth | null;
   lastHeartbeat: number | null;
   capabilities: WorkerCapabilities | null;
-  /** Null until checked. False keeps this worker off embedding and tokens. */
-  modelOk: boolean | null;
+  /**
+   * Per role, null until checked. False keeps this worker off that role: a vector from
+   * another embedding model is not comparable, and neither is a score from another reranker.
+   */
+  modelOk: Record<Capability, boolean | null>;
   refusals: Record<CircuitKey, number>;
   inFlight: Record<PriorityClass, number>;
   outcomes: boolean[];
@@ -154,8 +157,8 @@ export type EmbedProbe = (target: DispatchTarget) => Promise<number[]>;
 
 export interface WorkerPoolOptions {
   workers: PoolWorkerConfig[];
-  /** The exact file names, in lower case, that count as the index's embedding model. */
-  embedFiles: readonly string[];
+  /** Per role, the exact file names, in lower case, that count as the configured model. */
+  modelFiles: Record<Capability, readonly string[]>;
   breaker?: Partial<BreakerOptions>;
   timeouts?: Partial<OperationTimeouts>;
   fetch?: typeof globalThis.fetch;
@@ -168,6 +171,8 @@ export interface WorkerPoolOptions {
   trial?: RoleTrial;
   probe?: EmbedProbe;
   probeEveryMs?: number;
+  /** Told when a worker reports another model than the one configured for a role it serves. */
+  onModelMismatch?: (worker: string, role: Capability, reported: string | null) => void;
   /** Told when workers start or stop disagreeing about the same text. */
   onDisagreement?: (workers: readonly string[]) => void;
   /** Slots per worker that background work may not use, when the worker has more than that. */
@@ -184,6 +189,13 @@ const PROBE_MIN_COSINE = 0.995;
 function circuitFor(capability: Capability, klass: PriorityClass): CircuitKey {
   return capability === "embed" && klass === "background" ? "documents" : capability;
 }
+
+/** Why a worker was refused a role for its model. */
+const MISMATCH: Record<Capability, string> = {
+  embed: "the worker does not serve the index's embedding model",
+  rerank: "the worker does not serve the configured rerank model",
+  generate: "the worker does not serve the configured generate model",
+};
 
 /** Operations that need the worker to hold a particular role. */
 const OPERATIONS: Record<Capability, string> = { embed: "embed", rerank: "rerank", generate: "complete" };
@@ -219,7 +231,7 @@ function newEntry(config: PoolWorkerConfig, pool: BreakerOptions, options: Worke
     health: null,
     lastHeartbeat: null,
     capabilities: null,
-    modelOk: null,
+    modelOk: { embed: null, rerank: null, generate: null },
     refusals: { embed: 0, rerank: 0, generate: 0, documents: 0 },
     inFlight: { interactive: 0, background: 0 },
     outcomes: [],
@@ -237,7 +249,8 @@ function worstCircuit(entry: Entry): BreakerState {
 
 export class WorkerPool {
   readonly #entries: Entry[];
-  readonly #embedFiles: ReadonlySet<string>;
+  readonly #modelFiles: Record<Capability, ReadonlySet<string>>;
+  readonly #onModelMismatch: WorkerPoolOptions["onModelMismatch"];
   readonly #now: () => number;
   readonly #queueTimeoutMs: Record<PriorityClass, number>;
   readonly #interactiveBudgetMs: () => number | null;
@@ -255,7 +268,8 @@ export class WorkerPool {
 
   constructor(options: WorkerPoolOptions) {
     if (options.workers.length === 0) throw new Error("A worker pool needs at least one worker");
-    this.#embedFiles = new Set(options.embedFiles);
+    this.#modelFiles = { embed: new Set(options.modelFiles.embed), rerank: new Set(options.modelFiles.rerank), generate: new Set(options.modelFiles.generate) };
+    this.#onModelMismatch = options.onModelMismatch;
     this.#now = options.now ?? (() => Date.now());
     this.#queueTimeoutMs = options.queueTimeoutMs ?? { interactive: 5_000, background: 600_000 };
     this.#interactiveBudgetMs = options.interactiveBudgetMs ?? (() => null);
@@ -311,8 +325,25 @@ export class WorkerPool {
     entry.reachable = true;
     entry.lastHeartbeat = this.#now();
     this.#settleCircuits(entry, wasDown);
-    entry.modelOk = this.servesIndexModel(entry.capabilities?.models.embed);
+    this.#checkModels(entry, entry.capabilities);
     await this.#runTrials(entry);
+  }
+
+  /**
+   * Each role this worker is configured for and offers, against the model configured for it. A role it
+   * does not offer at all is already kept from it by its operations, and is not a wrong model.
+   */
+  #checkModels(entry: Entry, capabilities: WorkerCapabilities): void {
+    for (const role of entry.config.capabilities) {
+      if (capabilities.operations.includes(OPERATIONS[role])) this.#checkModel(entry, role, capabilities.models[role]);
+    }
+  }
+
+  #checkModel(entry: Entry, role: Capability, reported: string | null): boolean {
+    const ok = this.servesModel(role, reported);
+    if (!ok && entry.modelOk[role] !== false) this.#onModelMismatch?.(entry.config.name, role, reported);
+    entry.modelOk[role] = ok;
+    return ok;
   }
 
   /**
@@ -422,7 +453,7 @@ export class WorkerPool {
 
   /** Up, in rotation, and serving the index's model, so its vector says something. */
   #probeable(entry: Entry): boolean {
-    return entry.reachable === true && !entry.drained && entry.config.capabilities.includes("embed") && entry.modelOk === true;
+    return entry.reachable === true && !entry.drained && entry.config.capabilities.includes("embed") && entry.modelOk.embed === true;
   }
 
   #probeDue(): boolean {
@@ -451,15 +482,19 @@ export class WorkerPool {
   }
 
   /** Exact, so `evil-embeddinggemma...` does not pass for `embeddinggemma...`. */
+  servesModel(role: Capability, file: unknown): boolean {
+    return typeof file === "string" && this.#modelFiles[role].has(file.toLowerCase());
+  }
+
   servesIndexModel(file: unknown): boolean {
-    return typeof file === "string" && this.#embedFiles.has(file.toLowerCase());
+    return this.servesModel("embed", file);
   }
 
   // --- routing ---------------------------------------------------------------
 
   #servesRole(entry: Entry, capability: Capability): boolean {
     if (entry.drained || !entry.config.capabilities.includes(capability)) return false;
-    if (capability === "embed" && entry.modelOk === false) return false;
+    if (entry.modelOk[capability] === false) return false;
     if (entry.capabilities && !entry.capabilities.operations.includes(OPERATIONS[capability])) return false;
     return !entry.health || entry.health.models[capability];
   }
@@ -598,7 +633,7 @@ export class WorkerPool {
 
   async #attempt<T>(entry: Entry, capability: Capability, klass: PriorityClass, operation: string, work: (target: DispatchTarget) => Promise<T>): Promise<Attempt<T>> {
     try {
-      if (capability === "embed") await this.#verifyEmbedModel(entry, operation);
+      await this.#verifyModel(entry, capability, operation);
       const value = await work({ name: entry.config.name, client: entry.client });
       const key = circuitFor(capability, klass);
       entry.breakers[key].success();
@@ -606,14 +641,14 @@ export class WorkerPool {
       this.#record(entry, true);
       return { ok: true, value };
     } catch (err) {
-      return this.#failed(entry, circuitFor(capability, klass), err);
+      return this.#failed(entry, capability, circuitFor(capability, klass), err);
     } finally {
       entry.inFlight[klass]--;
       this.#wake();
     }
   }
 
-  #failed(entry: Entry, key: CircuitKey, err: unknown): Attempt<never> {
+  #failed(entry: Entry, capability: Capability, key: CircuitKey, err: unknown): Attempt<never> {
     const breaker = entry.breakers[key];
     if (err instanceof WorkerError && err.code === "closing") {
       // Shutdown stopped it, not the worker.
@@ -638,7 +673,7 @@ export class WorkerPool {
     }
     this.#record(entry, false);
     if (err.code === "model_mismatch") {
-      entry.modelOk = false;
+      entry.modelOk[capability] = false;
       breaker.settle();
     } else {
       breaker.failure(this.#now());
@@ -646,9 +681,13 @@ export class WorkerPool {
     return { ok: false, error: err, retry: true };
   }
 
-  /** A worker that has not been heartbeat-checked yet is asked before it embeds anything. */
-  async #verifyEmbedModel(entry: Entry, operation: string): Promise<void> {
-    if (entry.modelOk === true) return;
+  /**
+   * A worker that has not been heartbeat-checked yet is asked before it serves a role. A rerank
+   * or generate response names no model, so this and the heartbeat are what keep a worker running
+   * another reranker out: failover between two would mix their scores in one search.
+   */
+  async #verifyModel(entry: Entry, capability: Capability, operation: string): Promise<void> {
+    if (entry.modelOk[capability] === true) return;
     let capabilities;
     try {
       // Named apart from the heartbeat's call: this one is on a request's path, so it is logged.
@@ -657,8 +696,7 @@ export class WorkerPool {
       if (err instanceof ResponseViolation) throw new WorkerError("invalid_response", operation, entry.client.name, err.message);
       throw err;
     }
-    entry.modelOk = this.servesIndexModel(capabilities.models.embed);
-    if (!entry.modelOk) throw new WorkerError("model_mismatch", operation, entry.client.name, "the worker does not serve the index's embedding model");
+    if (!this.#checkModel(entry, capability, capabilities.models[capability])) throw new WorkerError("model_mismatch", operation, entry.client.name, MISMATCH[capability]);
   }
 
   #record(entry: Entry, ok: boolean): void {
@@ -715,7 +753,7 @@ export class WorkerPool {
         capabilities: [...e.config.capabilities],
         priority: e.config.priority,
         maxConcurrent: e.config.maxConcurrent,
-        embedModelCompatible: e.modelOk,
+        embedModelCompatible: e.modelOk.embed,
         rerankTransport: e.capabilities?.rerankTransport ?? null,
         lastHeartbeat: e.lastHeartbeat === null ? null : new Date(e.lastHeartbeat).toISOString(),
         inFlight: e.inFlight.interactive + e.inFlight.background,

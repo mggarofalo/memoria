@@ -88,6 +88,7 @@ export interface RemoteLlmOptions {
   indexDimensions?: () => number | null;
   probeEveryMs?: number;
   onDisagreement?: (workers: readonly string[]) => void;
+  onModelMismatch?: (worker: string, role: Capability, reported: string | null) => void;
   searchDeadlineMs?: number;
   /** Slots per worker that background work may not use. */
   interactiveReserve?: number;
@@ -97,8 +98,8 @@ function basename(uri: string): string {
   return (uri.split("/").pop() ?? uri).toLowerCase();
 }
 
-/** What a worker may report for the model: its file name, or QMD's cache name for it. Exact names only. */
-export function acceptedEmbedFiles(uri: string): string[] {
+/** What a worker may report for a model: its file name, or QMD's cache name for it. Exact names only. */
+export function acceptedModelFiles(uri: string): string[] {
   const file = basename(uri);
   const owner = /^hf:([^/]+)\//.exec(uri)?.[1]?.toLowerCase();
   return owner ? [file, `hf_${owner}_${file}`] : [file];
@@ -183,8 +184,8 @@ export class RemoteLlm implements LlmSurface {
     this.#searchDeadlineMs = options.searchDeadlineMs ?? DEFAULT_SEARCH_DEADLINE_MS;
     this.pool = new WorkerPool({
       workers: workersFrom(options),
-      embedFiles: acceptedEmbedFiles(options.models.embed),
-      ...definedOnly({ breaker: options.breaker, timeouts: options.timeouts, fetch: options.fetch, onCall: options.onCall, now: options.now, probeEveryMs: options.probeEveryMs, onDisagreement: options.onDisagreement, interactiveReserve: options.interactiveReserve }),
+      modelFiles: { embed: acceptedModelFiles(options.models.embed), rerank: acceptedModelFiles(options.models.rerank), generate: acceptedModelFiles(options.models.generate) },
+      ...definedOnly({ breaker: options.breaker, timeouts: options.timeouts, fetch: options.fetch, onCall: options.onCall, now: options.now, probeEveryMs: options.probeEveryMs, onDisagreement: options.onDisagreement, onModelMismatch: options.onModelMismatch, interactiveReserve: options.interactiveReserve }),
       interactiveBudgetMs: () => this.#remainingMs(),
       lifecycle: this.lifecycle,
       trial: (capability, target) => this.#trial(capability, target),

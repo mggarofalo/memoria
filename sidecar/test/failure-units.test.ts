@@ -10,7 +10,7 @@ import { JobDeferred, JobPartial, JobQueue, type JobResult, type JobStore, type 
 import { WorkerClient, WorkerError } from "../src/llm/client.ts";
 import { MAX_EXPANSION_QUERIES, parseExpansion } from "../src/llm/expansion.ts";
 import { cosineOf } from "../src/llm/probe.ts";
-import { acceptedEmbedFiles, RemoteLlm, type RemoteLlmOptions } from "../src/llm/remote.ts";
+import { acceptedModelFiles, RemoteLlm, type RemoteLlmOptions } from "../src/llm/remote.ts";
 import type { Capability, LocalFallback, PoolWorkerConfig } from "../src/llm/types.ts";
 import { parseEmbeddings, ResponseViolation } from "../src/llm/validate.ts";
 import { embedCapacity, guardedFallback, sdkCacheFileName, type SdkDb } from "../src/llm/wire.ts";
@@ -18,12 +18,12 @@ import { openJobStore, retryJobStore, SqliteJobStore } from "../src/queue-store.
 import type { BackendSearchOptions, SearchHit } from "../src/store.ts";
 import { loadConfig } from "../src/config.ts";
 import { dieWithParent, dieWithParentEnv, ManualScheduler, tempDir } from "./helpers.ts";
-import { EMBED_FILE, MockWorker, vectorFor } from "./mock-worker.ts";
+import { EMBED_FILE, GENERATE_URI, MockWorker, RERANK_URI, vectorFor } from "./mock-worker.ts";
 
 /** Each test here reproduces a failure that once left the system looking healthy. */
 
 const URI = `hf:ggml-org/embeddinggemma-300M-GGUF/${EMBED_FILE}`;
-const MODELS = { embed: URI, rerank: "hf:x/r.gguf", generate: "hf:x/g.gguf" };
+const MODELS = { embed: URI, rerank: RERANK_URI, generate: GENERATE_URI };
 const result: JobResult = { update: { collections: 1, indexed: 0, updated: 0, unchanged: 0, removed: 0, skipped: 0, needsEmbedding: 0 }, embed: null, metadata: { documents: 0, withMetadata: 0 } };
 const req = (over: Partial<ReindexRequest> = {}): ReindexRequest => ({ collections: ["c"], embed: true, force: false, reason: "test", ...over });
 const never = new Promise<JobResult>(() => {});
@@ -228,8 +228,8 @@ test("a good heartbeat frees a trial that never came back", async () => {
 // --- a lying worker -------------------------------------------------------------------------
 
 test("the model name must match exactly: a suffix is not enough", async () => {
-  assert.deepEqual(acceptedEmbedFiles(URI), [EMBED_FILE.toLowerCase(), `hf_ggml-org_${EMBED_FILE.toLowerCase()}`]);
-  assert.deepEqual(acceptedEmbedFiles("/models/plain.gguf"), ["plain.gguf"]);
+  assert.deepEqual(acceptedModelFiles(URI), [EMBED_FILE.toLowerCase(), `hf_ggml-org_${EMBED_FILE.toLowerCase()}`]);
+  assert.deepEqual(acceptedModelFiles("/models/plain.gguf"), ["plain.gguf"]);
   for (const liar of [`evil-${EMBED_FILE}`, `hf_someone-else_${EMBED_FILE}`, `x${EMBED_FILE}`]) {
     const a = await new MockWorker(8, liar).start();
     const llm = new RemoteLlm({ workers: [workerConfig("a", a.url)], embedDimensions: 8, models: MODELS, fallback: null });

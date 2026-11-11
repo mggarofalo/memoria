@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { WorkerClient, WorkerError } from "../src/llm/client.ts";
 import { EXPANSION_GRAMMAR, EXPANSION_SAMPLING, EXPANSION_SYSTEM_PROMPT, parseExpansion } from "../src/llm/expansion.ts";
-import { acceptedEmbedFiles, RemoteLlm, WORKER_CACHE_MARK, type RemoteLlmOptions } from "../src/llm/remote.ts";
+import { acceptedModelFiles, RemoteLlm, WORKER_CACHE_MARK, type RemoteLlmOptions } from "../src/llm/remote.ts";
 import type { RerankTransport } from "../src/llm/rerank-transport.ts";
 import type { LlmCallLog, LocalFallback } from "../src/llm/types.ts";
-import { EMBED_FILE, MockWorker, WORKER_TOKEN } from "./mock-worker.ts";
+import { EMBED_FILE, GENERATE_URI, MockWorker, RERANK_URI, WORKER_TOKEN } from "./mock-worker.ts";
 
 const URI = `hf:ggml-org/embeddinggemma-300M-GGUF/${EMBED_FILE}`;
 const docs = (...texts: string[]) => texts.map((text, i) => ({ file: `f${i}.md`, text }));
@@ -25,7 +25,7 @@ async function harness(options: Partial<RemoteLlmOptions> & { dimensions?: numbe
   const degraded: Harness["degraded"] = [];
   const llm = new RemoteLlm({
     worker: { url: worker.url, token: WORKER_TOKEN, embedDimensions: dimensions },
-    models: { embed: URI, rerank: "hf:x/rerank.gguf", generate: "hf:x/gen.gguf" },
+    models: { embed: URI, rerank: RERANK_URI, generate: GENERATE_URI },
     fallback: null,
     onCall: (e) => calls.push(e),
     onDegraded: (e) => degraded.push(e),
@@ -244,7 +244,7 @@ test("JSON cannot smuggle NaN, but an overflowing number is caught as non-finite
 
 test("with dimensions unset, the first response pins the length", async () => {
   const worker = await new MockWorker(4).start();
-  const llm = new RemoteLlm({ worker: { url: worker.url, token: undefined, embedDimensions: 0 }, models: { embed: URI, rerank: "r", generate: "g" }, fallback: null });
+  const llm = new RemoteLlm({ worker: { url: worker.url, token: undefined, embedDimensions: 0 }, models: { embed: URI, rerank: RERANK_URI, generate: GENERATE_URI }, fallback: null });
   try {
     assert.equal((await llm.embed("a"))!.embedding.length, 4);
     worker.on("POST /v1/embed", () => ({ body: { embeddings: [[1, 2, 3]] } }));
@@ -540,8 +540,9 @@ test("a hostile worker cannot get the token into an error, even by echoing it", 
     await h.llm.tokenize("x").catch((e: Error) => seen.push(e.message, String(e.stack), JSON.stringify(e)));
     await h.llm.embedBatch(["a"], { model: "m" });
     await h.llm.expandQuery("x");
-    // An unsafe remote code is dropped entirely; a safe one is kept.
-    h.worker.on("POST /v1/rerank", () => ({ status: 502, body: { error: "rerank_score_out_of_range", message: "free text" } }));
+    // An unsafe remote code is dropped entirely; a safe one is kept. A rerank first checks the worker's model, so that must answer.
+    h.worker.on("GET /capabilities", new MockWorker().handlers.get("GET /capabilities")!);
+    h.worker.on("POST /v1/rerank",() => ({ status: 502, body: { error: "rerank_score_out_of_range", message: "free text" } }));
     await assert.rejects(h.llm.rerank("q", docs("a")), (err: Error) => /rerank_score_out_of_range/.test(err.message) && !/free text/.test(err.message));
     await h.llm.refreshStatus();
     seen.push(JSON.stringify(h.calls), JSON.stringify(h.degraded), JSON.stringify(h.llm.pool.workers()));
