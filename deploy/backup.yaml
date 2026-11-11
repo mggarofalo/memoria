@@ -1,7 +1,7 @@
 # Backups for deploy/compose.yaml, used beside it, never on its own. See docs/deployment.md#backups.
 #
 #   docker compose -f deploy/compose.yaml -f deploy/backup.yaml run --rm backup init       # once
-#   docker compose -f deploy/compose.yaml -f deploy/backup.yaml run --rm snapshot          # then, daily:
+#   docker compose -f deploy/compose.yaml -f deploy/backup.yaml run --rm snapshot &&       # then, daily:
 #   docker compose -f deploy/compose.yaml -f deploy/backup.yaml run --rm backup
 #
 # restore writes only into empty volumes, and refuses otherwise, so it cannot overwrite a running deployment.
@@ -15,18 +15,24 @@ x-restic: &restic
   secrets: [restic_password]
 
 services:
-  # Consistent copies of the live databases, which restic then backs up with the files.
+  # Consistent copies of the live databases, which restic then backs up with the files. The running sidecar holds the job queue's file
+  # under an exclusive lock, so it copies that one itself when asked, which is why this is on its network with its secret. It fails,
+  # keeping the last copy, if a running sidecar cannot be reached or refuses: run backup only after this succeeds.
   snapshot:
     image: ghcr.io/mggarofalo/memoria-qmd:${MEMORIA_VERSION}
     profiles: [backup]
     user: "0:0"
-    network_mode: none
+    networks: [memoria]
+    environment:
+      MEMORIA_SIDECAR_URL: http://memoria-qmd:8282
+      MEMORIA_SIDECAR_SECRET: ${MEMORIA_SIDECAR_SECRET}
     entrypoint: ["node", "scripts/snapshot-db.mjs"]
     command:
       - /data/control.db
       - /staging/control.db
       - /index/qmd/index.sqlite
       - /staging/index.sqlite
+      - --queue
       - /index/qmd/index.sqlite.queue.sqlite
       - /staging/queue.sqlite
     # Writable, as a reader of a WAL database writes its -shm index. The script opens each database read-only, and gives any file it

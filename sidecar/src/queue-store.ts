@@ -1,4 +1,5 @@
-import { existsSync, readdirSync, renameSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, readdirSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { isBusy } from "./sqlite-busy.ts";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -30,6 +31,21 @@ const JOB_STATES: ReadonlySet<string> = new Set(["queued", "running", "succeeded
 /** The default location: beside the index, under a name of its own. */
 export function queueDbPathFor(indexPath: string): string {
   return `${indexPath}.queue.sqlite`;
+}
+
+/**
+ * Where `snapshot` writes: beside the queue file, under a fixed name. Nothing a
+ * caller sends can change it.
+ */
+export function queueSnapshotPathFor(queuePath: string): string {
+  return `${queuePath}.snapshot`;
+}
+
+/** What a snapshot wrote, so its reader can check that the file it reads is this one. */
+export interface QueueSnapshot {
+  bytes: number;
+  /** Lowercase hex. */
+  sha256: string;
 }
 
 /** How many moved-aside corrupt files to keep. */
@@ -97,12 +113,14 @@ function jobFromRow(row: Row): PersistedJob {
 
 export class SqliteJobStore implements JobStore {
   readonly #db: DatabaseSync;
+  readonly #path: string;
   readonly #upsert: ReturnType<DatabaseSync["prepare"]>;
   readonly #delete: ReturnType<DatabaseSync["prepare"]>;
   /** Rows set aside by the last `load`. */
   quarantined = 0;
 
   constructor(path: string) {
+    this.#path = path;
     this.#db = new DatabaseSync(path);
     try {
       this.#prepareFile(path);
@@ -244,6 +262,33 @@ export class SqliteJobStore implements JobStore {
 
   remove(id: string): void {
     this.#delete.run(id);
+  }
+
+  /**
+   * A consistent copy of this file, for a backup, at `queueSnapshotPathFor`. The
+   * exclusive lock lets no other process read the file, so this connection copies it.
+   *
+   * `VACUUM INTO` copies in one read transaction, on the event loop that runs every
+   * write here, so no write can land partway through. It leaves out free pages, and
+   * writes a rollback-journal file with nothing beside it. The copy is written under
+   * another name and renamed over the last one, so a reader sees one copy or the
+   * other, whole.
+   */
+  snapshot(): QueueSnapshot {
+    const target = queueSnapshotPathFor(this.#path);
+    const partial = `${target}.partial`;
+    // VACUUM INTO will not write over a file. One left by a failed copy goes, and a link is removed, not followed.
+    rmSync(partial, { force: true });
+    try {
+      this.#db.prepare("VACUUM INTO ?").run(partial);
+      const bytes = readFileSync(partial);
+      renameSync(partial, target);
+      return { bytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") };
+    } catch (err) {
+      // A full disk, say: a half-written copy must not stay to fill it further.
+      rmSync(partial, { force: true });
+      throw err;
+    }
   }
 
   close(): void {

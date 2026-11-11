@@ -99,6 +99,12 @@ test("a restore writes only into empty volumes, and backups pin restic and check
   const snapshot = read("sidecar/scripts/snapshot-db.mjs");
   assert.match(snapshot, /readonly: true/);
   assert.match(snapshot, /integrity_check/);
+  // The running sidecar holds the queue's file under an exclusive lock, so the snapshot asks it for the copy, on its network, with its secret.
+  const service = backup.slice(backup.indexOf("  snapshot:\n"), backup.indexOf("  backup:\n"));
+  assert.match(service, /networks: \[memoria\]/);
+  assert.match(service, /MEMORIA_SIDECAR_URL: http:\/\/memoria-qmd:8282/);
+  assert.match(service, /MEMORIA_SIDECAR_SECRET: \$\{MEMORIA_SIDECAR_SECRET\}/);
+  assert.match(service, /- --queue\n\s+- \/index\/qmd\/index\.sqlite\.queue\.sqlite\n\s+- \/staging\/queue\.sqlite\n/);
 });
 
 test("compose keeps the sidecar unpublished, off the fallback, and the API on its heap", () => {

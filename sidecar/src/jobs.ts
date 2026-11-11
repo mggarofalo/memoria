@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { QueueSnapshot } from "./queue-store.ts";
 
 /**
  * A single-worker queue for index maintenance. `qmd update` and `qmd embed`
@@ -164,6 +165,8 @@ export interface JobStore {
   load(): PersistedJob[];
   save(entry: PersistedJob): void;
   remove(id: string): void;
+  /** A consistent copy of the store's file, for a backup. Only a store with a file has one. */
+  snapshot?(): QueueSnapshot;
 }
 
 export interface JobQueueOptions {
@@ -302,6 +305,17 @@ export class JobQueue {
 
   persistence(): QueuePersistence {
     return { enabled: this.#store !== undefined, healthy: this.#store !== undefined && this.#storeHealthy };
+  }
+
+  /**
+   * A copy of the store's file, for a backup. Null when no file holds these jobs: they
+   * are in memory only, the file is behind them after a failed write, which also leaves
+   * the store unhealthy, or shutdown has begun. A copy then would read as a good backup
+   * of jobs it does not have.
+   */
+  snapshot(): QueueSnapshot | null {
+    if (!this.#store?.snapshot || this.#suspended || !this.#storeHealthy) return null;
+    return this.#store.snapshot();
   }
 
   /**

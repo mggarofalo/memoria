@@ -1078,6 +1078,37 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     },
   );
 
+  app.post(
+    "/queue::snapshot",
+    {
+      schema: {
+        tags: ["index"],
+        summary: "Copy the job queue's file for a backup",
+        description:
+          "Write a consistent copy of the job queue's file, with its jobs and set-aside documents, beside it as " +
+          "`<queue file>.snapshot`, replacing the last copy whole. Nothing in the request chooses where. The sidecar holds " +
+          "the file under an exclusive lock, so only it can copy it while it runs. 409 `queue_not_persistent` when no file " +
+          "holds its jobs: they are in memory only, the file is behind them after a failed write, or it is shutting down.",
+        response: {
+          200: {
+            type: "object",
+            required: ["bytes", "sha256"],
+            properties: {
+              bytes: { type: "integer", description: "The copy's size." },
+              sha256: { type: "string", description: "The copy's SHA-256, in hex, so its reader can tell it read this copy and not a later one." },
+            },
+          },
+          ...errorResponses,
+        },
+      },
+    },
+    async () => {
+      const snapshot = ctx.jobs.snapshot();
+      if (!snapshot) throw new HttpError(409, "queue_not_persistent", "No file holds this sidecar's jobs, so there is nothing to copy. See GET /queue for its persistence.");
+      return snapshot;
+    },
+  );
+
   app.get(
     "/queue/dead-letters",
     {
