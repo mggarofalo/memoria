@@ -299,7 +299,7 @@ function planCounts(h: Harness, key: string): void {
 function credentialNames(h: Harness, key: string): void {
   const token = h.remember("gh" + "p_" + randomBytes(27).toString("base64url").replace(/[-_]/g, "a").padEnd(36, "b").slice(0, 36));
   const s = setup(h, key, "credential-name", CREDENTIAL_TARGET, { [`${token}.md`]: "---\ndate: \"2024-03-01\"\n---\n\ntext\n", "good.md": "---\ndate: \"2024-03-01\"\n---\n\ntext\n" });
-  const report = h.memoria(["migrate", "report", "--qmd-config", s.config, "--tool", redactionCheckDll(), "--no-gitleaks", "--no-trufflehog", "--format", "json"], { noUrl: true });
+  const report = h.memoria(["migrate", "report", "--qmd-config", s.config, "--tool", redactionCheckDll(), "--no-gitleaks", "--format", "json"], { noUrl: true });
   const row = (JSON.parse(report.out || "[{}]") as Array<{ credentialNames?: number }>)[0];
   h.check("report: a file name that looks like a credential is counted, and exits 1", report.code === 1 && row?.credentialNames === 1, report.out + report.err);
   const pushed = push(s, h.apiUrl, "--apply", "--format", "json");

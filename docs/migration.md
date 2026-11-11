@@ -51,21 +51,17 @@ dotnet build tools/RedactionCheck -c Release
 memoria migrate report --qmd-config ~/.config/qmd/index.yml --tool tools/RedactionCheck/bin/Release/net10.0/RedactionCheck.dll
 ```
 
-Two scanners then look over the redacted text, so both must be on `PATH`: [gitleaks](https://github.com/gitleaks/gitleaks) and [trufflehog](https://github.com/trufflesecurity/trufflehog). They answer different questions:
+[Gitleaks](https://github.com/gitleaks/gitleaks) then looks over the redacted text, so it must be on `PATH`. The redaction engine imports gitleaks's own rules, so gitleaks finds almost nothing the engine did not already remove. It can still catch the few rules the engine leaves out, such as `generic-api-key`, and a rule that was translated wrongly. Its 0 is not proof: it can miss a token at a chunk boundary, or a form its rules do not know, and text that survives redaction is stored and searchable. [Redaction policy](configuration.md#redaction-policy) says what redaction is meant to catch and what it is not.
 
-- **Gitleaks's count says whether the import is faithful.** The redaction engine imports gitleaks's own rules, so gitleaks finds almost nothing the engine did not already remove. It can still catch the few rules the engine leaves out, such as `generic-api-key`, and a rule that was translated wrongly. Its 0 says little about what neither of them knows.
-- **Trufflehog's count is the independent look.** Its detectors are its own, written apart from gitleaks's, and it runs with verification off, so it calls no service. A 0 from it means a second, unrelated set of patterns also found nothing.
-- **Neither 0 is proof.** Gitleaks can miss a token at a chunk boundary, and both can miss a form neither knows. Text that survives redaction will be stored and searchable.
+The report is a sanity check, not a gate. It prints the counts and exits 0 whatever they are, and exits 2 only for a mistake in how you ran it. `--strict` makes it exit 1 if a document was refused, gitleaks found something in the redacted text or could not read it, a file's name looks like a credential, or something could not be read. `--no-gitleaks` goes without gitleaks, and the report says the check is weaker for it.
 
-It exits 1 if a document was refused, a scanner found something in the redacted text or could not read it, a file's name looks like a credential, or something could not be read. `--no-gitleaks` and `--no-trufflehog` go without one scanner, and the report says the check is weaker for it.
+Gitleaks's input never touches the disk: it reads the text on its standard input.
 
-Neither scanner's input touches the disk. Each reads the text on its standard input. Trufflehog writes what it reads to a temporary file past 10 MB, so the tool gives it under that at a time, in a process of its own for each batch.
-
-**Stop or go.** Go on only at exit 0. Exit 1 is a stop: do not push until you have dealt with what it counted, by removing the secret from the file, or by leaving that file out with an ignore rule, or by listing a finding you have reviewed (below), and the report comes back clean. If a rule's count looks wrong for your notes, stop and look at the rule, as the report will not show you the text.
+**Glance at the counts.** Look at the replacements by rule and at gitleaks's findings, then go on. A rule whose count looks wrong for your notes, or a finding that looks like a live secret, is worth a look before you push: remove the secret from the file, or leave that file out with an ignore rule. The report will not show you the text, so open the file yourself.
 
 #### Findings you have reviewed
 
-Either scanner can flag text that holds no secret, such as a hash beside the word "api", prose that reads like an assignment, or a connection string whose password redaction already replaced. Once you have looked at a finding and judged it harmless, you can list it by fingerprint, so it no longer fails the run while any other finding still does:
+Gitleaks can flag text that holds no secret, such as a hash beside the word "api", or prose that reads like an assignment. If you run the report with `--strict`, for instance to keep a clean corpus clean, a finding you have looked at and judged harmless can be listed by fingerprint, so it no longer fails the run while any other finding still does:
 
 ```sh
 mkdir -p ~/.config/memoria/migrate-state
@@ -73,16 +69,16 @@ memoria migrate report --qmd-config ~/.config/qmd/index.yml --tool tools/Redacti
   --gitleaks-findings ~/.config/memoria/migrate-state/findings.txt
 ```
 
-`--gitleaks-findings <file>` writes one fingerprint for each finding not already listed, in the form `<collection>/<path>:<rule>:<line>`: the collection's name in your QMD config, the file's path in it, the rule, and the line in the redacted document. A trufflehog finding's rule is `trufflehog-<detector>`, such as `trufflehog-jdbc`, so one ignore file covers both scanners. Trufflehog says what it found and not where, so the tool finds that text again in the redacted documents, and each place it appears is a finding of its own. One it found only in a decoded form, which the text does not hold as such, has no place and cannot be listed. Open each file at that line, decide, and copy the ones you judge harmless into an ignore file, with a comment line above each saying why:
+`--gitleaks-findings <file>` writes one fingerprint for each finding not already listed, in the form `<collection>/<path>:<rule>:<line>`: the collection's name in your QMD config, the file's path in it, the rule, and the line in the redacted document. Open each file at that line, decide, and copy the ones you judge harmless into an ignore file, with a comment line above each saying why:
 
 ```text
 # a list of git blob hashes; the keyword is in a file name, and the value is a SHA-1
 notes/build/hashes.md:generic-api-key:12
 ```
 
-Then run the report with `--gitleaks-ignore ~/.config/memoria/migrate-state/reviewed.gitleaksignore`. Each listing excuses one finding: it is counted as ignored, and shown as such, and does not fail the run. A new finding, one under another rule, or one that has moved to another line or file still exits 1, and so does a second finding on a listed line, until its fingerprint is listed a second time. The findings file shows such a fingerprint twice. The file is in `.gitleaksignore` form: one fingerprint a line, with blank lines and `#` comments skipped.
+Then run the report with `--strict --gitleaks-ignore ~/.config/memoria/migrate-state/reviewed.gitleaksignore`. Each listing excuses one finding: it is counted as ignored, and shown as such, and does not fail the run. A new finding, one under another rule, or one that has moved to another line or file still exits 1, and so does a second finding on a listed line, until its fingerprint is listed a second time. The findings file shows such a fingerprint twice. The file is in `.gitleaksignore` form: one fingerprint a line, with blank lines and `#` comments skipped.
 
-The findings file is deleted when the report starts, so a run that cannot finish leaves none behind from an earlier run. An empty findings file does not mean the run was clean, as a document gitleaks could not read has no findings to list: go by the exit code.
+The findings file is deleted when the report starts, so a run that cannot finish leaves none behind from an earlier run. An empty findings file does not mean the run was clean, as a document gitleaks could not read has no findings to list: go by the counts, or by the exit code under `--strict`.
 
 - **Keep both files private, and out of any repository.** A fingerprint holds a file's path, and paths can say more than you mean them to. `~/.config/memoria/migrate-state/` is the place for them.
 - **A fingerprint names a line, not a value.** If the text on a listed line changes and gitleaks still flags it under the same rule, it stays listed. This is how gitleaks's own fingerprints work. Review the file again after editing a listed document.
