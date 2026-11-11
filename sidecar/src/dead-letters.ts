@@ -1,3 +1,4 @@
+import { truncateLog } from "./purge.ts";
 import { isBusy, withShortBusyTimeout } from "./sqlite-busy.ts";
 
 /**
@@ -81,7 +82,7 @@ export class DeadLetterBook {
   #table: DeadLetterTable;
   #persistent: boolean;
   readonly #now: () => string;
-  #clearedAt: string | null = null;
+  #clearedAt: string | undefined;
   readonly #goneHashes = new Map<string, string>();
   readonly #goneRows = new Map<string, string>();
 
@@ -98,7 +99,7 @@ export class DeadLetterBook {
   /** Removed here after this row was written, so a copy of it from elsewhere is stale. */
   #removed(row: DeadLetterRow): boolean {
     const at = [this.#clearedAt, this.#goneHashes.get(row.hash), this.#goneRows.get(key(row.hash, row.path))];
-    return at.some((when) => when !== undefined && when !== null && row.at <= when);
+    return at.some((when) => when !== undefined && row.at <= when);
   }
 
   /** The queue file came free: what was kept in memory joins what it holds. */
@@ -133,7 +134,7 @@ export class DeadLetterBook {
   /** No other copy is left to merge in, so what was removed need not be remembered. */
   settle(): void {
     if (!this.#persistent) return;
-    this.#clearedAt = null;
+    this.#clearedAt = undefined;
     this.#goneHashes.clear();
     this.#goneRows.clear();
   }
@@ -198,7 +199,9 @@ function pruneLegacyTable(db: IndexDb): void {
     );
   } catch (err) {
     if (!isBusy(err)) throw err;
+    return;
   }
+  if ((db.prepare("SELECT changes() AS n").get() as { n: number }).n > 0) truncateLog(db as never);
 }
 
 /**
@@ -237,6 +240,8 @@ export function moveLegacyLetters(db: IndexDb, book: DeadLetterBook): void {
     if (isBusy(err)) return;
     throw err;
   }
+  // The log's frames still hold the dropped rows, paths included, until it is emptied.
+  truncateLog(db as never);
   book.settle();
 }
 

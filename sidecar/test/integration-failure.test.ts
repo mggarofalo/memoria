@@ -7,6 +7,7 @@
  */
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createInterface } from "node:readline";
@@ -1178,6 +1179,9 @@ for (const mode of ["remote", "local"] as const) {
       run2.close();
     }
     assert.equal(await legacyTableIn(dbPath), undefined, "dropped from the index");
+    const onDisk = [dbPath, `${dbPath}-wal`].filter((f) => existsSync(f)).map((f) => readFileSync(f).toString("latin1")).join("");
+    assert.ok(onDisk.includes("sub/delta.md"), "the check can see a path that is there");
+    assert.ok(!onDisk.includes("secret/deleted.md"), "nor left in the index's free pages or its log");
   });
 }
 
@@ -1196,6 +1200,8 @@ test("a process holding no queue file keeps an older build's set-asides in memor
   assert.notEqual(await legacyTableIn(dbPath), undefined, "kept for the process that holds the file");
   const left = await withSdk(dbPath, (db) => (db.prepare("SELECT path FROM memoria_dead_letters").all() as Array<{ path: string }>).map((r) => r.path));
   assert.deepEqual(left, ["sub/delta.md"], "less the deleted document's, whose path may be sensitive");
+  const onDisk = [dbPath, `${dbPath}-wal`].filter((f) => existsSync(f)).map((f) => readFileSync(f).toString("latin1")).join("");
+  assert.ok(!onDisk.includes("secret/deleted.md"), "and not left in the index's free pages or its log");
 });
 
 test("a queue file that fails leaves status, a scan and search working, with a warning", { skip }, async () => {

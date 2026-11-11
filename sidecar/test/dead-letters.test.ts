@@ -269,6 +269,99 @@ test("whether a document row holds a set-aside: any row, or only an active one",
   assert.deepEqual([active("h", "live.md"), active("h", "gone.md")], [true, false]);
 });
 
+/** A table in memory that counts its scrubs. */
+class CountingTable extends MemoryDeadLetters {
+  scrubs = 0;
+  override scrub(): void {
+    this.scrubs++;
+  }
+}
+
+test("a merge keeps the record it holds when the other is no newer, and a removal covers a row written in its own millisecond", () => {
+  const book = new DeadLetterBook(new MemoryDeadLetters(), clock(T2).now);
+  book.put(row("h", "a.md", T1, "held"));
+  book.merge([row("h", "a.md", T1, "same time, from elsewhere")]);
+  assert.equal(book.all()[0]!.reason, "held");
+  book.removeHash("h");
+  book.merge([row("h", "a.md", T2)]);
+  assert.deepEqual(book.all(), [], "written as it was removed, so not after it");
+});
+
+test("by default a removal is timed by the clock, so a copy written before it stays removed", () => {
+  const book = new DeadLetterBook(new MemoryDeadLetters());
+  book.clear();
+  book.merge([row("h", "a.md", "2000-01-01T00:00:00.000Z")]);
+  assert.deepEqual(book.all(), []);
+});
+
+test("settling forgets every kind of removal, once the book is the file's", () => {
+  const book = new DeadLetterBook(new MemoryDeadLetters(), clock(T2).now);
+  book.put(row("h", "a.md", T1));
+  book.put(row("g", "b.md", T1));
+  book.removeHash("h");
+  book.retain((hash) => hash !== "g");
+  book.settle();
+  book.merge([row("h", "a.md", T1), row("g", "b.md", T1)]);
+  assert.deepEqual(paths(book), ["a.md", "b.md"]);
+});
+
+test("a second adopt keeps the book on the first file", async () => {
+  const { store } = await queueFile();
+  try {
+    const book = new DeadLetterBook(null);
+    book.adopt(store.deadLetters());
+    book.adopt(new MemoryDeadLetters());
+    book.put(row("h", "a.md"));
+    assert.equal(store.deadLetters().all().length, 1);
+  } finally {
+    store.close();
+  }
+});
+
+test("the table is scrubbed after rows are removed, and only then", () => {
+  const table = new CountingTable();
+  const book = new DeadLetterBook(table, clock(T2).now);
+  assert.equal(book.retain(() => false), 0);
+  assert.equal(book.clear(), 0);
+  assert.equal(table.scrubs, 0, "nothing removed, nothing to scrub");
+  book.put(row("h", "a.md", T1));
+  book.put(row("g", "b.md", T1));
+  assert.equal(book.retain((hash) => hash === "g"), 1);
+  assert.equal(table.scrubs, 1);
+  assert.equal(book.clear(), 1);
+  assert.equal(table.scrubs, 2);
+
+  const file = new CountingTable();
+  file.put(row("f", "f.md", T1));
+  const inMemory = new DeadLetterBook(null, clock(T2).now);
+  inMemory.adopt(file);
+  assert.equal(file.scrubs, 0, "an adopt that removes nothing");
+  const cleared = new DeadLetterBook(null, clock(T2).now);
+  cleared.clear();
+  const other = new CountingTable();
+  other.put(row("f", "f.md", T1));
+  cleared.adopt(other);
+  assert.deepEqual([other.all(), other.scrubs], [[], 1], "and one that does");
+});
+
+test("an older build's table goes only once it is moved, and a fault other than a busy index is not hidden", () => {
+  const index = new DatabaseSync(":memory:");
+  index.exec("CREATE TABLE memoria_dead_letters (hash TEXT NOT NULL, path TEXT NOT NULL, reason TEXT NOT NULL, at TEXT NOT NULL, worker_set TEXT NOT NULL, PRIMARY KEY (hash, path))");
+  assert.throws(() => moveLegacyLetters(index, new DeadLetterBook(null)), /no such table: documents/, "pruning in memory needs the documents table");
+  const book = new DeadLetterBook(new MemoryDeadLetters(), clock(T2).now);
+  book.clear();
+  moveLegacyLetters(index, book);
+  assert.equal(index.isTransaction, false, "the move committed");
+  assert.equal(legacyTable(index), false);
+  book.merge([row("h", "a.md", T1)]);
+  assert.deepEqual(paths(book), ["a.md"], "and with nothing left to merge, the book settled");
+  const again = new DeadLetterBook(new MemoryDeadLetters(), clock(T2).now);
+  again.clear();
+  moveLegacyLetters(index, again);
+  again.merge([row("h", "a.md", T1)]);
+  assert.deepEqual(paths(again), ["a.md"], "it settles when there was no table to move, too");
+});
+
 test("a queue file an earlier build made gains the table and keeps its schema version, so that build can still open it", async () => {
   const file = path.join(await tempDir("memoria-letters-"), "q.sqlite");
   // As an earlier build left it: this build's file, less the table it adds.

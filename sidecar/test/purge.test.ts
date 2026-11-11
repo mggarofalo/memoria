@@ -121,6 +121,13 @@ test("a busy index is left as it is, for the next scan", () => {
   assert.equal(rows(db, "SELECT COUNT(*) FROM documents")[0], 4);
 });
 
+test("removing any one kind of row is worth emptying the log for", () => {
+  for (const counts of [{ documents: 1, content: 0, vectors: 0 }, { documents: 0, content: 1, vectors: 0 }, { documents: 0, content: 0, vectors: 1 }, { documents: 1, content: 1, vectors: 1 }]) {
+    assert.equal(removedAny(counts), true, JSON.stringify(counts));
+  }
+  assert.equal(removedAny({ documents: 0, content: 0, vectors: 0 }), false);
+});
+
 test("truncating the log never throws, busy or not in WAL mode", () => {
   const db = index();
   truncateLog(db as unknown as PurgeDb);

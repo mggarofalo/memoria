@@ -555,16 +555,17 @@ export async function openBackend(options: OpenBackendOptions): Promise<OpenedBa
   const internal = store.internal as unknown as { llm?: LlamaLike };
   const llm = internal.llm;
   if (llmOptions.mode === "local" && options.keepWarm) disableIdleUnload(llm);
-  reportRepair(repairVectorRows(store.internal.db), options);
-  const { letters, tidyLetters } = setAsides(store.internal.db, options);
+  const db = store.internal.db;
+  // A row deleted, a deleted document's text included, is overwritten on disk, not left in free pages. Set before
+  // anything here deletes: the repair below, and the move of an older build's set-asides, which name paths.
+  db.exec("PRAGMA secure_delete = ON");
+  reportRepair(repairVectorRows(db), options);
+  const { letters, tidyLetters } = setAsides(db, options);
   tidyLetters();
   const wired = llmOptions.mode === "remote" ? await wire(store.internal, internal, llmOptions, options, letters) : undefined;
   const remote = wired?.llm;
   const setAside = (): number => tolerated(() => wired?.deadLetters().length ?? 0, 0, options);
   const active = (remote ?? llm) as unknown as LlmSurface;
-  const db = store.internal.db;
-  // A row deleted, a deleted document's text included, is overwritten on disk, not left in free pages.
-  db.exec("PRAGMA secure_delete = ON");
   const unexpanded = withholdExpansion(store.internal as unknown as ExpandingStore);
   const headsStatement = db.prepare(
   `SELECT d.collection AS collection, d.path AS path, substr(c.doc, 1, ?) AS head

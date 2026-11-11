@@ -1,7 +1,7 @@
 /**
  * `node scripts/e2e/backup-restore.ts`: deploy/backup.yaml as it ships, on a throwaway compose project. It fills the project, embeds it with the
  * sidecar tests' scripted worker, backs it up, adds a day's worth more and measures that delta, then destroys every volume by name, restores, and
- * proves keys, documents, deletes and search came back. Needs Docker. Everything is named `sc-backup`, and the run removes all of it.
+ * proves keys, documents, deletes, a document set aside from embedding, and search came back. Needs Docker. Everything is named `sc-backup`, and the run removes all of it.
  */
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -21,6 +21,8 @@ const VOLUMES = ["memoria-data", "memoria-corpus", "memoria-qmd-index", "memoria
 const FIRST_DOCUMENTS = 300;
 const DAILY_DOCUMENTS = 40;
 const DOCUMENT_BYTES = 20_000;
+/** The word in the one document the scripted worker refuses. */
+const POISON = "poisonmarker";
 
 const dir = mkdtempSync(path.join(os.tmpdir(), "memoria-backup-"));
 const results: { name: string; ok: boolean }[] = [];
@@ -112,6 +114,9 @@ volumes:
   writeFileSync(path.join(dir, "worker-host.mjs"), `import { createServer, connect } from "node:net";
 import { MockWorker } from "/mock/mock-worker.ts";
 const worker = await new MockWorker(1024, "Qwen3-Embedding-0.6B-Q8_0.gguf", "Qwen3-Reranker-4B.Q8_0.gguf").start();
+// It refuses one document's text, so the sidecar sets that document aside, a record the backup has to keep.
+const healthy = worker.handlers.get("POST /v1/embed");
+worker.on("POST /v1/embed", (b, req) => (b.texts.some((t) => t.includes("${POISON}")) ? { status: 400, body: {} } : healthy(b, req)));
 const port = Number(new URL(worker.url).port);
 createServer((socket) => { const up = connect(port, "127.0.0.1"); socket.pipe(up).pipe(socket); socket.on("error", () => up.destroy()); up.on("error", () => socket.destroy()); }).listen(8383, "0.0.0.0");
 `);
@@ -140,12 +145,19 @@ async function embed(): Promise<{ state: string; seconds: number; result: unknow
   return { state: done.state, seconds: Math.round((Date.now() - started) / 100) / 10, result: done.result?.embed };
 }
 
-function backup(): { seconds: number; added: string } {
-  const started = Date.now();
-  compose(["run", "--rm", "snapshot"]);
-  const out = compose(["run", "--rm", "backup"]).out;
-  return { seconds: Math.round((Date.now() - started) / 100) / 10, added: /Added to the repository: ([^\n]+)/.exec(out)?.[1] ?? "?" };
+/** The paths the sidecar holds set aside from embedding, which it keeps in the job queue's file. */
+function setAside(): string[] {
+  return (sidecar("/queue/dead-letters").documents as { path: string }[]).map((d) => d.path).sort();
 }
+
+function backup(): { seconds: number; added: string; snapshot: string } {
+  const started = Date.now();
+  const snapshot = compose(["run", "--rm", "snapshot"]).out;
+  const out = compose(["run", "--rm", "backup"]).out;
+  return { seconds: Math.round((Date.now() - started) / 100) / 10, added: /Added to the repository: ([^\n]+)/.exec(out)?.[1] ?? "?", snapshot };
+}
+
+const QUEUE = "/index/qmd/index.sqlite.queue.sqlite";
 
 function auditRows(): number {
   const script = "const D=require('better-sqlite3');const d=new D('/data/control.db',{readonly:true});console.log(d.prepare('select count(*) n from audit_log').get().n)";
@@ -185,12 +197,17 @@ async function backUpAndMeasure(key: string): Promise<void> {
   check("backup: the first backup is taken", full.added !== "?");
 
   check(`backup: a day's delta of ${DAILY_DOCUMENTS} documents goes in`, (await write(key, FIRST_DOCUMENTS, DAILY_DOCUMENTS)) === 0);
+  const poison = await api(`/v1/ingest/rendered?collection=${COLLECTION}&path=day/poison.md&updated=2026-01-15T00:00:00Z`, { method: "POST", key, headers: { "Content-Type": "text/markdown" }, body: body(POISON) });
+  check("backup: with one document the worker refuses", poison.status === 202, poison.text.slice(0, 300));
   const delta = await embed();
   console.log(`     daily delta: ${DAILY_DOCUMENTS} documents of ${DOCUMENT_BYTES} bytes embedded in ${delta.seconds} s on the scripted worker, ${JSON.stringify(delta.result)}`);
-  check("backup: the daily embed finishes", delta.state === "succeeded", delta);
+  // The job that sets a document aside ends failed, and has embedded the rest.
+  check("backup: the daily embed finishes, setting that one document aside", delta.state === "failed" && setAside().join() === "day/poison.md", { delta, setAside: setAside() });
   const daily = backup();
   console.log(`     daily backup: ${daily.seconds} s, added ${daily.added}`);
   check("backup: the daily backup is taken", daily.added !== "?");
+  // The running sidecar holds its queue file under an exclusive lock, and an online backup of it would be an empty database.
+  check("backup: the job queue's file, which the running sidecar holds, is skipped and not copied empty", daily.snapshot.includes(`skipped ${QUEUE}: another process holds it`), daily.snapshot.slice(-400));
 }
 
 /** With the services stopped, the snapshot may be what creates a database's -wal and -shm files: they must still be the service's afterwards. */
@@ -199,7 +216,9 @@ async function snapshotWhileStopped(key: string): Promise<void> {
   const taken = compose(["run", "--rm", "snapshot"], true);
   compose(["start", "memoria-qmd", "memoria-api"]);
   await until(() => api("/health").catch(() => ({ status: 0, body: {}, text: "" })), (r) => r.status === 200, 90);
-  check("backup: a snapshot with the services stopped works too", taken.status === 0 && taken.out.includes("/data/control.db -> /staging/control.db"), taken.out.slice(-400));
+  check("backup: a snapshot with the services stopped works too, and copies the job queue's file", taken.status === 0 && taken.out.includes("/data/control.db -> /staging/control.db") && taken.out.includes(`${QUEUE} -> /staging/queue.sqlite`), taken.out.slice(-400));
+  const stopped = compose(["run", "--rm", "backup"]).out;
+  check("backup: and a backup of that snapshot is taken", /Added to the repository/.test(stopped), stopped.slice(-400));
   const written = await api(`/v1/ingest/rendered?collection=${COLLECTION}&path=day/after-stop.md&updated=2026-01-15T00:00:00Z`, { method: "POST", key, headers: { "Content-Type": "text/markdown" }, body: body("afterstop") });
   check("backup: and the services still write to their databases afterwards", written.status === 202, written.text.slice(0, 300));
 }
@@ -232,6 +251,7 @@ async function proveRestored(before: Before): Promise<void> {
   check("restore: the admin key works, and lists the same keys", JSON.stringify(labels) === JSON.stringify(before.labels), labels);
   const audit = auditRows();
   check("restore: the audit log came back, with at least what it held before", audit >= before.audit && before.audit > 0, { before: before.audit, after: audit });
+  check("restore: the set-aside document is still set aside, so the job queue's file came back too", setAside().join() === "day/poison.md", setAside());
 }
 
 async function proveSearchAndDeletes(before: Before): Promise<void> {

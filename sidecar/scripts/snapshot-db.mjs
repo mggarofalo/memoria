@@ -34,6 +34,16 @@ for (let i = 0; i < args.length; i += 2) {
   rmSync(partial, { force: true });
   const db = new Database(source, { readonly: true, fileMustExist: true });
   try {
+    // A database another process holds under an exclusive lock, as a running sidecar holds its job queue, still reads as locked after the
+    // driver's 5 s busy wait, which a passing writer would not. The online
+    // backup of it would be an empty database that passes the check. So it is not copied, and its last copy stays.
+    try {
+      db.prepare("SELECT count(*) FROM sqlite_master").get();
+    } catch (err) {
+      if (err?.code !== "SQLITE_BUSY") throw err;
+      console.log(`skipped ${source}: another process holds it, so ${existsSync(target) ? "its last copy stays" : "there is no copy of it"}`);
+      continue;
+    }
     await db.backup(partial);
   } finally {
     db.close();

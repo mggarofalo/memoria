@@ -260,6 +260,8 @@ The sidecar writes with SQLite's `secure_delete` on, so what it deletes is overw
 | The collection roots and QMD's config | restic reads the files. |
 | `control.db`, the index, and the job queue's file, with its jobs and set-aside documents | `snapshot` copies each live database with SQLite's online backup, as `sqlite3 .backup` does, and checks each copy, and restic backs up the copies. A plain copy of a database in use can be torn. |
 
+**The job queue's file is copied only while the sidecar is stopped.** A running sidecar holds it under an exclusive lock, so `snapshot` skips it, says so, and keeps its last copy, which later backups carry. To back up its jobs and set-asides as they are, stop `memoria-qmd` while `snapshot` runs, then start it and run `backup`. A set-aside lost to a restore means that document is tried again, and set aside again if it still fails.
+
 The index is in the backup because restoring it is much cheaper than rebuilding it. Measured with the scripted worker, 300 documents of 20 KB, 13,455 chunks, took 15 s to embed, and their whole backup took 8 s and stored 8.5 MiB. A real worker embeds far more slowly than the scripted one, and a full corpus is far larger, so re-embedding it takes hours where restoring takes minutes. A daily delta of 40 documents embedded in 3 s on the scripted worker, and its backup took 8 s and stored 5.6 MiB: most of a day's new data is the index's pages, which change throughout.
 
 **What is in it.** Only what Memoria stores: the documents, which are redacted before they are written, and the control database, which holds key hashes and the audit log, never a plaintext key. It is still private text, so the backup is encrypted, and the password decides who can read it.
@@ -303,7 +305,7 @@ docker compose -f deploy/compose.yaml up -d
 
 Remove only the volumes you mean to replace, by name, and only once the backup you are restoring has been checked: `restic snapshots` and `restic check`. The restore puts each file back with the owner its service runs as.
 
-`scripts/e2e/backup-restore.ts` proves this path on a throwaway project. It backs up, destroys each data volume by name, restores, and checks that the keys, documents, deletes and search came back. It also checks that a restore into volumes holding data is refused.
+`scripts/e2e/backup-restore.ts` proves this path on a throwaway project. It backs up, destroys each data volume by name, restores, and checks that the keys, documents, deletes, a document set aside from embedding, and search came back. It also checks that a restore into volumes holding data is refused.
 
 ### Lost collection records
 
