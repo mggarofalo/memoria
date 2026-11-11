@@ -7,15 +7,17 @@
  */
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { buildApp } from "../src/app.ts";
+import { DeadLetterBook, MemoryDeadLetters, type DeadLetterRow } from "../src/dead-letters.ts";
 import type { PoolWorkerConfig } from "../src/llm/types.ts";
 import { replaceDocumentVectors, sweepExpiredCache, type SdkDb, type SdkHandles } from "../src/llm/wire.ts";
-import { queueDbPathFor } from "../src/queue-store.ts";
+import { queueDbPathFor, SqliteJobStore } from "../src/queue-store.ts";
 import { openBackend, type LlmOptions, type OpenedBackend } from "../src/store.ts";
 import { authHeaders, dieWithParent, dieWithParentEnv, tempDir, testConfig } from "./helpers.ts";
 import { EMBED_FILE, MockWorker, vectorFor } from "./mock-worker.ts";
@@ -1071,73 +1073,220 @@ test("400 on all real text condemns nothing on the real pool, and search keeps w
 
 // --- when a set-aside ends ---------------------------------------------------------------------------------------
 
-async function withSetAside(run: (o: { dbPath: string; corpus: string; mock: MockWorker; backend: OpenedBackend }) => Promise<void>): Promise<void> {
+async function withSetAside(run: (o: { dbPath: string; corpus: string; mock: MockWorker; backend: OpenedBackend; letters: DeadLetterBook }) => Promise<void>): Promise<void> {
   const { dbPath, corpus } = await fixture();
   const mock = await new MockWorker(8).start();
-  const backend = await openBackend({ dbPath, keepWarm: false, llm: remoteOptions([worker("only", mock)]) });
+  const letters = new DeadLetterBook(null);
+  const backend = await openBackend({ dbPath, keepWarm: false, deadLetters: letters, llm: remoteOptions([worker("only", mock)]) });
   try {
     const healthy = mock.handlers.get("POST /v1/embed")!;
     refuseText(mock, 400, "Nested document");
     await backend.embed({ force: false });
     assert.equal(backend.deadLetters().length, 1);
     mock.on("POST /v1/embed", healthy);
-    await run({ dbPath, corpus, mock, backend });
+    await run({ dbPath, corpus, mock, backend, letters });
   } finally {
     await backend.close();
     await mock.stop();
   }
 }
 
-const setLetterTime = async (dbPath: string, at: string): Promise<void> => {
-  const { DatabaseSync } = await import("node:sqlite");
-  const raw = new DatabaseSync(dbPath);
-  raw.prepare("UPDATE memoria_dead_letters SET at = ?").run(at);
-  raw.close();
+const setLetterTime = (letters: DeadLetterBook, at: string): void => {
+  for (const row of letters.all()) letters.put({ ...row, at });
 };
 
+/** What a sidecar would open: the queue's file beside the index, holding the set-asides too. */
+function queueLetters(dbPath: string): { letters: DeadLetterBook; close: () => void } {
+  const store = new SqliteJobStore(queueDbPathFor(dbPath));
+  return { letters: new DeadLetterBook(store.deadLetters()), close: () => store.close() };
+}
+
 test("a set-aside holds across jobs, and ends after 24 hours", { skip }, () =>
-  withSetAside(async ({ dbPath, backend }) => {
+  withSetAside(async ({ backend, letters }) => {
     assert.equal((await backend.embed({ force: false })).docsProcessed, 0, "it holds");
-    await setLetterTime(dbPath, new Date(Date.now() - 25 * 3_600_000).toISOString());
+    setLetterTime(letters, new Date(Date.now() - 25 * 3_600_000).toISOString());
     assert.deepEqual(backend.deadLetters(), [], "not shown as held");
     assert.equal((await backend.embed({ force: false })).docsProcessed, 1);
     assert.equal((await backend.getStatus()).needsEmbedding, 0);
   }));
 
 test("a set-aside dated in the future, from a clock moved back, holds nothing", { skip }, () =>
-  withSetAside(async ({ dbPath, backend }) => {
-    await setLetterTime(dbPath, new Date(Date.now() + 25 * 3_600_000).toISOString());
+  withSetAside(async ({ backend, letters }) => {
+    setLetterTime(letters, new Date(Date.now() + 25 * 3_600_000).toISOString());
     assert.equal((await backend.embed({ force: false })).docsProcessed, 1);
   }));
 
-test("a set-aside ends when the workers change", { skip }, async () => {
+test("a set-aside outlives a restart, in the queue's file, and ends when the workers change", { skip }, async () => {
   const { dbPath } = await fixture();
   const first = await new MockWorker(8).start();
-  const backend = await openBackend({ dbPath, keepWarm: false, llm: remoteOptions([worker("first", first)]) });
+  const run1 = queueLetters(dbPath);
+  const backend = await openBackend({ dbPath, keepWarm: false, deadLetters: run1.letters, llm: remoteOptions([worker("first", first)]) });
   refuseText(first, 400, "Nested document");
   await backend.embed({ force: false });
   await backend.close();
+  run1.close();
 
-  const same = await openBackend({ dbPath, keepWarm: false, llm: remoteOptions([worker("first", first)]) });
+  const run2 = queueLetters(dbPath);
+  const same = await openBackend({ dbPath, keepWarm: false, deadLetters: run2.letters, llm: remoteOptions([worker("first", first)]) });
   assert.equal(same.deadLetters().length, 1, "the same worker back again changes nothing");
   assert.equal((await same.embed({ force: false })).docsProcessed, 0);
   await same.close();
+  run2.close();
   await first.stop();
 
   const second = await new MockWorker(8).start();
-  const other = await openBackend({ dbPath, keepWarm: false, llm: remoteOptions([worker("second", second)]) });
+  const run3 = queueLetters(dbPath);
+  const other = await openBackend({ dbPath, keepWarm: false, deadLetters: run3.letters, llm: remoteOptions([worker("second", second)]) });
   try {
     assert.deepEqual(other.deadLetters(), []);
     assert.equal((await other.embed({ force: false })).docsProcessed, 1);
     assert.equal((await other.getStatus()).needsEmbedding, 0);
   } finally {
     await other.close();
+    run3.close();
     await second.stop();
   }
 });
 
+/** An index as an older build left it: a set-aside for `sub/delta.md`, and one for a path no document has. */
+async function withLegacyTable(dbPath: string, at: string): Promise<void> {
+  await withSdk(dbPath, (db) => {
+    const hash = (db.prepare("SELECT hash FROM documents WHERE path = 'sub/delta.md'").get() as { hash: string }).hash;
+    db.exec("CREATE TABLE memoria_dead_letters (hash TEXT NOT NULL, path TEXT NOT NULL, reason TEXT NOT NULL, at TEXT NOT NULL, worker_set TEXT NOT NULL, PRIMARY KEY (hash, path))");
+    db.prepare("INSERT INTO memoria_dead_letters VALUES (?, 'sub/delta.md', 'refused', ?, 'older')").run(hash, at);
+    db.prepare("INSERT INTO memoria_dead_letters VALUES ('gone', 'secret/deleted.md', 'refused', ?, 'older')").run(at);
+  });
+}
+
+const legacyTableIn = (dbPath: string): Promise<unknown> => withSdk(dbPath, (db) => db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'memoria_dead_letters'").get());
+
+for (const mode of ["remote", "local"] as const) {
+  test(`an older build's set-asides in the index move to the queue's file, in ${mode} mode, and the index keeps no table of ours`, { skip }, async () => {
+    const { dbPath } = await fixture();
+    const at = new Date().toISOString();
+    await withLegacyTable(dbPath, at);
+    const mock = await new MockWorker(8).start();
+    const run1 = queueLetters(dbPath);
+    const backend = await openBackend({ dbPath, keepWarm: false, deadLetters: run1.letters, ...(mode === "remote" ? { llm: remoteOptions([worker("only", mock)]) } : {}) });
+    await backend.close();
+    run1.close();
+    await mock.stop();
+
+    const run2 = queueLetters(dbPath);
+    try {
+      assert.deepEqual(run2.letters.all().map((l) => [l.path, l.reason, l.at, l.workerSet]), [["sub/delta.md", "refused", at, "older"]], "moved with what it said, less the deleted document's");
+    } finally {
+      run2.close();
+    }
+    assert.equal(await legacyTableIn(dbPath), undefined, "dropped from the index");
+    const onDisk = [dbPath, `${dbPath}-wal`].filter((f) => existsSync(f)).map((f) => readFileSync(f).toString("latin1")).join("");
+    assert.ok(onDisk.includes("sub/delta.md"), "the check can see a path that is there");
+    assert.ok(!onDisk.includes("secret/deleted.md"), "nor left in the index's free pages or its log");
+  });
+}
+
+test("a process holding no queue file keeps an older build's set-asides in memory and leaves their table in the index", { skip }, async () => {
+  const { dbPath } = await fixture();
+  await withLegacyTable(dbPath, new Date().toISOString());
+  const mock = await new MockWorker(8).start();
+  const letters = new DeadLetterBook(null);
+  const backend = await openBackend({ dbPath, keepWarm: false, deadLetters: letters, llm: remoteOptions([worker("only", mock)]) });
+  try {
+    assert.deepEqual(letters.all().map((l) => l.path), ["sub/delta.md"], "the deleted document's is not kept");
+  } finally {
+    await backend.close();
+    await mock.stop();
+  }
+  assert.notEqual(await legacyTableIn(dbPath), undefined, "kept for the process that holds the file");
+  const left = await withSdk(dbPath, (db) => (db.prepare("SELECT path FROM memoria_dead_letters").all() as Array<{ path: string }>).map((r) => r.path));
+  assert.deepEqual(left, ["sub/delta.md"], "less the deleted document's, whose path may be sensitive");
+  const onDisk = [dbPath, `${dbPath}-wal`].filter((f) => existsSync(f)).map((f) => readFileSync(f).toString("latin1")).join("");
+  assert.ok(!onDisk.includes("secret/deleted.md"), "and not left in the index's free pages or its log");
+});
+
+test("a queue file that fails leaves status, a scan and search working, with a warning", { skip }, async () => {
+  const { dbPath } = await fixture();
+  const mock = await new MockWorker(8).start();
+  const failing = new (class extends MemoryDeadLetters {
+    override all(): DeadLetterRow[] {
+      throw new Error("disk I/O error");
+    }
+  })();
+  const warnings: string[] = [];
+  const backend = await openBackend({ dbPath, keepWarm: false, deadLetters: new DeadLetterBook(failing), onLlmWarning: (m) => void warnings.push(m), llm: remoteOptions([worker("only", mock)]) });
+  try {
+    assert.equal((await backend.getStatus()).documentsSetAside, 0);
+    assert.equal(backend.llmHealth().documentsSetAside, 0);
+    assert.equal((await backend.update({})).removed, 0);
+    assert.ok((await backend.search({ query: "nested", limit: 5, minScore: 0, rerank: false })).length > 0);
+    assert.ok(warnings.some((m) => m.includes("set aside from embedding could not be read or tidied: disk I/O error")), warnings.join("\n"));
+  } finally {
+    await backend.close();
+  }
+  try {
+    const unheard = await openBackend({ dbPath, keepWarm: false, deadLetters: new DeadLetterBook(failing), llm: remoteOptions([worker("only", mock)]) });
+    try {
+      assert.equal((await unheard.getStatus()).documentsSetAside, 0, "and with no one to warn, too");
+    } finally {
+      await unheard.close();
+    }
+  } finally {
+    await mock.stop();
+  }
+});
+
+test("in local mode status reads no set-aside, and warns of nothing", { skip }, async () => {
+  const { dbPath } = await fixture();
+  const warnings: string[] = [];
+  const backend = await openBackend({ dbPath, keepWarm: false, deadLetters: new DeadLetterBook(null), onLlmWarning: (m) => void warnings.push(m) });
+  try {
+    assert.equal((await backend.getStatus()).documentsSetAside, 0);
+    assert.deepEqual(backend.deadLetters(), []);
+    assert.deepEqual(warnings, []);
+  } finally {
+    await backend.close();
+  }
+});
+
+test("a sidecar that takes over the queue file later moves an older build's table at its next embed", { skip }, async () => {
+  const { dbPath } = await fixture();
+  await withLegacyTable(dbPath, new Date().toISOString());
+  const mock = await new MockWorker(8).start();
+  const letters = new DeadLetterBook(null);
+  const backend = await openBackend({ dbPath, keepWarm: false, deadLetters: letters, llm: remoteOptions([worker("only", mock)]) });
+  const store = new SqliteJobStore(queueDbPathFor(dbPath));
+  try {
+    assert.notEqual(await legacyTableIn(dbPath), undefined, "kept while the file was not this sidecar's");
+    letters.adopt(store.deadLetters());
+    await backend.embed({ force: false });
+    assert.equal(await legacyTableIn(dbPath), undefined, "moved at the embed, without waiting for a scan");
+  } finally {
+    await backend.close();
+    store.close();
+    await mock.stop();
+  }
+});
+
+test("a set-aside of a document whose row is no longer active goes at the next embed", { skip }, () =>
+  withSetAside(async ({ dbPath, backend, letters }) => {
+    const [held] = letters.all();
+    await withSdk(dbPath, (db) => db.prepare("UPDATE documents SET active = 0 WHERE path = ?").run(held!.path));
+    await backend.embed({ force: false });
+    assert.deepEqual(letters.all(), []);
+  }));
+
+test("set-asides are listed oldest first", { skip }, () =>
+  withSetAside(async ({ backend, letters }) => {
+    const [held] = letters.all();
+    const at = Date.parse(held!.at);
+    letters.put({ ...held!, path: "middle.md", at: new Date(at - 30_000).toISOString() });
+    letters.put({ ...held!, path: "earliest.md", at: new Date(at - 60_000).toISOString() });
+    assert.deepEqual(backend.deadLetters().map((l) => l.path), ["earliest.md", "middle.md", held!.path]);
+  }));
+
+
 test("the same content under a new path is tried afresh, and a deleted document leaves no record", { skip }, () =>
-  withSetAside(async ({ dbPath, corpus, backend }) => {
+  withSetAside(async ({ dbPath, corpus, backend, letters }) => {
     const body = "# Delta\n\nNested document about something else entirely.\n";
     await rm(path.join(corpus, "sub/delta.md"));
     await writeFile(path.join(corpus, "renamed.md"), body);
@@ -1146,11 +1295,12 @@ test("the same content under a new path is tried afresh, and a deleted document 
     assert.equal(out.docsProcessed, 1, "the hash alone keeps nothing out");
     assert.equal(out.docsPending, 0);
     assert.deepEqual(backend.deadLetters(), []);
+    assert.equal(letters.all().length, 0, "nothing is left of it, not even beyond the 24 hours it held for");
     const { DatabaseSync } = await import("node:sqlite");
-    const raw = new DatabaseSync(dbPath);
-    const rows = (raw.prepare("SELECT COUNT(*) AS n FROM memoria_dead_letters").get() as { n: number }).n;
+    const raw = new DatabaseSync(dbPath, { readOnly: true });
+    const table = raw.prepare("SELECT 1 FROM sqlite_master WHERE name = 'memoria_dead_letters'").get();
     raw.close();
-    assert.equal(rows, 0);
+    assert.equal(table, undefined, "nor in the index");
   }));
 
 test("the same content gaining a name that sorts first is tried afresh while the old name stands", { skip }, () =>
@@ -1297,12 +1447,13 @@ async function poisonApp(docs: Record<string, string>, status = 400) {
   const { dbPath, corpus: dir } = await fixture(docs);
   const mock = await new MockWorker(8).start();
   refuseText(mock, status, POISON);
-  const backend = await openBackend({ dbPath, keepWarm: false, llm: remoteOptions([worker("only", mock)], { embedBatchBytes: 300 }) });
+  const letters = new DeadLetterBook(null);
+  const backend = await openBackend({ dbPath, keepWarm: false, deadLetters: letters, llm: remoteOptions([worker("only", mock)], { embedBatchBytes: 300 }) });
   const logs: string[] = [];
   const app = await buildApp({ backend, config: testConfig(), logger: { level: "warn", stream: { write: (line: string) => void logs.push(line) } } });
   const get = async (url: string) => (await app.inject({ method: "GET", url, headers: authHeaders })).json();
   return {
-    dbPath, dir, mock, backend, app, get, logs,
+    dbPath, dir, mock, backend, app, get, logs, letters,
     /** Ask for a job, and wait until it has finished or gone back to waiting. */
     job: async (payload: object = {}) => {
       const { id } = (await app.inject({ method: "POST", url: "/reindex", headers: authHeaders, payload })).json().job;
@@ -1393,7 +1544,7 @@ test("after 24 hours, 5 set-aside documents retried alone are set aside again ra
   const o = await poisonApp(corpus(95, 5));
   try {
     await o.job();
-    await setLetterTime(o.dbPath, new Date(Date.now() - 25 * 3_600_000).toISOString());
+    setLetterTime(o.letters, new Date(Date.now() - 25 * 3_600_000).toISOString());
     assert.equal((await o.get("/status")).documentsSetAside, 0);
     assert.equal((await o.get("/status")).needsEmbedding, 5, "due again, so waiting again");
     const job = await o.job();

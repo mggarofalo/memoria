@@ -2,9 +2,9 @@ import { isBusy, withShortBusyTimeout } from "./sqlite-busy.ts";
 
 /**
  * What a deleted document leaves behind, removed. When a scan finds a document gone,
- * the SDK only marks its row inactive, so its text stays in `content`, its chunks in
- * `content_vectors` and `vectors_vec`, and any set-aside in `memoria_dead_letters`,
- * until a `qmd cleanup` that nothing here runs. Deleted text, which may be sensitive,
+ * the SDK only marks its row inactive, so its text stays in `content` and its chunks in
+ * `content_vectors` and `vectors_vec`, until a `qmd cleanup` that nothing here runs. Any
+ * record of it being set aside is in the queue's file, and goes after this (src/llm/wire.ts). Deleted text, which may be sensitive,
  * then stays in the index and in every backup of it.
  *
  * This runs after every scan, in one transaction:
@@ -13,8 +13,7 @@ import { isBusy, withShortBusyTimeout } from "./sqlite-busy.ts";
  *    those the scan found with no document whose root is missing, unreadable, or
  *    not shown to be the real one (see collection-roots.ts). Their rows coming back
  *    would otherwise cost every vector of them a re-embed.
- * 2. Then whatever no remaining row holds: vectors and set-asides by hash, and by
- *    hash and path, and content by hash. Content is shared by hash, so text that
+ * 2. Then whatever no remaining row holds: vectors by hash, and content by hash. Content is shared by hash, so text that
  *    another document also holds stays, with its vectors, for that one.
  *
  * It finds the rows to remove before touching the vector table, so a scan with
@@ -29,7 +28,6 @@ export interface PurgeCounts {
   documents: number;
   content: number;
   vectors: number;
-  deadLetters: number;
 }
 
 /** Collections with document rows and not one of them active: the scan found no document in them. */
@@ -80,11 +78,8 @@ function removeAll(db: PurgeDb, keep: () => readonly string[]): PurgeCounts {
   // Decided inside the transaction, so no other writer can empty a collection between the decision and the delete.
   const documents = Number(db.prepare("DELETE FROM documents WHERE active = 0 AND collection NOT IN (SELECT value FROM json_each(?))").run(JSON.stringify(keep())).changes);
   const vectors = removeVectors(db);
-  const deadLetters = hasTable(db, "memoria_dead_letters")
-    ? changes(db, "DELETE FROM memoria_dead_letters WHERE NOT EXISTS (SELECT 1 FROM documents d WHERE d.hash = memoria_dead_letters.hash AND d.path = memoria_dead_letters.path)")
-    : 0;
   const content = changes(db, `DELETE FROM content WHERE hash NOT IN (${HELD})`);
-  return { documents, content, vectors, deadLetters };
+  return { documents, content, vectors };
 }
 
 function inTransaction<T>(db: PurgeDb, work: () => T): T {
@@ -119,7 +114,7 @@ export function purgeDeleted(db: PurgeDb, keep: () => readonly string[] = () => 
 
 /** Anything was removed, so its old versions are worth taking out of the write-ahead log. */
 export function removedAny(counts: PurgeCounts | null): boolean {
-  return counts !== null && counts.documents + counts.content + counts.vectors + counts.deadLetters > 0;
+  return counts !== null && counts.documents + counts.content + counts.vectors > 0;
 }
 
 /**

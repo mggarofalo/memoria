@@ -7,6 +7,7 @@ import type { BreakerOptions } from "./llm/pool.ts";
 import type { RemoteLlm } from "./llm/remote.ts";
 import { requireSdkFixes, type SdkStoreFunctions } from "./sdk-check.ts";
 import { collectionsToKeep, type CollectionRoot } from "./collection-roots.ts";
+import { DeadLetterBook, documentHolds, moveLegacyLetters } from "./dead-letters.ts";
 import { purgeDeleted, removedAny, truncateLog } from "./purge.ts";
 import { withShortBusyTimeout } from "./sqlite-busy.ts";
 import type { DeadLetter, DegradedReason, EmbeddingResult, LlmCallSink, LlmHealth, LlmSurface, PoolLoad, PoolWorkerConfig, Queryable, RerankDocument, RerankResult, WorkerView } from "./llm/types.ts";
@@ -225,6 +226,11 @@ export interface OpenBackendOptions {
   onLlmWarning?: (message: string) => void;
   /** Told how many vector rows the startup repair removed, when it removes any. */
   onVectorRepair?: (rows: number) => void;
+  /**
+   * Where documents set aside from embedding are kept: the queue file's, from the process that
+   * holds it (src/main.ts). Without one they are kept in memory, as for a tool.
+   */
+  deadLetters?: DeadLetterBook;
 }
 
 /** Direct access to the model path, bypassing `llm_cache`. For the parity benchmark. */
@@ -486,11 +492,39 @@ function disableIdleUnload(llm: LlamaLike | undefined): void {
   if (llm) llm.inactivityTimeoutMs = 0;
 }
 
-async function wire(storeInternal: unknown, holder: { llm?: LlamaLike }, config: Extract<LlmOptions, { mode: "remote" }>, options: OpenBackendOptions): Promise<WiredRemote> {
+async function wire(storeInternal: unknown, holder: { llm?: LlamaLike }, config: Extract<LlmOptions, { mode: "remote" }>, options: OpenBackendOptions, letters: DeadLetterBook): Promise<WiredRemote> {
   const { wireRemote } = await import("./llm/wire.ts");
-  const wired = wireRemote(await sdkHandles(storeInternal, holder.llm as unknown as LlmSurface), config, options);
+  const wired = wireRemote(await sdkHandles(storeInternal, holder.llm as unknown as LlmSurface), config, options, letters);
   holder.llm = wired.llm as unknown as LlamaLike;
   return wired;
+}
+
+/**
+ * Set-asides live in the queue's file, which must never stop search, status or a scan. So
+ * trouble with it there is a warning, and the work goes on as if none were set aside.
+ */
+function tolerated<T>(work: () => T, fallback: T, options: OpenBackendOptions): T {
+  try {
+    return work();
+  } catch (err) {
+    options.onLlmWarning?.(`The documents set aside from embedding could not be read or tidied: ${err instanceof Error ? err.message : String(err)}`);
+    return fallback;
+  }
+}
+
+/**
+ * The book of set-asides, and its tidying: an older build's table moved out of the index,
+ * and the records of documents no row holds any more removed, as their paths may be
+ * sensitive. Both run in either LLM mode.
+ */
+function setAsides(db: unknown, options: OpenBackendOptions): { letters: DeadLetterBook; tidyLetters: () => void } {
+  const letters = options.deadLetters ?? new DeadLetterBook(null);
+  const tidyLetters = (): void =>
+    tolerated(() => {
+      moveLegacyLetters(db as never, letters);
+      letters.retain(documentHolds(db as never, false));
+    }, undefined, options);
+  return { letters, tidyLetters };
 }
 
 /**
@@ -521,14 +555,17 @@ export async function openBackend(options: OpenBackendOptions): Promise<OpenedBa
   const internal = store.internal as unknown as { llm?: LlamaLike };
   const llm = internal.llm;
   if (llmOptions.mode === "local" && options.keepWarm) disableIdleUnload(llm);
-  reportRepair(repairVectorRows(store.internal.db), options);
-  const wired = llmOptions.mode === "remote" ? await wire(store.internal, internal, llmOptions, options) : undefined;
-  const remote = wired?.llm;
-  const setAside = (): number => wired?.deadLetters().length ?? 0;
-  const active = (remote ?? llm) as unknown as LlmSurface;
   const db = store.internal.db;
-  // A row deleted, a deleted document's text included, is overwritten on disk, not left in free pages.
+  // A row deleted, a deleted document's text included, is overwritten on disk, not left in free pages. Set before
+  // anything here deletes: the repair below, and the move of an older build's set-asides, which name paths.
   db.exec("PRAGMA secure_delete = ON");
+  reportRepair(repairVectorRows(db), options);
+  const { letters, tidyLetters } = setAsides(db, options);
+  tidyLetters();
+  const wired = llmOptions.mode === "remote" ? await wire(store.internal, internal, llmOptions, options, letters) : undefined;
+  const remote = wired?.llm;
+  const setAside = (): number => tolerated(() => wired?.deadLetters().length ?? 0, 0, options);
+  const active = (remote ?? llm) as unknown as LlmSurface;
   const unexpanded = withholdExpansion(store.internal as unknown as ExpandingStore);
   const headsStatement = db.prepare(
   `SELECT d.collection AS collection, d.path AS path, substr(c.doc, 1, ?) AS head
@@ -602,6 +639,8 @@ export async function openBackend(options: OpenBackendOptions): Promise<OpenedBa
     const purged = purgeDeleted(db as never, () => collectionsToKeep(db as never, rootsStatement.all() as CollectionRoot[], (message) => options.onLlmWarning?.(message)));
     if (purged === null) options.onLlmWarning?.("The index was busy, so what deleted documents left in it waits for the next scan to remove it.");
     if (removedAny(purged)) truncateLog(db as never);
+    // Set-asides of documents no row holds any more go too, as their paths may be sensitive.
+    tidyLetters();
     return {
       collections: r.collections,
       indexed: r.indexed,

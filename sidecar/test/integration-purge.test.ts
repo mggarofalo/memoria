@@ -12,6 +12,7 @@ import { createRequire } from "node:module";
 import { test } from "node:test";
 import type { PoolWorkerConfig } from "../src/llm/types.ts";
 import { ROOT_MARKER } from "../src/collection-roots.ts";
+import { DeadLetterBook } from "../src/dead-letters.ts";
 import { purgeDeleted } from "../src/purge.ts";
 import { openBackend } from "../src/store.ts";
 import { tempDir } from "./helpers.ts";
@@ -60,7 +61,6 @@ interface Traces {
   documents: number;
   contentVectors: number;
   vectors: number;
-  deadLetters: number;
   fullText: number;
 }
 
@@ -71,30 +71,30 @@ function traces(db: Db, hash: string, snippet: string): Traces {
     documents: count("SELECT COUNT(*) AS n FROM documents WHERE hash = ?", hash),
     contentVectors: count("SELECT COUNT(*) AS n FROM content_vectors WHERE hash = ?", hash),
     vectors: count("SELECT COUNT(*) AS n FROM vectors_vec WHERE hash_seq LIKE ? || '_%'", hash),
-    deadLetters: count("SELECT COUNT(*) AS n FROM memoria_dead_letters WHERE hash = ?", hash),
     fullText: count("SELECT COUNT(*) AS n FROM documents_fts WHERE body LIKE '%' || ? || '%'", snippet),
   };
 }
 
 const hashOf = (db: Db, file: string): string => (db.prepare("SELECT hash FROM documents WHERE path = ?").get(file) as { hash: string }).hash;
 
-test("a deleted document leaves no content, vectors, full text or set-aside in the index", { skip }, async () => {
+test("a deleted document leaves no content, vectors or full text in the index, and no set-aside beside it", { skip }, async () => {
   const { corpus, dbPath } = await index();
   const mock = await new MockWorker(8).start();
-  const backend = await openBackend({ dbPath, keepWarm: false, llm: { mode: "remote", workers: [worker(mock)], embedDimensions: 8, fallback: false, statusPollMs: 0, embedBatchBytes: 2048 } });
+  const letters = new DeadLetterBook(null);
+  const backend = await openBackend({ dbPath, keepWarm: false, deadLetters: letters, llm: { mode: "remote", workers: [worker(mock)], embedDimensions: 8, fallback: false, statusPollMs: 0, embedBatchBytes: 2048 } });
   const qmd = await import("@tobilu/qmd");
   try {
     await backend.embed({ force: false });
     const reader = await qmd.createStore({ dbPath });
     let hash = "";
     try {
-      const db = reader.internal.db as unknown as Db & { exec(sql: string): void };
-      // A set-aside for it, as a worker refusing one of its chunks leaves.
-      db.exec("CREATE TABLE IF NOT EXISTS memoria_dead_letters (hash TEXT NOT NULL, path TEXT NOT NULL, reason TEXT NOT NULL, at TEXT NOT NULL, worker_set TEXT NOT NULL, PRIMARY KEY (hash, path))");
+      const db = reader.internal.db as unknown as Db;
       hash = hashOf(db, "secret.md");
-      (db.prepare("INSERT INTO memoria_dead_letters VALUES (?, 'secret.md', 'refused', '2026-01-01T00:00:00Z', 'w')") as unknown as { run(...a: unknown[]): unknown }).run(hash);
+      // A set-aside for it, as a worker refusing one of its chunks leaves. It names the deleted path.
+      letters.put({ hash, path: "secret.md", reason: "refused", at: "2026-01-01T00:00:00Z", workerSet: "w" });
+      letters.put({ hash: hashOf(db, "kept.md"), path: "kept.md", reason: "refused", at: "2026-01-01T00:00:00Z", workerSet: "w" });
       const before = traces(db, hash, "only this document says");
-      assert.ok(before.content === 1 && before.contentVectors > 0 && before.vectors > 0 && before.deadLetters === 1 && before.fullText === 1, JSON.stringify(before));
+      assert.ok(before.content === 1 && before.contentVectors > 0 && before.vectors > 0 && before.fullText === 1, JSON.stringify(before));
     } finally {
       await reader.close();
     }
@@ -112,7 +112,9 @@ test("a deleted document leaves no content, vectors, full text or set-aside in t
     const after = await qmd.createStore({ dbPath });
     try {
       const db = after.internal.db as unknown as Db;
-      assert.deepEqual(traces(db, hash, "only this document says"), { content: 0, documents: 0, contentVectors: 0, vectors: 0, deadLetters: 0, fullText: 0 });
+      assert.deepEqual(traces(db, hash, "only this document says"), { content: 0, documents: 0, contentVectors: 0, vectors: 0, fullText: 0 });
+      assert.deepEqual(letters.all().map((l) => l.path), ["kept.md"], "the deleted path's set-aside goes with it, and a live one's stays");
+      assert.equal(db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'memoria_dead_letters'").get(), undefined, "the index holds no table of ours");
       assert.equal((db.prepare("SELECT COUNT(*) AS n FROM documents WHERE active = 0").get() as { n: number }).n, 0, "no inactive row is left");
       assert.equal((db.prepare("SELECT COUNT(*) AS n FROM documents WHERE path = 'kept.md' AND active = 1").get() as { n: number }).n, 1);
     } finally {
@@ -279,7 +281,7 @@ test("a busy index changes nothing, and the next purge removes it all", { skip }
     const contentRows = (): number => (db.prepare("SELECT COUNT(*) AS n FROM content WHERE hash = ?").get(hash) as { n: number }).n;
     assert.equal(contentRows(), 1);
     blocker.exec("ROLLBACK");
-    assert.deepEqual(purgeDeleted(db as never), { documents: 1, content: 1, vectors: 0, deadLetters: 0 });
+    assert.deepEqual(purgeDeleted(db as never), { documents: 1, content: 1, vectors: 0 });
     assert.equal(contentRows(), 0);
   } finally {
     await holder.close();
