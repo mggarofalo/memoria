@@ -32,6 +32,9 @@ public sealed class TemplatePathTests
 			// A password's or a token's name keeps words between slashes: they can be the passphrase itself.
 			{ "password: `${SALT}/hunter/two`", "hunter/two" },
 			{ "secret = `${x}/correct/horse/battery`", "correct/horse/battery" },
+			// A name that may carry a secret, though it describes one, keeps them too.
+			{ "secret_header = `${scheme}/hunter/two`", "hunter/two" },
+			{ "token_ref = `${vault}/correct/horse`", "correct/horse" },
 			// A span's own data can be the secret, under any name.
 			{ "secretName = `${a}/x/${b:-hunterxyz}/y`", "hunterxyz" },
 		};

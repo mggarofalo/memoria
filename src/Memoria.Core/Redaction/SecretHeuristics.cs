@@ -635,12 +635,13 @@ internal static class SecretHeuristics
 	}
 
 	/// <summary>
-	/// A value that holds no secret where it stands. A template that builds a path of words counts only under a name that describes a
-	/// secret, such as <c>secretName</c>, since under a password's or a token's name its words can be the secret.
+	/// A value that holds no secret where it stands. A template that builds a path of words counts only under a name that says where a
+	/// secret is, such as <c>secretName</c> or <c>tokenPath</c>: under a password's or a token's name its words can be the secret, and so
+	/// they can under <c>secret_header</c> or <c>token_ref</c>, which may carry one.
 	/// </summary>
 	private static bool IsBenignCandidate(SecretCandidate candidate, Group keyGroup, string value, KeyKind kind)
 	{
-		if (kind == KeyKind.Descriptive && CodeValues.IsTemplatedPath(value))
+		if (kind == KeyKind.Descriptive && NamesAPlace(keyGroup.Value) && CodeValues.IsTemplatedPath(value))
 		{
 			return true;
 		}
@@ -654,6 +655,15 @@ internal static class SecretHeuristics
 		return (!literalDollar && IsBenignValue(value, keyGroup.Value, readAsCode))
 			|| IsNestedYamlKey(input, keyGroup, start, value)
 			|| IsHostAfterPlaceholder(candidate.Value, value);
+	}
+
+	/// <summary>Words that end a name for where a secret is kept, not for something that may carry one.</summary>
+	private static readonly HashSet<string> PlaceWords = new(StringComparer.OrdinalIgnoreCase) { "name", "names", "path", "paths", "file", "files", "dir" };
+
+	private static bool NamesAPlace(string key)
+	{
+		List<string> words = SecretKeyNames.SplitWords(key);
+		return words.Count > 0 && PlaceWords.Contains(words[^1]);
 	}
 
 	/// <summary>In <c>secret:\n  name: x</c> the next line is a nested key, not the secret's value.</summary>
