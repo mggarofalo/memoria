@@ -7,7 +7,7 @@
     "node": ">=26.13.0"
   },
   "scripts": {
-    "lint": "eslint sidecar worker scripts/release scripts/e2e"
+    "lint": "eslint sidecar worker scripts/release scripts/e2e scripts/*.mts deploy/mutation-runner"
   },
   "allowScripts": {
     "lefthook": true

@@ -120,9 +120,14 @@ if (process.send) {
 }
 // Never outlive the test process. A test that fails, or a mutant that breaks the
 // supervisor's stop, would otherwise leave these running and use up the machine.
-const parent = process.ppid;
-setInterval(() => {
+// The starter names itself in FAKE_LLAMA_PARENT_PID (handOverPort in helpers.ts):
+// a test process that exits within the second this takes to start is already gone
+// by now, and the parent seen here would be the one that adopted the orphan.
+const parent = Number(process.env.FAKE_LLAMA_PARENT_PID) || process.ppid;
+const checkParent = (): void => {
   if (process.ppid !== parent) process.exit(0);
-}, 1000).unref();
+};
+checkParent();
+setInterval(checkParent, 1000).unref();
 process.on("SIGTERM", () => process.exit(0));
 process.on("SIGINT", () => process.exit(0));

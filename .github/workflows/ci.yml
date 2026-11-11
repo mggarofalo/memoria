@@ -223,7 +223,7 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
       - name: Complexity
-        run: npx eslint sidecar scripts/release scripts/e2e
+        run: npx eslint sidecar scripts/release scripts/e2e scripts/*.mts deploy/mutation-runner
         working-directory: .
       - name: Unit tests and coverage
         run: npm run test:coverage

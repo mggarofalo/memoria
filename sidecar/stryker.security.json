@@ -6,6 +6,7 @@
     "nodeArgs": ["--max-old-space-size=512", "--test-reporter=tap", "-r", "{{hookFile}}", "{{testFile}}"]
   },
   "coverageAnalysis": "perTest",
+  "concurrency": 4,
   "mutate": ["sidecar/src/auth.ts"],
   "ignorePatterns": ["/cli", "/src", "/tests/Memoria.Api.Tests", "/docs", "/deploy", "/.claude", "/sidecar/test/install-scripts.test.ts", "/sidecar/test/docs-match-code.test.ts", "**/bin", "**/obj"],
   "reporters": ["clear-text", "html", "json"],
