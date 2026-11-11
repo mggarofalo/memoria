@@ -1,5 +1,5 @@
 {
-  "why": "The full .NET mutation run, split so each shard fits one job's 4 hours. Paths are relative to the config's project. A shard with rest takes every file in that folder that no other shard of its config names, and rest of \"\" takes every folder no rest shard takes, so a new file always lands in some shard. Sized from mutant counts: keep a shard near 650.",
+  "why": "The full .NET mutation run, split so its shards can run in parallel and be rerun one at a time. On a 4-core hosted runner the shards that finished took 50 minutes to 2 hours, and the larger redaction shards ran past 2. Paths are relative to the config's project. A shard with rest takes every file in that folder that no other shard of its config names, and rest of \"\" takes every folder no rest shard takes, so a new file always lands in some shard. Sized from mutant counts: keep a shard near 650.",
   "shards": [
     { "name": "core redaction 1", "config": "core", "files": ["Redaction/SecretHeuristics.cs"] },
     { "name": "core redaction 2", "config": "core", "files": ["Redaction/PemBlock.cs"] },

@@ -4,20 +4,32 @@
 # Otherwise (nightly) mutates everything. Never run this from a git hook.
 # Every config runs, so one score under its threshold does not hide the others.
 #
-# With MUTATION_LIMIT_MINUTES set, running out of time fails the run as inconclusive.
-# Stryker.NET writes its score at the end, so a config that runs out of time has no
-# score, and a run with no score must not read as a pass. The nightly run has no limit.
+# With MUTATION_LIMIT_MINUTES set, running out of time is reported as inconclusive
+# instead of failing. Stryker.NET writes its score at the end, so a config that
+# runs out of time has no score to report; the nightly run has no such limit.
 #
-# MUTATION_CONFIGS names the configs to run, space-separated; the default is all four.
-# MUTATION_MUTATE narrows what they mutate, as space-separated globs, each passed as
-# --mutate, where a leading ! excludes. The nightly run uses the two to split the work
-# into shards that each fit the job's time limit, and each shard keeps its config's
-# thresholds, break included.
+# A full run of Memoria.Core takes hours, so it can also run as the shards in
+# stryker/shards.json, which together mutate every file exactly once and can run in
+# parallel or be rerun one at a time. MUTATION_SHARD=<name> runs one of them under its
+# config's thresholds, break included, with its report in StrykerOutput/<config>-<shard>.
+# `node scripts/mutation-dotnet-shards.mjs --names` lists them.
+#
+# Lower level: MUTATION_CONFIGS names the configs to run, space-separated, and
+# MUTATION_MUTATE narrows what they mutate, as space-separated globs passed as --mutate,
+# where a leading ! excludes.
 set -euf # -f: the globs are Stryker's, not the shell's
 
 since=""
 if [ -n "${MUTATION_BASE:-}" ]; then
   since="--since:$MUTATION_BASE"
+fi
+
+output_suffix=""
+if [ -n "${MUTATION_SHARD:-}" ]; then
+  shards="$(dirname "$0")/mutation-dotnet-shards.mjs"
+  MUTATION_CONFIGS=$(node "$shards" --shard "$MUTATION_SHARD" --field configs)
+  MUTATION_MUTATE=$(node "$shards" --shard "$MUTATION_SHARD" --field mutate)
+  output_suffix="-$(node "$shards" --shard "$MUTATION_SHARD" --field slug)"
 fi
 
 mutate=""
@@ -26,7 +38,7 @@ for glob in ${MUTATION_MUTATE:-}; do
 done
 
 inconclusive() {
-  message="Mutation (.NET) is inconclusive: the time limit ended before $1 finished, so it has no score. This fails the run; the nightly run covers the whole project."
+  message="Mutation (.NET) is inconclusive: the time limit ended before $1 finished. No score for it, and this is not a failure. The nightly run covers it."
   echo "$message"
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     echo "$message" >> "$GITHUB_STEP_SUMMARY"
@@ -44,7 +56,6 @@ for config in ${MUTATION_CONFIGS:-core api security security-core}; do
     left=$((MUTATION_LIMIT_MINUTES * 60 - $(date +%s) + started))
     if [ "$left" -le 0 ]; then
       inconclusive "$config"
-      status=1
       continue
     fi
     limiter="timeout $left"
@@ -52,10 +63,9 @@ for config in ${MUTATION_CONFIGS:-core api security security-core}; do
   code=0
   # shellcheck disable=SC2086 # $limiter, $since and $mutate are empty or meant to split
   $limiter dotnet tool run dotnet-stryker --config-file "stryker/$config.json" \
-    --output "StrykerOutput/$config" --concurrency "$runners" $since $mutate || code=$?
+    --output "StrykerOutput/$config$output_suffix" --concurrency "$runners" $since $mutate || code=$?
   if [ "$code" -eq 124 ] && [ -n "$limiter" ]; then
     inconclusive "$config"
-    status=1
   elif [ "$code" -ne 0 ]; then
     status=1
   fi

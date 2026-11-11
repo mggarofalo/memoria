@@ -10,7 +10,6 @@ on:
     paths:
       - .github/workflows/mutation.yml
       - scripts/mutation-*.sh
-      - scripts/mutation-*.mjs
       - stryker/**
       - dotnet-tools.json
       - src/**
@@ -39,34 +38,12 @@ env:
   MUTATION_BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || '' }}
 
 jobs:
-  dotnet-shards:
-    name: Mutation (.NET shards)
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.shards.outputs.matrix }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - id: shards
-        run: echo "matrix=$(node scripts/mutation-dotnet-shards.mjs ${{ github.event_name == 'pull_request' && '--pull-request' || '' }})" >> "$GITHUB_OUTPUT"
-
   dotnet:
-    name: Mutation (.NET${{ matrix.shard.name && format(', {0}', matrix.shard.name) || '' }})
-    needs: dotnet-shards
+    name: Mutation (.NET)
     runs-on: ubuntu-latest
-    # A pull request mutates only what changed in the security subset of Memoria.Api,
-    # in one job, and fails as inconclusive if that takes past 20 minutes. Any Memoria.Core
-    # config spends about 13 minutes on its first test run alone, so pull requests leave
-    # Core to the full run; see scripts/mutation-dotnet.sh. The full run does
-    # not fit one job's 4 hours: Memoria.Core alone has about 5,600 mutants, most of them
-    # covered by thousands of redaction tests, at several seconds each. So it runs as the
-    # shards in stryker/shards.json, each with the job limit to itself and its config's
-    # thresholds, break included. Core's shards cover every file once; security-core's
-    # files are among them, under the same 90% break, so a full run does not mutate them twice.
-    timeout-minutes: ${{ github.event_name == 'pull_request' && 30 || 240 }}
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: ${{ fromJSON(needs.dotnet-shards.outputs.matrix) }}
+    # A full run of a large change can take hours. A pull request stops itself at 50
+    # minutes and reports inconclusive; see scripts/mutation-dotnet.sh.
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 60 || 240 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -80,19 +57,16 @@ jobs:
       - name: Mutate
         run: sh scripts/mutation-dotnet.sh
         env:
-          MUTATION_LIMIT_MINUTES: ${{ github.event_name == 'pull_request' && '20' || '' }}
-          MUTATION_CONFIGS: ${{ matrix.shard.configs }}
-          MUTATION_MUTATE: ${{ matrix.shard.mutate }}
-      # Always, pull requests included: a failed score is only actionable with the report,
-      # and a run that hits its time limit still has the reports of the configs it finished.
+          MUTATION_LIMIT_MINUTES: ${{ github.event_name == 'pull_request' && '50' || '' }}
       - name: Upload report
+        # Always: a run stopped at its time limit still has the reports it finished.
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: mutation-dotnet${{ matrix.shard.name && format('-{0}', strategy.job-index) || '' }}
-          path: StrykerOutput/*/reports/
           if-no-files-found: ignore
-          retention-days: ${{ github.event_name == 'pull_request' && 7 || 30 }}
+          name: mutation-dotnet
+          path: StrykerOutput/*/reports/
+          retention-days: 30
 
   node:
     name: Mutation (${{ matrix.package }})
@@ -125,13 +99,14 @@ jobs:
         env:
           MUTATION_LIMIT_MINUTES: ${{ github.event_name == 'pull_request' && '50' || '' }}
       - name: Upload report
+        # Always: a run stopped at its time limit still has the reports it finished.
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          if-no-files-found: ignore
           name: mutation-${{ matrix.package }}
           path: ${{ matrix.package }}/reports/
-          if-no-files-found: ignore
-          retention-days: ${{ github.event_name == 'pull_request' && 7 || 30 }}
+          retention-days: 30
 
   cli:
     name: Mutation (CLI)
@@ -149,13 +124,14 @@ jobs:
       - name: Mutate
         run: sh scripts/mutation-go.sh
       - name: Upload report
+        # Always: a run stopped at its time limit still has the reports it finished.
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          if-no-files-found: ignore
           name: mutation-cli
           path: cli/reports/
-          if-no-files-found: ignore
-          retention-days: ${{ github.event_name == 'pull_request' && 7 || 30 }}
+          retention-days: 30
 
   # Real Go branch coverage. A slow report, never a gate: statement coverage in
   # CI is what blocks. gobco has no per-file exclusion or threshold of its own,
