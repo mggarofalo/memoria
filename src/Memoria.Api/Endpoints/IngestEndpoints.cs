@@ -160,7 +160,7 @@ public static class IngestEndpoints
 	/// <summary>Bringing back what someone deleted is an operator's decision: a deleted document may have held a credential.</summary>
 	private static void RequireRestoreRight(HttpContext context, bool? restoreDeleted)
 	{
-		if (restoreDeleted == true && !context.User.HasClaim(MemoriaClaims.Scope, MemoriaScopes.Admin))
+		if (restoreDeleted == true && !context.User.IsUnboundAdmin())
 		{
 			throw new IngestRefusedException(StatusCodes.Status403Forbidden, "restore_needs_admin", "Only a key with the admin scope can restore what was deleted.");
 		}

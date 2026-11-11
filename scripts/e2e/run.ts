@@ -2,7 +2,7 @@
  * Entry point: `node scripts/e2e/run.ts [--no-build]`. Needs Node 26.13+, Go, the
  * .NET SDK, and `npm ci` in sidecar/. See README.md.
  */
-import { auditTrail, authModes, finishExpiry, knownGood, revocation, rotation, startExpiry } from "./auth-keys.ts";
+import { auditTrail, authModes, boundAdmin, finishExpiry, knownGood, revocation, rotation, startExpiry } from "./auth-keys.ts";
 import { forwardedHeaders, limits } from "./auth-limits.ts";
 import { issueScopeKeys, mcpScope, multiGetLimits, scopeMatrix, secretsAbsent, sendCanaries } from "./auth-reads.ts";
 import { bootstrap, keyManagement, login, mcp, noModels, rateLimits, scopedReads, scopeErrors, traversal, type Keys } from "./checks.ts";
@@ -45,6 +45,7 @@ async function authChecks(h: Harness, { admin, reader }: Keys): Promise<void> {
   await authModes(h, admin);
   await rotation(h, admin);
   await revocation(h, admin);
+  await boundAdmin(h, admin);
   await knownGood(h, admin);
   await auditTrail(h, admin, reader);
   await limits(h, admin);

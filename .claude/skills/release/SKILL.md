@@ -157,15 +157,13 @@ docker buildx imagetools inspect ghcr.io/mggarofalo/memoria-qmd:<version> --form
 docker buildx imagetools inspect ghcr.io/mggarofalo/memoria-qmd:latest --format "{{json .Manifest.Digest}}"
 ```
 
-Verify the image reports the same version:
+Verify the image reports the same version. It names its version only to a caller with a key, so this runs the image, bootstraps a throwaway admin key inside it, and asks with that key:
 
 ```bash
-docker run -d --name memoria-release-check -p 127.0.0.1:18080:8080 -e Memoria__Sidecar__BaseUrl=http://127.0.0.1:8282 ghcr.io/mggarofalo/memoria:<version>
-curl -fsS http://127.0.0.1:18080/health
-docker rm -f memoria-release-check
+node scripts/release/release.ts verify-image ghcr.io/mggarofalo/memoria:<version> <version>
 ```
 
-`/health` must report `"version":"<version>"`. Then the sidecar image, which also must hold no llama.cpp binaries:
+It refuses an image that names its version to an anonymous caller, and removes the container either way. Then the sidecar image, which also must hold no llama.cpp binaries:
 
 ```bash
 node scripts/release/release.ts verify-sidecar-image ghcr.io/mggarofalo/memoria-qmd:<version> <version>

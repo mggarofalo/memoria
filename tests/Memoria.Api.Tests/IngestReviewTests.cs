@@ -514,7 +514,7 @@ public sealed class IngestOwnershipTests(AuthApiFactory factory) : IClassFixture
 		Assert.False(corpus.Files.ContainsKey(part));
 
 		Assert.Equal(HttpStatusCode.Forbidden, (await PostSessionAsync(client, jsonl, sessionId: id, restoreDeleted: true)).StatusCode);
-		HttpClient operatorKey = await factory.ClientWithScopesAsync([MemoriaScopes.Ingest, MemoriaScopes.Admin], ["c"]);
+		HttpClient operatorKey = await factory.ClientWithScopesAsync([MemoriaScopes.Ingest, MemoriaScopes.Admin], allCollections: true);
 		Assert.Equal(HttpStatusCode.Accepted, (await PostSessionAsync(operatorKey, jsonl, sessionId: id, restoreDeleted: true)).StatusCode);
 		Assert.True(corpus.Files.ContainsKey(part));
 		Assert.Equal(IngestStateName.Complete, await StateAsync(client, id));

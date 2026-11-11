@@ -11,17 +11,19 @@ using Microsoft.Extensions.Options;
 
 namespace Memoria.Api.Endpoints;
 
-/// <summary>Body of <c>GET /health</c>.</summary>
-public sealed record HealthReport(string Status, string Version);
+/// <summary>Body of <c>GET /health</c>. <see cref="Version"/> is null for an anonymous caller.</summary>
+public sealed record HealthReport(string Status, string? Version);
 
 public static class HealthEndpoints
 {
 	public static IEndpointRouteBuilder MapHealth(this IEndpointRouteBuilder app)
 	{
-		app.MapGet("/health", () => TypedResults.Ok(new HealthReport("ok", SidecarServiceCollectionExtensions.ApiVersion)))
+		app.MapGet("/health", Health)
 			.WithName("health")
 			.WithSummary("Liveness")
-			.WithDescription("The API process is up. Anonymous. Does not contact the search backend; use `/ready` for that.")
+			.WithDescription(
+				"The API process is up. Anonymous. Does not contact the search backend; use `/ready` for that. "
+				+ "`version`, the exact build and commit, is null unless the request carries a valid API key, so a scanner cannot match the build against advisories.")
 			.WithTags("Health")
 			.AllowAnonymous();
 
@@ -41,6 +43,13 @@ public static class HealthEndpoints
 			.Produces<ReadinessReport>(StatusCodes.Status503ServiceUnavailable);
 
 		return app;
+	}
+
+	/// <summary>Any authenticated caller sees the version: a key, or anyone at all in disabled mode, which binds loopback unless told otherwise.</summary>
+	private static Ok<HealthReport> Health(HttpContext context)
+	{
+		bool known = context.User.Identity?.IsAuthenticated == true;
+		return TypedResults.Ok(new HealthReport("ok", known ? SidecarServiceCollectionExtensions.ApiVersion : null));
 	}
 
 	private static async Task<Results<Ok<ReadinessReport>, JsonHttpResult<ReadinessReport>>> ReadyAsync(
@@ -89,7 +98,7 @@ public static class HealthEndpoints
 	/// </summary>
 	private static async Task<SidecarReadinessResult> ProbeAsync(IMemoriaQmdClient sidecar, ReadinessCache readiness, SidecarOptions settings, HttpContext context)
 	{
-		if (context.User.HasClaim(MemoriaClaims.Scope, MemoriaScopes.Admin) && !context.User.HasClaim(static c => c.Type == MemoriaClaims.AuthDisabled))
+		if (context.User.IsUnboundAdmin() && !context.User.HasClaim(static c => c.Type == MemoriaClaims.AuthDisabled))
 		{
 			using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted);
 			timeout.CancelAfter(settings.ReadinessTimeout);

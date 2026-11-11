@@ -14,7 +14,7 @@ public interface ICallerScope
 
 	/// <summary>
 	/// True when the caller may see how the backend failed: sidecar addresses,
-	/// internal error text, the readiness report. Admin keys and disabled mode.
+	/// internal error text, the readiness report. Admin keys bound to no collection, and disabled mode.
 	/// </summary>
 	bool SeesBackendDetails { get; }
 }
@@ -49,7 +49,7 @@ public sealed class HttpCallerScope(IHttpContextAccessor accessor) : ICallerScop
 		{
 			System.Security.Claims.ClaimsPrincipal? user = accessor.HttpContext?.User;
 			return user?.Identity?.IsAuthenticated == true
-				&& (user.HasClaim(c => c.Type == MemoriaClaims.AuthDisabled) || user.HasClaim(MemoriaClaims.Scope, MemoriaScopes.Admin));
+				&& (user.HasClaim(c => c.Type == MemoriaClaims.AuthDisabled) || user.IsUnboundAdmin());
 		}
 	}
 }

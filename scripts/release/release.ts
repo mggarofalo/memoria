@@ -9,8 +9,8 @@ import { run, type Tools } from "./cli.ts";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
-function capture(command: string, args: string[]): string {
-  return execFileSync(command, args, { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 256 * 1024 * 1024 });
+function capture(command: string, args: string[], input?: string): string {
+  return execFileSync(command, args, { cwd: root, encoding: "utf8", stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"], input, maxBuffer: 256 * 1024 * 1024 });
 }
 
 const tools: Tools = {
@@ -26,9 +26,10 @@ const tools: Tools = {
     execFileSync(command, args, { cwd, stdio: "inherit", shell: command === "npm" && process.platform === "win32" });
   },
   docker: (args) => capture("docker", args),
-  httpGet: (url) => {
+  httpGet: (url, bearer) => {
     try {
-      return capture("curl", ["-fsS", url]);
+      // `-H @-` reads the header from stdin, so the token is in no process argument.
+      return bearer === undefined ? capture("curl", ["-fsS", url]) : capture("curl", ["-fsS", "-H", "@-", url], `Authorization: Bearer ${bearer}\n`);
     } catch {
       return undefined;
     }

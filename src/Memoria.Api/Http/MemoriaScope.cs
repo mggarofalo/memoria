@@ -88,6 +88,21 @@ public sealed class MemoriaUnboundKeyHandler : AuthorizationHandler<MemoriaUnbou
 	}
 }
 
+public static class MemoriaPrincipalExtensions
+{
+	/// <summary>
+	/// An authenticated key holding <c>admin</c> and bound to no collection: the only caller that sees backend detail or
+	/// probes readiness on its own. The handler already withholds admin from a bound key; this checks again, so the
+	/// binding holds even if that ever changes.
+	/// </summary>
+	public static bool IsUnboundAdmin(this System.Security.Claims.ClaimsPrincipal user)
+	{
+		return user.Identity?.IsAuthenticated == true
+			&& user.HasClaim(MemoriaClaims.Scope, MemoriaScopes.Admin)
+			&& !user.HasClaim(static c => c.Type == MemoriaClaims.Collection);
+	}
+}
+
 public static class MemoriaScopeEndpointExtensions
 {
 	/// <summary>Declares the scope every endpoint in the group requires.</summary>

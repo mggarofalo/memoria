@@ -59,13 +59,17 @@ public sealed class KeyLifetimeTests : IDisposable
 	}
 
 	[Fact]
-	public async Task An_admin_key_never_gets_one_even_beside_another_scope()
+	public async Task An_admin_only_key_never_gets_one_but_admin_beside_a_data_scope_does()
 	{
+		DateTimeOffset before = DateTimeOffset.UtcNow;
+
 		ApiKeyInfo admin = await CreateAsync(_limited, new CreateApiKeyRequest("ops", [MemoriaScopes.Admin], null, null, null));
-		ApiKeyInfo mixed = await CreateAsync(_limited, new CreateApiKeyRequest("ops-reader", [MemoriaScopes.Admin, MemoriaScopes.Read], ["c"], null, null));
+		ApiKeyInfo reader = await CreateAsync(_limited, new CreateApiKeyRequest("ops-reader", [MemoriaScopes.Admin, MemoriaScopes.Read], null, true, null));
+		ApiKeyInfo writer = await CreateAsync(_limited, new CreateApiKeyRequest("ops-writer", [MemoriaScopes.Ingest, MemoriaScopes.Admin], null, true, null));
 
 		Assert.Null(admin.ExpiresAt);
-		Assert.Null(mixed.ExpiresAt);
+		Assert.InRange(reader.ExpiresAt!.Value, before.AddDays(30), DateTimeOffset.UtcNow.AddDays(30));
+		Assert.InRange(writer.ExpiresAt!.Value, before.AddDays(30), DateTimeOffset.UtcNow.AddDays(30));
 	}
 
 	[Fact]
@@ -84,5 +88,7 @@ public sealed class KeyLifetimeTests : IDisposable
 		Assert.Equal(now.AddDays(365), AdminKeyEndpoints.DefaultExpiry([MemoriaScopes.Read], now, TimeSpan.FromDays(365)));
 		Assert.Null(AdminKeyEndpoints.DefaultExpiry([MemoriaScopes.Read], now, null));
 		Assert.Null(AdminKeyEndpoints.DefaultExpiry([MemoriaScopes.Admin], now, TimeSpan.FromDays(365)));
+		Assert.Equal(now.AddDays(365), AdminKeyEndpoints.DefaultExpiry([MemoriaScopes.Admin, MemoriaScopes.Read], now, TimeSpan.FromDays(365)));
+		Assert.Equal(now.AddDays(365), AdminKeyEndpoints.DefaultExpiry([MemoriaScopes.Ingest, MemoriaScopes.Admin], now, TimeSpan.FromDays(365)));
 	}
 }

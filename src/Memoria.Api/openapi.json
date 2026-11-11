@@ -26,7 +26,7 @@
           "Health"
         ],
         "summary": "Liveness",
-        "description": "The API process is up. Anonymous. Does not contact the search backend; use `/ready` for that.",
+        "description": "The API process is up. Anonymous. Does not contact the search backend; use `/ready` for that. `version`, the exact build and commit, is null unless the request carries a valid API key, so a scanner cannot match the build against advisories.",
         "operationId": "health",
         "responses": {
           "200": {
@@ -731,7 +731,7 @@
           "Admin"
         ],
         "summary": "Issue an API key",
-        "description": "Creates a key and returns its plaintext. This response is the only time the plaintext exists. `read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. With `Memoria:Auth:DefaultKeyLifetime` set, a key without the `admin` scope and with no `expiresAt` expires that long after it is made. Requires the `admin` scope.",
+        "description": "Creates a key and returns its plaintext. This response is the only time the plaintext exists. `read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. A key with `admin` acts on every collection, so it cannot list `collections` (400, `admin_key_bound`); give it `allCollections` if it also reads or ingests. With `Memoria:Auth:DefaultKeyLifetime` set, a key with `read` or `ingest` and no `expiresAt` expires that long after it is made. `expiresAt` may be at most two years ahead. A key never makes a key wider than itself: one that expires cannot make a key that outlives it (403, `key_exceeds_caller`). Requires the `admin` scope.",
         "operationId": "createApiKey",
         "requestBody": {
           "content": {
@@ -863,7 +863,7 @@
           "Admin"
         ],
         "summary": "Revoke an API key",
-        "description": "Takes effect on the key's next request. Revoking a revoked key succeeds and keeps the original timestamp. Requires the `admin` scope.",
+        "description": "Takes effect on the key's next request. Revoking a revoked key succeeds and keeps the original timestamp. A key may always revoke itself, but not an active key that outlives it (403, `key_exceeds_caller`). Requires the `admin` scope.",
         "operationId": "revokeApiKey",
         "parameters": [
           {
@@ -933,7 +933,7 @@
           "Admin"
         ],
         "summary": "Rotate an API key",
-        "description": "Replaces the key's secret and returns the new plaintext, once. The id, scopes, collections and expiry stay; the previous token stops working immediately. A revoked or expired key cannot be rotated (409). Requires the `admin` scope.",
+        "description": "Replaces the key's secret and returns the new plaintext, once. The id, scopes, collections and expiry stay; the previous token stops working immediately. A revoked or expired key cannot be rotated (409), nor can a key that outlives the caller's own (403, `key_exceeds_caller`) or one holding `admin` beside a collection list (409, `bound_admin_key`). Requires the `admin` scope.",
         "operationId": "rotateApiKey",
         "parameters": [
           {
@@ -3343,7 +3343,8 @@
             "type": "string"
           },
           "version": {
-            "type": "string"
+            "type": "string",
+            "nullable": true
           }
         }
       },

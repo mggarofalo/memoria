@@ -29,7 +29,7 @@ Nothing about the first tag is special beyond the rules above. Run the skill on 
 
 | Component | How it gets the version | Without a tag |
 |---|---|---|
-| `Memoria.Api` | `dotnet publish -p:Version=X.Y.Z`, reported by `/health` and the MCP server | `0.0.0-dev+<commit>` from a plain `dotnet build` |
+| `Memoria.Api` | `dotnet publish -p:Version=X.Y.Z`, reported by `/health` to a caller with a key, and by the MCP server | `0.0.0-dev+<commit>` from a plain `dotnet build` |
 | Docker image | build argument `MEMORIA_VERSION`, from `release.ts describe` | see below |
 | `memoria` CLI | `-ldflags -X .../cmd.Version=X.Y.Z`, reported by `memoria --version` | `dev` from a plain `go build` |
 | `memoria-qmd` | `dist/VERSION` in its release package | see below |
@@ -68,7 +68,7 @@ Nothing else holds a version. `package.json` says `0.0.0`, the csproj says `0.0.
 | Job | Runs on | Permissions | Does |
 |---|---|---|---|
 | `Validate Release Tag` | tags | `contents: read`, `checks: read` | the gate above |
-| `Docker Image` | everything | `contents: read` | builds locally and checks `/health`; publishes nothing |
+| `Docker Image` | everything | `contents: read` | builds locally, checks that `/health` names no version anonymously and the right one to a key it bootstraps; publishes nothing |
 | `Publish Image` | `main`, tags | `contents: read`, `packages: write` | pushes by digest with no tag, runs that exact digest and checks `/health`, then points the tags at the digest and confirms each one resolves to it |
 | `Attest Image Provenance` | tags | `contents: read`, `id-token: write`, `attestations: write` | attests the verified digest |
 | `Sidecar Image` | everything | `contents: read` | builds the sidecar image, starts it on a fresh index, checks `/health` and that it holds no llama.cpp binaries; publishes nothing |

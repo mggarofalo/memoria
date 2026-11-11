@@ -26,6 +26,8 @@ public class MemoriaApiFactory : WebApplicationFactory<Program>
 	protected override void ConfigureWebHost(IWebHostBuilder builder)
 	{
 		builder.UseEnvironment("Production");
+		// The test server binds nothing, but disabled mode refuses to start unless configuration names loopback only.
+		builder.UseSetting("urls", "http://127.0.0.1:0");
 		builder.UseSetting("Memoria:Sidecar:BaseUrl", SidecarBaseUrl);
 		builder.UseSetting("Memoria:Sidecar:Secret", SidecarSecret);
 		builder.UseSetting("Memoria:Sidecar:ReadinessTimeout", "00:00:01");

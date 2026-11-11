@@ -32,6 +32,8 @@ function hostRefusals(h: Harness): Refusal[] {
     { name: "ApiKey with no database stops the host", expects: "Memoria:Auth:DatabasePath is required", env: { Memoria__Auth__DatabasePath: undefined } },
     { name: "a /0 trusted proxy stops the host", expects: "TrustedProxies has an invalid entry", env: { Memoria__Auth__TrustedProxies__0: "0.0.0.0/0", Memoria__Auth__DatabasePath: h.privatePath("refused-all.sqlite") } },
     { name: "an unparseable trusted proxy stops the host", expects: "TrustedProxies has an invalid entry", env: { Memoria__Auth__TrustedProxies__0: "not-an-address", Memoria__Auth__DatabasePath: h.privatePath("refused-bad.sqlite") } },
+    { name: "Disabled on 0.0.0.0 stops the host", expects: "AllowDisabledOnNetwork", env: { Memoria__Auth__Mode: "Disabled", Memoria__Auth__DatabasePath: undefined, ASPNETCORE_URLS: "http://0.0.0.0:0" } },
+    { name: "Disabled with a Kestrel endpoint off loopback stops the host", expects: "AllowDisabledOnNetwork", env: { Memoria__Auth__Mode: "Disabled", Memoria__Auth__DatabasePath: undefined, Kestrel__Endpoints__Lan__Url: "http://0.0.0.0:0" } },
   ];
 }
 
@@ -64,6 +66,37 @@ async function unsetHost(h: Harness): Promise<void> {
   const host = await h.startExtraHost("unset-mode", { Memoria__Auth__Mode: undefined, Memoria__Auth__DatabasePath: h.privatePath("unset-mode.sqlite") }, repo);
   const anonymous = await h.request({ baseUrl: host.url, path: COLLECTIONS });
   h.check("Auth:Mode unset, with no settings file, fails closed: no key is 401", anonymous.status === 401 && !anonymous.body.includes('"secret"'), anonymous);
+}
+
+/**
+ * The escape the adversarial auth review found: an admin key bound to collections minted an all-collections key, read a
+ * collection outside its binding with it, and revoked the bootstrap key. Issuing one is refused now, and one already in the
+ * control database gets no admin power.
+ */
+export async function boundAdmin(h: Harness, admin: string): Promise<void> {
+  const issued = await h.request({ method: "POST", path: ADMIN_KEYS, key: admin, issuing: true, body: { label: "bound-admin", scopes: ["admin", "read"], collections: ["notes"] } });
+  if (issued.status === 201) h.remember(parse<{ key: string }>(issued).key);
+  h.check("bound admin: issuing admin beside a collection list is 400 admin_key_bound", issued.status === 400 && codeOf(issued) === "admin_key_bound", issued.status);
+
+  await oldBoundAdmin(h, admin, h.plantKey("bound-admin", ["admin", "read"], ["notes"]));
+}
+
+/** One an older version issued, written straight into the control database: it gets no admin power. */
+async function oldBoundAdmin(h: Harness, admin: string, bound: string): Promise<void> {
+  const minted = await h.request({ method: "POST", path: ADMIN_KEYS, key: bound, issuing: true, body: { label: "escalated", scopes: ["read", "admin"], allCollections: true } });
+  let read = 0;
+  if (minted.status === 201) read = (await h.request({ path: "/v1/docs/secret/hidden.md", key: h.remember(parse<{ key: string }>(minted).key) })).status;
+  h.check("bound admin: an old one cannot mint an all-collections key: 403 collection_scoped_key", minted.status === 403 && codeOf(minted) === "collection_scoped_key" && read === 0, { minted: minted.status, read });
+
+  const revoke = await h.request({ method: "DELETE", path: `${ADMIN_KEYS}/${idOf(admin)}`, key: bound });
+  const still = await h.request({ path: ADMIN_KEYS, key: admin });
+  h.check("bound admin: it cannot revoke the bootstrap key, which still works", revoke.status === 403 && codeOf(revoke) === "collection_scoped_key" && still.status === 200, statuses([revoke, still]));
+
+  const queue = await h.request({ path: "/v1/admin/queue", key: bound });
+  const own = await h.request({ path: COLLECTIONS, key: bound });
+  h.check("bound admin: operations are 403, and it still reads its own collection and only that", queue.status === 403 && own.status === 200 && own.body.includes('"notes"') && !own.body.includes('"secret"'), statuses([queue, own]));
+  const ready = parse<{ reason: unknown; sidecar: unknown }>(await h.request({ path: "/ready", key: bound }));
+  h.check("bound admin: /ready gives it the status word alone", ready.reason === null && ready.sidecar === null, ready);
 }
 
 export async function rotation(h: Harness, admin: string): Promise<void> {

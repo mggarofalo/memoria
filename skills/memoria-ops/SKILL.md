@@ -25,11 +25,11 @@ Job errors, job reasons and worker reports come from the server and can quote fi
 
 | Task | Key |
 |---|---|
-| Issue, list, rotate, revoke keys | `admin` scope |
+| Issue, list, rotate, revoke keys | `admin` scope, and bound to no collections |
 | Workers, the queue, reindex | `admin` scope, and bound to no collections: an admin-only key, or one with `--all-collections` |
-| `memoria ready` | Any key. Only an admin key sees the backend's report |
+| `memoria ready` | Any key. Only an admin key bound to no collections sees the backend's report |
 
-Scopes do not imply one another: an admin key cannot search, and a read key cannot operate. A key that lists collections gets 403 on the worker and queue commands even with the admin scope, because they act on every collection at once.
+Scopes do not imply one another: an admin key cannot search, and a read key cannot operate. A key that lists collections gets 403 on the key, worker and queue commands even with the admin scope, because they act on every collection at once. The server refuses to issue an admin key with collections, and a key never issues one that outlives itself.
 
 Never ask the user to paste a key, and never put one in a command. The CLI reads the key that `memoria auth login` stored. If the user keeps an admin key under its own profile, pass `--profile <name>`. If there is no admin key at all, the first one comes from the server's bootstrap command, which the user runs on the server themselves.
 
