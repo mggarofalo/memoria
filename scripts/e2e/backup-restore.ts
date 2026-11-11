@@ -74,6 +74,8 @@ function prepare(): void {
   writeFileSync(path.join(dir, "check.env"), [
     `MEMORIA_VERSION=${VERSION}`,
     `MEMORIA_SIDECAR_SECRET=${randomBytes(32).toString("base64url")}`,
+    // Its own, so a deployment on this host keeps its proxy network.
+    `MEMORIA_PROXY_NETWORK=${PROJECT}-proxy`,
     `MEMORIA_INGEST_DIGEST_KEY=${randomBytes(32).toString("base64url")}`,
     `MEMORIA_QMD_WORKERS=${JSON.stringify(workers)}`,
     "MEMORIA_WORKER_TOKEN_GPU=mock-worker-token-0123456789",

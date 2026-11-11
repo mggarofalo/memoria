@@ -121,6 +121,8 @@ export class ComposeHarness extends Harness {
     writeFileSync(path.join(this.dir, "compose.env"), [
       `MEMORIA_VERSION=${VERSION}`,
       `MEMORIA_SIDECAR_SECRET=${this.sidecarSecret}`,
+      // Its own, so a deployment on this host keeps its proxy network.
+      `MEMORIA_PROXY_NETWORK=${PROJECT}-proxy`,
       `MEMORIA_INGEST_DIGEST_KEY=${this.digestKey}`,
       `MEMORIA_QMD_WORKERS=${JSON.stringify(workers)}`,
       `MEMORIA_WORKER_TOKEN_GPU=${this.workerToken}`,

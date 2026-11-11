@@ -46,6 +46,12 @@ services:
       # The documents. Back this up: it may be the only copy.
       - ${MEMORIA_CORPUS:-memoria-corpus}:/corpus
     networks: [memoria]
+    # Nothing in the image is written at run time: what changes is on the volumes. Drop every
+    # capability, and let nothing gain privileges, as neither process needs any.
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
     # Shutdown takes MEMORIA_QMD_SHUTDOWN_DRAIN_MS (10 s by default) plus at most 3 s, and stopped
     # jobs persist, so this leaves 2 s spare. Raise it with the drain, never below drain + 3 s.
     stop_grace_period: 15s
@@ -73,11 +79,19 @@ services:
       # API keys and the audit log. Durable and not rebuildable, unlike QMD's
       # index: losing this volume revokes every key. Keep it on a local disk.
       - memoria-data:/data
-    networks: [memoria]
+    # memoria: the sidecar, and nothing else. proxy: the reverse proxy reaches the API here, and
+    # never the sidecar, which is not on it. See docs/deployment.md.
+    networks: [memoria, proxy]
+    # Nothing in the image is written at run time: what changes is on the volumes. Drop every
+    # capability, and let nothing gain privileges, as neither process needs any.
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
     ports:
-      # LAN only. Public exposure goes through the reverse proxy once the
-      # homelab hardening work lands; do not publish on 0.0.0.0 of a host with a
-      # public interface before then.
+      # Loopback by default. The reverse proxy reaches the API on the proxy network, not
+      # through this port. Docker's published ports are not filtered by ufw: see
+      # docs/deployment.md before binding a LAN address, and never bind 0.0.0.0.
       - "${MEMORIA_BIND_ADDRESS:-127.0.0.1}:8080:8080"
     healthcheck:
       test: ["CMD", "dotnet", "Memoria.Api.dll", "--health-check"]
@@ -88,6 +102,11 @@ services:
 
 networks:
   memoria:
+    driver: bridge
+  # The reverse proxy's way in. Its own compose project joins this by name, as an external
+  # network: `networks: { memoria-proxy: { external: true } }`. Only memoria-api is on it.
+  proxy:
+    name: ${MEMORIA_PROXY_NETWORK:-memoria-proxy}
     driver: bridge
 
 volumes:
