@@ -8,7 +8,7 @@
   "coverageAnalysis": "perTest",
   "concurrency": 4,
   "mutate": ["sidecar/src/auth.ts", "sidecar/src/llm/validate.ts"],
-  "ignorePatterns": ["/cli", "/src", "/tests/Memoria.Api.Tests", "/docs", "/deploy", "/.claude", "/sidecar/test/install-scripts.test.ts", "/sidecar/test/docs-match-code.test.ts", "**/bin", "**/obj"],
+  "ignorePatterns": ["/cli", "/src", "/tests/Memoria.Api.Tests", "/docs", "/deploy", "/.claude", "/sidecar/test/install-scripts.test.ts", "/sidecar/test/docs-match-code.test.ts", "/sidecar/test/mutation-runner.test.ts", "**/bin", "**/obj"],
   "reporters": ["clear-text", "html", "json"],
   "htmlReporter": { "fileName": "sidecar/reports/mutation-security/mutation.html" },
   "jsonReporter": { "fileName": "sidecar/reports/mutation-security/mutation.json" },
