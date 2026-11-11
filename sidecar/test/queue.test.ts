@@ -573,7 +573,7 @@ test("GET /workers is empty in local mode and passes through only declared field
   try {
     assert.deepEqual((await app.inject({ method: "GET", url: "/workers", headers: authHeaders })).json(), { mode: "local", workers: [] });
     backend.health = { mode: "remote", degraded: false, unavailable: [], workersUp: 1, workersTotal: 1, embedDisagreement: [], documentsSetAside: 0 };
-    const view = { name: "d", host: "h:1", state: "up" as const, circuit: "closed" as const, circuits: { embed: "closed" as const, rerank: "closed" as const, generate: "closed" as const, documents: "closed" as const }, embedDisagrees: false, capabilities: ["embed" as const], priority: 1, maxConcurrent: 2, embedModelCompatible: true, rerankTransport: null, lastHeartbeat: null, inFlight: 0, queueDepth: 0, calls: 0, errorRate: 0, drained: false };
+    const view = { name: "d", host: "h:1", state: "up" as const, circuit: "closed" as const, circuits: { embed: "closed" as const, rerank: "closed" as const, generate: "closed" as const, documents: "closed" as const }, embedDisagrees: false, capabilities: ["embed" as const], priority: 1, maxConcurrent: 2, embedModelCompatible: true, rerankModelCompatible: true, generateModelCompatible: true, rerankTransport: null, lastHeartbeat: null, inFlight: 0, queueDepth: 0, calls: 0, errorRate: 0, drained: false };
     // Even if a token somehow reached the view, the response schema would drop it.
     backend.workerViews = [{ ...view, token: "should-not-appear" } as never];
     const body = (await app.inject({ method: "GET", url: "/workers", headers: authHeaders })).body;
@@ -798,7 +798,7 @@ test("POST /workers/{name}:drain and :enable change one worker, and refuse a nam
     assert.equal(local.statusCode, 404, "local mode has no workers");
     assert.equal(local.json().error, "unknown_worker");
 
-    const view = { name: "desktop", host: "h:1", state: "up" as const, circuit: "closed" as const, circuits: { embed: "closed" as const, rerank: "closed" as const, generate: "closed" as const, documents: "closed" as const }, embedDisagrees: false, capabilities: ["embed" as const], priority: 1, maxConcurrent: 2, embedModelCompatible: true, rerankTransport: null, lastHeartbeat: null, inFlight: 0, queueDepth: 0, calls: 0, errorRate: 0, drained: false };
+    const view = { name: "desktop", host: "h:1", state: "up" as const, circuit: "closed" as const, circuits: { embed: "closed" as const, rerank: "closed" as const, generate: "closed" as const, documents: "closed" as const }, embedDisagrees: false, capabilities: ["embed" as const], priority: 1, maxConcurrent: 2, embedModelCompatible: true, rerankModelCompatible: true, generateModelCompatible: true, rerankTransport: null, lastHeartbeat: null, inFlight: 0, queueDepth: 0, calls: 0, errorRate: 0, drained: false };
     backend.workerViews = [view, { ...view, name: "mac.local" }];
 
     const drained = await post("/workers/desktop:drain");

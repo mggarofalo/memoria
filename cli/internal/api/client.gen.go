@@ -471,22 +471,24 @@ type WorkerCircuits struct {
 
 // WorkerInfo defines model for WorkerInfo.
 type WorkerInfo struct {
-	Calls                int32          `json:"calls"`
-	Capabilities         []string       `json:"capabilities"`
-	Circuit              string         `json:"circuit"`
-	Circuits             WorkerCircuits `json:"circuits"`
-	Drained              bool           `json:"drained"`
-	EmbedDisagrees       bool           `json:"embedDisagrees"`
-	EmbedModelCompatible *bool          `json:"embedModelCompatible"`
-	ErrorRate            float64        `json:"errorRate"`
-	Host                 string         `json:"host"`
-	InFlight             int32          `json:"inFlight"`
-	LastHeartbeat        *string        `json:"lastHeartbeat"`
-	MaxConcurrent        int32          `json:"maxConcurrent"`
-	Name                 string         `json:"name"`
-	Priority             int32          `json:"priority"`
-	QueueDepth           float64        `json:"queueDepth"`
-	State                string         `json:"state"`
+	Calls                   int32          `json:"calls"`
+	Capabilities            []string       `json:"capabilities"`
+	Circuit                 string         `json:"circuit"`
+	Circuits                WorkerCircuits `json:"circuits"`
+	Drained                 bool           `json:"drained"`
+	EmbedDisagrees          bool           `json:"embedDisagrees"`
+	EmbedModelCompatible    *bool          `json:"embedModelCompatible"`
+	ErrorRate               float64        `json:"errorRate"`
+	GenerateModelCompatible *bool          `json:"generateModelCompatible,omitempty"`
+	Host                    string         `json:"host"`
+	InFlight                int32          `json:"inFlight"`
+	LastHeartbeat           *string        `json:"lastHeartbeat"`
+	MaxConcurrent           int32          `json:"maxConcurrent"`
+	Name                    string         `json:"name"`
+	Priority                int32          `json:"priority"`
+	QueueDepth              float64        `json:"queueDepth"`
+	RerankModelCompatible   *bool          `json:"rerankModelCompatible,omitempty"`
+	State                   string         `json:"state"`
 }
 
 // WorkerList defines model for WorkerList.

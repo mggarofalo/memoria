@@ -96,7 +96,9 @@ internal static class ContractMapping
 			worker.ErrorRate,
 			worker.LastHeartbeat,
 			worker.EmbedModelCompatible,
-			worker.EmbedDisagrees);
+			worker.EmbedDisagrees,
+			worker.RerankModelCompatible,
+			worker.GenerateModelCompatible);
 	}
 
 	public static JobCounts ToContract(this SidecarJobCounts counts)

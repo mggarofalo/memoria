@@ -4,7 +4,7 @@ import { WorkerError } from "../src/llm/client.ts";
 import { Breaker, WorkerPool, type DispatchTarget } from "../src/llm/pool.ts";
 import { RemoteLlm } from "../src/llm/remote.ts";
 import type { Capability, PoolWorkerConfig } from "../src/llm/types.ts";
-import { EMBED_FILE, MockWorker } from "./mock-worker.ts";
+import { EMBED_FILE, GENERATE_FILE, GENERATE_URI, MockWorker, RERANK_FILE, RERANK_URI } from "./mock-worker.ts";
 
 const TOKENS = { a: "token-for-worker-a-0123456789", b: "token-for-worker-b-0123456789" };
 const URI = `hf:ggml-org/embeddinggemma-300M-GGUF/${EMBED_FILE}`;
@@ -16,13 +16,16 @@ interface Fleet {
   llm: RemoteLlm;
   /** Connection attempts per worker URL, counted before any network happens. */
   attempts: Map<string, number>;
+  /** Each time the pool reported a worker serving another model for a role. */
+  mismatches: string[];
   tick(ms: number): void;
   done(): Promise<void>;
 }
 
-async function fleet(over: { a?: Partial<PoolWorkerConfig>; b?: Partial<PoolWorkerConfig>; bFile?: string; reserve?: number } = {}): Promise<Fleet> {
+async function fleet(over: { a?: Partial<PoolWorkerConfig>; b?: Partial<PoolWorkerConfig>; bFile?: string; bRerank?: string; bGenerate?: string; reserve?: number } = {}): Promise<Fleet> {
   const a = await new MockWorker(8).start();
-  const b = await new MockWorker(8, over.bFile).start();
+  const b = await new MockWorker(8, over.bFile, over.bRerank, over.bGenerate).start();
+  const mismatches: string[] = [];
   const attempts = new Map<string, number>();
   let now = 1_000_000;
   const countingFetch = ((input: URL, init: RequestInit) => {
@@ -34,11 +37,12 @@ async function fleet(over: { a?: Partial<PoolWorkerConfig>; b?: Partial<PoolWork
   const llm = new RemoteLlm({
     workers: [worker("a", a, { priority: 1, ...over.a }), worker("b", b, { priority: 2, ...over.b })],
     embedDimensions: 8,
-    models: { embed: URI, rerank: "hf:x/r.gguf", generate: "hf:x/g.gguf" },
+    models: { embed: URI, rerank: RERANK_URI, generate: GENERATE_URI },
     fallback: null,
     fetch: countingFetch,
     now: () => now,
     breaker: { threshold: 3, backoffBaseMs: 1_000, backoffMaxMs: 8_000 },
+    onModelMismatch: (worker, role, reported) => mismatches.push(`${worker} ${role} ${reported}`),
     ...(over.reserve !== undefined ? { interactiveReserve: over.reserve } : {}),
   });
   return {
@@ -47,6 +51,7 @@ async function fleet(over: { a?: Partial<PoolWorkerConfig>; b?: Partial<PoolWork
     pool: llm.pool,
     llm,
     attempts,
+    mismatches,
     tick: (ms) => {
       now += ms;
     },
@@ -461,6 +466,105 @@ test("an embed response with no model named is refused", async () => {
   }
 });
 
+// --- the rerank and generate models, per worker -----------------------------------
+
+const OTHER_RERANKER = "Qwen3-Reranker-4B.Q8_0.gguf";
+
+test("a worker serving another reranker never reranks, so failover cannot mix two rerankers' scores, but it still embeds", async () => {
+  const f = await fleet({ bRerank: OTHER_RERANKER, b: { priority: 0 } });
+  try {
+    await f.pool.refresh();
+    await f.pool.refresh();
+    for (let i = 0; i < 3; i++) await rerank(f);
+    assert.equal(f.b.count("/v1/rerank"), 0);
+    assert.equal(f.a.count("/v1/rerank"), 3);
+    assert.equal((await f.llm.embedDocuments(["x"])).worker, "b", "its embedding model is the index's");
+    assert.deepEqual(f.mismatches, [`b rerank ${OTHER_RERANKER}`], "said once, not at every heartbeat");
+    const view = f.pool.workers()[1]!;
+    assert.deepEqual([view.embedModelCompatible, view.rerankModelCompatible, view.generateModelCompatible], [true, false, true], "GET /workers says which role it is kept off");
+  } finally {
+    await f.done();
+  }
+});
+
+test("a worker not yet heartbeat-checked is asked its reranker before it scores, and a wrong one fails over", async () => {
+  const f = await fleet({ bRerank: OTHER_RERANKER, b: { priority: 0 } });
+  try {
+    await rerank(f);
+    assert.equal(f.b.count("/v1/rerank"), 0);
+    assert.equal(f.a.count("/v1/rerank"), 1);
+    assert.equal(f.pool.workers()[1]!.circuit, "closed", "a wrong model is not an outage");
+  } finally {
+    await f.done();
+  }
+});
+
+test("a sole worker serving another reranker leaves search unreranked rather than scored by the wrong model", async () => {
+  const f = await fleet({ a: { capabilities: ["embed"] }, bRerank: OTHER_RERANKER });
+  try {
+    await assert.rejects(rerank(f), (e) => e instanceof WorkerError && e.code === "model_mismatch" && /rerank model/.test(e.message));
+    await f.pool.refresh();
+    assert.equal(f.pool.status().rerank, false);
+    assert.equal(f.b.count("/v1/rerank"), 0);
+  } finally {
+    await f.done();
+  }
+});
+
+test("a worker serving another query-expansion model never expands queries", async () => {
+  const f = await fleet({ bGenerate: "Qwen3-0.6B-Q8_0.gguf", b: { priority: 0 } });
+  try {
+    await f.pool.refresh();
+    await f.llm.expandQuery("auth");
+    assert.equal(f.b.count("/v1/complete"), 0);
+    assert.equal(f.a.count("/v1/complete"), 1);
+  } finally {
+    await f.done();
+  }
+});
+
+test("a worker caught by its embed response with another model is warned about once, like any other mismatch", async () => {
+  const f = await fleet();
+  try {
+    await f.pool.refresh();
+    f.a.on("POST /v1/embed", (b) => ({ body: { model: "swapped-model.gguf", embeddings: (b.texts as string[]).map(() => [1, 2, 3, 4, 5, 6, 7, 8]) } }));
+    assert.equal((await f.llm.embedDocuments(["x"])).worker, "b");
+    assert.deepEqual(f.mismatches, ["a embed swapped-model.gguf"]);
+  } finally {
+    await f.done();
+  }
+});
+
+test("a worker asked for a role it does not offer is passed over, with no warning and no failure counted", async () => {
+  const f = await fleet();
+  try {
+    f.a.on("GET /capabilities", () => ({ body: { operations: ["embed", "rerank", "tokenize", "detokenize"], models: { embed: EMBED_FILE, rerank: RERANK_FILE, generate: null }, rerankTransport: "llama-server-qmd-tokens" } }));
+    await f.llm.expandQuery("auth");
+    assert.equal(f.a.count("/v1/complete"), 0);
+    assert.equal(f.b.count("/v1/complete"), 1);
+    assert.deepEqual(f.mismatches, []);
+    const view = f.pool.workers()[0]!;
+    assert.equal(view.errorRate, 0);
+    assert.equal(view.generateModelCompatible, null, "not a wrong model: it has none for this");
+    assert.equal(view.circuit, "closed");
+  } finally {
+    await f.done();
+  }
+});
+
+test("a worker that comes back with the configured reranker reranks again after a heartbeat", async () => {
+  const f = await fleet({ bRerank: OTHER_RERANKER, b: { priority: 0 } });
+  try {
+    await f.pool.refresh();
+    f.b.on("GET /capabilities", new MockWorker().handlers.get("GET /capabilities")!);
+    await f.pool.refresh();
+    await rerank(f);
+    assert.equal(f.b.count("/v1/rerank"), 1);
+  } finally {
+    await f.done();
+  }
+});
+
 test("workers cannot disagree on dimensions once the length is pinned", async () => {
   const a = await new MockWorker(8).start();
   const b = await new MockWorker(4).start();
@@ -470,7 +574,7 @@ test("workers cannot disagree on dimensions once the length is pinned", async ()
       { name: "b", url: b.url, token: undefined, capabilities: ["embed"], priority: 2, maxConcurrent: 1 },
     ],
     embedDimensions: 0,
-    models: { embed: URI, rerank: "r", generate: "g" },
+    models: { embed: URI, rerank: RERANK_URI, generate: GENERATE_URI },
     fallback: null,
   });
   try {
@@ -546,7 +650,7 @@ test("waiting too long for a slot is a timeout, not a hang", async () => {
   let now = 0;
   const pool = new WorkerPool({
     workers: [{ name: "a", url: a.url, token: undefined, capabilities: ["rerank"], priority: 1, maxConcurrent: 1 }],
-    embedFiles: [EMBED_FILE.toLowerCase()],
+    modelFiles: { embed: [EMBED_FILE.toLowerCase()], rerank: [RERANK_FILE], generate: [GENERATE_FILE.toLowerCase()] },
     now: () => now,
     queueTimeoutMs: { interactive: 100, background: 100 },
   });
@@ -617,7 +721,7 @@ test("status reports a role only when some worker can serve it now", async () =>
 test("heartbeats stay out of the per-call log", async () => {
   const worker = await new MockWorker(8).start();
   const seen: string[] = [];
-  const llm = new RemoteLlm({ worker: { url: worker.url, token: undefined, embedDimensions: 8 }, models: { embed: URI, rerank: "r", generate: "g" }, fallback: null, onCall: (e) => seen.push(e.operation) });
+  const llm = new RemoteLlm({ worker: { url: worker.url, token: undefined, embedDimensions: 8 }, models: { embed: URI, rerank: RERANK_URI, generate: GENERATE_URI }, fallback: null, onCall: (e) => seen.push(e.operation) });
   try {
     await llm.refreshStatus();
     await llm.rerank("q", [{ file: "x", text: "x" }]);

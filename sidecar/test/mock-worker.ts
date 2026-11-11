@@ -9,6 +9,11 @@ import { listenFetchable } from "../../worker/test/ports.ts";
 
 export const WORKER_TOKEN = "mock-worker-token-0123456789";
 export const EMBED_FILE = "embeddinggemma-300M-Q8_0.gguf";
+/** The SDK's default rerank and generate models, which a sidecar left to its defaults expects a worker to serve. */
+export const RERANK_FILE = "qwen3-reranker-0.6b-q8_0.gguf";
+export const GENERATE_FILE = "qmd-query-expansion-1.7B-q4_k_m.gguf";
+export const RERANK_URI = `hf:ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF/${RERANK_FILE}`;
+export const GENERATE_URI = `hf:tobil/qmd-query-expansion-1.7B-gguf/${GENERATE_FILE}`;
 
 export interface RecordedRequest {
   method: string;
@@ -37,9 +42,9 @@ export class MockWorker {
   url = "";
   #server: Server | undefined;
 
-  constructor(dimensions = 8, embedFile = EMBED_FILE) {
+  constructor(dimensions = 8, embedFile = EMBED_FILE, rerankFile = RERANK_FILE, generateFile = GENERATE_FILE) {
     this.handlers = new Map<string, MockHandler>([
-      ["GET /capabilities", () => ({ body: { operations: ["embed", "rerank", "complete", "tokenize", "detokenize"], models: { embed: embedFile, rerank: "r.gguf", generate: "g.gguf" }, rerankTransport: "llama-server-qmd-tokens" } })],
+      ["GET /capabilities", () => ({ body: { operations: ["embed", "rerank", "complete", "tokenize", "detokenize"], models: { embed: embedFile, rerank: rerankFile, generate: generateFile }, rerankTransport: "llama-server-qmd-tokens" } })],
       ["GET /health", () => ({ body: { status: "ok", queueDepth: 0, models: { embed: { loaded: true }, rerank: { loaded: true }, generate: { loaded: true } } } })],
       ["POST /v1/embed", (b) => ({ body: { model: embedFile, embeddings: (b.texts as string[]).map((t) => vectorFor(t, dimensions)) } })],
       ["POST /v1/rerank", (b) => ({ body: { results: (b.documents as string[]).map((_, index) => ({ index, score: 1 / (index + 2) })) } })],

@@ -17,7 +17,7 @@ public sealed class AdminControlEndpointTests(AuthApiFactory factory) : IClassFi
 
 	private const string Worker = """
 		{"name":"desktop","host":"10.0.0.2:8383","state":"up","circuit":"closed","circuits":{"embed":"closed","rerank":"closed","generate":"closed","documents":"closed"},
-		 "embedDisagrees":false,"capabilities":["embed","rerank","generate"],"priority":1,"maxConcurrent":8,"embedModelCompatible":true,"rerankTransport":"llama-server-qmd-tokens",
+		 "embedDisagrees":false,"capabilities":["embed","rerank","generate"],"priority":1,"maxConcurrent":8,"embedModelCompatible":true,"rerankModelCompatible":false,"generateModelCompatible":null,"rerankTransport":"llama-server-qmd-tokens",
 		 "lastHeartbeat":"2026-11-01T10:00:00.000Z","inFlight":2,"queueDepth":0,"calls":40,"errorRate":0.025,"drained":DRAINED,"token":"never-forwarded-0123456789"}
 		""";
 
@@ -216,6 +216,7 @@ public sealed class AdminControlEndpointTests(AuthApiFactory factory) : IClassFi
 		Assert.Equal(0.025, worker.ErrorRate);
 		Assert.Equal("closed", worker.Circuits.Documents);
 		Assert.Equal(["embed", "rerank", "generate"], worker.Capabilities);
+		Assert.Equal((true, false, (bool?)null), (worker.EmbedModelCompatible, worker.RerankModelCompatible, worker.GenerateModelCompatible));
 	}
 
 	[Fact]

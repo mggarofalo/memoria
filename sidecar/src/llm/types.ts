@@ -134,6 +134,10 @@ export interface WorkerView {
   maxConcurrent: number;
   /** Null until checked. False keeps the worker off embedding and tokens. */
   embedModelCompatible: boolean | null;
+  /** False keeps this worker off reranking: it reports another rerank model than the configured one. Null until checked. */
+  rerankModelCompatible: boolean | null;
+  /** False keeps this worker off query expansion, for the same reason. Null until checked. */
+  generateModelCompatible: boolean | null;
   rerankTransport: string | null;
   lastHeartbeat: string | null;
   inFlight: number;
