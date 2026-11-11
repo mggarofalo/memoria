@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
@@ -219,15 +219,17 @@ test("the backup asks a running sidecar for the queue's copy, and takes it", asy
 
     const taken = await snapshotDb(["--queue", file, target], { MEMORIA_SIDECAR_URL: url, MEMORIA_SIDECAR_SECRET: TEST_SECRET });
     assert.equal(taken.status, 0, taken.out);
-    assert.match(taken.out, /copied by the sidecar/);
+    assert.match(taken.out, /-> .*queue\.sqlite, copied by the sidecar/);
     assert.deepEqual(contents(target), { reasons: ["while running"], setAside: ["c/set-aside.md"], journal: "delete" });
     assert.equal(existsSync(queueSnapshotPathFor(file)), false, "the sidecar's copy goes once read");
+    assert.equal(existsSync(`${target}.partial`), false);
     assert.doesNotMatch(taken.out, new RegExp(TEST_SECRET));
 
     const before = sha256(target);
     const refused = await snapshotDb(["--queue", file, target], { MEMORIA_SIDECAR_URL: url, MEMORIA_SIDECAR_SECRET: "wrong-secret-0123456789" });
     assert.equal(refused.status, 1, refused.out);
-    assert.match(refused.out, /refused to copy it \(401 unauthorized\), so its last copy stays/);
+    assert.match(refused.out, /a process holds the file, and the sidecar did not copy it \(401 unauthorized\)/);
+    assert.match(refused.out, /queue\.sqlite: unchanged, so its last copy stays/);
     assert.doesNotMatch(refused.out, /wrong-secret/);
     assert.equal(sha256(target), before);
   } finally {
@@ -236,61 +238,91 @@ test("the backup asks a running sidecar for the queue's copy, and takes it", asy
   }
 });
 
-test("with no answer, a held queue file fails the backup, and one nobody holds is read directly", async () => {
+/** A stand-in sidecar that gives whatever answer a test sets, and counts what it is asked. */
+async function standIn(): Promise<{ url: string; asked: () => number; answer: (status: number, body: string) => void; close: () => Promise<unknown> }> {
+  let reply = { status: 200, body: "{}" };
+  let asked = 0;
+  const server = createServer((_req, res) => {
+    asked++;
+    res.writeHead(reply.status, { "content-type": "application/json" }).end(reply.body);
+  });
+  const url = await listening(server);
+  return { url, asked: () => asked, answer: (status, body) => (reply = { status, body }), close: () => new Promise((resolve) => server.close(resolve)) };
+}
+
+test("a held queue file with no sidecar answering fails the backup, and one nobody holds is read without asking", async () => {
   const file = await queueFile();
   const { store } = await heldStore(file);
   const target = path.join(await tempDir("memoria-staging-"), "queue.sqlite");
-  const env = { MEMORIA_SIDECAR_URL: await nobody(), MEMORIA_SIDECAR_SECRET: TEST_SECRET };
 
-  const held = await snapshotDb(["--queue", file, target], env);
+  const held = await snapshotDb(["--queue", file, target], { MEMORIA_SIDECAR_URL: await nobody(), MEMORIA_SIDECAR_SECRET: TEST_SECRET });
   assert.equal(held.status, 1, held.out);
-  assert.match(held.out, /the sidecar did not answer \(ECONNREFUSED\), and a process holds the file, so it was not copied and there is no copy of it/);
+  assert.match(held.out, /a process holds the file, and the sidecar did not copy it \(no answer: ECONNREFUSED\)/);
+  assert.match(held.out, /unchanged, so there is no copy of it/);
   assert.equal(existsSync(target), false);
 
+  // With the sidecar stopped its secret is never sent, so whatever its name resolves to then never sees it.
   store.close();
-  const stopped = await snapshotDb(["--queue", file, target], env);
-  assert.equal(stopped.status, 0, stopped.out);
-  assert.match(stopped.out, /read directly: the sidecar did not answer \(ECONNREFUSED\), and nothing holds the file/);
-  assert.deepEqual(contents(target), { reasons: ["first"], setAside: ["c/set-aside.md"], journal: "delete" });
+  const sidecar = await standIn();
+  try {
+    const env = { MEMORIA_SIDECAR_URL: sidecar.url, MEMORIA_SIDECAR_SECRET: TEST_SECRET };
+    const stopped = await snapshotDb(["--queue", file, target], env);
+    assert.equal(stopped.status, 0, stopped.out);
+    assert.match(stopped.out, /-> .*queue\.sqlite, read directly, as nothing holds the file/);
+    assert.deepEqual(contents(target), { reasons: ["first"], setAside: ["c/set-aside.md"], journal: "delete" });
 
-  const none = await snapshotDb(["--queue", path.join(path.dirname(file), "missing.sqlite"), target], env);
-  assert.equal(none.status, 0, none.out);
-  assert.match(none.out, /skipped .*missing\.sqlite: the sidecar did not answer \(ECONNREFUSED\), and there is no such database/);
+    const none = await snapshotDb(["--queue", path.join(path.dirname(file), "missing.sqlite"), target], env);
+    assert.equal(none.status, 0, none.out);
+    assert.match(none.out, /skipped .*missing\.sqlite: there is no such database/);
+    assert.equal(sidecar.asked(), 0);
+  } finally {
+    await sidecar.close();
+  }
 });
 
-test("the backup refuses a copy that is not the one the sidecar answered with", async () => {
+test("the backup refuses a copy that is not the one the sidecar answered with, and then changes nothing it staged", async () => {
   const file = await queueFile();
-  const target = path.join(await tempDir("memoria-staging-"), "queue.sqlite");
-  let reply = { status: 200, body: "{}" };
-  const server = createServer((_req, res) => res.writeHead(reply.status, { "content-type": "application/json" }).end(reply.body));
-  const url = await listening(server);
-  const run = () => snapshotDb(["--queue", file, target], { MEMORIA_SIDECAR_URL: url, MEMORIA_SIDECAR_SECRET: TEST_SECRET });
+  const { store } = await heldStore(file);
+  const dir = await tempDir("memoria-staging-");
+  const target = path.join(dir, "queue.sqlite");
+  const plain = path.join(dir, "control.db");
+  const db = new DatabaseSync(plain);
+  db.exec("CREATE TABLE t (x)");
+  db.close();
+  const staged = path.join(dir, "control.copy");
+  writeFileSync(staged, "the last copy");
+  const sidecar = await standIn();
+  const fails = async (pattern: RegExp): Promise<void> => {
+    const out = await snapshotDb([plain, staged, "--queue", file, target], { MEMORIA_SIDECAR_URL: sidecar.url, MEMORIA_SIDECAR_SECRET: TEST_SECRET });
+    assert.equal(out.status, 1, out.out);
+    assert.match(out.out, pattern);
+    assert.equal(readFileSync(staged, "utf8"), "the last copy", "a failed run stages nothing");
+    assert.equal(existsSync(`${staged}.partial`) || existsSync(`${target}.partial`), false);
+  };
   try {
-    const empty = await run();
-    assert.equal(empty.status, 1);
-    assert.match(empty.out, /refused to copy it \(200 with no bytes and sha256\)/);
-
-    reply = { status: 409, body: "not json" };
-    assert.match((await run()).out, /refused to copy it \(409 with no error code\)/);
-
-    reply = { status: 200, body: JSON.stringify({ bytes: 3, sha256: "00" }) };
-    const missing = await run();
-    assert.equal(missing.status, 1);
-    assert.match(missing.out, /there is no copy where the sidecar writes it/);
+    await fails(/did not copy it \(200 with no bytes and sha256\)/);
+    sidecar.answer(409, "not json");
+    await fails(/did not copy it \(409 with no error code\)/);
+    sidecar.answer(200, JSON.stringify({ bytes: 3, sha256: "00" }));
+    await fails(/there is no copy where the sidecar writes it/);
 
     writeFileSync(queueSnapshotPathFor(file), "abc");
-    const raced = await run();
-    assert.equal(raced.status, 1);
-    assert.match(raced.out, /the copy changed after the sidecar wrote it/);
+    await fails(/the copy changed after the sidecar wrote it/);
     assert.equal(existsSync(queueSnapshotPathFor(file)), true, "a copy that is not the one answered for is left alone");
 
-    reply = { status: 200, body: JSON.stringify({ bytes: 3, sha256: createHash("sha256").update("abc").digest("hex") }) };
-    const torn = await run();
-    assert.equal(torn.status, 1, torn.out);
-    assert.match(torn.out, /not a database|integrity|malformed/i);
-    assert.equal(existsSync(`${target}.partial`), false);
+    sidecar.answer(200, JSON.stringify({ bytes: 3, sha256: createHash("sha256").update("abc").digest("hex") }));
+    await fails(/integrity check \(.*(not a database|malformed)/i);
+
+    if (process.platform !== "win32") {
+      const elsewhere = path.join(await tempDir("memoria-elsewhere-"), "secret");
+      writeFileSync(elsewhere, "abc");
+      rmSync(queueSnapshotPathFor(file), { force: true });
+      symlinkSync(elsewhere, queueSnapshotPathFor(file));
+      await fails(/what is where the sidecar writes its copy is not a file/);
+    }
   } finally {
-    await new Promise((resolve) => server.close(resolve));
+    await sidecar.close();
+    store.close();
   }
 });
 
@@ -302,6 +334,7 @@ test("the backup's other databases copy as before, and a held one fails it", asy
   db.close();
   const copied = await snapshotDb([plain, path.join(dir, "control.copy"), path.join(dir, "absent.db"), path.join(dir, "absent.copy")]);
   assert.equal(copied.status, 0, copied.out);
+  assert.match(copied.out, /control\.db -> .*control\.copy\n/);
   assert.match(copied.out, /skipped .*absent\.db: there is no such database/);
   const copy = new DatabaseSync(path.join(dir, "control.copy"), { readOnly: true });
   assert.deepEqual(copy.prepare("SELECT x FROM t").all().map((r) => ({ ...r })), [{ x: "kept" }]);
@@ -312,7 +345,8 @@ test("the backup's other databases copy as before, and a held one fails it", asy
   try {
     const held = await snapshotDb([file, path.join(dir, "queue.copy")]);
     assert.equal(held.status, 1, held.out);
-    assert.match(held.out, /another process holds it, so it was not copied and there is no copy of it/);
+    assert.match(held.out, /another process holds it, so it was not copied/);
+    assert.match(held.out, /queue\.copy: unchanged, so there is no copy of it/);
   } finally {
     store.close();
   }

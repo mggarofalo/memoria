@@ -216,7 +216,7 @@ async function backUpDaily(key: string): Promise<string> {
   console.log(`     daily backup: ${daily.seconds} s, added ${daily.added}`);
   check("backup: the daily backup is taken with the sidecar running", daily.added !== "?");
   check("backup: the running sidecar copied its job queue's file for it", daily.snapshot.includes(`${QUEUE} -> /staging/queue.sqlite, copied by the sidecar`), daily.snapshot.slice(-400));
-  check("backup: the job copied was waiting", (sidecar(`/reindex/jobs/${waiting}`).job as { state: string }).state === "queued");
+  check("backup: a job is waiting while the copy is made", (sidecar(`/reindex/jobs/${waiting}`).job as { state: string }).state === "queued");
   sidecar("/queue:resume", {});
   return waiting;
 }
@@ -226,7 +226,7 @@ async function snapshotUnreachable(before: Before): Promise<void> {
   run("docker", ["network", "disconnect", NETWORK, SIDECAR]);
   const taken = compose(["run", "--rm", "snapshot"], true);
   run("docker", ["network", "connect", "--alias", "memoria-qmd", NETWORK, SIDECAR]);
-  check("backup: a snapshot that cannot reach the running sidecar fails, and says why", taken.status !== 0 && taken.out.includes(`${QUEUE}: the sidecar did not answer`) && taken.out.includes("a process holds the file, so it was not copied and its last copy stays"), taken.out.slice(-400));
+  check("backup: a snapshot that cannot reach the running sidecar fails, and says why", taken.status !== 0 && taken.out.includes(`${QUEUE}: a process holds the file, and the sidecar did not copy it (no answer`) && taken.out.includes("/staging/queue.sqlite: unchanged, so its last copy stays"), taken.out.slice(-400));
   const doc = await until(() => api(`/v1/docs/${encodeURIComponent(`${COLLECTION}/day/d7.md`)}`, { key: before.key }), (r) => r.status === 200, 30);
   check("backup: and the sidecar serves again once it is back on its network", doc.text === before.doc, doc.status);
 }
@@ -237,7 +237,7 @@ async function snapshotWhileStopped(key: string): Promise<void> {
   const taken = compose(["run", "--rm", "snapshot"], true);
   compose(["start", "memoria-qmd", "memoria-api"]);
   await until(() => api("/health").catch(() => ({ status: 0, body: {}, text: "" })), (r) => r.status === 200, 90);
-  check("backup: a snapshot with the services stopped works too, and copies the job queue's file", taken.status === 0 && taken.out.includes("/data/control.db -> /staging/control.db") && taken.out.includes(`${QUEUE} -> /staging/queue.sqlite`), taken.out.slice(-400));
+  check("backup: a snapshot with the services stopped works too, and copies the job queue's file", taken.status === 0 && taken.out.includes("/data/control.db -> /staging/control.db") && taken.out.includes(`${QUEUE} -> /staging/queue.sqlite, read directly`), taken.out.slice(-400));
   const stopped = compose(["run", "--rm", "backup"]).out;
   check("backup: and a backup of that snapshot is taken", /Added to the repository/.test(stopped), stopped.slice(-400));
   const written = await api(`/v1/ingest/rendered?collection=${COLLECTION}&path=day/after-stop.md&updated=2026-01-15T00:00:00Z`, { method: "POST", key, headers: { "Content-Type": "text/markdown" }, body: body("afterstop") });
