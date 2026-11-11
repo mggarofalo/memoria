@@ -11,6 +11,9 @@ test("every file the sidecar's config mutates lands in exactly one shard, and no
   assert.ok(files.includes("sidecar/src/routes.ts"));
   assert.ok(files.includes("sidecar/src/llm/pool.ts"), "subdirectories too");
   assert.ok(!files.includes("sidecar/src/secret-file.ts"), "the config's exclusion holds");
+  // The integration shard mutates these, under stryker.integration.json.
+  assert.ok(!files.includes("sidecar/src/store.ts"), "the store is left to the integration shard");
+  assert.ok(!files.includes("sidecar/src/llm/wire.ts"), "the wire code is left to the integration shard");
   const shards = assignShards(weigh(ROOT, files), 8);
   const all = shards.flat();
   assert.equal(all.length, new Set(all).size, "no file twice");

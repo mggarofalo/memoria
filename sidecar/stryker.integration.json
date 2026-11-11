@@ -1,0 +1,16 @@
+{
+  "$schema": "../node_modules/@stryker-mutator/core/schema/stryker-schema.json",
+  "testRunner": "tap",
+  "tap": {
+    "testFiles": ["sidecar/test/**/*.test.ts"],
+    "nodeArgs": ["--max-old-space-size=1024", "--test-reporter=tap", "-r", "{{hookFile}}", "{{testFile}}"]
+  },
+  "coverageAnalysis": "perTest",
+  "concurrency": 4,
+  "mutate": ["sidecar/src/store.ts", "sidecar/src/llm/wire.ts"],
+  "ignorePatterns": ["/cli", "/src", "/tests/Memoria.Api.Tests", "/docs", "/deploy", "/.claude", "/sidecar/test/install-scripts.test.ts", "/sidecar/test/docs-match-code.test.ts", "**/bin", "**/obj"],
+  "reporters": ["clear-text", "html", "json"],
+  "htmlReporter": { "fileName": "sidecar/reports/mutation-integration/mutation.html" },
+  "jsonReporter": { "fileName": "sidecar/reports/mutation-integration/mutation.json" },
+  "thresholds": { "high": 80, "low": 60, "break": null }
+}

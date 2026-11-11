@@ -262,8 +262,10 @@ jobs:
         run: npm run openapi:check
       - name: Build
         run: npm run build
-      - name: Integration test (real SDK, fixture index, no models)
-        run: npm run test:integration
+      # Its own line gate (.c8rc.integration.json): the unit tests above stand in a fake for the SDK, so the store and
+      # the SDK-facing code are measured here.
+      - name: Integration test and coverage (real SDK, fixture index, no models)
+        run: npm run test:integration:coverage
         env:
           MEMORIA_QMD_INTEGRATION: "1"
 

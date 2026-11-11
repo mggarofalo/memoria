@@ -16,6 +16,7 @@
     "test": "node --test --test-reporter=spec \"test/**/*.test.ts\" \"../worker/test/**/*.test.ts\" \"../scripts/release/test/**/*.test.ts\"",
     "test:coverage": "node ../node_modules/c8/bin/c8.js node --test --test-reporter=spec \"test/**/*.test.ts\"",
     "test:integration": "node --test --test-reporter=spec \"test/integration*.test.ts\"",
+    "test:integration:coverage": "node ../node_modules/c8/bin/c8.js --config .c8rc.integration.json node --test --test-reporter=spec \"test/integration*.test.ts\"",
     "test:live": "node --test --test-reporter=spec test/live-worker.test.ts",
     "bench:parity": "node --max-old-space-size=6144 bench/parity.ts",
     "openapi": "node scripts/write-openapi.ts",
