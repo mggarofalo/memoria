@@ -55,7 +55,8 @@ func TestATranscriptIsFoundByItsNameAndConfirmedByItsMeta(t *testing.T) {
 	if len(found.ByID[testID]) != 2 {
 		t.Fatalf("by id = %v", found.ByID)
 	}
-	if matching := found.Matching(testID); len(matching) != 1 || matching[0] != right {
+	// Transcripts are held by their real paths, which a temporary folder's need not be (macOS's /var, Windows's short names).
+	if matching := found.Matching(testID); len(matching) != 1 || matching[0] != canonical(right) {
 		t.Fatalf("matching = %v", matching)
 	}
 	if _, err := FindTranscripts([]string{filepath.Join(dir, "absent")}); err == nil {

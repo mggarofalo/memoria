@@ -853,7 +853,12 @@ func TestRollbackWhenTheNewBinaryFails(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "restored") {
 		t.Fatalf("err = %v", err)
 	}
-	if ran != exe+"@1.2.0" {
+	// The binary is verified where it really is, which a temporary folder's path need not say (macOS's /var, Windows's short names).
+	real, err := filepath.EvalSymlinks(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ran != real+"@1.2.0" {
 		t.Fatalf("verified %q", ran)
 	}
 	assertBinary(t, exe, oldBinary)

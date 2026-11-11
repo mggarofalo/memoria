@@ -319,8 +319,9 @@ func (t *Transcripts) add(dir string) error {
 	}, func(string) { t.Unreadable++ })
 }
 
-// note keeps one entry per real file, so a folder given twice, or a folder and its parent, finds a transcript once.
-func (t *Transcripts) note(key, file string) {
+// canonical is a file's real, absolute path: links resolved, and on Windows the long form of a short name. Two names for one
+// file, such as macOS's /var and /private/var, come out the same.
+func canonical(file string) string {
 	real, err := filepath.EvalSymlinks(file)
 	if err != nil {
 		real = file
@@ -328,6 +329,12 @@ func (t *Transcripts) note(key, file string) {
 	if absolute, err := filepath.Abs(real); err == nil {
 		real = absolute
 	}
+	return real
+}
+
+// note keeps one entry per real file, so a folder given twice, or a folder and its parent, finds a transcript once.
+func (t *Transcripts) note(key, file string) {
+	real := canonical(file)
 	for _, known := range t.ByID[key] {
 		if strings.EqualFold(known, real) {
 			return

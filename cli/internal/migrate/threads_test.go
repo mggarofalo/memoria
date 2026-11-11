@@ -97,7 +97,7 @@ func TestACompressedTranscriptIsFoundAndReadAsItsLines(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if matching := found.Matching(testID); len(matching) != 1 || !strings.EqualFold(matching[0], file) {
+	if matching := found.Matching(testID); len(matching) != 1 || !strings.EqualFold(matching[0], canonical(file)) {
 		t.Fatalf("matching = %v", matching)
 	}
 	messages, err := TranscriptMessages(file)
