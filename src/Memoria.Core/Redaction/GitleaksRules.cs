@@ -57,14 +57,74 @@ internal static class GitleaksRules
 		bool padded = secret.Contains("={0,", StringComparison.Ordinal);
 		string pattern = IsAssignmentTemplate(spec) || separators.Contains('_', StringComparison.Ordinal) ? spec.Pattern : EndingAtUnderscore(spec.Pattern);
 		bool underscoreEnds = !string.Equals(pattern, spec.Pattern, StringComparison.Ordinal);
+		bool assignment = IsAssignmentTemplate(spec);
 		return new RedactionRule(
 			Prefix + spec.Id,
 			null,
-			candidate => Accept(candidate, spec.Entropy, global, own) && !(underscoreEnds && IsNameBeforeUnderscore(candidate)),
+			candidate => Accept(candidate, spec.Entropy, global, own) && !(underscoreEnds && IsNameBeforeUnderscore(candidate)) && !(assignment && NamesAnIdentifier(candidate, spec.Keywords)),
 			extend: candidate => ThroughGluedText(candidate, separators, new Ending(fixedToken, padded, underscoreEnds)),
 			keywords: spec.Keywords,
 			backstop: true,
 			buildPattern: () => RedactionRules.Pattern(pattern));
+	}
+
+	/// <summary>Words that name a thing with an id of its own and hold no credential. Alone after the keyword, or before an id word, they say the value is that id.</summary>
+	private static readonly HashSet<string> ThingWords = new(StringComparer.OrdinalIgnoreCase)
+	{
+		"task", "tasks", "item", "items", "trace", "span", "project", "projects", "org", "organization", "team", "workspace", "issue", "ticket",
+		"order", "job", "build", "run", "commit", "page", "document", "folder", "channel", "thread", "customer", "invoice", "deployment", "release",
+		"device", "node", "site",
+	};
+
+	/// <summary>Words that name a thing a credential can belong to, such as a service account. Only an id word after them says the value is an id.</summary>
+	private static readonly HashSet<string> HolderWords = new(StringComparer.OrdinalIgnoreCase)
+	{
+		"app", "apps", "application", "account", "accounts", "user", "users",
+	};
+
+	private static readonly HashSet<string> IdWords = new(StringComparer.OrdinalIgnoreCase) { "id", "ids", "uuid", "guid" };
+
+	/// <summary>
+	/// An assignment rule matches a name, its keyword, up to 20 more name characters, then an operator and the value, and accepts the
+	/// value by its shape alone: 24 of upstream's accept only digits, hex or a UUID. When all that follows the keyword names a thing, as
+	/// <c>asana task: </c> does before digits, or a thing's id, as <c>heroku app id: </c> does before a UUID and <c>plaid item_id: </c>
+	/// before hex, and no word of the name is a credential's, the value is that id. Nothing else may follow: <c>heroku app token</c>,
+	/// <c>HEROKU_APP_TOKEN2</c>, <c>heroku app bearer</c>, <c>asana_app_pat</c> and <c>asana_service_account</c> may name credentials the
+	/// word lists do not know, so their values still go. So do a bare <c>heroku id</c>, which names no thing, and <c>heroku user</c>, as
+	/// a user, an app or an account can hold a credential, and only <c>user id</c> says the value is its id.
+	/// </summary>
+	internal static bool NamesAnIdentifier(SecretCandidate candidate, IReadOnlyList<string> keywords)
+	{
+		string before = candidate.Input[candidate.Match.Index..candidate.Secret.Index];
+		int operatorAt = before.IndexOfAny(['=', ':', '>', '|', '?', ',', '\'', '"', '`']);
+		string name = (operatorAt < 0 ? before : before[..operatorAt]).Trim();
+		int keywordEnd = keywords
+			.Select(keyword => (At: name.LastIndexOf(keyword, StringComparison.OrdinalIgnoreCase), keyword.Length))
+			.Where(static found => found.At >= 0)
+			.Select(static found => found.At + found.Length)
+			.DefaultIfEmpty(-1)
+			.Max();
+		return keywordEnd >= 0 && EndsByNamingAThing(SecretKeyNames.SplitWords(name[keywordEnd..])) && SecretKeyNames.Classify(name) == KeyKind.NotSecret;
+	}
+
+	/// <summary>
+	/// <c>task</c>, <c>task id</c> or <c>app id</c>, and nothing more: a thing's word alone, or a thing's or a holder's word and then an id
+	/// word. A number after it, as in <c>task 1203</c>, is the thing's own and names nothing, so it is passed over. <c>TOKEN2</c> is one
+	/// word, not a number.
+	/// </summary>
+	private static bool EndsByNamingAThing(List<string> words)
+	{
+		while (words.Count > 0 && words[^1].All(char.IsAsciiDigit))
+		{
+			words.RemoveAt(words.Count - 1);
+		}
+
+		return words.Count switch
+		{
+			1 => ThingWords.Contains(words[0]),
+			2 => IdWords.Contains(words[1]) && (ThingWords.Contains(words[0]) || HolderWords.Contains(words[0])),
+			_ => false,
+		};
 	}
 
 	/// <summary>The ending the translator draws for upstream's <c>\b</c> or common ending: any character but a letter, a digit or <c>_</c>.</summary>
