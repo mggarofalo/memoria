@@ -139,26 +139,55 @@ public sealed class ReadinessCacheTests : IDisposable
 	}
 
 	/// <summary>
-	/// A caller resumes on another thread the moment the probe's answer is out. If the finish time were marked after that, it could
-	/// ask again first and be handed the finished probe as if still in flight. Many rounds make that window show if it is there.
+	/// A caller resumes on another thread the moment the probe's answer is out. Were the finish time marked after that, it could ask
+	/// again first, find none, and be handed the finished probe as if still in flight, for good. So the answer must not be out while
+	/// the finish time is read: the clock holds that read until the test has looked.
 	/// </summary>
 	[Fact]
-	public async Task A_caller_who_asks_again_the_moment_an_answer_lands_gets_a_new_probe()
+	public async Task The_finish_time_is_marked_before_anyone_sees_the_answer()
 	{
+		using HeldClock time = new();
 		MemoriaOptions settings = new() { Sidecar = { ReadinessCacheTime = TimeSpan.Zero, ReadinessTimeout = TimeSpan.FromSeconds(5) } };
-		ReadinessCache cache = new(new SteppedClock(), Options.Create(settings));
-		int probes = 0;
-		Task<SidecarReadinessResult> Probe(CancellationToken _)
-		{
-			Interlocked.Increment(ref probes);
-			return Task.FromResult<SidecarReadinessResult>(null!);
-		}
+		ReadinessCache cache = new(time, Options.Create(settings));
 
-		for (int round = 1; round <= 2_000; round++)
-		{
-			await cache.GetAsync(Probe);
-			Assert.Equal(round, Volatile.Read(ref probes));
-		}
+		Task<SidecarReadinessResult> answer = cache.GetAsync(_ => Task.FromResult<SidecarReadinessResult>(null!));
+		Assert.True(time.Reading.Wait(TimeSpan.FromSeconds(10)), "the probe never read the clock");
+		bool outEarly = answer.IsCompleted;
+		time.Release.Set();
+		await answer;
+
+		Assert.False(outEarly);
+	}
+
+	/// <summary>An admin's own probe carries the request's trace, which is the point of it.</summary>
+	[Fact]
+	public async Task An_admins_probe_carries_the_requests_trace_to_the_sidecar()
+	{
+		using AuthApiFactory auth = new();
+		auth.Sidecar.On("GET", "/ready", HttpStatusCode.OK, SidecarFixtures.Readiness("ready", resident: true));
+		(_, string key) = await auth.IssueAsync([Memoria.Api.Http.MemoriaScopes.Admin]);
+
+		HttpResponseMessage response = await AuthApiFactory.Authorized(auth.CreateClient(), key).GetAsync("/ready");
+
+		string traceId = Assert.Single(response.Headers.GetValues(Memoria.Api.Http.RequestLoggingMiddleware.TraceIdHeader));
+		FakeSidecar.RecordedRequest sent = auth.Sidecar.Requests.Last(r => r.Uri.AbsolutePath == "/ready");
+		Assert.True(sent.Headers.TryGetValue("traceparent", out string? traceparent));
+		Assert.Contains(traceId, traceparent, StringComparison.Ordinal);
+	}
+
+	/// <summary>An admin's own probe has the same timeout, and a slow sidecar reads as unavailable, with the reason.</summary>
+	[Fact]
+	public async Task An_admins_probe_times_out_like_the_shared_one()
+	{
+		using AuthApiFactory auth = new();
+		using WebApplicationFactory<Program> quick = auth.WithWebHostBuilder(static builder => builder.UseSetting("Memoria:Sidecar:ReadinessTimeout", "00:00:00.200"));
+		auth.Sidecar.Hanging();
+		(_, string key) = await auth.IssueAsync([Memoria.Api.Http.MemoriaScopes.Admin]);
+
+		HttpResponseMessage response = await AuthApiFactory.Authorized(quick.CreateClient(), key).GetAsync("/ready");
+
+		Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+		Assert.Contains("did not answer the readiness probe", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
 	}
 
 	[Fact]
@@ -254,6 +283,33 @@ public sealed class ReadinessCacheTests : IDisposable
 		await client.GetStringAsync("/ready");
 
 		Assert.Equal(1, ReadyProbes);
+	}
+
+	/// <summary>A clock that holds its first timestamp read until released, and says when it is holding it.</summary>
+	private sealed class HeldClock : TimeProvider, IDisposable
+	{
+		private int _reads;
+
+		public ManualResetEventSlim Reading { get; } = new();
+
+		public ManualResetEventSlim Release { get; } = new();
+
+		public override long GetTimestamp()
+		{
+			if (Interlocked.Increment(ref _reads) == 1)
+			{
+				Reading.Set();
+				Release.Wait(TimeSpan.FromSeconds(10));
+			}
+
+			return base.GetTimestamp();
+		}
+
+		public void Dispose()
+		{
+			Reading.Dispose();
+			Release.Dispose();
+		}
 	}
 
 	/// <summary>A clock whose monotonic timestamp and wall time move apart, as when NTP steps the wall clock.</summary>
