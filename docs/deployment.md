@@ -461,7 +461,7 @@ Run the sidecar with `--max-old-space-size=4096`. The image sets it. This is a c
 
 `sidecar/scripts/patch-qmd.ts` runs on install and fixes the SDK's scans. Without it, one search over six 21 MB documents froze for 35 s and needed over 1 GB of heap. With it, the same search took 2 to 3 s and fitted in 512 MiB. The SDK's functions are checked at start, and a sidecar on an unpatched SDK refuses to start. `/ready` shows `sdk.patched`.
 
-The same script carries the fix for QMD's reranker blend (upstream tobi/qmd#1032). A reranked hit's score is now the reranker's own score, and equal scores keep their rank-fusion order. That moves `minScore` too: the top-ranked hits no longer get a score floor from their rank. Stored indexes and cached reranker scores stay valid, so nothing needs re-embedding. Run `npm ci` in `sidecar/` when updating to a build with this fix, or the sidecar refuses to start.
+The same script carries the fix for QMD's reranker blend (upstream tobi/qmd#1032). A reranked hit's score is now the reranker's own score, and equal scores keep their rank-fusion order. That moves `minScore` too: the top-ranked hits no longer get a score floor from their rank. Stored indexes and cached reranker scores stay valid, so nothing needs re-embedding. The image applies it when it is built. A source checkout must run `npm ci` in `sidecar/` after updating, or the sidecar refuses to start.
 
 It also carries the config sync fix described under [lost collection records](#lost-collection-records), and the start-up check covers it the same way.
 
@@ -702,11 +702,11 @@ do not create the proxy host entry, and do not forward a router port.
 
 ## Deployment checklist
 
-Run these from the commit you are about to deploy, before starting or
-restarting the sidecar or a worker:
+Run these from the release you are about to deploy, before pulling its images or
+restarting a worker:
 
 ```bash
-(cd sidecar && npm ci && npm audit --omit=dev --audit-level=high)
+(cd sidecar && npm audit --omit=dev --audit-level=high)
 (cd worker && npm audit --omit=dev --audit-level=high)
 ```
 
@@ -717,9 +717,10 @@ exclusion. Findings appear without any change to this repository, because new
 advisories are published against versions already in the lockfile, so a result
 from an earlier deployment does not carry over.
 
-The audit reads the lockfile, so it covers what `npm ci` installs and nothing
-else. It says nothing about a `qmd` CLI installed globally on the host, which
-is one more reason never to serve QMD's HTTP transport from one.
+The audit reads the lockfile, which is what the sidecar's image and a worker's
+`npm ci` install, and nothing else. It says nothing about a `qmd` CLI installed
+globally on the host, which is one more reason to use the one inside the image and
+never to serve QMD's HTTP transport from a host install.
 `sidecar/README.md` lists the current overrides and what to do with them on a
 QMD bump.
 
@@ -727,7 +728,7 @@ Then check the network boundary, below.
 
 ## The loopback invariant
 
-QMD itself is never reachable from anywhere. The sidecar is the only process that opens the index. It requires the shared secret on every route except `/health`, and compares it in constant time. `Memoria.Api` is the only intended caller. If any path exists from a client to the sidecar that does not pass through `Memoria.Api`, authentication has been bypassed entirely. When auditing the deployment, check that:
+QMD itself is never reachable from anywhere. The sidecar is the only process that opens the index. It requires the shared secret on every route except `/health` and `/openapi.json`, which give away only that it is up and the contract it serves, and compares it in constant time. `Memoria.Api` is the only intended caller. If any path exists from a client to the sidecar that does not pass through `Memoria.Api`, authentication has been bypassed entirely. When auditing the deployment, check that:
 
 - the sidecar container publishes no port: `docker port memoria-qmd` prints nothing;
 - the API and the sidecar are the only containers on their network: `docker network inspect memoria_memoria`;
