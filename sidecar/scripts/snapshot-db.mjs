@@ -168,11 +168,14 @@ if (pairs.some((p) => p.queue) && (!url || !secret)) {
 }
 
 const made = [];
+/** Targets whose source is gone. Their old copies go too, so what is staged is always from one run. */
+const gone = [];
 let failed = false;
 for (const { source, target, queue } of pairs) {
   const partial = `${target}.partial`;
   const { copied, how } = queue ? await copyQueue(source, partial, url, secret) : { copied: await copyLive(source, partial) };
   if (copied === "copied") made.push({ source, target, partial, how });
+  if (copied === "absent") gone.push(target);
   if (copied === "absent") console.log(`skipped ${source}: there is no such database`);
   if (copied === "held") console.error(`${source}: another process holds it, so it was not copied`);
   if (copied === "failed" || copied === "held") failed = true;
@@ -185,5 +188,10 @@ if (failed) {
 for (const { source, target, partial, how } of made) {
   renameSync(partial, target);
   console.log(`${source} -> ${target}${how ? `, ${how}` : ""}`);
+}
+for (const target of gone) {
+  if (!existsSync(target)) continue;
+  rmSync(target, { force: true });
+  console.log(`${target}: removed, as its database is gone`);
 }
 process.exit(0);

@@ -332,10 +332,13 @@ test("the backup's other databases copy as before, and a held one fails it", asy
   const db = new DatabaseSync(plain);
   db.exec("PRAGMA journal_mode = WAL; CREATE TABLE t (x); INSERT INTO t VALUES ('kept')");
   db.close();
+  writeFileSync(path.join(dir, "absent.copy"), "from a run when it existed");
   const copied = await snapshotDb([plain, path.join(dir, "control.copy"), path.join(dir, "absent.db"), path.join(dir, "absent.copy")]);
   assert.equal(copied.status, 0, copied.out);
   assert.match(copied.out, /control\.db -> .*control\.copy\n/);
   assert.match(copied.out, /skipped .*absent\.db: there is no such database/);
+  assert.match(copied.out, /absent\.copy: removed, as its database is gone/);
+  assert.equal(existsSync(path.join(dir, "absent.copy")), false, "what is staged is all from one run");
   const copy = new DatabaseSync(path.join(dir, "control.copy"), { readOnly: true });
   assert.deepEqual(copy.prepare("SELECT x FROM t").all().map((r) => ({ ...r })), [{ x: "kept" }]);
   copy.close();
