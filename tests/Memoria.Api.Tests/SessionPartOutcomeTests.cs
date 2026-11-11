@@ -157,7 +157,7 @@ public sealed class SessionPartOutcomeTests(AuthApiFactory factory) : IClassFixt
 		string id = NewSession();
 		await PostSessionAsync(client, Transcript(2), sessionId: id);
 		await client.DeleteAsync($"/v1/documents?collection=c&path={PartPath(id, 1)}");
-		HttpClient admin = await factory.ClientWithScopesAsync([MemoriaScopes.Ingest, MemoriaScopes.Admin], ["c"]);
+		HttpClient admin = await factory.ClientWithScopesAsync([MemoriaScopes.Ingest, MemoriaScopes.Admin], allCollections: true);
 
 		HttpResponseMessage restored = await PostSessionAsync(admin, Transcript(2), sessionId: id, updated: Stamp.AddHours(1), restoreDeleted: true);
 		JsonElement status = await StatusAsync(client, id);

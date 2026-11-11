@@ -129,7 +129,7 @@ public sealed class AuthResponseTests(AuthApiFactory factory) : IClassFixture<Au
 		HttpResponseMessage response = await GetAsync(factory.CreateClient(), "/v1/admin/workers", token);
 
 		Assert.Equal(
-			new Problem(403, "Key is bound to collections", "Operations act on every collection, so they need an admin key that is not limited to particular collections.", "collection_scoped_key"),
+			new Problem(403, "Key is bound to collections", "Operations and key management act on every collection, so they need an admin key that lists no collections. A key holding admin beside a collection list is not given the admin scope: issue an admin key without collections, then revoke this one.", "collection_scoped_key"),
 			await ProblemOf(response));
 		Assert.Empty(factory.Sidecar.Requests);
 	}

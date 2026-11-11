@@ -21,6 +21,12 @@ public sealed class HostStartupTests(MemoriaApiFactory factory) : IClassFixture<
 		Directory.Delete(_contentRoot, recursive: true);
 	}
 
+	/// <summary>No listen address, as in production. The fixture names loopback because disabled mode refuses anything else unless the operator opts in.</summary>
+	private static IWebHostBuilder Unbound(IWebHostBuilder builder)
+	{
+		return builder.UseSetting(WebHostDefaults.ServerUrlsKey, "").UseSetting("Memoria:Auth:AllowDisabledOnNetwork", "true");
+	}
+
 	private static string? ListenUrls(WebApplicationFactory<Program> host)
 	{
 		return host.Services.GetRequiredService<IConfiguration>()[WebHostDefaults.ServerUrlsKey];
@@ -29,7 +35,7 @@ public sealed class HostStartupTests(MemoriaApiFactory factory) : IClassFixture<
 	[Fact]
 	public void With_no_address_configured_the_host_listens_on_the_lan_at_8080()
 	{
-		using WebApplicationFactory<Program> host = factory.WithWebHostBuilder(static _ => { });
+		using WebApplicationFactory<Program> host = factory.WithWebHostBuilder(static builder => Unbound(builder));
 
 		Assert.Equal("http://0.0.0.0:8080", ListenUrls(host));
 	}
@@ -45,9 +51,9 @@ public sealed class HostStartupTests(MemoriaApiFactory factory) : IClassFixture<
 	[Fact]
 	public void Kestrel_endpoints_are_left_to_choose_the_address()
 	{
-		using WebApplicationFactory<Program> host = factory.WithWebHostBuilder(static builder => builder.UseSetting("Kestrel:Endpoints:Http:Url", "http://127.0.0.1:5998"));
+		using WebApplicationFactory<Program> host = factory.WithWebHostBuilder(static builder => Unbound(builder).UseSetting("Kestrel:Endpoints:Http:Url", "http://127.0.0.1:5998"));
 
-		Assert.Null(ListenUrls(host));
+		Assert.True(string.IsNullOrEmpty(ListenUrls(host)));
 	}
 
 	[Fact]

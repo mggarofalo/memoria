@@ -31,7 +31,7 @@ public sealed class OptionsBoundaryTests
 		{ "an upload speed floor of one byte a second", static o => o.Ingest.MinUploadBytesPerSecond = 1 },
 		{ "no reindex interval", static o => o.Ingest.MinReindexInterval = TimeSpan.Zero },
 		{ "keys that live exactly an hour", static o => o.Auth.DefaultKeyLifetime = TimeSpan.FromHours(1) },
-		{ "keys that live exactly ten years", static o => o.Auth.DefaultKeyLifetime = TimeSpan.FromDays(3650) },
+		{ "keys that live exactly two years", static o => o.Auth.DefaultKeyLifetime = TimeSpan.FromDays(730) },
 		{ "two tracked addresses", static o => o.Auth.FailedAuth.MaxTrackedAddresses = 2 },
 		{ "a sidecar on localhost with no secret", static o => { o.Sidecar.BaseUrl = "http://localhost:8282"; o.Sidecar.Secret = null; } },
 	};
