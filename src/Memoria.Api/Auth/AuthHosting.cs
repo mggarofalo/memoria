@@ -22,7 +22,6 @@ public static partial class AuthHosting
 		ArgumentNullException.ThrowIfNull(auth);
 
 		services.AddHttpContextAccessor();
-		services.TryAddTimeProvider();
 		services.AddSingleton(new ControlDatabase(auth.DatabasePath));
 		services.AddSingleton<IApiKeyStore, SqliteApiKeyStore>();
 		services.AddSingleton<LastUsedThrottle>();
@@ -33,6 +32,7 @@ public static partial class AuthHosting
 		services.AddSingleton<IAuthorizationHandler, MemoriaScopeHandler>();
 		services.AddSingleton<IAuthorizationHandler, MemoriaUnboundKeyHandler>();
 
+		// AddAuthentication also registers TimeProvider.System, unless a clock is registered already, as a test's is.
 		AuthenticationBuilder authentication = services.AddAuthentication(ApiKeyAuthenticationHandler.SchemeName);
 		if (auth.IsDisabled)
 		{
@@ -150,20 +150,13 @@ public static partial class AuthHosting
 		LogDisabledOnNetwork(logger, listed);
 	}
 
-	private static void TryAddTimeProvider(this IServiceCollection services)
-	{
-		if (!services.Any(static service => service.ServiceType == typeof(TimeProvider)))
-		{
-			services.AddSingleton(TimeProvider.System);
-		}
-	}
-
 	/// <summary>Partitions on the key id, so limits survive a reverse proxy that makes every caller the same IP.</summary>
 	private static RateLimitPartition<string> Partition(HttpContext context, RateLimitOptions limits)
 	{
 		string? keyId = context.User.FindFirst(MemoriaClaims.KeyId)?.Value;
 		if (!limits.Enabled || keyId is null)
 		{
+			// Stryker disable once String : a partition with no limiter is never looked up by its key.
 			return RateLimitPartition.GetNoLimiter(string.Empty);
 		}
 
@@ -172,6 +165,7 @@ public static partial class AuthHosting
 			PermitLimit = limits.PermitLimit,
 			Window = limits.Window,
 			QueueLimit = 0,
+			// Stryker disable once Boolean : the partitioned limiter refills its partitions on its own timer either way.
 			AutoReplenishment = true,
 		});
 	}

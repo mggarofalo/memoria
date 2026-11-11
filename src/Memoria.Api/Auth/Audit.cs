@@ -271,6 +271,7 @@ public sealed class AuditMiddleware(RequestDelegate next, IAuditLog auditLog, IO
 		}
 		catch (Exception ex)
 		{
+			// Stryker disable Assignment : only MCP tools set an outcome, and the MCP server turns whatever a tool throws into a tool result, so no exception reaches here after one.
 			entry.Status ??= ex switch
 			{
 				SidecarException sidecar => MemoriaExceptionHandler.Map(sidecar).Status,
@@ -284,6 +285,8 @@ public sealed class AuditMiddleware(RequestDelegate next, IAuditLog auditLog, IO
 			{
 				entry.AttemptedCollections ??= forbidden.Requested;
 			}
+
+			// Stryker restore Assignment
 
 			throw;
 		}
@@ -306,8 +309,10 @@ public sealed class AuditMiddleware(RequestDelegate next, IAuditLog auditLog, IO
 
 	private static string OperationName(Endpoint endpoint)
 	{
-		return endpoint.Metadata.GetMetadata<IEndpointNameMetadata>()?.EndpointName
-			?? endpoint.Metadata.GetMetadata<IRouteDiagnosticsMetadata>()?.Route
+		string? named = endpoint.Metadata.GetMetadata<IEndpointNameMetadata>()?.EndpointName
+			?? endpoint.Metadata.GetMetadata<IRouteDiagnosticsMetadata>()?.Route;
+		// Stryker disable once all : only scoped routes are audited, and every route endpoint carries its pattern, so named is never null and these fallbacks never run.
+		return named
 			?? endpoint.DisplayName
 			?? "unknown";
 	}

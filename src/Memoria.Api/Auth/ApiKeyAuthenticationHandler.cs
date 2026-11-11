@@ -47,6 +47,7 @@ public sealed class LastUsedThrottle
 					return true;
 				}
 
+				// Stryker disable once Statement : without it, the loop still comes round: previous is 0 here, so the TryUpdate below fails and the loop retries.
 				continue;
 			}
 
@@ -178,6 +179,7 @@ public sealed partial class ApiKeyAuthenticationHandler(
 		}
 
 		Context.Features.Set(new FailedAuthThrottled(decision.RetryAfter));
+		// Stryker disable once String : the challenge answers from the feature above; this text reaches only the framework's own debug log.
 		return AuthenticateResult.Fail("throttled");
 	}
 
@@ -234,6 +236,7 @@ public sealed partial class ApiKeyAuthenticationHandler(
 		bool withheld = required == MemoriaScopes.Admin && Context.User.HasClaim(static c => c.Type == MemoriaClaims.AdminWithheld);
 		return endpoint?.Metadata.GetMetadata<MemoriaUnboundKeyAttribute>() is not null
 			&& (required is null || withheld || Context.User.HasClaim(MemoriaClaims.Scope, required))
+			// Stryker disable once Equality : a key that holds the route's scope is refused there only for a collection claim, so when this line runs, a claim of any other type means one of that type too.
 			&& Context.User.HasClaim(static c => c.Type == MemoriaClaims.Collection);
 	}
 
@@ -256,6 +259,7 @@ public sealed partial class ApiKeyAuthenticationHandler(
 
 		if (record.AllCollections)
 		{
+			// Stryker disable once String : only the claim's type is ever read (HttpCallerScope), never its value.
 			claims.Add(new Claim(MemoriaClaims.AllCollections, "true"));
 		}
 		else
@@ -329,6 +333,7 @@ public sealed class DisabledAuthenticationHandler(
 	UrlEncoder encoder)
 	: AuthenticationHandler<AuthenticationSchemeOptions>(options, loggerFactory, encoder)
 {
+	// Stryker disable String : only these claims' types are ever read (HttpCallerScope, HealthEndpoints), never their values.
 	private static readonly ClaimsPrincipal Everyone = new(new ClaimsIdentity(
 		[
 			new Claim(MemoriaClaims.AuthDisabled, "true"),
@@ -338,6 +343,7 @@ public sealed class DisabledAuthenticationHandler(
 			new Claim(MemoriaClaims.Scope, MemoriaScopes.Admin),
 		],
 		ApiKeyAuthenticationHandler.SchemeName));
+	// Stryker restore String
 
 	protected override Task<AuthenticateResult> HandleAuthenticateAsync()
 	{
