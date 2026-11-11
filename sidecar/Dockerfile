@@ -46,8 +46,12 @@ COPY --from=build /app/dist dist/
 COPY scripts/init-index.mjs scripts/snapshot-db.mjs scripts/
 
 # A named volume mounted on one of these takes its ownership on first use, so the
-# non-root user can write to it.
-RUN mkdir -p /index/qmd /config/qmd /corpus && chown -R node:node /index /config /corpus
+# non-root user can write to it. The service runs node alone, so the npm, npx and
+# corepack the base image bundles go: npm's own dependencies were all that the
+# image scan in audit.yml found.
+RUN mkdir -p /index/qmd /config/qmd /corpus && chown -R node:node /index /config /corpus \
+ && rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
+           /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
 
 USER node
 EXPOSE 8282
