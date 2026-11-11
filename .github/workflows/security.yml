@@ -9,16 +9,23 @@ on:
     - cron: "23 6 * * 1"
   workflow_dispatch:
 
+# A new push to a pull request replaces its running checks. Every push to main runs in a group of its own, so none is
+# cancelled or replaced while it waits.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
 jobs:
+  # On main, weekly and by hand, not on pull requests: three languages on every pull request held runners in a queue
+  # that was already full, and no ruleset requires code scanning. Alerts appear once a change reaches main. This
+  # workflow is CodeQL's advanced setup; the repository's default setup is off. The secret scan below still runs on
+  # every pull request, as a leaked key must be caught before it merges.
   codeql:
     name: CodeQL (${{ matrix.language }})
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
