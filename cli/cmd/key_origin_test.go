@@ -3,7 +3,6 @@ package cmd
 import (
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -153,20 +152,23 @@ func TestPlainHTTPToAPrivateAddressNeedsItsOptIn(t *testing.T) {
 }
 
 func TestThePrivateOptInIsAFlagOrAnEnvironmentVariable(t *testing.T) {
-	for name, setup := range map[string]func(h *harness) []string{
-		"flag":               func(*harness) []string { return []string{"--allow-private-http"} },
-		"environment":        func(h *harness) []string { h.env[auth.EnvAllowPrivateHTTP] = "1"; return nil },
-		"the broader opt-in": func(*harness) []string { return []string{"--allow-insecure-http"} },
+	for name, c := range map[string]struct {
+		setup func(h *harness) []string
+		warns string
+	}{
+		"flag":               {func(*harness) []string { return []string{"--allow-private-http"} }, "warning: plain http to a private address is explicitly allowed"},
+		"environment":        {func(h *harness) []string { h.env[auth.EnvAllowPrivateHTTP] = "1"; return nil }, "warning: plain http to a private address is explicitly allowed"},
+		"the broader opt-in": {func(*harness) []string { return []string{"--allow-insecure-http"} }, "warning: plain http to a private address is explicitly allowed"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newHarness(t)
 			h.env[auth.EnvAPIKey] = testKey
-			args := append([]string{"status", "--api-url", "http://10.255.255.1", "--timeout", "1ms"}, setup(h)...)
+			args := append([]string{"status", "--api-url", "http://10.255.255.1:9", "--timeout", "50ms"}, c.setup(h)...)
 			if code := h.run(args...); code == apperr.ExitInsecure {
 				t.Fatalf("still refused as insecure: stderr = %q", h.stderr.String())
 			}
-			if !strings.Contains(h.stderr.String(), "warning: ") {
-				t.Fatalf("no warning: stderr = %q", h.stderr.String())
+			if !strings.Contains(h.stderr.String(), c.warns) {
+				t.Fatalf("stderr = %q, want %q", h.stderr.String(), c.warns)
 			}
 		})
 	}
@@ -191,46 +193,62 @@ func TestThePrivateOptInDoesNotReachAPublicAddress(t *testing.T) {
 	}
 }
 
-func TestTheRedactionToolInheritsNoCredential(t *testing.T) {
-	t.Setenv(auth.EnvAPIKey, testKey)
-	t.Setenv("GITHUB_TOKEN", "ghp_must_not_reach_the_tool")
-	t.Setenv("MEMORIA_TEST_ORDINARY", "kept")
-
-	env := dotnetCommand(t.Context(), []string{"--version"}, nil).Env
-
-	if env == nil {
-		t.Fatal("the tool would inherit the whole environment")
-	}
-	for _, entry := range env {
-		name, _, _ := strings.Cut(entry, "=")
-		if strings.EqualFold(name, auth.EnvAPIKey) || strings.EqualFold(name, "GITHUB_TOKEN") {
-			t.Fatalf("%s reached the tool", name)
+// The refusal comes before the config's URL is looked at, so a planted plain-http server cannot
+// turn it into a request to opt in to plain http for a server nobody chose.
+func TestAnExplicitKeyIsRefusedBeforeTheConfigURLIsJudged(t *testing.T) {
+	for _, planted := range []string{"http://10.0.0.9:8080", "http://memoria.lan", "http://8.8.8.8"} {
+		h := newHarness(t)
+		h.writeConfigFile(`{"active_profile":"default","profiles":{"default":{"api_url":"` + planted + `"}}}`)
+		h.env[auth.EnvAPIKey] = testKey
+		if code := h.run("collections"); code != apperr.ExitInsecure {
+			t.Fatalf("%s: code = %d", planted, code)
 		}
-	}
-	if !slices.Contains(env, "MEMORIA_TEST_ORDINARY=kept") {
-		t.Fatal("an ordinary variable was dropped")
+		text := h.stderr.String()
+		if strings.Contains(text, "allow-private-http") || strings.Contains(text, "allow-insecure-http") || !strings.Contains(text, auth.EnvURL) {
+			t.Fatalf("%s: stderr = %q", planted, text)
+		}
 	}
 }
 
-// A real child process, run the way verify runs local qmd: what it sees of the environment is what it inherited.
-func TestLocalQMDInheritsNoCredential(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("no node here to stand in for qmd")
-	}
-	script := filepath.Join(t.TempDir(), "env.js")
-	if err := os.WriteFile(script, []byte("console.log(JSON.stringify(process.env))"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv(auth.EnvAPIKey, testKey)
-	t.Setenv("OPENAI_API_KEY", "sk-must-not-reach-qmd")
-	t.Setenv("MEMORIA_TEST_ORDINARY", "kept")
+func TestLoginWithAKeyFlagNamesItsServer(t *testing.T) {
+	api := newFakeAPI(t, jsonReply(`{"collections":[]}`))
+	h := newHarness(t)
+	h.login(api.URL)
+	before := len(api.requests)
 
-	out, err := runLocalQMD(t.Context(), node, []string{script})
-	if err != nil {
-		t.Fatal(err)
+	if code := h.run("auth", "login", "--api-key", testKey); code != apperr.ExitInsecure || !strings.Contains(h.stderr.String(), "--api-url") {
+		t.Fatalf("code = %d, stderr = %q", code, h.stderr.String())
 	}
-	assertChildEnvironment(t, out)
+	if len(api.requests) != before {
+		t.Fatal("the key was sent to the config's server")
+	}
+}
+
+// childEnvHelperArg marks a run of this test binary as the child, which prints its environment.
+const childEnvHelperArg = "memoria-childenv-helper"
+
+// TestChildEnvHelper is not a test: the tests below start this binary as a child process, and
+// this prints what the child inherited. Arguments, not the environment, mark it, since the
+// environment is what is being checked.
+func TestChildEnvHelper(t *testing.T) {
+	if !slices.Contains(os.Args, childEnvHelperArg) {
+		return
+	}
+	seen := map[string]string{}
+	for _, entry := range os.Environ() {
+		name, value, _ := strings.Cut(entry, "=")
+		seen[name] = value
+	}
+	data, _ := json.Marshal(seen)
+	_, _ = os.Stdout.Write(append(data, '\n'))
+	os.Exit(0)
+}
+
+func setChildEnvTestVariables(t *testing.T) {
+	t.Setenv(auth.EnvAPIKey, testKey)
+	t.Setenv("GITHUB_TOKEN", "ghp_must_not_reach_the_child")
+	t.Setenv("OPENAI_API_KEY", "sk-must-not-reach-the-child")
+	t.Setenv("QMD_TEST_ORDINARY", "kept")
 }
 
 func assertChildEnvironment(t *testing.T, out []byte) {
@@ -240,11 +258,47 @@ func assertChildEnvironment(t *testing.T, out []byte) {
 		t.Fatalf("output %q: %v", out, err)
 	}
 	for name := range seen {
-		if strings.EqualFold(name, auth.EnvAPIKey) || strings.EqualFold(name, "OPENAI_API_KEY") {
-			t.Fatalf("%s reached the child", name)
+		for _, secret := range []string{auth.EnvAPIKey, "GITHUB_TOKEN", "OPENAI_API_KEY"} {
+			if strings.EqualFold(name, secret) {
+				t.Fatalf("%s reached the child", name)
+			}
 		}
 	}
-	if seen["MEMORIA_TEST_ORDINARY"] != "kept" {
-		t.Fatal("an ordinary variable was dropped")
+	if seen["QMD_TEST_ORDINARY"] != "kept" {
+		t.Fatalf("an allowed variable was dropped: %v", seen)
 	}
+}
+
+func helperArgs() []string {
+	return []string{"-test.run=^TestChildEnvHelper$", "--", childEnvHelperArg}
+}
+
+// The redaction tool's process, run for real with this binary standing in for dotnet.
+func TestTheRedactionToolInheritsNoCredential(t *testing.T) {
+	setChildEnvTestVariables(t)
+	command := dotnetCommand(t.Context(), helperArgs(), nil)
+	if command.Env == nil {
+		t.Fatal("the tool would inherit the whole environment")
+	}
+	command.Path = os.Args[0]
+	command.Args = append([]string{os.Args[0]}, helperArgs()...)
+	out, err := command.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertChildEnvironment(t, out)
+}
+
+// A real child process, run the way verify runs a local qmd that is a program.
+func TestLocalQMDInheritsNoCredential(t *testing.T) {
+	setChildEnvTestVariables(t)
+	exe, err := filepath.Abs(os.Args[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := runLocalQMD(t.Context(), exe, helperArgs())
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertChildEnvironment(t, out)
 }

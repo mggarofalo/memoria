@@ -567,17 +567,6 @@ func TestPublicPlainHTTPIsRefusedWithoutContact(t *testing.T) {
 	}
 }
 
-func TestPrivatePlainHTTPWarns(t *testing.T) {
-	h := newHarness(t)
-	h.env[auth.EnvAPIKey] = testKey
-	// 192.0.2.x would be public; 10.255.255.1 stays unrouted and the short
-	// timeout ends the attempt. What matters is the warning before it.
-	h.run("status", "--api-url", "http://10.255.255.1:9", "--timeout", "50ms")
-	if !strings.Contains(h.stderr.String(), "private address") {
-		t.Fatalf("stderr = %q", h.stderr.String())
-	}
-}
-
 func TestInsecureOverride(t *testing.T) {
 	for name, set := range map[string]func(*harness) []string{
 		"flag": func(*harness) []string { return []string{"--allow-insecure-http"} },

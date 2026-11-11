@@ -205,6 +205,19 @@ func (r *Resolver) ExplicitURL() bool {
 	return r.FlagURL != "" || r.getenv(EnvURL) != ""
 }
 
+// ExplicitKeySource names where an explicit key would come from, --api-key or
+// MEMORIA_API_KEY, or returns an empty string when the key will come from a store.
+// It reads no store, so it can be asked before anything else is decided.
+func (r *Resolver) ExplicitKeySource() string {
+	switch {
+	case r.FlagKey != "":
+		return "--api-key"
+	case r.getenv(EnvAPIKey) != "":
+		return EnvAPIKey
+	}
+	return ""
+}
+
 // ResolveURL returns the server URL from flag, env, or the active profile.
 func (r *Resolver) ResolveURL() string {
 	if r.FlagURL != "" {

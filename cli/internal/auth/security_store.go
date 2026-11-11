@@ -9,9 +9,10 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
-	"slices"
 	"strings"
 	"time"
+
+	"github.com/mggarofalo/memoria/cli/internal/childenv"
 )
 
 const (
@@ -109,18 +110,13 @@ func (s *SecurityStore) run(stdin string, args ...string) securityResult {
 	ctx, cancel := context.WithTimeout(context.Background(), securityTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, s.path, args...) //nolint:gosec // G204: s.path is the fixed /usr/bin/security; the key goes on stdin, never in args
-	cmd.Env = withoutAPIKey(os.Environ())
+	// A deny-list, not the allowlist: the tool needs the login session as it is.
+	cmd.Env = childenv.Scrub(os.Environ())
 	cmd.Stdin = strings.NewReader(stdin)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()
 	return securityResult{stdout: stdout.Bytes(), stderr: stderr.Bytes(), err: err}
-}
-
-func withoutAPIKey(environ []string) []string {
-	return slices.DeleteFunc(environ, func(entry string) bool {
-		return strings.HasPrefix(strings.ToUpper(entry), EnvAPIKey+"=")
-	})
 }
 
 // classifySecurityFailure recognizes known outcomes. Only fixed text comes out.

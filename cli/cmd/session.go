@@ -116,6 +116,11 @@ func (a *app) connect() (*session, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Before the URL is even parsed, so that the config's server cannot shape the
+	// answer, such as by asking for a plain-http opt-in for a server nobody chose.
+	if err := checkExplicitKeyOrigin(resolver); err != nil {
+		return nil, err
+	}
 	base, err := a.parseURL(resolver.ResolveURL())
 	if err != nil {
 		return nil, err
@@ -138,9 +143,6 @@ func (a *app) resolveKey(resolver *auth.Resolver, profile string, base *url.URL)
 		return auth.Resolved{}, err
 	}
 	a.redactor.Add(resolved.Credential.Reveal())
-	if err := checkExplicitKeyOrigin(resolved, resolver); err != nil {
-		return auth.Resolved{}, err
-	}
 	if err := checkStoredKeyOrigin(resolved, profile, base); err != nil {
 		return auth.Resolved{}, err
 	}
@@ -150,7 +152,7 @@ func (a *app) resolveKey(resolver *auth.Resolver, profile string, base *url.URL)
 		}
 	}
 	if resolved.Source == auth.SourceEnv && a.stdinIsTerminal() && !a.flags.quiet {
-		a.warn("using " + auth.EnvAPIKey + " from the environment; child processes inherit it. Consider 'memoria auth login'")
+		a.warn("using " + auth.EnvAPIKey + " from the environment; everything your shell starts inherits it. Consider 'memoria auth login'")
 	}
 	return resolved, nil
 }
@@ -180,13 +182,11 @@ func (a *app) checkFileBackend(resolved auth.Resolved, profile string) error {
 // so taking the server from config.json would send it wherever that file says, and
 // that file is the one a poisoned XDG_CONFIG_HOME or HOME supplies. The server the
 // config names is not repeated: it is not one the user chose here.
-func checkExplicitKeyOrigin(resolved auth.Resolved, resolver *auth.Resolver) error {
-	if resolved.Stored() || resolver.ExplicitURL() {
+func checkExplicitKeyOrigin(resolver *auth.Resolver) error {
+	label := resolver.ExplicitKeySource()
+	// With no URL anywhere, parseURL gives the plain usage error that says how to name one.
+	if label == "" || resolver.ExplicitURL() || resolver.ResolveURL() == "" {
 		return nil
-	}
-	label := "--api-key"
-	if resolved.Source == auth.SourceEnv {
-		label = auth.EnvAPIKey
 	}
 	return apperr.New(apperr.KindInsecure,
 		"a key from %s is sent only to a server named the same way: pass --api-url or set %s. It is never sent to the server in config.json, which is not tied to that key",

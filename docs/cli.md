@@ -99,7 +99,7 @@ A key from `--api-key` or `MEMORIA_API_KEY` is tied to no server, so it goes onl
 
 A key from the keyring or file is sent only to the server it was saved for. That origin is stored with the key, in the same secret, so replacing the config cannot redirect it. If `--api-url`, `MEMORIA_URL` or the config names another origin, the command refuses. Use a separate `--profile` for a second server.
 
-`auth login` shows the server before it asks for the key. It ignores `MEMORIA_URL`. If the config has a saved URL, login uses it only when the keyring confirms that server; otherwise pass `--api-url`. The prompt for a URL appears only at a terminal with no saved URL. The credentials file cannot vouch for a URL, because it sits in the same directory as the config. On a machine with a keyring, a file login leaves a small record of its server there, which holds no key.
+`auth login` shows the server before it asks for the key. It ignores `MEMORIA_URL`. A key given with `--api-key` needs `--api-url` beside it. If the config has a saved URL, login uses it only when the keyring confirms that server; otherwise pass `--api-url`. The prompt for a URL appears only at a terminal with no saved URL. The credentials file cannot vouch for a URL, because it sits in the same directory as the config. On a machine with a keyring, a file login leaves a small record of its server there, which holds no key.
 
 `auth logout` says which server each removed key was for. It keeps a keyring key for a different server than the config names, because a config can be replaced by whoever sets `XDG_CONFIG_HOME` or `HOME`. Pass `--include-keyring` to remove it anyway.
 
@@ -304,9 +304,11 @@ A redirect to a different origin is never followed. A different origin includes 
 
 ## Child processes
 
-`migrate report` runs the redaction tool through `dotnet`, which runs the secret scanners, and `migrate verify` runs a local `qmd`, through `cmd.exe` on Windows when npm installed it as a `.cmd` file. None of them needs a credential, so none inherits one: their environment leaves out `MEMORIA_API_KEY` and every variable whose name contains `TOKEN`, `SECRET`, `PASSWORD`, `PASSWD`, `PASSPHRASE`, `CREDENTIAL`, `API_KEY`, `APIKEY`, `ACCESS_KEY`, `PRIVATE_KEY`, `AUTH`, `COOKIE` or `SESSION_KEY`, in any case. A local `qmd` set up to reach a remote model through such a variable cannot do so under `migrate verify`. `self-update` runs the new binary with only an allowlist of variables, and the macOS keychain tool runs without `MEMORIA_API_KEY`.
+`migrate report` runs the redaction tool through `dotnet`, which runs the secret scanners, and `migrate verify` runs a local `qmd`, through `cmd.exe` on Windows when npm installed it as a `.cmd` file. None of them needs a credential, so none inherits one. They get an allowlist: `PATH` and `PATHEXT`; the home, user, temporary, locale and terminal variables; Windows' system and profile folders, `ComSpec` among them; `SSL_CERT_FILE`, `SSL_CERT_DIR` and `NUGET_PACKAGES`; and anything starting `LC_`, `XDG_`, `DOTNET_`, `NODE_` or `QMD_`. Even from those, a variable is left out when its name contains, in any case, `TOKEN`, `SECRET`, `PASS`, `PWD`, `CREDENTIAL`, `KEY`, `AUTH`, `COOKIE`, `SESSION`, `DSN` or `CONNECTION_STRING`, or when its value holds a URL with a password. `MEMORIA_API_KEY` never reaches them. A local `qmd` that reaches a remote model through some other variable cannot do so under `migrate verify`. `self-update` runs the new binary with an allowlist of its own, and the macOS keychain tool runs with the same name and value checks but no allowlist, since it needs the login session as it is.
 
-`memoria help` names no topic it does not know, so a key pasted as one never comes back on stdout.
+## Help
+
+`memoria help` names no topic it does not know, so a key pasted as one never comes back on stdout or stderr.
 
 ## MCP bridge
 
