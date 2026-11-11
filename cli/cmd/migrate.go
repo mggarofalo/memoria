@@ -256,11 +256,11 @@ func skipsError(skipped int, acceptSkips bool) error {
 }
 
 type migrateReportOptions struct {
-	qmdConfig    string
-	tool         string
-	noGitleaks   bool
-	noTrufflehog bool
-	acceptSkips  bool
+	qmdConfig   string
+	tool        string
+	noGitleaks  bool
+	strict      bool
+	acceptSkips bool
 	// gitleaksIgnore is a .gitleaksignore of reviewed findings, and gitleaksFindings where to write the ones left. Both hold paths.
 	gitleaksIgnore   string
 	gitleaksFindings string
@@ -280,28 +280,26 @@ checkout of the repository, which needs the .NET runtime:
 
   dotnet build tools/RedactionCheck -c Release
 
-Two scanners then look over the redacted text for anything left, so both must be on
-PATH. Gitleaks's rules are also the ones the redaction engine imports, so a 0 from it
-says mostly that the import is faithful. Trufflehog runs with its own detectors and
-verification off, so it calls no service, and it is the independent look. Neither 0 is
-proof: gitleaks can miss a token at a chunk boundary, and both can miss a form they do
-not know. A document a scanner could not read is counted as unscanned. --no-gitleaks
-and --no-trufflehog go without one, which makes this a weaker check, and without both
-it only says what the rules replaced, and nothing about what they missed. The text goes
-to each on its standard input, so no copy is written to disk.
+Gitleaks then looks over the redacted text for anything left, so it must be on PATH.
+Its rules are also the ones the redaction engine imports, so a 0 from it says mostly
+that the import is faithful, and it is not proof: gitleaks can miss a token at a chunk
+boundary, or a form its rules do not know. A document it could not read is counted as
+unscanned. --no-gitleaks goes without it, and then this only says what the rules
+replaced, and nothing about what they missed. The text goes to gitleaks on its
+standard input, so no copy is written to disk.
 
-This exits 1 if a document was refused, a scanner found something or could not read a
-document, or anything could not be read. Those last are counted, never named, and
---accept-skips lets the exit be 0 for them alone.
+The report is a sanity check, not a gate: it prints the counts and exits 0, whatever
+they are. With --strict it exits 1 if a document was refused, gitleaks found something
+or could not read a document, or anything could not be read. Those last are counted,
+never named, and --accept-skips lets --strict exit 0 for them alone.
 
 A finding a person has reviewed and judged harmless can be listed by fingerprint in a
 file in gitleaks's .gitleaksignore form, passed with --gitleaks-ignore. A fingerprint is
-<collection>/<path>:<rule>:<line>, the line counted in the redacted document, and a
-trufflehog finding's rule is trufflehog-<detector>, so the one file covers both. Each
-listing excuses one finding, which is counted as ignored and does not fail the run; any
-other finding still does, even a second on a listed line. --gitleaks-findings <file>
-writes the fingerprints of the findings that are not listed, one a finding, for that
-review. Both files hold paths, so keep them out of any repository.`,
+<collection>/<path>:<rule>:<line>, the line counted in the redacted document. Each
+listing excuses one finding, which is counted as ignored and does not fail --strict;
+any other finding still does, even a second on a listed line. --gitleaks-findings
+<file> writes the fingerprints of the findings that are not listed, one a finding, for
+that review. Both files hold paths, so keep them out of any repository.`,
 		Example: `  memoria migrate report --qmd-config ~/.config/qmd/index.yml --tool tools/RedactionCheck/bin/Release/net10.0/RedactionCheck.dll`,
 		Args:    noArgs,
 		RunE:    func(cmd *cobra.Command, _ []string) error { return a.migrateReport(cmd.Context(), o) },
@@ -310,9 +308,9 @@ review. Both files hold paths, so keep them out of any repository.`,
 	f.StringVar(&o.qmdConfig, "qmd-config", "", "Path to QMD's index.yml (required). There is no default")
 	f.StringVar(&o.tool, "tool", "", "Path to the built RedactionCheck.dll (required)")
 	f.BoolVar(&o.noGitleaks, "no-gitleaks", false, "Skip gitleaks's look at the redacted text, which makes this a weaker check")
-	f.BoolVar(&o.noTrufflehog, "no-trufflehog", false, "Skip trufflehog's look at the redacted text, the one independent of the engine's rules, which makes this a weaker check")
-	f.BoolVar(&o.acceptSkips, "accept-skips", false, "Exit 0 even if a file or folder could not be read. They stay counted")
-	f.StringVar(&o.gitleaksIgnore, "gitleaks-ignore", "", "A .gitleaksignore of reviewed findings by fingerprint. Listed findings do not fail the run")
+	f.BoolVar(&o.strict, "strict", false, "Exit 1 if a document was refused, a finding is not in --gitleaks-ignore, or anything was not read or scanned")
+	f.BoolVar(&o.acceptSkips, "accept-skips", false, "With --strict, exit 0 even if a file or folder could not be read. They stay counted")
+	f.StringVar(&o.gitleaksIgnore, "gitleaks-ignore", "", "A .gitleaksignore of reviewed findings by fingerprint. Listed findings do not fail --strict")
 	f.StringVar(&o.gitleaksFindings, "gitleaks-findings", "", "Write the fingerprints of findings not listed in --gitleaks-ignore to this file, for review")
 	return cmd
 }
@@ -325,7 +323,9 @@ func (a *app) migrateReport(ctx context.Context, o migrateReportOptions) error {
 	if err != nil {
 		return err
 	}
-	a.warnScanners(o)
+	if o.noGitleaks {
+		a.warn("--no-gitleaks makes this a weaker check: it says what the rules replaced, and nothing about what they missed")
+	}
 	reports, err := a.runRedactionCheck(ctx, o, collections)
 	if err != nil {
 		return err
@@ -343,29 +343,17 @@ func (a *app) migrateReport(ctx context.Context, o migrateReportOptions) error {
 	for i := range reports {
 		a.warnIfNoFiles(reports[i].Name, reports[i].Files, reports[i].Skipped)
 	}
-	return uncleanError(reports, o.acceptSkips)
-}
-
-// warnScanners says what the scanners' counts can and cannot mean, before they are shown.
-func (a *app) warnScanners(o migrateReportOptions) {
-	switch {
-	case o.noGitleaks && o.noTrufflehog:
-		a.warn("--no-gitleaks and --no-trufflehog make this a weaker check: it says what the rules replaced, and nothing about what they missed")
-	case o.noTrufflehog:
-		a.warn("--no-trufflehog leaves only gitleaks, whose rules are the engine's own, so nothing independent looks at what is left")
-	case o.noGitleaks:
-		a.warn("--no-gitleaks leaves only trufflehog, which can miss a form it does not know")
+	if o.strict {
+		return uncleanError(reports, o.acceptSkips)
 	}
-	if !o.noGitleaks || !o.noTrufflehog {
-		a.warn("0 findings is not proof that nothing is left: gitleaks's rules are the engine's own and it can miss a token at a chunk boundary, and trufflehog can miss a form it does not know")
-	}
+	return nil
 }
 
 func uncleanError(reports []migrate.Report, acceptSkips bool) error {
 	skipped := 0
 	for i := range reports {
 		if !reports[i].Clean() {
-			return apperr.New(apperr.KindGeneric, "a document was refused, a file's name looks like a credential, or a scanner found something in the redacted text or could not read it; see the counts above")
+			return apperr.New(apperr.KindGeneric, "a document was refused, a file's name looks like a credential, or gitleaks found something in the redacted text or could not read it; see the counts above")
 		}
 		skipped += reports[i].Skipped
 	}
@@ -384,18 +372,13 @@ func checkReportTools(o migrateReportOptions) error {
 			return apperr.New(apperr.KindUsage, "gitleaks is not on PATH; install it, or pass --no-gitleaks to go without that look")
 		}
 	}
-	if !o.noTrufflehog {
-		if _, err := exec.LookPath("trufflehog"); err != nil {
-			return apperr.New(apperr.KindUsage, "trufflehog is not on PATH; install it, or pass --no-trufflehog to go without the look that is independent of the engine's rules")
-		}
-	}
 	return nil
 }
 
 // checkGitleaksFiles refuses an ignore file that is missing, or either file without gitleaks, which would let a typo pass as clean.
 func checkGitleaksFiles(o migrateReportOptions) error {
-	if o.noGitleaks && o.noTrufflehog && (o.gitleaksIgnore != "" || o.gitleaksFindings != "") {
-		return apperr.New(apperr.KindUsage, "--gitleaks-ignore and --gitleaks-findings need a scanner, so they cannot go with both --no-gitleaks and --no-trufflehog")
+	if o.noGitleaks && (o.gitleaksIgnore != "" || o.gitleaksFindings != "") {
+		return apperr.New(apperr.KindUsage, "--gitleaks-ignore and --gitleaks-findings need gitleaks, so they cannot go with --no-gitleaks")
 	}
 	if o.gitleaksIgnore == "" {
 		return nil
@@ -411,9 +394,6 @@ func reportToolArgs(o migrateReportOptions) []string {
 	args := []string{o.tool, "--json", "--lists-on-stdin"}
 	if o.noGitleaks {
 		args = append(args, "--no-gitleaks")
-	}
-	if o.noTrufflehog {
-		args = append(args, "--no-trufflehog")
 	}
 	if o.gitleaksIgnore != "" {
 		args = append(args, "--gitleaks-ignore", o.gitleaksIgnore)

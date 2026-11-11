@@ -12,18 +12,16 @@ import (
 	"github.com/mggarofalo/memoria/cli/internal/migrate"
 )
 
-// withFakeGitleaks puts an empty gitleaks and trufflehog on PATH, so the report's checks for them pass. The tool is faked, so
-// neither ever runs.
+// withFakeGitleaks puts an empty gitleaks on PATH, so the report's check for it passes. The tool is faked, so it never runs.
 func withFakeGitleaks(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()
-	for _, name := range []string{"gitleaks", "trufflehog"} {
-		if runtime.GOOS == "windows" {
-			name += ".exe"
-		}
-		if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"), 0o755); err != nil {
-			t.Fatal(err)
-		}
+	name := "gitleaks"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir)
 }
@@ -37,7 +35,7 @@ func TestMigrateReportPassesTheIgnoreAndFindingsFilesToTheTool(t *testing.T) {
 	writeFile(t, ignore, "# reviewed\nnotes/a.md:generic-api-key:3\n")
 	findings := filepath.Join(t.TempDir(), "findings.txt")
 	f.fakeCheck("["+ignoredCheck+","+ignoredCheck+"]", nil)
-	code := f.h.run("migrate", "report", "--qmd-config", f.config, "--tool", f.tool, "--gitleaks-ignore", ignore, "--gitleaks-findings", findings)
+	code := f.h.run("migrate", "report", "--qmd-config", f.config, "--tool", f.tool, "--strict", "--gitleaks-ignore", ignore, "--gitleaks-findings", findings)
 	if code != 0 {
 		t.Fatalf("code = %d, stderr = %q", code, f.h.stderr.String())
 	}
@@ -50,14 +48,14 @@ func TestMigrateReportPassesTheIgnoreAndFindingsFilesToTheTool(t *testing.T) {
 	}
 }
 
-func TestMigrateReportStillFailsOnAFindingTheIgnoreFileDoesNotList(t *testing.T) {
+func TestMigrateReportStrictStillFailsOnAFindingTheIgnoreFileDoesNotList(t *testing.T) {
 	f := newMigrateFixture(t)
 	withFakeGitleaks(t)
 	ignore := filepath.Join(t.TempDir(), "reviewed.gitleaksignore")
 	writeFile(t, ignore, "notes/a.md:generic-api-key:3\n")
 	left := `{"files":1,"changed":0,"refused":0,"replacements":{},"filesByRule":{},"gitleaksRan":true,"gitleaksFindings":{"generic-api-key":1},"gitleaksIgnored":1}`
 	f.fakeCheck("["+left+","+ignoredCheck+"]", nil)
-	if code := f.h.run("migrate", "report", "--qmd-config", f.config, "--tool", f.tool, "--gitleaks-ignore", ignore); code != 1 {
+	if code := f.h.run("migrate", "report", "--qmd-config", f.config, "--tool", f.tool, "--strict", "--gitleaks-ignore", ignore); code != 1 {
 		t.Fatalf("code = %d, stderr = %q", code, f.h.stderr.String())
 	}
 }
@@ -70,8 +68,8 @@ func TestMigrateReportRefusesAnIgnoreFileItCannotUse(t *testing.T) {
 	cases := map[string][]string{
 		"missing":               {"--gitleaks-ignore", filepath.Join(t.TempDir(), "absent")},
 		"a folder":              {"--gitleaks-ignore", t.TempDir()},
-		"ignore, no gitleaks":   {"--gitleaks-ignore", ignore, "--no-gitleaks", "--no-trufflehog"},
-		"findings, no gitleaks": {"--gitleaks-findings", filepath.Join(t.TempDir(), "out"), "--no-gitleaks", "--no-trufflehog"},
+		"ignore, no gitleaks":   {"--gitleaks-ignore", ignore, "--no-gitleaks"},
+		"findings, no gitleaks": {"--gitleaks-findings", filepath.Join(t.TempDir(), "out"), "--no-gitleaks"},
 	}
 	for name, extra := range cases {
 		f.fakeCheck("["+cleanCheck+","+cleanCheck+"]", nil)

@@ -386,6 +386,14 @@ Identity, lookup and path digests are not keyed. They are made from names, not c
 
 `message_sha256` in a Codex part's frontmatter says no more than the part's own text. When the last check replaced a message in that part, the digest is the only trace of what the message said, so it is replaced too.
 
+### Redaction policy
+
+Redaction is defense in depth, not a security boundary. The boundary is authentication: every key is scoped to its collections, nothing is served without a key, and the network the API and sidecar sit on is locked down. Redaction is there so that a secret pasted into a transcript is not also searchable by everyone who can read that collection.
+
+It catches common, high-value secrets cheaply: formatted credentials, through the vendored gitleaks rules; private-key blocks and JWTs; plain assignments such as `password=` or `token:`; and common command-line credentials. It does not try to catch a secret written in prose, in an unusual encoding, or split or obfuscated on purpose. When in doubt it over-redacts, as losing a few words costs less than storing a credential, but it does not chase precision either way.
+
+A new rule needs a real secret that got through, and a regression test that holds that case. No rule is added on speculation. The migration's redaction report, `memoria migrate report`, is a sanity check on the rules over a real corpus, not a gate.
+
 ### What redaction cannot catch
 
 Besides its own rules, the engine runs gitleaks's default rules as data, after its own, on whatever they left. [The imported gitleaks rules](gitleaks-rules.md) lists every one, and every upstream rule left out, with the reason. Imported rules that know a token by its own format run before those that know a value by the name before it, so a name's rule cannot take the head of a longer token. A token whose alphabet has no `_` ends at one, as in `ENV_<token>_backup`, though upstream's `\b` finds nothing there, unless what came before the `_` reads as words, as in `sk_test_connection_timeout`. A token whose alphabet holds `_` runs on, so it stays, and so does a value known by the name before it. After a token at its format's exact length, or one that ends in `=` padding, text after a separator stays, plain or URL-encoded. After one of a variable length, or a value known by the name before it, random text after a separator goes too, since it may be the rest of a longer token, and so does more of the run after an encoded `%2B`, `%2F` or `%3D` when a piece of it reads as random. A path such as `%2Fhome%2Fuser` stays. A change to these rules changes what is stored on the next upload, so a session already stored may then need `allowShrink=true`, as any rule change can.
