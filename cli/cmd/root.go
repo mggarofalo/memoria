@@ -66,6 +66,7 @@ type rootFlags struct {
 	verbose       bool
 	quiet         bool
 	allowInsecure bool
+	allowPrivate  bool
 	timeout       time.Duration
 }
 
@@ -119,13 +120,34 @@ func (a *app) rootCmd() *cobra.Command {
 	pf.StringVar(&a.flags.format, "format", "", "Output format: json, table, or markdown. json is the server's response, byte for byte")
 	pf.BoolVarP(&a.flags.verbose, "verbose", "v", false, "Log requests to stderr (never headers or the key)")
 	pf.BoolVarP(&a.flags.quiet, "quiet", "q", false, "Suppress informational messages")
-	pf.BoolVar(&a.flags.allowInsecure, "allow-insecure-http", false, "Allow sending the key over plain http to a public address (or "+auth.EnvAllowInsecureHTTP+"=1). The key can be read in transit")
+	pf.BoolVar(&a.flags.allowInsecure, "allow-insecure-http", false, "Allow sending the key over plain http to any address or name (or "+auth.EnvAllowInsecureHTTP+"=1). The key can be read in transit")
+	pf.BoolVar(&a.flags.allowPrivate, "allow-private-http", false, "Allow sending the key over plain http to a private address, such as 192.168.x.x (or "+auth.EnvAllowPrivateHTTP+"=1). Only on a network you run")
 	pf.DurationVar(&a.flags.timeout, "timeout", defaultTimeout, "Time limit for each request")
 
 	for _, factory := range commandFactories {
 		root.AddCommand(factory(a))
 	}
+	root.SetHelpCommand(helpCmd())
 	return root
+}
+
+// helpCmd replaces cobra's help command, which answers an unknown topic by quoting it
+// to stdout, where a key given as the topic would come straight back.
+func helpCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "help [command]",
+		Short: "Help about any command",
+		Long:  "Help provides help for any command in the application.\nSimply type memoria help [path to command] for full details.",
+		RunE: func(c *cobra.Command, args []string) error {
+			target, _, err := c.Root().Find(args)
+			if target == nil || err != nil {
+				return apperr.New(apperr.KindUsage, "unknown help topic; see 'memoria --help'")
+			}
+			target.InitDefaultHelpFlag()
+			target.InitDefaultVersionFlag()
+			return target.Help()
+		},
+	}
 }
 
 // prepare validates global flags and warns about a key on the command line.

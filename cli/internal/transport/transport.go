@@ -30,8 +30,10 @@ type Options struct {
 	BaseURL *url.URL
 	// Key is the bearer token. It is attached only to requests for BaseURL's origin.
 	Key string
-	// AllowInsecureHTTP is the explicit override for the plain-http refusal.
+	// AllowInsecureHTTP is the explicit override for the plain-http refusal, to any address.
 	AllowInsecureHTTP bool
+	// AllowPrivateHTTP is the narrower override, for plain http to a private address only.
+	AllowPrivateHTTP bool
 	// Timeout bounds a whole request including the body. Zero means no limit,
 	// for callers that set a deadline per request.
 	Timeout time.Duration
@@ -51,7 +53,7 @@ func NewClient(o Options) (*http.Client, error) {
 	if o.BaseURL == nil {
 		return nil, errors.New("transport: no base URL")
 	}
-	if _, err := Evaluate(o.BaseURL, o.AllowInsecureHTTP); err != nil {
+	if _, err := Evaluate(o.BaseURL, AllowanceOf(o.AllowInsecureHTTP, o.AllowPrivateHTTP)); err != nil {
 		return nil, err
 	}
 	base := newBaseTransport(o.BaseURL, o.AllowInsecureHTTP)

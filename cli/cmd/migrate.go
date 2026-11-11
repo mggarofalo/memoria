@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mggarofalo/memoria/cli/internal/apperr"
+	"github.com/mggarofalo/memoria/cli/internal/childenv"
 	"github.com/mggarofalo/memoria/cli/internal/migrate"
 	"github.com/mggarofalo/memoria/cli/internal/output"
 	"github.com/mggarofalo/memoria/cli/internal/sources"
@@ -447,8 +448,7 @@ func exitOneIsAResult(err error) bool {
 // runDotnet runs the tool. Its stderr is left behind, because a failure there could quote a
 // path or text. An exit of 1 only says the counts are not clean, and they are still the result.
 func runDotnet(ctx context.Context, args []string, stdin []byte) ([]byte, error) {
-	command := exec.CommandContext(ctx, "dotnet", args...) //nolint:gosec // G204: the dotnet the user installed runs the RedactionCheck tool they named
-	command.Stdin = bytes.NewReader(stdin)
+	command := dotnetCommand(ctx, args, stdin)
 	var stdout bytes.Buffer
 	command.Stdout = &stdout
 	err := command.Run()
@@ -456,4 +456,12 @@ func runDotnet(ctx context.Context, args []string, stdin []byte) ([]byte, error)
 		return stdout.Bytes(), nil
 	}
 	return nil, apperr.New(apperr.KindGeneric, "the redaction check did not finish; run it by hand for its own message")
+}
+
+// dotnetCommand is the redaction tool's process. The tool, and the scanners it runs, need no credential, so none is inherited.
+func dotnetCommand(ctx context.Context, args []string, stdin []byte) *exec.Cmd {
+	command := exec.CommandContext(ctx, "dotnet", args...) //nolint:gosec // G204: the dotnet the user installed runs the RedactionCheck tool they named
+	command.Env = childenv.Environ()
+	command.Stdin = bytes.NewReader(stdin)
+	return command
 }

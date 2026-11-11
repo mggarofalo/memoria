@@ -85,7 +85,7 @@ The first of these that has a key wins:
 | Order | Source | Risk |
 |---|---|---|
 | 1 | `--api-key` | Lands in shell history, and is visible in process listings while the command runs. The CLI warns every time. |
-| 2 | `MEMORIA_API_KEY` | Inherited by every child process. Readable by anything running as you. The CLI warns at a terminal. |
+| 2 | `MEMORIA_API_KEY` | Inherited by every process your shell starts, and readable by anything running as you. The CLI warns at a terminal. The processes the CLI itself starts do not get it: see [child processes](#child-processes). |
 | 3 | OS keyring (login Keychain, Credential Manager, or the Secret Service on Linux) | Encrypted at rest by the OS. Any process running as you may still be able to ask for it, depending on the keyring. |
 | 4 | Credentials file | Unencrypted on disk. See below. |
 
@@ -95,9 +95,11 @@ The config file (`config.json`) never holds a key. It records the active profile
 
 The server URL comes from `--api-url`, then `MEMORIA_URL`, then the profile.
 
+A key from `--api-key` or `MEMORIA_API_KEY` is tied to no server, so it goes only to a server named the same way, by `--api-url` or `MEMORIA_URL`, in the same invocation. With neither, the command refuses with exit 7 rather than sending the key to the server `config.json` names, as that file is what a poisoned `XDG_CONFIG_HOME` or `HOME` supplies. The refusal does not repeat that server. So `MEMORIA_API_KEY=... memoria collections` needs `MEMORIA_URL` beside it, and an MCP client configured with the key in its environment needs the URL there too.
+
 A key from the keyring or file is sent only to the server it was saved for. That origin is stored with the key, in the same secret, so replacing the config cannot redirect it. If `--api-url`, `MEMORIA_URL` or the config names another origin, the command refuses. Use a separate `--profile` for a second server.
 
-`auth login` shows the server before it asks for the key. It ignores `MEMORIA_URL`. If the config has a saved URL, login uses it only when the keyring confirms that server; otherwise pass `--api-url`. The prompt for a URL appears only at a terminal with no saved URL. The credentials file cannot vouch for a URL, because it sits in the same directory as the config. On a machine with a keyring, a file login leaves a small record of its server there, which holds no key.
+`auth login` shows the server before it asks for the key. It ignores `MEMORIA_URL`. A key given with `--api-key` needs `--api-url` beside it. If the config has a saved URL, login uses it only when the keyring confirms that server; otherwise pass `--api-url`. The prompt for a URL appears only at a terminal with no saved URL. The credentials file cannot vouch for a URL, because it sits in the same directory as the config. On a machine with a keyring, a file login leaves a small record of its server there, which holds no key.
 
 `auth logout` says which server each removed key was for. It keeps a keyring key for a different server than the config names, because a config can be replaced by whoever sets `XDG_CONFIG_HOME` or `HOME`. Pass `--include-keyring` to remove it anyway.
 
@@ -280,7 +282,7 @@ Both `plan` and `report` exit 1 if anything could not be read: a denied folder, 
 | 4 | Not found, including a `multi-get` where any reference failed or nothing was returned |
 | 5 | Server unavailable: 502, 503, 504, a timeout, or no connection |
 | 6 | Rate limited (429). The message includes `Retry-After` when the server sends it |
-| 7 | Refused for transport safety: plain http to a hostname or public address, a cross-origin redirect, a stored key aimed at another server, or a login whose server nothing confirms |
+| 7 | Refused for transport safety: plain http to anything but loopback without its opt-in, a cross-origin redirect, a stored key aimed at another server, a key from `--api-key` or `MEMORIA_API_KEY` with no server named the same way, or a login whose server nothing confirms |
 
 ## Plain http
 
@@ -289,14 +291,24 @@ A bearer key sent over plain http can be read by anyone on the path.
 | Server address | Behavior |
 |---|---|
 | https | Allowed. TLS 1.2 or later |
-| Private IP literal (RFC 1918, ULA) | Allowed with a warning |
 | Loopback, including `localhost` (which must resolve to a loopback address) | Allowed quietly |
+| Private IP literal (RFC 1918, ULA) | Refused, unless you pass `--allow-private-http` or set `MEMORIA_ALLOW_PRIVATE_HTTP=1`, and then allowed with a warning. `--allow-insecure-http` covers it too |
 | A hostname over http | Refused, unless you pass `--allow-insecure-http` or set `MEMORIA_ALLOW_INSECURE_HTTP=1` |
 | Anything else over http | Refused, with the same override |
+
+A private address is not this machine, and it is not unique: on a network someone else runs, such as hotel or conference Wi-Fi, `192.168.1.20` can be anyone's, and ARP spoofing can read the key in transit. So it takes an opt-in, never only a warning, which the MCP bridge would hide on stderr. Set `MEMORIA_ALLOW_PRIVATE_HTTP=1` only where you run the network, for example in the environment of an MCP client on your home machine, and prefer https. Each environment opt-in is exactly `1`.
 
 Link-local addresses count as public, and so do the cloud metadata addresses `169.254.169.254` and `fd00:ec2::254`. Hosts must be plain ASCII: use the `xn--` form of an internationalized name. Plain http never goes through a configured proxy, which would otherwise see the key.
 
 A redirect to a different origin is never followed. A different origin includes a subdomain, another port, and a move from https to http. Go's HTTP client keeps the `Authorization` header in the subdomain and downgrade cases, so the CLI attaches the header itself, only to requests for the configured origin.
+
+## Child processes
+
+`migrate report` runs the redaction tool through `dotnet`, which runs the secret scanners, and `migrate verify` runs a local `qmd`, through `cmd.exe` on Windows when npm installed it as a `.cmd` file. None of them needs a credential, so none inherits one. They get an allowlist: `PATH` and `PATHEXT`; the home, user, temporary, locale and terminal variables; Windows' system and profile folders, `ComSpec` among them; `SSL_CERT_FILE`, `SSL_CERT_DIR` and `NUGET_PACKAGES`; and anything starting `LC_`, `XDG_`, `DOTNET_`, `NODE_` or `QMD_`. Even from those, a variable is left out when its name contains, in any case, `TOKEN`, `SECRET`, `PASS`, `PWD`, `CREDENTIAL`, `KEY`, `AUTH`, `COOKIE`, `SESSION`, `DSN` or `CONNECTION_STRING`, or when its value holds a URL with a password. `MEMORIA_API_KEY` never reaches them. A local `qmd` that reaches a remote model through some other variable cannot do so under `migrate verify`. `self-update` runs the new binary with an allowlist of its own, and the macOS keychain tool runs with the same name and value checks but no allowlist, since it needs the login session as it is.
+
+## Help
+
+`memoria help` names no topic it does not know, so a key pasted as one never comes back on stdout or stderr.
 
 ## MCP bridge
 

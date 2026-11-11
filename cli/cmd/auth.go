@@ -167,6 +167,10 @@ func (a *app) loginURL(cfg *auth.Config, profile string) (string, error) {
 	if a.flags.apiURL != "" {
 		return a.flags.apiURL, nil
 	}
+	// A key on the command line is tied to no server, so it names its server the same way.
+	if a.flags.apiKey != "" {
+		return "", apperr.New(apperr.KindInsecure, "a key from --api-key is stored only for a server named the same way: pass --api-url")
+	}
 	if a.getenv(auth.EnvURL) != "" {
 		a.warn(auth.EnvURL + " is ignored by 'auth login'; pass --api-url to choose the server")
 	}

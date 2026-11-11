@@ -82,3 +82,21 @@ func TestABatchFileGetsEachArgumentWhole(t *testing.T) {
 		t.Fatalf("a query ran as a command: %v", err)
 	}
 }
+
+// npm's qmd shim runs through cmd.exe, which hands its own environment on: neither may carry a credential.
+// This test binary stands behind the shim, so no other program is needed.
+func TestABatchFileThroughCmdInheritsNoCredential(t *testing.T) {
+	exe, err := filepath.Abs(os.Args[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	shim := filepath.Join(t.TempDir(), "qmd.cmd")
+	writeFile(t, shim, "@\""+exe+"\" %*\r\n")
+	setChildEnvTestVariables(t)
+
+	out, err := runLocalQMD(t.Context(), shim, helperArgs())
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertChildEnvironment(t, out)
+}

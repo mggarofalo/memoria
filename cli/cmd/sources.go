@@ -198,7 +198,12 @@ func (a *app) localOrigin() (string, error) {
 		return "", err
 	}
 	resolver := &auth.Resolver{FlagURL: a.flags.apiURL, Profile: profile, Config: cfg, Getenv: a.getenv}
-	base, err := a.parseURL(resolver.ResolveURL())
+	raw := resolver.ResolveURL()
+	if raw == "" {
+		return "", apperr.New(apperr.KindUsage, "no server URL: run 'memoria auth login --api-url <url>', set %s, or pass --api-url", auth.EnvURL)
+	}
+	// Only the name: nothing is sent, so the plain-http rules wait for the command that sends.
+	base, err := transport.ParseBaseURL(raw)
 	if err != nil {
 		return "", err
 	}

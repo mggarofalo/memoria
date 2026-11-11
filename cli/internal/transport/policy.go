@@ -92,19 +92,54 @@ func classifyAddr(addr netip.Addr) Class {
 	return ClassPublic
 }
 
+// Allowance is how far the user has opted in to sending the key over plain http.
+type Allowance int
+
+const (
+	// AllowNone permits https, and plain http to loopback.
+	AllowNone Allowance = iota
+	// AllowPrivate also permits plain http to a private address.
+	AllowPrivate
+	// AllowInsecure permits plain http to any address or name.
+	AllowInsecure
+)
+
+// AllowanceOf is the allowance the two opt-ins grant. The broader one covers the narrower.
+func AllowanceOf(insecure, private bool) Allowance {
+	switch {
+	case insecure:
+		return AllowInsecure
+	case private:
+		return AllowPrivate
+	}
+	return AllowNone
+}
+
 // Evaluate applies the plain-http rules to a base URL. It returns a warning to
-// show, if any, and an error when the key must not be sent.
-func Evaluate(u *url.URL, allowInsecure bool) (warning string, err error) {
+// show, if any, and an error when the key must not be sent. A private address is
+// not this machine: on a network someone else runs, such as hotel Wi-Fi, the same
+// address can belong to anyone, and ARP spoofing reads the key in transit. So it
+// needs an opt-in too, and is never just a warning that the MCP bridge hides.
+func Evaluate(u *url.URL, allow Allowance) (warning string, err error) {
 	switch Classify(u) {
 	case ClassHTTPS, ClassLoopback:
 		return "", nil
 	case ClassPrivate:
-		return "plain http to a private address: the API key crosses the local network unencrypted. Prefer https.", nil
+		if allow >= AllowPrivate {
+			return privateOverrideWarning, nil
+		}
+		return "", privateRefusal()
 	}
-	if allowInsecure {
+	if allow >= AllowInsecure {
 		return insecureOverrideWarning, nil
 	}
 	return "", insecureRefusal()
+}
+
+const privateOverrideWarning = "plain http to a private address is explicitly allowed: the API key crosses the local network unencrypted, and on a network you do not run that address can be anyone's. Prefer https."
+
+func privateRefusal() error {
+	return apperr.New(apperr.KindInsecure, "refusing to send an API key over plain http to a private address, which on a network you do not run can be anyone's; use https, or pass --allow-private-http (or set MEMORIA_ALLOW_PRIVATE_HTTP=1) if this is your own network")
 }
 
 const insecureOverrideWarning = "insecure http is explicitly allowed: the API key is being sent unencrypted across a network anyone on the path can read."

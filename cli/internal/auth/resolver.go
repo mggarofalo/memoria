@@ -15,6 +15,7 @@ const (
 	EnvURL               = "MEMORIA_URL"
 	EnvProfile           = "MEMORIA_PROFILE"
 	EnvAllowInsecureHTTP = "MEMORIA_ALLOW_INSECURE_HTTP"
+	EnvAllowPrivateHTTP  = "MEMORIA_ALLOW_PRIVATE_HTTP"
 )
 
 // Sources a key can come from, in precedence order.
@@ -194,6 +195,27 @@ func StoredOrigin(store SecretStore, profile string) string {
 		return ""
 	}
 	return origin
+}
+
+// ExplicitURL reports whether this invocation names the server itself, by flag or
+// environment, rather than leaving it to the config file. A key given the same way
+// is tied to no server, so it may only go to a server named the same way: the
+// config file can be replaced by anyone who can set XDG_CONFIG_HOME or HOME.
+func (r *Resolver) ExplicitURL() bool {
+	return r.FlagURL != "" || r.getenv(EnvURL) != ""
+}
+
+// ExplicitKeySource names where an explicit key would come from, --api-key or
+// MEMORIA_API_KEY, or returns an empty string when the key will come from a store.
+// It reads no store, so it can be asked before anything else is decided.
+func (r *Resolver) ExplicitKeySource() string {
+	switch {
+	case r.FlagKey != "":
+		return "--api-key"
+	case r.getenv(EnvAPIKey) != "":
+		return EnvAPIKey
+	}
+	return ""
 }
 
 // ResolveURL returns the server URL from flag, env, or the active profile.
