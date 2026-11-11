@@ -96,7 +96,7 @@ claude mcp add --transport http memoria http://<api-host>:8080/mcp \
 | Key | Default | Purpose |
 |---|---|---|
 | `Mode` | `ApiKey` | `ApiKey` requires a key on every `/v1` and MCP route. `Disabled` turns authentication off for development; it must be set explicitly and logs a loud warning at startup. With `Disabled`, the host refuses to start unless every address it would listen on is loopback (`localhost` or a loopback IP), unless `AllowDisabledOnNetwork` is `true`. The value must be exactly one of those two, case-sensitive. Anything else stops the host, including `1`, `disabled`, ` Disabled `, `ApiKey,Disabled`, and a key that is set but empty. |
-| `AllowDisabledOnNetwork` | `false` | `true` lets `Mode = Disabled` listen on an address that is not loopback, such as the default `0.0.0.0`, where every caller can read every collection. Startup then logs a critical line naming the addresses. The check reads `Kestrel:Endpoints`, `urls` (`ASPNETCORE_URLS`, `--urls`, or the default) and `ASPNETCORE_HTTP_PORTS`/`HTTPS_PORTS`, all of them, before anything binds; a Unix socket or named pipe counts as the network. Ignored in `ApiKey` mode. |
+| `AllowDisabledOnNetwork` | `false` | `true` lets `Mode = Disabled` listen on an address that is not loopback, such as the default `0.0.0.0`, where every caller can read every collection. Startup then logs a critical line naming the addresses. Before anything binds, the check reads `Kestrel:Endpoints` and `urls` (`ASPNETCORE_URLS`, `--urls`, or the default), both even where Kestrel would ignore `urls`, and `ASPNETCORE_HTTP_PORTS`/`HTTPS_PORTS` when `urls` is unset, as Kestrel does. Once it is up, it checks the addresses it really bound, and checks again whenever configuration reloads, since Kestrel rebinds a changed endpoint from a watched settings file; a host found off loopback is stopped. A Unix socket or named pipe counts as the network. Ignored in `ApiKey` mode. |
 | `DatabasePath` | unset | The SQLite control database holding keys and audit records. **Required in `ApiKey` mode**: without it the host refuses to start. It is durable state, separate from QMD's index, and belongs on a local volume (SQLite's WAL mode does not work over a network share). Not needed in `Disabled` mode. |
 | `RateLimit:Enabled` | `true` | Enforce per-key limits. |
 | `RateLimit:PermitLimit` | `120` | Requests one key may make per window, counting ones that end in `403`. Over the limit: `429` with `Retry-After`. |
@@ -125,8 +125,8 @@ then manage keys over REST with that key:
 |---|---|
 | `POST /v1/admin/keys` | Issue a key. Body: `label`, `scopes`, then `collections` or `allCollections: true`, and optionally `expiresAt`, else `DefaultKeyLifetime` applies to a key with `read` or `ingest`. A key with `admin` cannot list `collections`: `400` with code `admin_key_bound`. `expiresAt` more than two years ahead is `400`. |
 | `GET /v1/admin/keys` | List keys, with no key material. |
-| `DELETE /v1/admin/keys/{id}` | Revoke. |
-| `POST /v1/admin/keys/{id}:rotate` | New secret, same id, scopes and expiry. The old token stops working at once. Revoked or expired keys get `409`. A key that would outlive the caller gets `403` with code `key_exceeds_caller`. |
+| `DELETE /v1/admin/keys/{id}` | Revoke. A key may always revoke itself, but not an active key that outlives it (`403`, `key_exceeds_caller`). |
+| `POST /v1/admin/keys/{id}:rotate` | New secret, same id, scopes and expiry. The old token stops working at once. Revoked or expired keys get `409`. A key that would outlive the caller gets `403` with code `key_exceeds_caller`, and a key holding `admin` beside a collection list gets `409` with code `bound_admin_key`. |
 
 ```bash
 curl -s -X POST http://localhost:8080/v1/admin/keys \
@@ -134,7 +134,7 @@ curl -s -X POST http://localhost:8080/v1/admin/keys \
   -d '{"label":"laptop","scopes":["read"],"collections":["claude-sessions"]}' | jq -r .key
 ```
 
-**Who may manage keys.** Key management needs the `admin` scope and a key bound to no collection, as [operations](#operations) do: a key that lists collections gets `403` with code `collection_scoped_key`, decided before the body is read. A key never issues or rotates a key wider than itself. `admin` grants the right to issue `read` and `ingest` keys on any collection, so in practice the limit is lifetime: a key with an `expiresAt` cannot issue a key that expires later or never, nor rotate one (`403`, `key_exceeds_caller`, with `dimension` naming what is wider). A key it issues with no `expiresAt` of its own ends when the issuer does, if that is sooner than `DefaultKeyLifetime`.
+**Who may manage keys.** Key management needs the `admin` scope and a key bound to no collection, as [operations](#operations) do: a key that lists collections gets `403` with code `collection_scoped_key`, decided before the body is read. A key never issues or rotates a key wider than itself. `admin` grants the right to issue `read` and `ingest` keys on any collection, so in practice the limit is lifetime: a key with an `expiresAt` cannot issue a key that expires later or never, nor rotate or revoke one (`403`, `key_exceeds_caller`, with `dimension` naming what is wider). A key revoked or expired while its request runs gets `403` with code `caller_inactive`. A key it issues with no `expiresAt` of its own ends when the issuer does, if that is sooner than `DefaultKeyLifetime`.
 
 **Lifetime cap.** `expiresAt` may be at most two years (730 days) ahead, for every key, and `DefaultKeyLifetime` may be at most as long. Rotating keeps a key's expiry, so issue a replacement before a key lapses.
 
@@ -157,7 +157,7 @@ you want both.
 
 ### Admin keys bound to collections
 
-Earlier versions issued `admin` beside a `collections` list. Such a key was not really bound: it could issue an all-collections key or revoke the others. Issuing one is now refused, and one already in the control database is **not given the `admin` scope**. It keeps its other scopes on its own collections, so a bound `admin` and `read` key still reads them, but every admin route answers `403` with code `collection_scoped_key`, `/ready` gives it the status word alone, and it sees no backend detail. It also no longer counts as an admin for `--bootstrap-admin-key`, so a deployment whose only admin key was bound can bootstrap a new one.
+Earlier versions issued `admin` beside a `collections` list. Such a key was not really bound: it could issue an all-collections key or revoke the others. Issuing one is now refused, and one already in the control database is **not given the `admin` scope**. It keeps its other scopes on its own collections, so a bound `admin` and `read` key still reads them, but every admin route answers `403` with code `collection_scoped_key`, `/ready` gives it the status word alone, and it sees no backend detail. It is not rotated (`409`, `bound_admin_key`). It also no longer counts as an admin for `--bootstrap-admin-key`, so a deployment whose only admin key was bound can bootstrap a new one.
 
 To find them, look for the warning startup logs for each one, event id `3201`, which names the key id, or run `memoria keys list` and look for a key whose scopes include `admin` and whose collections are not empty. To replace one, issue an admin key without collections (with `allCollections: true` if it must also read or ingest), give a bound key only `read` or `ingest` for the collections, move the clients over, and revoke the old key.
 

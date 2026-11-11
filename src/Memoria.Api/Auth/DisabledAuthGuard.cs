@@ -5,7 +5,9 @@ namespace Memoria.Api.Auth;
 /// unless every address it is configured to listen on is loopback, or <c>Memoria:Auth:AllowDisabledOnNetwork</c> says the
 /// operator means it. The addresses are read from configuration before anything binds: <c>Kestrel:Endpoints</c>, then
 /// <c>urls</c> (<c>ASPNETCORE_URLS</c>, <c>--urls</c>, or the host's own default), then <c>http_ports</c> and
-/// <c>https_ports</c>. All of them are checked, even where Kestrel would ignore some, so the guard errs toward refusing.
+/// <c>https_ports</c>, which, as in Kestrel, count only when <c>urls</c> is unset. Endpoints and <c>urls</c> are both checked, even
+/// where Kestrel would ignore <c>urls</c>, so the guard errs toward refusing. Once the host is up, <see cref="AuthHosting"/> checks the
+/// addresses it actually bound too, and checks again whenever the <c>Kestrel</c> section is reloaded.
 /// </summary>
 public static class DisabledAuthGuard
 {

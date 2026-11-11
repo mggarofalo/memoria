@@ -863,7 +863,7 @@
           "Admin"
         ],
         "summary": "Revoke an API key",
-        "description": "Takes effect on the key's next request. Revoking a revoked key succeeds and keeps the original timestamp. Requires the `admin` scope.",
+        "description": "Takes effect on the key's next request. Revoking a revoked key succeeds and keeps the original timestamp. A key may always revoke itself, but not an active key that outlives it (403, `key_exceeds_caller`). Requires the `admin` scope.",
         "operationId": "revokeApiKey",
         "parameters": [
           {
@@ -933,7 +933,7 @@
           "Admin"
         ],
         "summary": "Rotate an API key",
-        "description": "Replaces the key's secret and returns the new plaintext, once. The id, scopes, collections and expiry stay; the previous token stops working immediately. A revoked or expired key cannot be rotated (409), nor can a key that outlives the caller's own (403, `key_exceeds_caller`). Requires the `admin` scope.",
+        "description": "Replaces the key's secret and returns the new plaintext, once. The id, scopes, collections and expiry stay; the previous token stops working immediately. A revoked or expired key cannot be rotated (409), nor can a key that outlives the caller's own (403, `key_exceeds_caller`) or one holding `admin` beside a collection list (409, `bound_admin_key`). Requires the `admin` scope.",
         "operationId": "rotateApiKey",
         "parameters": [
           {

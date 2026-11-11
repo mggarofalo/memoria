@@ -777,14 +777,14 @@ type ClientInterface interface {
 
 	// RevokeApiKey Revoke an API key
 	//
-	// Takes effect on the key's next request. Revoking a revoked key succeeds and keeps the original timestamp. Requires the `admin` scope.
+	// Takes effect on the key's next request. Revoking a revoked key succeeds and keeps the original timestamp. A key may always revoke itself, but not an active key that outlives it (403, `key_exceeds_caller`). Requires the `admin` scope.
 	//
 	// Corresponds with DELETE /v1/admin/keys/{id} (the `RevokeApiKey` operationId).
 	RevokeApiKey(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// RotateApiKey Rotate an API key
 	//
-	// Replaces the key's secret and returns the new plaintext, once. The id, scopes, collections and expiry stay; the previous token stops working immediately. A revoked or expired key cannot be rotated (409), nor can a key that outlives the caller's own (403, `key_exceeds_caller`). Requires the `admin` scope.
+	// Replaces the key's secret and returns the new plaintext, once. The id, scopes, collections and expiry stay; the previous token stops working immediately. A revoked or expired key cannot be rotated (409), nor can a key that outlives the caller's own (403, `key_exceeds_caller`) or one holding `admin` beside a collection list (409, `bound_admin_key`). Requires the `admin` scope.
 	//
 	// Corresponds with POST /v1/admin/keys/{id}:rotate (the `RotateApiKey` operationId).
 	RotateApiKey(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -1058,7 +1058,7 @@ func (c *Client) CreateApiKey(ctx context.Context, body CreateApiKeyJSONRequestB
 
 // RevokeApiKey Revoke an API key
 //
-// Takes effect on the key's next request. Revoking a revoked key succeeds and keeps the original timestamp. Requires the `admin` scope.
+// Takes effect on the key's next request. Revoking a revoked key succeeds and keeps the original timestamp. A key may always revoke itself, but not an active key that outlives it (403, `key_exceeds_caller`). Requires the `admin` scope.
 //
 // Corresponds with DELETE /v1/admin/keys/{id} (the `RevokeApiKey` operationId).
 func (c *Client) RevokeApiKey(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*http.Response, error) {
@@ -1075,7 +1075,7 @@ func (c *Client) RevokeApiKey(ctx context.Context, id string, reqEditors ...Requ
 
 // RotateApiKey Rotate an API key
 //
-// Replaces the key's secret and returns the new plaintext, once. The id, scopes, collections and expiry stay; the previous token stops working immediately. A revoked or expired key cannot be rotated (409), nor can a key that outlives the caller's own (403, `key_exceeds_caller`). Requires the `admin` scope.
+// Replaces the key's secret and returns the new plaintext, once. The id, scopes, collections and expiry stay; the previous token stops working immediately. A revoked or expired key cannot be rotated (409), nor can a key that outlives the caller's own (403, `key_exceeds_caller`) or one holding `admin` beside a collection list (409, `bound_admin_key`). Requires the `admin` scope.
 //
 // Corresponds with POST /v1/admin/keys/{id}:rotate (the `RotateApiKey` operationId).
 func (c *Client) RotateApiKey(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*http.Response, error) {
@@ -3022,7 +3022,7 @@ type ClientWithResponsesInterface interface {
 
 	// RevokeApiKeyWithResponse Revoke an API key
 	//
-	// Takes effect on the key's next request. Revoking a revoked key succeeds and keeps the original timestamp. Requires the `admin` scope.
+	// Takes effect on the key's next request. Revoking a revoked key succeeds and keeps the original timestamp. A key may always revoke itself, but not an active key that outlives it (403, `key_exceeds_caller`). Requires the `admin` scope.
 	//
 	// Returns a wrapper object for the known response body format(s).
 	//
@@ -3031,7 +3031,7 @@ type ClientWithResponsesInterface interface {
 
 	// RotateApiKeyWithResponse Rotate an API key
 	//
-	// Replaces the key's secret and returns the new plaintext, once. The id, scopes, collections and expiry stay; the previous token stops working immediately. A revoked or expired key cannot be rotated (409), nor can a key that outlives the caller's own (403, `key_exceeds_caller`). Requires the `admin` scope.
+	// Replaces the key's secret and returns the new plaintext, once. The id, scopes, collections and expiry stay; the previous token stops working immediately. A revoked or expired key cannot be rotated (409), nor can a key that outlives the caller's own (403, `key_exceeds_caller`) or one holding `admin` beside a collection list (409, `bound_admin_key`). Requires the `admin` scope.
 	//
 	// Returns a wrapper object for the known response body format(s).
 	//
@@ -5593,7 +5593,7 @@ func (c *ClientWithResponses) CreateApiKeyWithResponse(ctx context.Context, body
 
 // RevokeApiKeyWithResponse Revoke an API key
 //
-// Takes effect on the key's next request. Revoking a revoked key succeeds and keeps the original timestamp. Requires the `admin` scope.
+// Takes effect on the key's next request. Revoking a revoked key succeeds and keeps the original timestamp. A key may always revoke itself, but not an active key that outlives it (403, `key_exceeds_caller`). Requires the `admin` scope.
 //
 // Returns a wrapper object for the known response body format(s).
 //
@@ -5608,7 +5608,7 @@ func (c *ClientWithResponses) RevokeApiKeyWithResponse(ctx context.Context, id s
 
 // RotateApiKeyWithResponse Rotate an API key
 //
-// Replaces the key's secret and returns the new plaintext, once. The id, scopes, collections and expiry stay; the previous token stops working immediately. A revoked or expired key cannot be rotated (409), nor can a key that outlives the caller's own (403, `key_exceeds_caller`). Requires the `admin` scope.
+// Replaces the key's secret and returns the new plaintext, once. The id, scopes, collections and expiry stay; the previous token stops working immediately. A revoked or expired key cannot be rotated (409), nor can a key that outlives the caller's own (403, `key_exceeds_caller`) or one holding `admin` beside a collection list (409, `bound_admin_key`). Requires the `admin` scope.
 //
 // Returns a wrapper object for the known response body format(s).
 //

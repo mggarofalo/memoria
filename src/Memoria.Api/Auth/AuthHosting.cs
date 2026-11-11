@@ -80,6 +80,7 @@ public static partial class AuthHosting
 		if (auth.IsDisabled)
 		{
 			RefuseDisabledOnNetwork(logger, app.Configuration, auth.AllowDisabledOnNetwork);
+			WatchDisabledBinding(app, logger, auth.AllowDisabledOnNetwork);
 			return;
 		}
 
@@ -91,6 +92,38 @@ public static partial class AuthHosting
 		{
 			LogBoundAdmin(logger, bound.Id);
 		}
+	}
+
+	/// <summary>
+	/// The check before binding reads configuration. Once the host is up, this checks what it really bound, which also catches
+	/// a listener added in code, and checks again whenever the <c>Kestrel</c> section is reloaded: Kestrel rebinds a changed
+	/// endpoint from a watched settings file while it runs. A host found on the network is stopped.
+	/// </summary>
+	private static void WatchDisabledBinding(WebApplication app, ILogger logger, bool allowOnNetwork)
+	{
+		void Check()
+		{
+			IEnumerable<string> bound = app.Services.GetRequiredService<Microsoft.AspNetCore.Hosting.Server.IServer>()
+				.Features.Get<Microsoft.AspNetCore.Hosting.Server.Features.IServerAddressesFeature>()?.Addresses ?? [];
+			StopIfOnNetwork(logger, [.. bound, .. DisabledAuthGuard.ListenAddresses(app.Configuration)], allowOnNetwork, app.Lifetime.StopApplication);
+		}
+
+		app.Lifetime.ApplicationStarted.Register(Check);
+		Microsoft.Extensions.Primitives.ChangeToken.OnChange(() => app.Configuration.GetReloadToken(), Check);
+	}
+
+	/// <summary>Stops a disabled-mode host that is listening off loopback without the opt-in. True when it stopped it.</summary>
+	public static bool StopIfOnNetwork(ILogger logger, IEnumerable<string> addresses, bool allowOnNetwork, Action stop)
+	{
+		string[] network = DisabledAuthGuard.OnNetwork(addresses);
+		if (network.Length == 0 || allowOnNetwork)
+		{
+			return false;
+		}
+
+		LogDisabledRefused(logger, string.Join(';', network));
+		stop();
+		return true;
 	}
 
 	/// <summary>Disabled mode starts only on loopback, unless the operator opted in to the network. It says so loudly either way.</summary>

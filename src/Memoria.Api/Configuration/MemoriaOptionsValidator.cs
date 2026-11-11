@@ -88,7 +88,7 @@ public sealed class MemoriaOptionsValidator : IValidateOptions<MemoriaOptions>
 			return;
 		}
 
-		Require(auth.IsDisabled || !string.IsNullOrWhiteSpace(auth.DatabasePath), "Memoria:Auth:DatabasePath is required when Memoria:Auth:Mode is ApiKey (the default). For anonymous development on a trusted LAN, set Memoria:Auth:Mode to Disabled explicitly.", failures);
+		Require(auth.IsDisabled || !string.IsNullOrWhiteSpace(auth.DatabasePath), "Memoria:Auth:DatabasePath is required when Memoria:Auth:Mode is ApiKey (the default). For anonymous development on loopback, set Memoria:Auth:Mode to Disabled explicitly.", failures);
 		Require(auth.DefaultKeyLifetime is not { } lifetime || (lifetime >= TimeSpan.FromHours(1) && lifetime <= Auth.KeyGrant.MaxLifetime), "Memoria:Auth:DefaultKeyLifetime must be between an hour and two years (730 days), the longest any key may last, or unset for keys that never expire.", failures);
 	}
 

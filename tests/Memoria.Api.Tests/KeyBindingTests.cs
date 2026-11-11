@@ -181,6 +181,40 @@ public sealed class KeyBindingTests(AuthApiFactory factory) : IClassFixture<Auth
 		Assert.Equal(until.ToUnixTimeSeconds(), issued.Info.ExpiresAt!.Value.ToUnixTimeSeconds());
 	}
 
+	[Fact]
+	public async Task An_expiring_admin_key_cannot_revoke_a_key_that_outlives_it_but_can_revoke_itself()
+	{
+		DateTimeOffset now = DateTimeOffset.UtcNow;
+		(ApiKeyRecord shortRecord, string shortToken) = await factory.IssueAsync([MemoriaScopes.Admin], expiresAt: now.AddDays(10));
+		(ApiKeyRecord forever, _) = await factory.IssueAsync([MemoriaScopes.Admin]);
+		(ApiKeyRecord briefer, _) = await factory.IssueAsync([MemoriaScopes.Read], ["c"], expiresAt: now.AddDays(5));
+		(ApiKeyRecord gone, _) = await factory.IssueAsync([MemoriaScopes.Admin]);
+		await factory.Store.RevokeAsync(gone.Id, now);
+		HttpClient shortLived = Client(shortToken);
+
+		HttpResponseMessage refused = await shortLived.DeleteAsync($"/v1/admin/keys/{forever.Id}");
+
+		Assert.Equal(HttpStatusCode.Forbidden, refused.StatusCode);
+		Assert.Equal("key_exceeds_caller", await CodeOf(refused));
+		Assert.Null((await factory.Store.FindAsync(forever.Id))!.RevokedAt);
+		Assert.Equal(HttpStatusCode.NoContent, (await shortLived.DeleteAsync($"/v1/admin/keys/{briefer.Id}")).StatusCode);
+		Assert.Equal(HttpStatusCode.NoContent, (await shortLived.DeleteAsync($"/v1/admin/keys/{gone.Id}")).StatusCode);
+		Assert.Equal(HttpStatusCode.NotFound, (await shortLived.DeleteAsync("/v1/admin/keys/0000000000000000")).StatusCode);
+		Assert.Equal(HttpStatusCode.NoContent, (await shortLived.DeleteAsync($"/v1/admin/keys/{shortRecord.Id}")).StatusCode);
+	}
+
+	[Fact]
+	public async Task An_old_bound_admin_key_is_not_rotated()
+	{
+		(ApiKeyRecord bound, _) = await factory.IssueAsync([MemoriaScopes.Admin, MemoriaScopes.Read], ["c"]);
+		HttpClient admin = await factory.AdminAsync();
+
+		HttpResponseMessage response = await admin.PostAsync($"/v1/admin/keys/{bound.Id}:rotate", null);
+
+		Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+		Assert.Equal("bound_admin_key", await CodeOf(response));
+		Assert.Equal(bound.Sha256Hash, (await factory.Store.FindAsync(bound.Id))!.Sha256Hash);
+	}
 	[Theory]
 	[InlineData("9999-12-31T00:00:00Z")]
 	[InlineData("+731")]
@@ -339,6 +373,29 @@ public sealed class DisabledAuthGuardTests
 		Assert.Equal(HttpStatusCode.OK, (await factory.CreateClient().GetAsync("/health")).StatusCode);
 	}
 
+	[Fact]
+	public void A_running_host_found_on_the_network_is_stopped_unless_told_otherwise()
+	{
+		int stops = 0;
+		Microsoft.Extensions.Logging.Abstractions.NullLogger logger = Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
+
+		Assert.True(AuthHosting.StopIfOnNetwork(logger, ["http://127.0.0.1:5000", "http://[::]:8080"], allowOnNetwork: false, () => stops++));
+		Assert.False(AuthHosting.StopIfOnNetwork(logger, ["http://[::]:8080"], allowOnNetwork: true, () => stops++));
+		Assert.False(AuthHosting.StopIfOnNetwork(logger, ["http://127.0.0.1:5000", "http://localhost:5001"], allowOnNetwork: false, () => stops++));
+		Assert.Equal(1, stops);
+	}
+
+	[Fact]
+	public async Task Disabled_mode_on_real_kestrel_on_loopback_stays_up()
+	{
+		using MemoriaApiFactory baseFactory = new();
+		using WebApplicationFactory<Program> server = baseFactory.WithWebHostBuilder(static builder => builder.UseSetting("urls", "http://127.0.0.1:0"));
+		server.UseKestrel();
+		server.StartServer();
+
+		Assert.Equal(HttpStatusCode.OK, (await server.CreateClient().GetAsync("/health")).StatusCode);
+		Assert.DoesNotContain(baseFactory.Logs, static l => l.EventId.Id == 3203);
+	}
 	[Theory]
 	[InlineData("http://127.0.0.1:8080", true)]
 	[InlineData("http://127.8.9.10:8080", true)]

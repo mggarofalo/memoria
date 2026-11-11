@@ -55,7 +55,7 @@ public static partial class AdminKeyEndpoints
 		keys.MapDelete("/{id}", RevokeAsync)
 			.WithName("revokeApiKey")
 			.WithSummary("Revoke an API key")
-			.WithDescription("Takes effect on the key's next request. Revoking a revoked key succeeds and keeps the original timestamp.")
+			.WithDescription("Takes effect on the key's next request. Revoking a revoked key succeeds and keeps the original timestamp. A key may always revoke itself, but not an active key that outlives it (403, `key_exceeds_caller`).")
 			.ProducesProblem(StatusCodes.Status404NotFound);
 
 		keys.MapPost("/{id}:rotate", RotateAsync)
@@ -64,7 +64,7 @@ public static partial class AdminKeyEndpoints
 			.WithDescription(
 				"Replaces the key's secret and returns the new plaintext, once. The id, scopes, collections and expiry stay; "
 				+ "the previous token stops working immediately. A revoked or expired key cannot be rotated (409), "
-				+ "nor can a key that outlives the caller's own (403, `key_exceeds_caller`).")
+				+ "nor can a key that outlives the caller's own (403, `key_exceeds_caller`) or one holding `admin` beside a collection list (409, `bound_admin_key`).")
 			.ProducesProblem(StatusCodes.Status404NotFound)
 			.ProducesProblem(StatusCodes.Status409Conflict);
 
@@ -104,7 +104,7 @@ public static partial class AdminKeyEndpoints
 			return TypedResults.ValidationProblem(errors, extensions: ValidationCode(request));
 		}
 
-		ApiKeyRecord? caller = await CallerAsync(store, context, cancellationToken);
+		ApiKeyRecord? caller = await CallerAsync(store, context, now, cancellationToken);
 		string[] scopes = request.Scopes!.Distinct(StringComparer.Ordinal).ToArray();
 		string[] collections = (request.Collections ?? []).Distinct(StringComparer.Ordinal).ToArray();
 		bool allCollections = request.AllCollections == true;
@@ -146,26 +146,41 @@ public static partial class AdminKeyEndpoints
 		return second is { } b && b < a ? b : a;
 	}
 
-	/// <summary>The calling key's own record. The route needs a key, so it is null only if that key vanished mid-request.</summary>
-	private static async Task<ApiKeyRecord?> CallerAsync(IApiKeyStore store, HttpContext context, CancellationToken cancellationToken)
+	/// <summary>
+	/// The calling key's own record, read again now. Null when it has gone, or was revoked or expired since it authenticated,
+	/// so a request already in flight cannot outlive its key.
+	/// </summary>
+	private static async Task<ApiKeyRecord?> CallerAsync(IApiKeyStore store, HttpContext context, DateTimeOffset now, CancellationToken cancellationToken)
 	{
-		return Actor(context) is { } id ? await store.FindAsync(id, cancellationToken) : null;
+		ApiKeyRecord? caller = Actor(context) is { } id ? await store.FindAsync(id, cancellationToken) : null;
+		return caller is not null && caller.IsActive(now) ? caller : null;
 	}
 
-	/// <summary>Null when the caller may hand out a key of this shape; otherwise the 403 that says which way it is wider.</summary>
+	/// <summary>Null when the caller may hand out, rotate or revoke a key of this shape; otherwise the 403 that says why not.</summary>
 	private static ProblemHttpResult? WiderThanCaller(ApiKeyRecord? caller, IReadOnlyCollection<string> scopes, IReadOnlyCollection<string> collections, bool allCollections, DateTimeOffset? expiresAt)
 	{
-		string? dimension = caller is null ? "scopes" : KeyGrant.Exceeds(caller, scopes, collections, allCollections, expiresAt);
+		if (caller is null)
+		{
+			return TypedResults.Problem(
+				statusCode: StatusCodes.Status403Forbidden,
+				title: "Calling key is not active",
+				detail: "The key making this request was revoked or expired while it ran.",
+				extensions: new Dictionary<string, object?> { ["code"] = "caller_inactive" });
+		}
+
+		string? dimension = KeyGrant.Exceeds(caller, scopes, collections, allCollections, expiresAt);
 		if (dimension is null)
 		{
 			return null;
 		}
 
+		string why = dimension == "lifetime"
+			? "A key that expires cannot make, rotate or revoke one that outlives it: name an earlier expiresAt, or use a key that does not expire."
+			: $"It would be wider in its {dimension}.";
 		return TypedResults.Problem(
 			statusCode: StatusCodes.Status403Forbidden,
 			title: "Key is wider than the caller",
-			detail: $"A key cannot issue or rotate a key wider than itself, and this one would be wider in its {dimension}. "
-				+ "A key that expires cannot make one that outlives it: name an earlier expiresAt, or use a key that does not expire.",
+			detail: "A key cannot issue, rotate or revoke a key wider than itself. " + why,
 			extensions: new Dictionary<string, object?> { ["code"] = "key_exceeds_caller", ["dimension"] = dimension });
 	}
 
@@ -185,7 +200,16 @@ public static partial class AdminKeyEndpoints
 		KnownGoodKeys knownGood,
 		CancellationToken cancellationToken)
 	{
-		if (!await store.RevokeAsync(id, timeProvider.GetUtcNow(), cancellationToken))
+		// A key may always revoke itself, and revoking a key that no longer works takes nothing away. Otherwise a key
+		// that expires cannot revoke one that outlives it: a short-lived automation key must not lock the operator out.
+		DateTimeOffset now = timeProvider.GetUtcNow();
+		if (await store.FindAsync(id, cancellationToken) is { } target && target.IsActive(now) && target.Id != Actor(context)
+			&& WiderThanCaller(await CallerAsync(store, context, now, cancellationToken), target.Scopes, target.Collections, target.AllCollections, target.ExpiresAt) is { } wider)
+		{
+			return wider;
+		}
+
+		if (!await store.RevokeAsync(id, now, cancellationToken))
 		{
 			return UnknownKey();
 		}
@@ -216,12 +240,22 @@ public static partial class AdminKeyEndpoints
 			return UnknownKey();
 		}
 
-		if (!record.IsActive(timeProvider.GetUtcNow()))
+		DateTimeOffset now = timeProvider.GetUtcNow();
+		if (!record.IsActive(now))
 		{
 			return InactiveKey();
 		}
 
-		ApiKeyRecord? caller = await CallerAsync(store, context, cancellationToken);
+		if (record.HoldsBoundAdmin)
+		{
+			return TypedResults.Problem(
+				statusCode: StatusCodes.Status409Conflict,
+				title: "Key holds admin beside a collection list",
+				detail: "Such a key can no longer be issued, so it is not rotated either. Issue an admin key without collections, and a read or ingest key for the collections, then revoke this one.",
+				extensions: new Dictionary<string, object?> { ["code"] = "bound_admin_key" });
+		}
+
+		ApiKeyRecord? caller = await CallerAsync(store, context, now, cancellationToken);
 		if (WiderThanCaller(caller, record.Scopes, record.Collections, record.AllCollections, record.ExpiresAt) is { } wider)
 		{
 			return wider;
