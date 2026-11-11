@@ -46,10 +46,10 @@ internal static partial class CodeValues
 	}
 
 	/// <summary>True for a value that only code or a version range could be. <paramref name="unquoted"/> allows the shapes a quoted string can also hold.</summary>
-	public static bool IsCode(string value, bool unquoted)
+	public static bool IsCode(string value, bool unquoted, bool templatesAreCode = true)
 	{
 		return IsVersionRange(value)
-			|| IsInterpolationOnly(value)
+			|| (templatesAreCode && IsInterpolationOnly(value))
 			|| (unquoted && (IsCollectionLiteral(value) || IsCallCutAtLineEnd(value) || IsRegexLiteral(value)));
 	}
 
@@ -75,6 +75,48 @@ internal static partial class CodeValues
 	public static bool IsInterpolationOnly(string value)
 	{
 		return Remainder(value) is string rest && !HoldsSecretLikePiece(rest) && !HoldsWord(rest);
+	}
+
+	/// <summary>
+	/// True when every piece of text beside a template's spans, with the data its spans carry, such as a shell default, is what only code
+	/// is: separators, markup, an upper-case name, or words of three letters or fewer with no digit. <c>/qz7/mv3/hx9</c> is not, as its
+	/// chunks mix letters and digits, and nor is <c>Summerpassword</c>. A value with no span, or whose span only wraps a literal, is not a
+	/// template here.
+	/// </summary>
+	public static bool TextBesideSpansIsCode(string value)
+	{
+		if (Remainder(value) is not string rest)
+		{
+			return true;
+		}
+
+		foreach (string piece in Tag().Replace(rest, " ").Split([' ', '\t', '/', '\\', ',', ';', ':', '=', '"', '\'', '`'], StringSplitOptions.RemoveEmptyEntries))
+		{
+			bool name = piece.Contains('_', StringComparison.Ordinal) && piece.Any(char.IsAsciiLetter) && !piece.Any(char.IsAsciiLetterLower);
+			if (!name && !IsShortWords(piece))
+			{
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	/// <summary>Each run of letters and digits in the text is a word of three letters or fewer, with no digit.</summary>
+	private static bool IsShortWords(string text)
+	{
+		int run = 0;
+		foreach (char c in text)
+		{
+			if (char.IsAsciiDigit(c) || (char.IsAsciiLetter(c) && ++run > 3))
+			{
+				return false;
+			}
+
+			run = char.IsAsciiLetter(c) ? run : 0;
+		}
+
+		return true;
 	}
 
 	/// <summary>

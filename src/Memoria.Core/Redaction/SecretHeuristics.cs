@@ -652,7 +652,7 @@ internal static class SecretHeuristics
 		// Backticks mark code in markdown, so a call inside them is still a call. Quotes make a literal.
 		bool readAsCode = !IsQuoted(input, start) || input[start - 1] == '`';
 		bool literalDollar = input[start - 1] == '\'' && IsLiteralDollar(value);
-		return (!literalDollar && IsBenignValue(value, keyGroup.Value, readAsCode))
+		return (!literalDollar && IsBenignValue(value, keyGroup.Value, readAsCode, TemplatesAreCode(kind, value)))
 			|| IsNestedYamlKey(input, keyGroup, start, value)
 			|| IsHostAfterPlaceholder(candidate.Value, value);
 	}
@@ -810,7 +810,18 @@ internal static class SecretHeuristics
 		return value.Split('-', '_').All(static segment => segment.All(char.IsAsciiLetter) || segment.All(char.IsAsciiDigit));
 	}
 
-	private static bool IsBenignValue(string value, string key, bool readAsCode)
+	/// <summary>
+	/// Whether a template counts as code here. Under a credential's name, text beside its spans is judged as a value instead, however short
+	/// its chunks, as <c>${base}/qz7/mv3/hx9</c> under <c>api_key</c> may join a secret to code. Text that only code is stays: markup, an
+	/// upper-case name such as <c>MEMORIA_WORKER_TOKEN_FILE</c>, or words of three letters or fewer, as <c>mem_</c> in a key's template.
+	/// Under a name that describes a secret, a template stays code.
+	/// </summary>
+	private static bool TemplatesAreCode(KeyKind kind, string value)
+	{
+		return kind is not (KeyKind.Password or KeyKind.Token or KeyKind.KeyFamily) || CodeValues.TextBesideSpansIsCode(value);
+	}
+
+	private static bool IsBenignValue(string value, string key, bool readAsCode, bool templatesAreCode = true)
 	{
 		return ValueShapes.IsPlaceholder(value)
 			|| Keywords.Contains(value)
@@ -818,7 +829,7 @@ internal static class SecretHeuristics
 			|| IsLocator(value)
 			|| IsSourceLocation(value)
 			|| IsFileName(value)
-			|| CodeValues.IsCode(value, readAsCode)
+			|| CodeValues.IsCode(value, readAsCode, templatesAreCode)
 			|| (readAsCode && ValueShapes.IsCodeReference(value));
 	}
 
