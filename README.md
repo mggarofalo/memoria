@@ -28,6 +28,7 @@ Container images publish to `ghcr.io/mggarofalo/memoria` (the API) and `ghcr.io/
 ## Development
 
 ```bash
+npm ci                             # at the root, first: installs the dev tooling and the git hooks
 dotnet build Memoria.slnx          # build the API
 dotnet test Memoria.slnx           # run tests
 (cd cli && go build ./...)         # build the CLI
