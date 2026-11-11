@@ -78,6 +78,68 @@ internal static partial class CodeValues
 	}
 
 	/// <summary>
+	/// A template that builds a path of words from its literal text alone, as <c>memoria/${env}/api-key</c> or
+	/// <c>${home}/.config/memoria/token</c> does. A span that carries data of its own, such as a shell default, does not count, as the data
+	/// could be the secret. Only a name that describes a secret, such as <c>secretName</c> or <c>tokenPath</c>, may hold one: under a
+	/// password's or a token's name, words between slashes can be the secret itself, as in <c>${SALT}/hunter/two</c>.
+	/// </summary>
+	public static bool IsTemplatedPath(string value)
+	{
+		StringBuilder literal = new();
+		int from = 0;
+		bool spans = false;
+		while (NextSpan(value, from) is (int start, int end))
+		{
+			string body = value[(start + 2)..Math.Min(value.Length, Math.Max(start + 2, end - 1))];
+			if (IsBareLiteral(body) || DataIn(body, value[start + 1] == '(').Trim().Length > 0)
+			{
+				return false;
+			}
+
+			literal.Append(value, from, start - from).Append(' ');
+			from = Math.Min(end, value.Length);
+			spans = true;
+		}
+
+		string rest = literal.Append(value, from, value.Length - from).ToString();
+		return spans && !HoldsSecretLikePiece(rest) && IsPathOfWords(rest);
+	}
+
+	/// <summary>
+	/// A template's text, its spans taken out, that divides at <c>/</c> into segments of words, such as <c>memoria/ /api-key</c>: a path, a
+	/// key's name in a vault, or a route. Each segment's parts, between <c>-</c>, <c>_</c>, <c>.</c> and <c>~</c>, must be words, maybe
+	/// capitalised, with at most two digits after them, or a number of at most four, and at most 20 characters, so a random segment such
+	/// as <c>kd8sj2nx…</c> or <c>Pr0dP4ss</c> beside a span is still taken for a secret.
+	/// </summary>
+	internal static bool IsPathOfWords(string rest)
+	{
+		if (!rest.Contains('/', StringComparison.Ordinal))
+		{
+			return false;
+		}
+
+		// One word after a slash, as in ${PREFIX}/Summerpassword, is no path: it takes two segments with words in them.
+		string[] segments = rest.Split('/');
+		if (segments.Count(static segment => segment.Trim().Length > 0) < 2)
+		{
+			return false;
+		}
+
+		foreach (string segment in segments)
+		{
+			foreach (string part in segment.Split(['-', '_', '.', '~', ' '], StringSplitOptions.RemoveEmptyEntries))
+			{
+				if (part.Length > 20 || !PathWord().IsMatch(part))
+				{
+					return false;
+				}
+			}
+		}
+
+		return true;
+	}
+
+	/// <summary>
 	/// The value with each span replaced by the data it carries, or null when it has no span or a span is only a literal. The data is a
 	/// shell default after :- or :=, and the quoted literals a command substitution prints. A literal passed to a call in a template,
 	/// as in toString("base64url"), is an argument. Built in one pass, so many spans cost no more than one long one.
@@ -357,6 +419,10 @@ internal static partial class CodeValues
 		int close = text.IndexOf('>', 1, Math.Min(LongestTagName + 1, text.Length - 1));
 		return close > 1 && text.AsSpan(1, close - 1).IndexOfAnyExceptInRange('a', 'z') < 0 ? close + 1 : 0;
 	}
+
+	/// <summary>A path's word: letters, maybe capitalised, with at most two digits after them, or a number of at most four.</summary>
+	[GeneratedRegex(@"^(?:[A-Za-z]?[a-z]+[0-9]{0,2}|[0-9]{1,4})$")]
+	private static partial Regex PathWord();
 
 	[GeneratedRegex(@"^(?:\^|~|[<>]=?|=)v?[0-9]+(?:\.(?:[0-9]+|x|\*)){1,3}(?:-[a-z]+(?:\.?[0-9]+)?)?$", RegexOptions.CultureInvariant)]
 	private static partial Regex VersionRange();

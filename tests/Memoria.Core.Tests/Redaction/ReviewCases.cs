@@ -15,9 +15,13 @@ internal static class ReviewCases
 	public static readonly (string Rule, string Secret)[] ProviderTokens =
 	[
 		("sendgrid-key", "S" + "G." + Synthetic.Body(22, 802) + "." + Synthetic.Body(43, 803)),
-		("twilio-key", "A" + "C" + Synthetic.Hex(32, 804)),
 		("twilio-key", "S" + "K" + Synthetic.Hex(32, 805)),
 		("mailgun-key", "ke" + "y-" + Synthetic.Hex(32, 806)),
+		("newrelic-key", "NR" + "AK-" + Synthetic.Upper(27, 813)),
+		("newrelic-key", "NR" + "AA-" + Synthetic.Body(27, 814)),
+		("newrelic-key", "NR" + "II-" + Synthetic.Body(16, 815) + "-" + Synthetic.Body(15, 816)),
+		("newrelic-key", "NR" + "JS-" + Synthetic.Hex(19, 817)),
+		("newrelic-key", Synthetic.Hex(36, 818) + "NR" + "AL"),
 		("digitalocean-token", "do" + "p_v1_" + Synthetic.Hex(64, 807)),
 		("vercel-token", "vc" + "p_" + Synthetic.Body(24, 808)),
 		("supabase-token", "sb" + "p_" + Synthetic.Hex(40, 809)),

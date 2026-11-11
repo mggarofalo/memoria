@@ -6,8 +6,11 @@ using Memoria.Core.Tests.Redaction.Gitleaks;
 namespace Memoria.Core.Tests.Redaction;
 
 /// <summary>
-/// The two numbers a redaction change is held to: lines of this repository's own non-test files that redaction changes, though none
-/// holds a real credential, and how many of the sampled imported-rule tokens are caught. The report is opt-in, as it reads every tracked
+/// The numbers a redaction change is held to. Lines of this repository's own non-test files that redaction changes, though none holds a
+/// real credential. The import regression bar: how many of the imported rules' samples are caught, each drawn from its rule's own
+/// pattern, so it shows the import kept the rules and not that they know real tokens. Real-format provider tokens caught, which
+/// <see cref="Gitleaks.ProviderFormats"/> writes by hand, in each context. And benign transcript lines changed, from
+/// <c>Fixtures/benign-lines.txt</c>, which must be 0. The report is opt-in, as it reads every tracked
 /// file. Run it with
 /// <code>MEMORIA_REDACTION_REPORT=&lt;directory&gt; dotnet test tests/Memoria.Core.Tests --filter RedactionMeasurement</code>
 /// and compare <c>redaction-report.txt</c> before and after a change. It lists every changed line, so a new one shows in a diff.
@@ -46,15 +49,24 @@ public sealed class RedactionMeasurementTests
 		}
 
 		string[] missed = [.. ImportedCases.Forms.Where(static form => Redactor.Shared.RedactFragment(form.Text).Text.Contains(form.Secret, StringComparison.Ordinal)).Select(static form => form.Rule)];
+		string[] uncaught = [.. ProviderFormats.Tokens.SelectMany(static token => ProviderFormats.Contexts.Select(context => (token.Provider, Text: context.Replace("{T}", token.Token, StringComparison.Ordinal), token.Token)))
+			.Where(static form => Redactor.Shared.RedactFragment(form.Text).Text.Contains(form.Token, StringComparison.Ordinal)).Select(static form => form.Provider)];
+		int forms = ProviderFormats.Tokens.Count * ProviderFormats.Contexts.Count;
+		int benignChanged = BenignLines.All.Count(static line => Redactor.Shared.RedactFragment(line).Text != line);
 
 		StringBuilder report = new();
 		report.AppendLine($"non-test files: {files}");
 		report.AppendLine($"wrongly changed lines: {changed.Count}");
 		report.AppendLine($"vendored sample lines changed: {vendored.Count}");
-		report.AppendLine($"sampled tokens caught: {ImportedCases.Forms.Count - missed.Length} of {ImportedCases.Forms.Count}");
+		// Each sample is drawn from its rule's own pattern and kept only if that rule matches it, so this says the import kept the rules.
+		report.AppendLine($"import regression bar, samples drawn from each rule's own pattern: {ImportedCases.Forms.Count - missed.Length} of {ImportedCases.Forms.Count}");
+		report.AppendLine($"real-format provider tokens caught, in {ProviderFormats.Contexts.Count} contexts each: {forms - uncaught.Length} of {forms}");
+		report.AppendLine($"benign transcript lines changed, which must be 0: {benignChanged} of {BenignLines.All.Count}");
 		report.AppendLine();
 		report.AppendLine("missed sampled rules:");
 		missed.ToList().ForEach(rule => report.AppendLine("  " + rule));
+		report.AppendLine("providers missed in some context:");
+		uncaught.Distinct().ToList().ForEach(provider => report.AppendLine("  " + provider));
 		report.AppendLine();
 		report.AppendLine("changed lines:");
 		changed.ForEach(line => report.AppendLine("  " + line));

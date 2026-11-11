@@ -118,6 +118,13 @@ public sealed partial class RedactionKeepsTheRestTests
 			// pattern needs after the secret, such as a host, stays.
 			string after = form.After.Any(char.IsAsciiLetterOrDigit) ? form.After : "";
 			string output = Redactor.Shared.RedactFragment(form.Before + form.Secret + after).Text;
+
+			if (PaddingLeftAfter(form, after, output) is { } shadowed)
+			{
+				yield return shadowed;
+				continue;
+			}
+
 			Match placed = output.StartsWith(form.Before, StringComparison.Ordinal) && output.EndsWith(after, StringComparison.Ordinal)
 				? OnePlaceholder().Match(output[form.Before.Length..^after.Length])
 				: Match.Empty;
@@ -127,6 +134,24 @@ public sealed partial class RedactionKeepsTheRestTests
 			string label = placed.Success && kept.Length < form.Secret.Length ? placed.Groups["name"].Value : form.Rule;
 			yield return (label, form.Before + kept + "{S}" + after, form.Secret[kept.Length..]);
 		}
+	}
+
+	/// <summary>
+	/// An imported rule takes <c>=</c> padding glued after its value. A rule of ours for a format with none, such as New Relic's keys,
+	/// ends before it and leaves it as written, so that padding is context after the secret, and the label is our rule's.
+	/// </summary>
+	private static (string Rule, string Template, string Secret)? PaddingLeftAfter(Gitleaks.ImportedCases.Form form, string after, string output)
+	{
+		string padding = form.Secret[form.Secret.TrimEnd('=').Length..];
+		if (padding.Length == 0 || !output.EndsWith(padding + after, StringComparison.Ordinal))
+		{
+			return null;
+		}
+
+		Match shadow = OnePlaceholder().Match(output[..^(padding.Length + after.Length)]);
+		return shadow.Success && shadow.Groups["kept"].Value == form.Before
+			? (shadow.Groups["name"].Value, form.Before + "{S}" + padding + after, form.Secret[..^padding.Length])
+			: null;
 	}
 
 	/// <summary>Each format in the shapes table, filled from a fixed seed.</summary>
