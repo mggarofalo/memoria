@@ -1,5 +1,5 @@
 #!/bin/sh
-# Real Go branch coverage, as a slow nightly REPORT. It never blocks anything:
+# Real Go branch coverage, as a slow REPORT run by hand (mutation.yml). It never blocks anything:
 # the blocking gate is statement coverage in scripts/coverage-go.sh.
 #
 # gobco can only take one package at a time, has no threshold, and cannot

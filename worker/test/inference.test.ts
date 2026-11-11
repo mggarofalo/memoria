@@ -87,8 +87,12 @@ test("system probes read this machine, and a missing command is a failed probe r
   assert.match(await runCommand(process.execPath, ["--version"], 0), /^v\d+/);
 });
 
+// Never answers, and ends itself once this test's process has gone: a mutant that drops the deadline leaves it
+// unkilled, and the mutation runner then kills this process and not the child.
+const neverAnswers = "const parent = process.ppid; setInterval(() => { if (process.ppid !== parent) process.exit(0); }, 200);";
+
 test("a probe that never answers is killed at its deadline and counts as failed", async () => {
-  await assert.rejects(runCommand(process.execPath, ["-e", "setInterval(() => {}, 1000)"], 50), (err: NodeJS.ErrnoException & { killed?: boolean }) => err.killed === true);
+  await assert.rejects(runCommand(process.execPath, ["-e", neverAnswers], 50), (err: NodeJS.ErrnoException & { killed?: boolean }) => err.killed === true);
 });
 
 test("the machine reading tolerates failed probes, and thresholds of zero disable a reason", async () => {

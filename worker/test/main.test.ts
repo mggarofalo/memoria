@@ -12,6 +12,22 @@ import { fakeSupervisor, freePort, roleConfigs, TOKEN } from "./helpers.ts";
 /** The real entry point as its own process, pointed at already-running fake servers. */
 
 const main = fileURLToPath(new URL("../src/main.ts", import.meta.url));
+// Every launch below goes through this, so an entry point a mutant keeps alive dies with the test (fixtures/die-with-parent.ts).
+const entry = ["--import", new URL("./fixtures/die-with-parent.ts", import.meta.url).href, main];
+// Each launch copies this environment, so each child knows which process it must not outlive.
+process.env.DIE_WITH_PARENT_PID = String(process.pid);
+
+test("an entry point started through the preload dies with the process that started it", { timeout: 30_000 }, async (t) => {
+  // The parent starts a grandchild that would run forever, writes nothing more, and exits. The pipe the grandchild
+  // holds closes only when the grandchild is gone. On a regression the timeout fails the test, and the pipe is let go
+  // so this file can still exit.
+  const forever = [entry[0]!, entry[1]!, "-e", "setInterval(() => {}, 1000)"];
+  const parentScript = `require("node:child_process").spawn(process.execPath, ${JSON.stringify(forever)}, { stdio: ["ignore", "inherit", "ignore"], env: { ...process.env, DIE_WITH_PARENT_PID: String(process.pid) } }).unref();`;
+  const parent = spawn(process.execPath, ["-e", parentScript], { stdio: ["ignore", "pipe", "ignore"] });
+  parent.stdout.resume();
+  t.signal.addEventListener("abort", () => parent.stdout.destroy());
+  await Promise.all([new Promise((resolve) => parent.once("exit", resolve)), new Promise((resolve) => parent.stdout.once("end", resolve))]);
+});
 
 function waitForExit(child: ChildProcess): Promise<void> {
   return new Promise((resolve) => (child.exitCode !== null || child.signalCode !== null ? resolve() : child.once("exit", () => resolve())));
@@ -40,7 +56,7 @@ test("the entry point starts, warms up, serves every endpoint, keeps the token o
     env[`MEMORIA_WORKER_${r.role.toUpperCase()}_URL`] = `http://127.0.0.1:${r.port}`;
     env[`MEMORIA_WORKER_${r.role.toUpperCase()}_API_KEY`] = upstream.apiKeyFor(r.role);
   }
-  const child = spawn(process.execPath, [main], { env, stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(process.execPath, entry, { env, stdio: ["ignore", "pipe", "pipe"] });
   let output = "";
   child.stdout.on("data", (c: Buffer) => (output += c.toString()));
   child.stderr.on("data", (c: Buffer) => (output += c.toString()));
@@ -62,7 +78,7 @@ test("the entry point starts, warms up, serves every endpoint, keeps the token o
 });
 
 test("bad configuration exits non-zero, names the setting, and does not repeat a token", () => {
-  const run = (over: NodeJS.ProcessEnv) => spawnSync(process.execPath, [main], { env: { ...process.env, ...over }, encoding: "utf8", timeout: 20_000 });
+  const run = (over: NodeJS.ProcessEnv) => spawnSync(process.execPath, entry, { env: { ...process.env, ...over }, encoding: "utf8", timeout: 20_000 });
   const wildcard = run({ MEMORIA_WORKER_HOST: "0.0.0.0", MEMORIA_WORKER_TOKEN: TOKEN });
   assert.equal(wildcard.status, 1);
   assert.match(wildcard.stderr, /MEMORIA_WORKER_HOST/);
@@ -76,7 +92,7 @@ test("bad configuration exits non-zero, names the setting, and does not repeat a
 test("the entry point reads its token from a file, and a bad file stops it without repeating the content", async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), "memoria-worker-token-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
-  const run = (over: NodeJS.ProcessEnv) => spawnSync(process.execPath, [main], { env: { ...process.env, MEMORIA_WORKER_TOKEN: "", MEMORIA_WORKER_MODEL_DIR: "/definitely/not/here", ...over }, encoding: "utf8", timeout: 20_000 });
+  const run = (over: NodeJS.ProcessEnv) => spawnSync(process.execPath, entry, { env: { ...process.env, MEMORIA_WORKER_TOKEN: "", MEMORIA_WORKER_MODEL_DIR: "/definitely/not/here", ...over }, encoding: "utf8", timeout: 20_000 });
 
   const missing = run({ MEMORIA_WORKER_TOKEN_FILE: path.join(dir, "absent") });
   assert.equal(missing.status, 1);
@@ -99,7 +115,7 @@ test("the entry point reads its token from a file, and a bad file stops it witho
 });
 
 test("a missing model is a clear startup failure, not a crash loop of llama-server", () => {
-  const run = spawnSync(process.execPath, [main], { env: { ...process.env, MEMORIA_WORKER_MODEL_DIR: "/definitely/not/here" }, encoding: "utf8", timeout: 20_000 });
+  const run = spawnSync(process.execPath, entry, { env: { ...process.env, MEMORIA_WORKER_MODEL_DIR: "/definitely/not/here" }, encoding: "utf8", timeout: 20_000 });
   assert.equal(run.status, 1);
   assert.match(run.stderr, /cannot be read/);
 });

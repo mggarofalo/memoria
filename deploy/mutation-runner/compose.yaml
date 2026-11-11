@@ -1,0 +1,45 @@
+# Mutation testing for commits on main, on a box of our own. See docs/mutation-runner.md.
+#
+#   docker compose up -d --build          start polling
+#   docker compose logs -f runner         what it is doing
+#   docker compose exec runner node /runner/runner.mts queue
+#   docker compose run --rm runner once   one tick now, beside the service; the lock keeps them apart
+#   docker compose down                   stop; add -v to drop the state, the reports and the caches
+name: memoria-mutation
+
+services:
+  runner:
+    build: .
+    image: memoria-mutation-runner:local
+    restart: unless-stopped
+    # Caps on the whole run, so the box's other work is not starved. See .env.example.
+    cpus: ${MUTATION_CPUS:-6}
+    mem_limit: ${MUTATION_MEMORY:-10g}
+    memswap_limit: ${MUTATION_MEMORY:-10g}
+    environment:
+      REPO_URL: ${REPO_URL:-https://github.com/mggarofalo/memoria.git}
+      BRANCH: ${BRANCH:-main}
+      POLL_SECONDS: ${POLL_SECONDS:-900}
+      MUTATION_SCOPE: ${MUTATION_SCOPE:-changed}
+      # Stryker.NET's test runners. Empty: its default, half the CPUs the container is given.
+      MUTATION_CONCURRENCY: ${MUTATION_CONCURRENCY:-}
+      # Empty: the status each run would post goes to the log instead.
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+    volumes:
+      # The runner's own clone, its state, the lock and every run's reports.
+      - ${MUTATION_STATE:-state}:/state
+      # Package caches, so a run does not download the world each time. They belong to the account the
+      # scripts run as, not to root.
+      - cache-nuget:/home/mutation/.nuget/packages
+      - cache-dotnet-tools:/home/mutation/.dotnet/tools
+      - cache-npm:/home/mutation/.npm
+      - cache-go:/home/mutation/go
+      - cache-go-build:/home/mutation/.cache/go-build
+
+volumes:
+  state:
+  cache-nuget:
+  cache-dotnet-tools:
+  cache-npm:
+  cache-go:
+  cache-go-build:

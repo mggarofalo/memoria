@@ -1,28 +1,11 @@
 name: Mutation
 
-# Slow, so it is not a required check. Pull requests mutate only what changed;
-# the nightly run mutates everything and uploads the reports. Thresholds live
-# in stryker/*.json, sidecar/stryker*.json, worker/stryker*.json, and
-# cli/.gremlins.yaml.
+# Run by hand only. Commits on main are mutated on a box of our own instead
+# (deploy/mutation-runner, docs/mutation-runner.md), which posts a `mutation`
+# commit status; nothing here runs on a pull request or a schedule. A dispatch
+# mutates everything and uploads the reports. Thresholds live in stryker/*.json,
+# sidecar/stryker*.json, worker/stryker*.json, and cli/.gremlins.yaml.
 on:
-  pull_request:
-    branches: ["main"]
-    paths:
-      - .github/workflows/mutation.yml
-      - scripts/mutation-*.sh
-      - stryker/**
-      - dotnet-tools.json
-      - src/**
-      - tests/**
-      - sidecar/src/**
-      - sidecar/test/**
-      - sidecar/stryker*.json
-      - worker/src/**
-      - worker/test/**
-      - worker/stryker*.json
-      - cli/**
-  schedule:
-    - cron: "17 3 * * *"
   workflow_dispatch:
 
 concurrency:
@@ -35,15 +18,12 @@ permissions:
 env:
   DOTNET_NOLOGO: true
   DOTNET_CLI_TELEMETRY_OPTOUT: true
-  MUTATION_BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || '' }}
 
 jobs:
   dotnet:
     name: Mutation (.NET)
     runs-on: ubuntu-latest
-    # A full run of a large change can take hours. A pull request stops itself at 50
-    # minutes and reports inconclusive; see scripts/mutation-dotnet.sh.
-    timeout-minutes: ${{ github.event_name == 'pull_request' && 60 || 240 }}
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -56,10 +36,8 @@ jobs:
           cache-dependency-path: "**/*.csproj"
       - name: Mutate
         run: sh scripts/mutation-dotnet.sh
-        env:
-          MUTATION_LIMIT_MINUTES: ${{ github.event_name == 'pull_request' && '50' || '' }}
       - name: Upload report
-        # Always: a run stopped at its time limit still has the reports it finished.
+        # Always: a run that fails a threshold, or is cancelled, still has the reports it finished.
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -69,15 +47,16 @@ jobs:
           retention-days: 30
 
   node:
-    name: Mutation (${{ matrix.package }})
+    name: Mutation (${{ matrix.package }}${{ matrix.shard && format(' {0}', matrix.shard) || '' }})
     runs-on: ubuntu-latest
-    # A full run takes hours on a hosted runner. A pull request stops itself at 50
-    # minutes and reports inconclusive; see scripts/mutation-js.sh.
-    timeout-minutes: ${{ github.event_name == 'pull_request' && 60 || 240 }}
+    # A full sidecar run is about 7,000 mutants, more than one job finishes in 4 hours,
+    # so a run splits it into shards (scripts/mutation-shard.mts), each with the
+    # package's thresholds.
+    timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:
-        package: [sidecar, worker]
+        include: ${{ fromJSON('[{"package":"worker","shard":""},{"package":"sidecar","shard":"1/8"},{"package":"sidecar","shard":"2/8"},{"package":"sidecar","shard":"3/8"},{"package":"sidecar","shard":"4/8"},{"package":"sidecar","shard":"5/8"},{"package":"sidecar","shard":"6/8"},{"package":"sidecar","shard":"7/8"},{"package":"sidecar","shard":"8/8"}]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -95,16 +74,25 @@ jobs:
           npm ci --no-fund --no-audit
           npm ci --no-fund --no-audit --prefix ${{ matrix.package }}
       - name: Mutate
-        run: sh scripts/mutation-js.sh ${{ matrix.package }}
+        # Every five minutes the log shows the runner's headroom, so a run that starves it can be seen coming.
+        run: |
+          # The most common processes are named by the script they run, so a leak shows what is leaking.
+          top() { ps -eo args --no-headers | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /\.(ts|mts|js)$/) { n = split($i, p, "/"); print p[n]; next } print $1 }' | sort | uniq -c | sort -rn | head -3 | awk '{printf "%s%s x%s", (NR > 1 ? ", " : ""), $2, $1}'; }
+          ( while sleep 300; do echo "resources: $(free -m | awk 'NR==2 {print $3 " MB used, " $7 " MB available"}'), $(ps -e --no-headers | wc -l) processes ($(top)), load $(cut -d' ' -f1 /proc/loadavg)"; done ) &
+          sampler=$!
+          status=0
+          sh scripts/mutation-js.sh ${{ matrix.package }} || status=$?
+          kill "$sampler" 2>/dev/null || true
+          exit "$status"
         env:
-          MUTATION_LIMIT_MINUTES: ${{ github.event_name == 'pull_request' && '50' || '' }}
+          MUTATION_SHARD: ${{ matrix.shard }}
       - name: Upload report
-        # Always: a run stopped at its time limit still has the reports it finished.
+        # Always: a run that fails a threshold, or is cancelled, still has the reports it finished.
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           if-no-files-found: ignore
-          name: mutation-${{ matrix.package }}
+          name: mutation-${{ matrix.package }}${{ matrix.shard && format('-{0}', strategy.job-index) || '' }}
           path: ${{ matrix.package }}/reports/
           retention-days: 30
 
@@ -124,7 +112,7 @@ jobs:
       - name: Mutate
         run: sh scripts/mutation-go.sh
       - name: Upload report
-        # Always: a run stopped at its time limit still has the reports it finished.
+        # Always: a run that fails a threshold, or is cancelled, still has the reports it finished.
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -138,7 +126,6 @@ jobs:
   # so scripts/coverage-go-branch.sh does that part.
   cli-branch:
     name: Go Branch Coverage (report)
-    if: ${{ github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     continue-on-error: true

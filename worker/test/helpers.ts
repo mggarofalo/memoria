@@ -33,7 +33,9 @@ export async function roleConfigs(roles: Role[] = ["embed", "rerank", "generate"
  * it, the child is told to bind it itself and fails as llama-server would, which is what the impostor test checks.
  */
 export const handOverPort: SpawnFn = (command, args, options) => {
-  const child = spawn(command, args, { env: options.env, stdio: ["ignore", "ignore", "pipe", "ipc"], windowsHide: options.windowsHide });
+  // The fixture checks for this parent, as it may start only after this process has gone (fake-llama-server.ts).
+  const env = { ...options.env, FAKE_LLAMA_PARENT_PID: String(process.pid) };
+  const child = spawn(command, args, { env, stdio: ["ignore", "ignore", "pipe", "ipc"], windowsHide: options.windowsHide });
   child.channel?.unref();
   const port = Number(args[args.indexOf("--port") + 1]);
   // A check that arrives before the handover is turned away at once, rather than left waiting on a socket no one serves.
