@@ -9,7 +9,7 @@ import { buildApp } from "../src/app.ts";
 import { JobCancelled, JobDeferred, JobQueue, type JobResult, type ReindexRequest } from "../src/jobs.ts";
 import { SqliteJobStore } from "../src/queue-store.ts";
 import { FakeBackend } from "./fake-backend.ts";
-import { authHeaders, makeApp, ManualScheduler, tempDir, testConfig } from "./helpers.ts";
+import { authHeaders, dieWithParent, dieWithParentEnv, makeApp, ManualScheduler, tempDir, testConfig } from "./helpers.ts";
 
 const result: JobResult = { update: { collections: 1, indexed: 1, updated: 0, unchanged: 0, removed: 0, skipped: 0, needsEmbedding: 0 }, embed: null, metadata: { documents: 1, withMetadata: 0 } };
 const req = (over: Partial<ReindexRequest> = {}): ReindexRequest => ({ collections: ["c"], embed: true, force: false, reason: "test", ...over });
@@ -200,7 +200,7 @@ const crashFixture = fileURLToPath(new URL("./fixtures/queue-crash.ts", import.m
 
 /** Start the fixture, wait for its report, and kill it with no chance to clean up. */
 async function crashAfter(queueDb: string, root: string, mode: string): Promise<{ status: number; id: string; state: string }> {
-  const child = spawn(process.execPath, [crashFixture, queueDb, root, mode], { stdio: ["ignore", "pipe", "ignore"] });
+  const child = spawn(process.execPath, [...dieWithParent, crashFixture, queueDb, root, mode], { env: dieWithParentEnv(), stdio: ["ignore", "pipe", "ignore"] });
   const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
   const lines = createInterface({ input: child.stdout });
   const report = await Promise.race([

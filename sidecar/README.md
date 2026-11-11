@@ -249,6 +249,7 @@ npm run typecheck         # tsc --noEmit
 npm test                  # unit tests on an in-memory fake backend (no SDK load)
 npm run openapi:check     # committed openapi.json matches the routes
 MEMORIA_QMD_INTEGRATION=1 npm run test:integration   # real SDK on a temp fixture index, no models
+MEMORIA_QMD_INTEGRATION=1 npm run test:integration:coverage   # the same, with its line gate (.c8rc.integration.json)
 MEMORIA_QMD_WORKER_URL=... npm run test:live         # sanity checks against a real worker
 MEMORIA_QMD_WORKER_URL=... npm run bench:parity -- --db <index>   # in-process versus worker
 npm run dev               # node src/main.ts against the local index

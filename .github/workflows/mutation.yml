@@ -52,11 +52,13 @@ jobs:
     # A full sidecar run is about 7,000 mutants, more than one job finishes in 4 hours,
     # so a run splits it into shards (scripts/mutation-shard.mts), each with the
     # package's thresholds.
+    # The `integration` shard mutates the store and the SDK wire code with the
+    # integration tests running, as nothing else reaches them.
     timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON('[{"package":"worker","shard":""},{"package":"sidecar","shard":"1/8"},{"package":"sidecar","shard":"2/8"},{"package":"sidecar","shard":"3/8"},{"package":"sidecar","shard":"4/8"},{"package":"sidecar","shard":"5/8"},{"package":"sidecar","shard":"6/8"},{"package":"sidecar","shard":"7/8"},{"package":"sidecar","shard":"8/8"}]') }}
+        include: ${{ fromJSON('[{"package":"worker","shard":""},{"package":"sidecar","shard":"1/8"},{"package":"sidecar","shard":"2/8"},{"package":"sidecar","shard":"3/8"},{"package":"sidecar","shard":"4/8"},{"package":"sidecar","shard":"5/8"},{"package":"sidecar","shard":"6/8"},{"package":"sidecar","shard":"7/8"},{"package":"sidecar","shard":"8/8"},{"package":"sidecar","shard":"integration"}]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

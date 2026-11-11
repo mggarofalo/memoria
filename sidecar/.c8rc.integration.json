@@ -1,0 +1,12 @@
+{
+  "all": true,
+  "src": ["src"],
+  "include": ["src/**"],
+  "exclude": ["src/llm/types.ts"],
+  "extension": [".ts"],
+  "reporter": ["text"],
+  "reports-dir": "coverage/integration",
+  "temp-directory": "coverage/integration/tmp",
+  "check-coverage": true,
+  "lines": 88
+}

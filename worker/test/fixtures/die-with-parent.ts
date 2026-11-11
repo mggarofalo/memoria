@@ -1,6 +1,7 @@
 /**
  * Preloaded (`node --import`) into a worker entry point that a test starts, so the entry point never outlives the
- * test's process. Under mutation testing a mutant can break the worker's shutdown, and the runner then kills the
+ * test's process. The sidecar's tests preload it into the processes they start, too (`dieWithParent` in
+ * sidecar/test/helpers.ts). Under mutation testing a mutant can break the worker's shutdown, and the runner then kills the
  * test's process. Without this the entry point would run on, and a full mutation run gathered hundreds of them until the
  * runner ran out of memory. Linux and macOS give an orphan a new parent; Windows ends a child with its parent's job.
  * The worker itself never loads this.

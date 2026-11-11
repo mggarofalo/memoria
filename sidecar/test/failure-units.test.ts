@@ -17,7 +17,7 @@ import { embedCapacity, guardedFallback, sdkCacheFileName, type SdkDb } from "..
 import { openJobStore, retryJobStore, SqliteJobStore } from "../src/queue-store.ts";
 import type { BackendSearchOptions, SearchHit } from "../src/store.ts";
 import { loadConfig } from "../src/config.ts";
-import { ManualScheduler, tempDir } from "./helpers.ts";
+import { dieWithParent, dieWithParentEnv, ManualScheduler, tempDir } from "./helpers.ts";
 import { EMBED_FILE, MockWorker, vectorFor } from "./mock-worker.ts";
 
 /** Each test here reproduces a failure that once left the system looking healthy. */
@@ -1528,7 +1528,7 @@ test("the retry stops by itself on a file that will never do, and can be stopped
 
 test("a process killed while holding the queue file lets the next one take it and its jobs", { timeout: 60_000 }, async () => {
   const file = await tempFile("q.sqlite");
-  const holder = spawn(process.execPath, [fileURLToPath(new URL("./fixtures/queue-hold.ts", import.meta.url)), file], { stdio: ["ignore", "pipe", "inherit"] });
+  const holder = spawn(process.execPath, [...dieWithParent, fileURLToPath(new URL("./fixtures/queue-hold.ts", import.meta.url)), file], { env: dieWithParentEnv(), stdio: ["ignore", "pipe", "inherit"] });
   const exited = new Promise<void>((resolve) => holder.once("exit", () => resolve()));
   await new Promise<void>((resolve) => createInterface({ input: holder.stdout }).once("line", () => resolve()));
   try {

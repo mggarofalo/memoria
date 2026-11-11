@@ -17,7 +17,7 @@ import type { PoolWorkerConfig } from "../src/llm/types.ts";
 import { replaceDocumentVectors, sweepExpiredCache, type SdkDb, type SdkHandles } from "../src/llm/wire.ts";
 import { queueDbPathFor } from "../src/queue-store.ts";
 import { openBackend, type LlmOptions, type OpenedBackend } from "../src/store.ts";
-import { authHeaders, tempDir, testConfig } from "./helpers.ts";
+import { authHeaders, dieWithParent, dieWithParentEnv, tempDir, testConfig } from "./helpers.ts";
 import { EMBED_FILE, MockWorker, vectorFor } from "./mock-worker.ts";
 import { freePort } from "../../worker/test/ports.ts";
 
@@ -584,8 +584,8 @@ const mainEntry = fileURLToPath(new URL("../src/main.ts", import.meta.url));
 test("a corrupt queue file does not stop the sidecar from starting", { skip }, async () => {
   const { dbPath } = await fixture();
   await writeFile(queueDbPathFor(dbPath), "not a database ".repeat(500));
-  const child = spawn(process.execPath, [mainEntry], {
-    env: { ...process.env, MEMORIA_QMD_DB_PATH: dbPath, MEMORIA_QMD_PORT: String(await freePort()), MEMORIA_QMD_WARMUP: "0", MEMORIA_QMD_SECRET: "Xk29vQmB7fLp3ZtRw" },
+  const child = spawn(process.execPath, [...dieWithParent, mainEntry], {
+    env: { ...dieWithParentEnv(), MEMORIA_QMD_DB_PATH: dbPath, MEMORIA_QMD_PORT: String(await freePort()), MEMORIA_QMD_WARMUP: "0", MEMORIA_QMD_SECRET: "Xk29vQmB7fLp3ZtRw" },
     stdio: ["ignore", "pipe", "ignore"],
   });
   const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
@@ -778,7 +778,7 @@ test("a clock moved back does not turn force into a silent no-op", { skip }, asy
 /** Another process, because POSIX file locks do not conflict within one process. */
 async function holdingLock<T>(dbPath: string, run: () => Promise<T>): Promise<T> {
   const script = "const d = new (require('node:sqlite').DatabaseSync)(process.argv[1]); d.exec('BEGIN IMMEDIATE'); console.log('held'); setInterval(() => {}, 1000);";
-  const holder = spawn(process.execPath, ["-e", script, dbPath], { stdio: ["ignore", "pipe", "ignore"] });
+  const holder = spawn(process.execPath, [...dieWithParent, "-e", script, dbPath], { env: dieWithParentEnv(), stdio: ["ignore", "pipe", "ignore"] });
   const exited = new Promise<void>((resolve) => holder.once("exit", () => resolve()));
   await Promise.race([
     new Promise<void>((resolve) => createInterface({ input: holder.stdout }).once("line", () => resolve())),

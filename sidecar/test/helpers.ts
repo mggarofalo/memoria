@@ -107,6 +107,17 @@ export function sampleDocs(): FakeDoc[] {
   ];
 }
 
+/**
+ * Node arguments and the environment for a process a test starts, so that it ends with the test's process. A mutant
+ * that hangs a test gets the test's process killed by the mutation runner, and the child would otherwise run on.
+ * The preload is the worker's, which says more (worker/test/fixtures/die-with-parent.ts).
+ */
+export const dieWithParent = ["--import", new URL("../../worker/test/fixtures/die-with-parent.ts", import.meta.url).href];
+
+export function dieWithParentEnv(): NodeJS.ProcessEnv {
+  return { ...process.env, DIE_WITH_PARENT_PID: String(process.pid) };
+}
+
 const created: string[] = [];
 
 /** Each test file is its own process, so its directories all go when it ends. */
