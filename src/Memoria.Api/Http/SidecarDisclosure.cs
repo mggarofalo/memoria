@@ -25,6 +25,7 @@ public static class SidecarDisclosure
 		ArgumentNullException.ThrowIfNull(scope);
 
 		bool restricted = scope.Collections is not null;
+		// Stryker disable once Equality : MemoriaExceptionHandler.Map answers 400, 404, 409, 413, 502, 503 or 504 and never exactly 500, so > and >= agree on every status it can return.
 		bool backendFault = MemoriaExceptionHandler.Map(exception).Status >= StatusCodes.Status500InternalServerError;
 		int? upstream = scope.SeesBackendDetails && exception.StatusCode is { } status ? (int)status : null;
 

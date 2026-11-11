@@ -95,6 +95,7 @@ public static partial class RequestDetailLogging
 	/// </summary>
 	private sealed class SilentRequestLog : ILogger
 	{
+		// Stryker disable once Block : the body only returns null, which is what the emptied block returns too.
 		public IDisposable? BeginScope<TState>(TState state) where TState : notnull
 		{
 			return null;
