@@ -59,9 +59,11 @@ jobs:
         env:
           MUTATION_LIMIT_MINUTES: ${{ github.event_name == 'pull_request' && '50' || '' }}
       - name: Upload report
-        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+        # Always: a run stopped at its time limit still has the reports it finished.
+        if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          if-no-files-found: ignore
           name: mutation-dotnet
           path: StrykerOutput/*/reports/
           retention-days: 30
@@ -97,9 +99,11 @@ jobs:
         env:
           MUTATION_LIMIT_MINUTES: ${{ github.event_name == 'pull_request' && '50' || '' }}
       - name: Upload report
-        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+        # Always: a run stopped at its time limit still has the reports it finished.
+        if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          if-no-files-found: ignore
           name: mutation-${{ matrix.package }}
           path: ${{ matrix.package }}/reports/
           retention-days: 30
@@ -120,9 +124,11 @@ jobs:
       - name: Mutate
         run: sh scripts/mutation-go.sh
       - name: Upload report
-        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+        # Always: a run stopped at its time limit still has the reports it finished.
+        if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          if-no-files-found: ignore
           name: mutation-cli
           path: cli/reports/
           retention-days: 30

@@ -6,6 +6,7 @@
       "tests/Memoria.Api.Tests/Memoria.Api.Tests.csproj"
     ],
     "test-case-filter": "Category!=Timing&FullyQualifiedName!~Curly_apostrophes",
+    "ignore-methods": ["ConfigureAwait"],
     "reporters": ["cleartext", "html", "json"],
     "thresholds": { "high": 95, "low": 90, "break": 90 }
   }

@@ -1,0 +1,19 @@
+{
+  "why": "The full .NET mutation run, split so its shards can run in parallel and be rerun one at a time. On a 4-core hosted runner the shards that finished took 50 minutes to 2 hours, and the larger redaction shards ran past 2. Paths are relative to the config's project. A shard with rest takes every file in that folder that no other shard of its config names, and rest of \"\" takes every folder no rest shard takes, so a new file always lands in some shard. Sized from mutant counts: keep a shard near 650.",
+  "shards": [
+    { "name": "core redaction 1", "config": "core", "files": ["Redaction/SecretHeuristics.cs"] },
+    { "name": "core redaction 2", "config": "core", "files": ["Redaction/PemBlock.cs"] },
+    { "name": "core redaction 3", "config": "core", "files": ["Redaction/CommandLines.cs", "Redaction/GitleaksRuleData.cs", "Redaction/ValueShapes.cs"] },
+    { "name": "core redaction 4", "config": "core", "files": ["Redaction/RedactionRules.cs", "Redaction/Redactor.cs", "Redaction/YamlFrontmatter.cs"] },
+    { "name": "core redaction 5", "config": "core", "files": ["Redaction/LineWraps.cs", "Redaction/PemSeparators.cs"] },
+    { "name": "core redaction 6", "config": "core", "files": ["Redaction/GitleaksRules.cs", "Redaction/SecretKeyNames.cs"] },
+    { "name": "core redaction 7", "config": "core", "files": ["Redaction/CodeValues.cs", "Redaction/DetectionView.cs"] },
+    { "name": "core redaction rest", "config": "core", "rest": "Redaction" },
+    { "name": "core sessions 1", "config": "core", "files": ["Sessions/CodexTranscript.cs", "Sessions/DocumentEnvelope.cs", "Sessions/SessionRenderer.cs"] },
+    { "name": "core sessions 2", "config": "core", "files": ["Sessions/ClaudeTranscript.cs", "Sessions/PartGate.cs", "Sessions/SessionFrontmatter.cs"] },
+    { "name": "core sessions rest", "config": "core", "rest": "Sessions" },
+    { "name": "core rest", "config": "core", "rest": "" },
+    { "name": "api", "config": "api" },
+    { "name": "security", "config": "security" }
+  ]
+}
