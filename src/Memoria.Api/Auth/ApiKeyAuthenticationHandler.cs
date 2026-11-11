@@ -234,9 +234,11 @@ public sealed partial class ApiKeyAuthenticationHandler(
 	private bool IsBoundKeyOnUnboundRoute(Endpoint? endpoint, string? required)
 	{
 		bool withheld = required == MemoriaScopes.Admin && Context.User.HasClaim(static c => c.Type == MemoriaClaims.AdminWithheld);
+		// Stryker disable once Equality : read only when the key holds the route's scope or had admin withheld, and either way a key refused here lists collections, so a claim of another type (it always has its key id) means one of this type too.
+		bool bound = Context.User.HasClaim(static c => c.Type == MemoriaClaims.Collection);
 		return endpoint?.Metadata.GetMetadata<MemoriaUnboundKeyAttribute>() is not null
 			&& (required is null || withheld || Context.User.HasClaim(MemoriaClaims.Scope, required))
-			&& Context.User.HasClaim(static c => c.Type == MemoriaClaims.Collection);
+			&& bound;
 	}
 
 	/// <summary>
@@ -253,6 +255,7 @@ public sealed partial class ApiKeyAuthenticationHandler(
 			.Select(static scope => new Claim(MemoriaClaims.Scope, scope)));
 		if (withhold)
 		{
+			// Stryker disable once String : only the claim's type is ever read (IsBoundKeyOnUnboundRoute), never its value.
 			claims.Add(new Claim(MemoriaClaims.AdminWithheld, "true"));
 		}
 
