@@ -4,18 +4,29 @@
 //   node scripts/mutation-dotnet-shards.mjs --names            one name per line
 //   node scripts/mutation-dotnet-shards.mjs --shard <name> --field configs|mutate|slug
 // scripts/mutation-dotnet.sh reads the last form when MUTATION_SHARD is set.
+//
+// Shards of configs on one project share its files: a file that a shard of one config
+// names or takes as rest is left out of the other configs' rest shards. That is how
+// security-core's shards take Core's redaction files from core's.
 import { readFileSync } from "node:fs";
 
+const projectOf = (config) =>
+  JSON.parse(readFileSync(new URL(`../stryker/${config}.json`, import.meta.url), "utf8"))["stryker-config"].project;
+
 function expand(shards) {
-  const restFolders = new Set(shards.filter((s) => s.rest !== undefined && s.rest !== "").map((s) => `${s.config}/${s.rest}`));
-  const named = (config, folder) =>
-    shards.filter((s) => s.config === config && s.files).flatMap((s) => s.files).filter((f) => f.startsWith(`${folder}/`));
+  const project = new Map(shards.map((s) => [s.config, projectOf(s.config)]));
+  const sameProject = (shard) => shards.filter((s) => project.get(s.config) === project.get(shard.config));
   const globs = (shard) => {
     if (shard.files) return shard.files.map((f) => `**/${f}`);
     if (shard.rest === undefined) return [];
-    if (shard.rest !== "") return [`**/${shard.rest}/**/*.cs`, ...named(shard.config, shard.rest).map((f) => `!**/${f}`)];
-    const taken = [...restFolders].filter((k) => k.startsWith(`${shard.config}/`)).map((k) => k.slice(shard.config.length + 1));
-    return ["**/*.cs", ...taken.map((folder) => `!**/${folder}/**/*.cs`)];
+    const others = sameProject(shard);
+    const named = others.filter((s) => s.files).flatMap((s) => s.files);
+    if (shard.rest !== "") {
+      return [`**/${shard.rest}/**/*.cs`, ...named.filter((f) => f.startsWith(`${shard.rest}/`)).map((f) => `!**/${f}`)];
+    }
+    const taken = others.filter((s) => s.rest !== undefined && s.rest !== "").map((s) => s.rest);
+    const loose = named.filter((f) => !taken.some((folder) => f.startsWith(`${folder}/`)));
+    return ["**/*.cs", ...taken.map((folder) => `!**/${folder}/**/*.cs`), ...loose.map((f) => `!**/${f}`)];
   };
   return shards.map((s) => ({ name: s.name, slug: s.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase(), configs: s.config, mutate: globs(s).join(" ") }));
 }
