@@ -300,12 +300,13 @@ public sealed class AuthResponseTests(AuthApiFactory factory) : IClassFixture<Au
 		using WebApplicationFactory<Program> limited = factory.WithWebHostBuilder(static builder =>
 		{
 			builder.UseSetting("Memoria:Auth:RateLimit:PermitLimit", "1");
-			builder.UseSetting("Memoria:Auth:RateLimit:Window", "00:00:00.300");
+			builder.UseSetting("Memoria:Auth:RateLimit:Window", "00:00:02");
 		});
 		HttpClient client = limited.CreateClient();
 		Assert.Equal(HttpStatusCode.OK, (await GetAsync(client, "/v1/collections", token)).StatusCode);
+		HttpStatusCode status = (await GetAsync(client, "/v1/collections", token)).StatusCode;
+		Assert.Equal(HttpStatusCode.TooManyRequests, status);
 
-		HttpStatusCode status = HttpStatusCode.TooManyRequests;
 		for (DateTime deadline = DateTime.UtcNow.AddSeconds(15); status == HttpStatusCode.TooManyRequests && DateTime.UtcNow < deadline;)
 		{
 			await Task.Delay(100);

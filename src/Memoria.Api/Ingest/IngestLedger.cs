@@ -339,7 +339,6 @@ public sealed class SqliteIngestLedger(ControlDatabase database) : IIngestLedger
 
 		return leased with
 		{
-			// Stryker disable once Equality : when the two versions are equal, either branch gives the same value.
 			Version = record.Version > soFar.Version ? record.Version : soFar.Version,
 			// A document that does not say how many it holds refuses a takeover rather than guess: allowShrink is how someone says the session really is the whole of it.
 			MessageCount = (record.MessageCount ?? long.MaxValue) > (soFar.MessageCount ?? 0) ? record.MessageCount ?? long.MaxValue : soFar.MessageCount,
@@ -388,7 +387,6 @@ public sealed class SqliteIngestLedger(ControlDatabase database) : IIngestLedger
 
 		return released with
 		{
-			// Stryker disable once Equality : when the version equals the clock, either branch gives the same value.
 			Version = landed.Version < landed.Now ? landed.Version : landed.Now,
 			State = state,
 			MessageCount = landed.MessageCount ?? row.MessageCount,

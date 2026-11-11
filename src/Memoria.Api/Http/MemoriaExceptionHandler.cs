@@ -114,7 +114,6 @@ public sealed partial class MemoriaExceptionHandler(IProblemDetailsService probl
 	{
 		(int status, string title) = Map(exception);
 
-		// Stryker disable once Equality : Map answers 400, 404, 409, 413, 502, 503 or 504 and never exactly 500, so > and >= agree on every status it can return.
 		if (status >= 500)
 		{
 			LogSidecarFailure(logger, exception, exception.Code, exception.StatusCode is null ? null : (int)exception.StatusCode.Value);

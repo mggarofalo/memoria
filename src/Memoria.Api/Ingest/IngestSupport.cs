@@ -225,7 +225,6 @@ public sealed class IngestCollections(IIngestLedger ledger, IOptions<MemoriaOpti
 
 		if (await ledger.IsCollectionOpenAsync(collection, cancellationToken))
 		{
-			// Stryker disable once Statement : without it, OpenAsync asks the ledger again and returns at once, as the ledger never closes a collection it opened. Only the wait for the opening lock is added.
 			return;
 		}
 

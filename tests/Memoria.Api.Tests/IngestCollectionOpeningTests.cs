@@ -61,6 +61,54 @@ public sealed class IngestCollectionOpeningTests
 		Assert.Equal(2, ledger.Asked);
 	}
 
+	/// <summary>Opening a collection holds one lock for all of them, so a collection already open must not wait behind another's first, slow, emptiness check.</summary>
+	[Fact]
+	public async Task An_open_collection_does_not_wait_while_another_is_being_opened()
+	{
+		(IMemoriaQmdClient client, ScriptedSidecarClient script) = ScriptedSidecarClient.Create();
+		TaskCompletionSource<SidecarCollectionEmptyResponse> emptyCheck = new(TaskCreationOptions.RunContinuationsAsynchronously);
+		script.On(nameof(IMemoriaQmdClient.IsCollectionEmptyAsync), _ => emptyCheck.Task);
+		MemoriaOptions options = new();
+		options.Ingest.Collections["new"] = new IngestCollectionOptions { Enabled = true };
+		options.Ingest.Collections["open"] = new IngestCollectionOptions { Enabled = true };
+		IngestCollections collections = new(new OpenOnly("open"), Options.Create(options), TimeProvider.System);
+
+		Task opening = collections.RequireOpenAsync("new", client, default);
+		Assert.False(opening.IsCompleted);
+
+		await collections.RequireOpenAsync("open", client, default).WaitAsync(TimeSpan.FromSeconds(10));
+
+		emptyCheck.SetResult(new SidecarCollectionEmptyResponse("new", false));
+		await Assert.ThrowsAsync<IngestRefusedException>(() => opening);
+	}
+
+	/// <summary>A ledger in which only the named collection is open.</summary>
+	private sealed class OpenOnly(string open) : IIngestLedger
+	{
+		public Task<bool> IsCollectionOpenAsync(string collection, CancellationToken cancellationToken)
+		{
+			return Task.FromResult(collection == open);
+		}
+
+		public Task OpenCollectionAsync(string collection, DateTimeOffset now, CancellationToken cancellationToken) => throw new NotSupportedException();
+
+		public Task<IngestClaim> ClaimAsync(IngestClaimRequest request, CancellationToken cancellationToken) => throw new NotSupportedException();
+
+		public Task<bool> BeginWriteAsync(string identity, string leaseToken, string collection, string path, DateTimeOffset now, CancellationToken cancellationToken) => throw new NotSupportedException();
+
+		public Task<bool> FinishAsync(string identity, string leaseToken, string collection, string state, IReadOnlyList<string> paths, IngestClaimRequest? landed) => throw new NotSupportedException();
+
+		public Task MarkDeletedAsync(string collection, string path, string documentIdentity, DateTimeOffset now) => throw new NotSupportedException();
+
+		public Task ForgetPathAsync(string collection, string path) => throw new NotSupportedException();
+
+		public Task<IngestRecord?> FindAsync(string identity, CancellationToken cancellationToken) => throw new NotSupportedException();
+
+		public Task<IReadOnlyList<IngestRecord>> FindByLookupAsync(string lookup, CancellationToken cancellationToken) => throw new NotSupportedException();
+
+		public string EffectiveState(IngestRecord record, DateTimeOffset now) => throw new NotSupportedException();
+	}
+
 	/// <summary>A ledger that says a collection is closed for the first few questions and open after, as when another request opens it in between.</summary>
 	private sealed class OpenAfter(int closedAnswers) : IIngestLedger
 	{
