@@ -576,7 +576,7 @@ internal static class SecretHeuristics
 		}
 
 		return (list ?? CodeValues.JoinedLiteralsOf(value)) is { } items
-			? items.Any(item => !IsBenignValue(item, keyGroup.Value, readAsCode: false) && JudgeByKind(candidate, keyGroup, kind, item, valueEnd))
+			? items.Any(item => !IsBenignValue(item, keyGroup.Value, readAsCode: false, TemplatesAreCode(kind, item)) && JudgeByKind(candidate, keyGroup, kind, item, valueEnd))
 			: JudgeByKind(candidate, keyGroup, kind, value, valueEnd);
 	}
 

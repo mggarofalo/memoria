@@ -48,9 +48,10 @@ internal static partial class CodeValues
 	/// <summary>True for a value that only code or a version range could be. <paramref name="unquoted"/> allows the shapes a quoted string can also hold.</summary>
 	public static bool IsCode(string value, bool unquoted, bool templatesAreCode = true)
 	{
+		// A template whose text beside its spans is not code is no list of names either, as in ["${base}/qz7/mv3"].
 		return IsVersionRange(value)
 			|| (templatesAreCode && IsInterpolationOnly(value))
-			|| (unquoted && (IsCollectionLiteral(value) || IsCallCutAtLineEnd(value) || IsRegexLiteral(value)));
+			|| (unquoted && ((templatesAreCode && IsCollectionLiteral(value)) || IsCallCutAtLineEnd(value) || IsRegexLiteral(value)));
 	}
 
 	/// <summary>
@@ -79,9 +80,9 @@ internal static partial class CodeValues
 
 	/// <summary>
 	/// True when every piece of text beside a template's spans, with the data its spans carry, such as a shell default, is what only code
-	/// is: separators, markup, an upper-case name, or words of three letters or fewer with no digit. <c>/qz7/mv3/hx9</c> is not, as its
-	/// chunks mix letters and digits, and nor is <c>Summerpassword</c>. A value with no span, or whose span only wraps a literal, is not a
-	/// template here.
+	/// is: separators, markup, an upper-case name of words, or a few short words with no digit, at most <see cref="ShortWordLetters"/>
+	/// letters in all. <c>/qz7/mv3/hx9</c> and <c>QZ7_MV3_HX9</c> are not, as their chunks mix letters and digits, nor are
+	/// <c>Summerpassword</c> and <c>-qzm-vhx-kbw</c>. A value with no span, or whose span only wraps a literal, is not a template here.
 	/// </summary>
 	public static bool TextBesideSpansIsCode(string value)
 	{
@@ -90,16 +91,41 @@ internal static partial class CodeValues
 			return true;
 		}
 
+		int letters = 0;
 		foreach (string piece in Tag().Replace(rest, " ").Split([' ', '\t', '/', '\\', ',', ';', ':', '=', '"', '\'', '`'], StringSplitOptions.RemoveEmptyEntries))
 		{
-			bool name = piece.Contains('_', StringComparison.Ordinal) && piece.Any(char.IsAsciiLetter) && !piece.Any(char.IsAsciiLetterLower);
-			if (!name && !IsShortWords(piece))
+			if (IsUpperCaseName(piece))
+			{
+				continue;
+			}
+
+			letters += piece.Count(char.IsAsciiLetter);
+			if (!IsShortWords(piece) || letters > ShortWordLetters)
 			{
 				return false;
 			}
 		}
 
 		return true;
+	}
+
+	/// <summary>The most letters short words beside spans may hold in all, as <c>mem_</c> or <c>abc!</c> does: fewer than a credential's.</summary>
+	private const int ShortWordLetters = 4;
+
+	/// <summary>
+	/// <c>MEMORIA_WORKER_TOKEN_FILE</c> or <c>API_V2</c>: upper-case words joined by <c>_</c>, each of letters, of digits, or a letter and a
+	/// version's one or two digits, so <c>QZ7_MV3</c> is no name.
+	/// </summary>
+	private static bool IsUpperCaseName(string piece)
+	{
+		string[] parts = piece.Split('_');
+		return parts.Length > 1 && piece.Any(char.IsAsciiLetter) && parts.All(IsNamePart);
+	}
+
+	private static bool IsNamePart(string part)
+	{
+		bool version = part.Length is 2 or 3 && char.IsAsciiLetterUpper(part[0]) && part[1..].All(char.IsAsciiDigit);
+		return version || part.All(char.IsAsciiLetterUpper) || part.All(char.IsAsciiDigit);
 	}
 
 	/// <summary>Each run of letters and digits in the text is a word of three letters or fewer, with no digit.</summary>
