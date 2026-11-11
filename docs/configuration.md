@@ -52,6 +52,7 @@ never starts half-configured.
 | `Secret` | unset | The sidecar's `MEMORIA_QMD_SECRET`, sent as `Authorization: Bearer`. **Required when `BaseUrl` is not loopback.** Set it through the environment or `appsettings.local.json`; never commit it. |
 | `Timeout` | `00:02:00` | Per-request ceiling. A reranked search on a cold sidecar can take 15 s or more; leave headroom. |
 | `ReadinessTimeout` | `00:00:05` | Ceiling for the `/ready` probe only. Probes must fail fast so an orchestrator notices. |
+| `ReadinessCacheTime` | `00:00:02` | How long one answer from the sidecar's `/ready` serves every caller of the API's. `/ready` is anonymous, and each probe makes the sidecar scan the index, so callers in that time share one, and so do callers while one is in flight. A failure is shared too. A caller with an admin key probes on its own instead, so the sidecar logs the call under that request's trace id; its key's rate limit bounds it, and the sidecar's own 2 s share bounds what it costs either way. `00:00:00` shares only a probe in flight. At most a minute. |
 
 ## `Memoria:Search` — defaults for `GET /v1/search`
 

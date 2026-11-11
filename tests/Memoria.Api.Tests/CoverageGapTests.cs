@@ -24,6 +24,8 @@ public sealed class MemoriaOptionsValidatorTests
 		{ "Sidecar:Secret", static o => o.Sidecar.BaseUrl = "http://192.168.1.20:8282" },
 		{ "Sidecar:Timeout", static o => o.Sidecar.Timeout = TimeSpan.Zero },
 		{ "Sidecar:ReadinessTimeout", static o => o.Sidecar.ReadinessTimeout = TimeSpan.Zero },
+		{ "Sidecar:ReadinessCacheTime", static o => o.Sidecar.ReadinessCacheTime = TimeSpan.FromSeconds(-1) },
+		{ "Sidecar:ReadinessCacheTime", static o => o.Sidecar.ReadinessCacheTime = TimeSpan.FromMinutes(2) },
 		{ "Search:MaxLimit", static o => o.Search.MaxLimit = 0 },
 		{ "Search:MaxLimit", static o => o.Search.MaxLimit = 101 },
 		{ "Search:DefaultLimit", static o => o.Search.DefaultLimit = 0 },

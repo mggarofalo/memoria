@@ -29,6 +29,8 @@ public class MemoriaApiFactory : WebApplicationFactory<Program>
 		builder.UseSetting("Memoria:Sidecar:BaseUrl", SidecarBaseUrl);
 		builder.UseSetting("Memoria:Sidecar:Secret", SidecarSecret);
 		builder.UseSetting("Memoria:Sidecar:ReadinessTimeout", "00:00:01");
+		// Each test scripts its own sidecar answer, so none may be served another's.
+		builder.UseSetting("Memoria:Sidecar:ReadinessCacheTime", "00:00:00");
 		builder.UseSetting("Memoria:Search:MaxLimit", "50");
 		builder.UseSetting("Memoria:Search:DefaultLimit", "10");
 		builder.UseSetting("Memoria:Ingest:MinReindexInterval", "00:00:00");

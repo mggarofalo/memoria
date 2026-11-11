@@ -182,6 +182,12 @@ public sealed class SidecarOptions
 	/// <summary>Timeout for the <c>/ready</c> probe only; probes must fail fast.</summary>
 	public TimeSpan ReadinessTimeout { get; set; } = TimeSpan.FromSeconds(5);
 
+	/// <summary>
+	/// How long one <c>/ready</c> answer from the sidecar serves every caller. <c>/ready</c> is anonymous and each probe costs the
+	/// sidecar scans of the index, so callers share. Zero shares only a probe still in flight.
+	/// </summary>
+	public TimeSpan ReadinessCacheTime { get; set; } = TimeSpan.FromSeconds(2);
+
 }
 
 /// <summary>Defaults and ceilings for <c>GET /v1/search</c>.</summary>

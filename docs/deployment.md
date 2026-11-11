@@ -551,6 +551,57 @@ sidecar answers, even with no GPU worker up, and tells anonymous callers only th
 status word. Point a health check that should fail on degradation at `/ready?strict=true`. See
 [configuration.md](configuration.md#anonymous-routes).
 
+### Refuse what only the LAN needs
+
+Two route groups have no business being reachable from the internet, so the proxy
+host refuses them for any address outside the LAN:
+
+- **`/ready`.** It needs no key, and each probe makes the sidecar scan the index.
+  The API shares one probe among its callers without an admin key for `Memoria:Sidecar:ReadinessCacheTime`
+  (2 s), and the sidecar shares one scan among its callers for 2 s, so a flood costs
+  one scan every 2 s. Measured on an index of 50,000 documents, one scan took about
+  30 ms of the sidecar's single event loop. Fifty `/ready` calls at once took 1.35 s
+  of it before the sharing, and 0.12 s after. An orchestrator on the host or the LAN
+  is the only caller that needs it.
+- **`/v1/admin/*`.** Key management, worker drain, the queue and reindex. An admin key
+  is all they ask for, so refusing them at the proxy means a leaked admin key cannot
+  be used from outside.
+
+In nginx-proxy-manager, add these to the proxy host's custom config, with your LAN's
+range in place of `192.168.1.0/24`:
+
+```nginx
+location ~* ^/ready/?$ {
+    allow 192.168.1.0/24;
+    deny all;
+    include conf.d/include/proxy.conf;
+}
+location ~* ^/v1/admin(/|$) {
+    allow 192.168.1.0/24;
+    deny all;
+    include conf.d/include/proxy.conf;
+}
+```
+
+- **Case-insensitive, by regex.** The API matches routes whatever their case, and
+  ignores a trailing slash, while a plain nginx `location` matches case and all. A
+  plain `location /v1/admin/` would let `/V1/Admin/keys` through to the API. A regex
+  `location` is also chosen over nginx-proxy-manager's own `location /`.
+- **`include`, not `proxy_pass`.** nginx-proxy-manager sets `X-Forwarded-For` and its
+  other headers in its own `location /`, and a new `location` inherits none of them.
+  Its `proxy.conf` holds those headers and its own `proxy_pass`, so these requests
+  carry the client's address like any other, as
+  [Tell the API who its proxy is](#tell-the-api-who-its-proxy-is) requires.
+- **Who counts as local.** A caller on the host itself reaches nginx through Docker's
+  published port, so nginx sees the Docker gateway's address, not `127.0.0.1`. Add
+  that address if something on the host needs these routes through the proxy.
+
+With Cloudflare or another proxy in front, `allow` sees that proxy's address unless
+nginx resolves the real client, as in step 4 above, so set that up first. Check from
+outside the LAN, for example from a phone off Wi-Fi, that `/ready`, `/READY`,
+`/v1/admin/keys` and `/V1/Admin/keys` each answer 403 from nginx, not the API's own
+401 or 200. Run `nginx -t` inside the proxy's container after saving.
+
 ## Upgrade order
 
 **The first build with whole-chunk embedding re-embeds every index once.** Its vectors carry a new fingerprint, so every document reads as pending, and the next embed job for its collection redoes all of it, on the workers here. Until it finishes, that job holds the one job queue, so the ingest behind it waits. `POST /reindex` with `embed: true` on the sidecar does every collection at once, which took under 10 minutes for 46,000 chunks on one RTX 5080. Search keeps using the old vectors until each document's new ones are written, and a document set aside keeps them. Never run a stock `qmd embed` on an index the sidecar serves: it writes vectors under the old fingerprint, which the sidecar then embeds all over again. [workers.md](workers.md#vectors-made-by-stock-qmd-are-embedded-again) explains why.

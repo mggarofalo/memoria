@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using Memoria.Api.Auth;
 using Memoria.Api.Configuration;
 using Memoria.Api.Http;
 using Memoria.Api.Sidecar;
@@ -28,7 +29,8 @@ public static class HealthEndpoints
 			.WithName("ready")
 			.WithSummary("Readiness")
 			.WithDescription(
-				"Probes the memoria-qmd sidecar. 200 whenever it answers, with `status` of `ready`, `warming` or `degraded`: "
+				"Probes the memoria-qmd sidecar. Callers without an admin key share one probe per `Memoria:Sidecar:ReadinessCacheTime` (2 s by default): callers in that "
+				+ "time share one answer. A caller with an admin key probes on its own, so the sidecar logs the call under that request's trace id. 200 whenever it answers, with `status` of `ready`, `warming` or `degraded`: "
 				+ "losing GPU workers makes search rank worse, and must not take the API out of rotation. "
 				+ "503 only when the sidecar cannot be reached, unless `strict=true`, which also answers 503 for anything but `ready`. "
 				+ "Anonymous for orchestrators: without an admin key the body carries only the status word, and `not_ready` for an "
@@ -44,18 +46,17 @@ public static class HealthEndpoints
 	private static async Task<Results<Ok<ReadinessReport>, JsonHttpResult<ReadinessReport>>> ReadyAsync(
 		[FromQuery(Name = "strict")][Description("Answer 503 unless the sidecar is fully ready, with no degradation.")] bool? strict,
 		IMemoriaQmdClient sidecar,
+		ReadinessCache readiness,
 		ICallerScope scope,
 		IOptions<MemoriaOptions> options,
 		HttpContext context)
 	{
 		SidecarOptions settings = options.Value.Sidecar;
-		using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted);
-		timeout.CancelAfter(settings.ReadinessTimeout);
 
 		ReadinessReport report;
 		try
 		{
-			SidecarReadinessResult result = await sidecar.GetReadinessAsync(requireModels: false, timeout.Token);
+			SidecarReadinessResult result = await ProbeAsync(sidecar, readiness, settings, context);
 			report = Answered(result.Details, strict == true);
 		}
 		catch (SidecarException ex)
@@ -79,6 +80,23 @@ public static class HealthEndpoints
 		return report.Ready
 			? TypedResults.Ok(report)
 			: TypedResults.Json(report, statusCode: StatusCodes.Status503ServiceUnavailable);
+	}
+
+	/// <summary>
+	/// A caller with an admin key probes on its own, so the sidecar logs the call under the request's trace id, which
+	/// <c>memoria ready</c> prints. Such a caller has a key, and so a rate limit. Everyone else, anonymous callers above all, shares one
+	/// probe: see <see cref="ReadinessCache"/>. Disabled mode shares it too, as anyone who can reach the API is a caller there.
+	/// </summary>
+	private static async Task<SidecarReadinessResult> ProbeAsync(IMemoriaQmdClient sidecar, ReadinessCache readiness, SidecarOptions settings, HttpContext context)
+	{
+		if (context.User.HasClaim(MemoriaClaims.Scope, MemoriaScopes.Admin) && !context.User.HasClaim(static c => c.Type == MemoriaClaims.AuthDisabled))
+		{
+			using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted);
+			timeout.CancelAfter(settings.ReadinessTimeout);
+			return await sidecar.GetReadinessAsync(requireModels: false, timeout.Token);
+		}
+
+		return await readiness.GetAsync(token => sidecar.GetReadinessAsync(requireModels: false, token)).WaitAsync(context.RequestAborted);
 	}
 
 	/// <summary>The sidecar answered, so the API stays in rotation unless the caller asked to be strict.</summary>

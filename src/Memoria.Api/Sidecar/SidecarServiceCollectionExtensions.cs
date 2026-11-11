@@ -16,6 +16,7 @@ public static class SidecarServiceCollectionExtensions
 	public static IServiceCollection AddMemoriaQmdClient(this IServiceCollection services)
 	{
 		services.AddTransient<SidecarCorrelationHandler>();
+		services.AddSingleton<ReadinessCache>();
 		services
 			.AddHttpClient<IMemoriaQmdClient, MemoriaQmdClient>((provider, http) =>
 			{
