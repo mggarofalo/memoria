@@ -115,14 +115,18 @@ public sealed class CodeFalsePositiveTests
 
 	/// <summary>Spans are set aside in one pass, so a value of many of them is judged in time linear in its length.</summary>
 	[Fact]
+	[Trait("Category", RedactorSafetyTests.TimingCategory)]
 	public void A_value_of_many_spans_is_judged_in_one_pass()
 	{
+		// About 4 times its cost, 0.14 s of this thread's CPU on a plain Debug run.
+		TimeSpan budget = TimeSpan.FromSeconds(0.6);
 		string text = "password=" + string.Concat(Enumerable.Repeat("${a}", 40_000));
-		System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
+		TimeSpan started = ThreadCpuTime.Now();
 
 		_ = Redactor.Shared.RedactFragment(text);
 
-		Assert.True(clock.Elapsed < TimeSpan.FromSeconds(3), $"took {clock.Elapsed}");
+		TimeSpan spent = ThreadCpuTime.Now() - started;
+		Assert.True(spent < budget, $"40,000 spans took {spent.TotalSeconds:F2} s of CPU, over the budget of {budget.TotalSeconds:F1} s.");
 	}
 
 	[Theory]
