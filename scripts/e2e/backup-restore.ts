@@ -1,7 +1,9 @@
 /**
  * `node scripts/e2e/backup-restore.ts`: deploy/backup.yaml as it ships, on a throwaway compose project. It fills the project, embeds it with the
- * sidecar tests' scripted worker, backs it up, adds a day's worth more and measures that delta, then destroys every volume by name, restores, and
- * proves keys, documents, deletes, a document set aside from embedding, and search came back. Needs Docker. Everything is named `sc-backup`, and the run removes all of it.
+ * sidecar tests' scripted worker, backs it up, takes a snapshot with the services stopped, adds a day's worth more and measures that delta, and backs
+ * it up with the sidecar running and holding its job queue's file. Then it destroys every volume by name, restores that last backup, and proves keys,
+ * documents, deletes, a waiting job, a document set aside from embedding, and search came back. Needs Docker. Everything is named `sc-backup`, and the
+ * run removes all of it.
  */
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -158,6 +160,7 @@ function backup(): { seconds: number; added: string; snapshot: string } {
 }
 
 const QUEUE = "/index/qmd/index.sqlite.queue.sqlite";
+const NETWORK = `${PROJECT}_memoria`;
 
 function auditRows(): number {
   const script = "const D=require('better-sqlite3');const d=new D('/data/control.db',{readonly:true});console.log(d.prepare('select count(*) n from audit_log').get().n)";
@@ -165,7 +168,7 @@ function auditRows(): number {
   return Number(run("docker", ["run", "--rm", "--user", "1654:1654", "-v", `${PROJECT}_memoria-data:/data`, "--entrypoint", "node", `ghcr.io/mggarofalo/memoria-qmd:${VERSION}`, "-e", script]).out.trim());
 }
 
-interface Before { admin: string; key: string; doc: string; hits: number; audit: number; labels: string[] }
+interface Before { admin: string; key: string; doc: string; hits: number; audit: number; labels: string[]; waiting: string }
 
 async function fill(): Promise<Before> {
   compose(["run", "--rm", "--no-deps", "memoria-qmd", "scripts/init-index.mjs", COLLECTION]);
@@ -187,15 +190,18 @@ async function fill(): Promise<Before> {
   const doc = (await api(`/v1/docs/${encodeURIComponent(`${COLLECTION}/day/d7.md`)}`, { key })).text;
   const search = await until(() => api(`/v1/search?query=marker7&collection=${COLLECTION}&limit=5`, { key }), (r) => r.body.results?.length > 0, 60);
   const labels = ((await api("/v1/admin/keys", { key: admin })).body as { label: string }[] | { keys: { label: string }[] });
-  return { admin, key, doc, hits: search.body.results?.length ?? 0, audit: auditRows(), labels: (Array.isArray(labels) ? labels : labels.keys).map((k) => k.label).sort() };
+  return { admin, key, doc, hits: search.body.results?.length ?? 0, audit: auditRows(), labels: (Array.isArray(labels) ? labels : labels.keys).map((k) => k.label).sort(), waiting: "" };
 }
 
-async function backUpAndMeasure(key: string): Promise<void> {
+async function backUpFirst(): Promise<void> {
   compose(["run", "--rm", "backup", "init"]);
   const full = backup();
   console.log(`     first backup: ${full.seconds} s, added ${full.added}`);
   check("backup: the first backup is taken", full.added !== "?");
+}
 
+/** The day's delta, backed up with the sidecar running, so its exclusive lock on the job queue's file is held throughout. Returns a job left waiting. */
+async function backUpDaily(key: string): Promise<string> {
   check(`backup: a day's delta of ${DAILY_DOCUMENTS} documents goes in`, (await write(key, FIRST_DOCUMENTS, DAILY_DOCUMENTS)) === 0);
   const poison = await api(`/v1/ingest/rendered?collection=${COLLECTION}&path=day/poison.md&updated=2026-01-15T00:00:00Z`, { method: "POST", key, headers: { "Content-Type": "text/markdown" }, body: body(POISON) });
   check("backup: with one document the worker refuses", poison.status === 202, poison.text.slice(0, 300));
@@ -203,11 +209,26 @@ async function backUpAndMeasure(key: string): Promise<void> {
   console.log(`     daily delta: ${DAILY_DOCUMENTS} documents of ${DOCUMENT_BYTES} bytes embedded in ${delta.seconds} s on the scripted worker, ${JSON.stringify(delta.result)}`);
   // The job that sets a document aside ends failed, and has embedded the rest.
   check("backup: the daily embed finishes, setting that one document aside", delta.state === "failed" && setAside().join() === "day/poison.md", { delta, setAside: setAside() });
+  // Paused, so a job is waiting in the queue's file when the copy is made.
+  sidecar("/queue:pause", {});
+  const waiting = String((sidecar("/reindex", { embed: false }).job as { id: string }).id);
   const daily = backup();
   console.log(`     daily backup: ${daily.seconds} s, added ${daily.added}`);
-  check("backup: the daily backup is taken", daily.added !== "?");
-  // The running sidecar holds its queue file under an exclusive lock, and an online backup of it would be an empty database.
-  check("backup: the job queue's file, which the running sidecar holds, is skipped and not copied empty", daily.snapshot.includes(`skipped ${QUEUE}: another process holds it`), daily.snapshot.slice(-400));
+  check("backup: the daily backup is taken with the sidecar running", daily.added !== "?");
+  check("backup: the running sidecar copied its job queue's file for it", daily.snapshot.includes(`${QUEUE} -> /staging/queue.sqlite, copied by the sidecar`), daily.snapshot.slice(-400));
+  check("backup: the job copied was waiting", (sidecar(`/reindex/jobs/${waiting}`).job as { state: string }).state === "queued");
+  sidecar("/queue:resume", {});
+  return waiting;
+}
+
+/** A running sidecar the snapshot cannot reach holds the queue's file, so the snapshot must fail, not keep its last copy as if it were current. */
+async function snapshotUnreachable(before: Before): Promise<void> {
+  run("docker", ["network", "disconnect", NETWORK, SIDECAR]);
+  const taken = compose(["run", "--rm", "snapshot"], true);
+  run("docker", ["network", "connect", "--alias", "memoria-qmd", NETWORK, SIDECAR]);
+  check("backup: a snapshot that cannot reach the running sidecar fails, and says why", taken.status !== 0 && taken.out.includes(`${QUEUE}: the sidecar did not answer`) && taken.out.includes("a process holds the file, so it was not copied and its last copy stays"), taken.out.slice(-400));
+  const doc = await until(() => api(`/v1/docs/${encodeURIComponent(`${COLLECTION}/day/d7.md`)}`, { key: before.key }), (r) => r.status === 200, 30);
+  check("backup: and the sidecar serves again once it is back on its network", doc.text === before.doc, doc.status);
 }
 
 /** With the services stopped, the snapshot may be what creates a database's -wal and -shm files: they must still be the service's afterwards. */
@@ -251,7 +272,10 @@ async function proveRestored(before: Before): Promise<void> {
   check("restore: the admin key works, and lists the same keys", JSON.stringify(labels) === JSON.stringify(before.labels), labels);
   const audit = auditRows();
   check("restore: the audit log came back, with at least what it held before", audit >= before.audit && before.audit > 0, { before: before.audit, after: audit });
-  check("restore: the set-aside document is still set aside, so the job queue's file came back too", setAside().join() === "day/poison.md", setAside());
+  // Both went into the queue's file after the snapshot with the services stopped, so only the running sidecar's copy holds them.
+  check("restore: the set-aside document is still set aside, so the job queue's file came back from the running sidecar's copy", setAside().join() === "day/poison.md", setAside());
+  const job = await until(() => sidecar(`/reindex/jobs/${before.waiting}`) as { job?: { id: string; state: string } }, (j) => j.job?.state === "succeeded", 60);
+  check("restore: so did the job that was waiting, which runs after the restart", job.job?.id === before.waiting && job.job.state === "succeeded", job);
 }
 
 async function proveSearchAndDeletes(before: Before): Promise<void> {
@@ -267,8 +291,10 @@ let crashed = false;
 try {
   prepare();
   const before = await fill();
-  await backUpAndMeasure(before.key);
+  await backUpFirst();
   await snapshotWhileStopped(before.key);
+  before.waiting = await backUpDaily(before.key);
+  await snapshotUnreachable(before);
   await refuseLive(before);
   await destroyAndRestore();
   await proveRestored(before);

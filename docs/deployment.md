@@ -258,9 +258,20 @@ The sidecar writes with SQLite's `secure_delete` on, so what it deletes is overw
 | What | How |
 |---|---|
 | The collection roots and QMD's config | restic reads the files. |
-| `control.db`, the index, and the job queue's file, with its jobs and set-aside documents | `snapshot` copies each live database with SQLite's online backup, as `sqlite3 .backup` does, and checks each copy, and restic backs up the copies. A plain copy of a database in use can be torn. |
+| `control.db` and the index | `snapshot` copies each live database with SQLite's online backup, as `sqlite3 .backup` does, and checks each copy, and restic backs up the copies. A plain copy of a database in use can be torn. |
+| The job queue's file, with its jobs and set-aside documents | `snapshot` asks the running sidecar for it (`POST /queue:snapshot`, with the sidecar's secret), checks the copy, and restic backs it up. |
 
-**The job queue's file is copied only while the sidecar is stopped.** A running sidecar holds it under an exclusive lock, so `snapshot` skips it, says so, and keeps its last copy, which later backups carry. To back up its jobs and set-asides as they are, stop `memoria-qmd` while `snapshot` runs, then start it and run `backup`. A set-aside lost to a restore means that document is tried again, and set aside again if it still fails.
+**The sidecar copies the job queue's file.** A running sidecar holds that file under an exclusive lock, which is how one sidecar owns it, and nothing else can read it then. So `snapshot` joins the sidecar's network and asks it for a copy. The sidecar writes one, whole and consistent, beside the file as `index.sqlite.queue.sqlite.snapshot`, a name the request cannot change, and answers with its size and SHA-256. `snapshot` checks that the file it reads is that one, checks it as it checks the others, moves it to the staging volume and removes the sidecar's copy. [The sidecar's README](../sidecar/README.md#the-job-queue) says how the copy is made.
+
+**`snapshot` fails, rather than keep an old copy without saying so,** whenever it cannot get the queue as it is. It exits 1, names the file, and leaves its last copy in place for `backup`, so run `backup` only when `snapshot` succeeds, as below. What decides:
+
+- **The sidecar answers.** Its answer decides. A refusal fails: a wrong secret, a sidecar running with its jobs in memory only (409 `queue_not_persistent`), or a copy that failed. So does a copy that is not the one it answered with, as when two snapshots run at once.
+- **The sidecar does not answer,** in 60 s, and something holds the file. That is a sidecar `snapshot` cannot reach, so it fails.
+- **The sidecar does not answer, and nothing holds the file.** The sidecar is stopped, so nothing is writing it, and `snapshot` copies it directly. This is how a backup with the services stopped works.
+
+A database other than the queue's that another process holds under a lock fails `snapshot` the same way. A set-aside lost to a restore means that document is tried again, and set aside again if it still fails.
+
+**What the secret allows here.** Anyone holding it can already reach every route. This one can only write that one copy, beside the queue file, replacing the last: no request names a path, so it cannot write anywhere else or fill the disk past one copy. Calling it again while a backup reads only changes the copy, which `snapshot` then refuses for not matching, so the backup fails rather than taking a mixed file. Each copy holds the event loop while it runs, which for a queue file of job records takes milliseconds.
 
 The index is in the backup because restoring it is much cheaper than rebuilding it. Measured with the scripted worker, 300 documents of 20 KB, 13,455 chunks, took 15 s to embed, and their whole backup took 8 s and stored 8.5 MiB. A real worker embeds far more slowly than the scripted one, and a full corpus is far larger, so re-embedding it takes hours where restoring takes minutes. A daily delta of 40 documents embedded in 3 s on the scripted worker, and its backup took 8 s and stored 5.6 MiB: most of a day's new data is the index's pages, which change throughout.
 
@@ -284,13 +295,12 @@ The index is in the backup because restoring it is much cheaper than rebuilding 
 ```bash
 B="docker compose -f deploy/compose.yaml -f deploy/backup.yaml"
 $B run --rm backup init       # once, for a new repository
-$B run --rm snapshot          # daily, then:
-$B run --rm backup
+$B run --rm snapshot && $B run --rm backup   # daily
 $B run --rm backup forget --keep-daily 7 --keep-weekly 4 --keep-monthly 12 --prune
 $B run --rm backup check
 ```
 
-Run it from a systemd timer or cron. `snapshot` fails, and keeps the last good copy, if a copy fails SQLite's integrity check.
+Run it from a systemd timer or cron, and alert on its exit status. `snapshot` also fails, and keeps the last good copy, if a copy fails SQLite's integrity check.
 
 ### Restore
 
@@ -305,7 +315,7 @@ docker compose -f deploy/compose.yaml up -d
 
 Remove only the volumes you mean to replace, by name, and only once the backup you are restoring has been checked: `restic snapshots` and `restic check`. The restore puts each file back with the owner its service runs as.
 
-`scripts/e2e/backup-restore.ts` proves this path on a throwaway project. It backs up, destroys each data volume by name, restores, and checks that the keys, documents, deletes, a document set aside from embedding, and search came back. It also checks that a restore into volumes holding data is refused.
+`scripts/e2e/backup-restore.ts` proves this path on a throwaway project. It takes its backups with the services running, destroys each data volume by name, restores, and checks that the keys, documents, deletes, a waiting job and a document set aside from embedding, and search came back. It also checks a snapshot with the services stopped, that `snapshot` fails when it cannot reach a running sidecar, and that a restore into volumes holding data is refused.
 
 ### Lost collection records
 

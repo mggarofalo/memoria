@@ -3115,6 +3115,91 @@
         }
       }
     },
+    "/queue:snapshot": {
+      "post": {
+        "summary": "Copy the job queue's file for a backup",
+        "tags": [
+          "index"
+        ],
+        "description": "Write a consistent copy of the job queue's file, with its jobs and set-aside documents, beside it as `<queue file>.snapshot`, replacing the last copy whole. Nothing in the request chooses where. The sidecar holds the file under an exclusive lock, so only it can copy it while it runs. 409 `queue_not_persistent` when no file holds its jobs: they are in memory only, the file is behind them after a failed write, or it is shutting down.",
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "bytes",
+                    "sha256"
+                  ],
+                  "properties": {
+                    "bytes": {
+                      "type": "integer",
+                      "description": "The copy's size."
+                    },
+                    "sha256": {
+                      "type": "string",
+                      "description": "The copy's SHA-256, in hex, so its reader can tell it read this copy and not a later one."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/queue/dead-letters": {
       "get": {
         "summary": "Documents set aside",
