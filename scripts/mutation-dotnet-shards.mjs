@@ -6,8 +6,9 @@
 // scripts/mutation-dotnet.sh reads the last form when MUTATION_SHARD is set.
 //
 // Shards of configs on one project share its files: a file that a shard of one config
-// names or takes as rest is left out of the other configs' rest shards. That is how
-// security-core's shards take Core's redaction files from core's.
+// names or takes as rest is left out of the other configs' rest shards, so a stricter
+// config can take files from a broader one on the same project. A shard with neither
+// files nor rest runs its config's own mutate list, as api and security do.
 import { readFileSync } from "node:fs";
 
 const projectOf = (config) =>

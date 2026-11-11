@@ -1,5 +1,5 @@
 #!/bin/sh
-# Stryker.NET for Memoria.Core, Memoria.Api, and the security-sensitive subset.
+# Stryker.NET for Memoria.Core, Memoria.Api, and the API's authentication and authorization subset.
 # With MUTATION_BASE set (the mutation runner, deploy/mutation-runner), mutates
 # only what changed since that commit. Otherwise mutates everything. Never run
 # this from a git hook. Every config runs, so one score under its threshold does
@@ -44,7 +44,7 @@ if [ -n "${MUTATION_CONCURRENCY:-}" ]; then
   concurrency="--concurrency $MUTATION_CONCURRENCY"
 fi
 status=0
-for config in ${MUTATION_CONFIGS:-core api security security-core}; do
+for config in ${MUTATION_CONFIGS:-core api security}; do
   # shellcheck disable=SC2086 # $concurrency, $since and $mutate are empty or meant to split
   dotnet tool run dotnet-stryker --config-file "stryker/$config.json" \
     --output "StrykerOutput/$config$output_suffix" $concurrency $since $mutate || status=1

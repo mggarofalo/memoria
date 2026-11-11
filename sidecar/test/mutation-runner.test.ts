@@ -57,12 +57,12 @@ test("a changed .NET file selects the shards that mutate it, from the repository
     configs[name] = { projectDir: path.posix.dirname(raw["stryker-config"].project), mutate: raw["stryker-config"].mutate ?? [] };
   }
   const names = (changed: string[]) => shardsFor(changed, shards, configs).map((s) => s.name);
-  // security-core's files are mutated under security-core's shards, not core's.
-  assert.deepEqual(names(["src/Memoria.Core/Redaction/PemBlock.cs"]), ["security-core redaction 2"]);
-  assert.deepEqual(names(["src/Memoria.Core/Sessions/PartGate.cs", "src/Memoria.Core/Redaction/Redactor.cs"]), ["security-core redaction 4", "security-core part gate"]);
+  // The redaction files and the part gate are core's, each in a shard of its own size.
+  assert.deepEqual(names(["src/Memoria.Core/Redaction/PemBlock.cs"]), ["core redaction 2"]);
+  assert.deepEqual(names(["src/Memoria.Core/Sessions/PartGate.cs", "src/Memoria.Core/Redaction/Redactor.cs"]), ["core redaction 4", "core part gate"]);
   assert.deepEqual(names(["src/Memoria.Core/Sessions/ClaudeTranscript.cs"]), ["core sessions 2"]);
   // A file no shard names lands in its folder's rest shard, or the config's.
-  assert.deepEqual(names(["src/Memoria.Core/Redaction/NotNamedAnywhere.cs"]), ["security-core redaction rest"]);
+  assert.deepEqual(names(["src/Memoria.Core/Redaction/NotNamedAnywhere.cs"]), ["core redaction rest"]);
   assert.deepEqual(names(["src/Memoria.Core/Sessions/NotNamedAnywhere.cs"]), ["core sessions rest"]);
   assert.deepEqual(names(["src/Memoria.Core/Search/Anything.cs"]), ["core rest"]);
   // Memoria.Api: the api shard takes it all, and the security shard the files its config names.
