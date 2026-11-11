@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import type { DocumentHead, MetadataSource } from "./metadata.ts";
 import type { EmbedSummary, UpdateSummary } from "./jobs.ts";
 import type { BreakerOptions } from "./llm/pool.ts";
@@ -383,8 +384,63 @@ interface HeadRow {
 
 function requireIndex(dbPath: string): void {
   if (!existsSync(dbPath)) {
-    throw new Error(`QMD index not found at ${dbPath}. Run \`qmd update\` on this host first, or set MEMORIA_QMD_DB_PATH.`);
+    throw new Error(`QMD index not found at ${dbPath}. Make it with the first-run command in docs/deployment.md, or the \`qmd\` CLI the sidecar installs, or set MEMORIA_QMD_DB_PATH.`);
   }
+}
+
+/** The index schema the pinned SDK writes, its `STORE_SCHEMA_VERSION`. test/integration-schema.test.ts holds the two together. */
+export const SUPPORTED_INDEX_SCHEMA = 1;
+
+/** How long the schema check waits for another process's write, as after a restore an operator's `qmd` may be scanning. */
+const SCHEMA_CHECK_BUSY_MS = 10_000;
+
+interface IndexSchema {
+  version: number;
+  vectorRows: boolean;
+  vectorsVec: boolean;
+}
+
+function readSchema(dbPath: string): IndexSchema {
+  let db: DatabaseSync | undefined;
+  try {
+    db = new DatabaseSync(dbPath, { readOnly: true, timeout: SCHEMA_CHECK_BUSY_MS });
+    const has = (name: string): boolean => db!.prepare("SELECT 1 FROM sqlite_master WHERE name = ?").get(name) !== undefined;
+    return { version: Number((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version), vectorRows: has("vector_rows"), vectorsVec: has("vectors_vec") };
+  } catch (err) {
+    throw new Error(`The index at ${dbPath} could not be read to check its schema: ${err instanceof Error ? err.message : String(err)}`);
+  } finally {
+    db?.close();
+  }
+}
+
+/**
+ * Refuse an index a newer QMD has touched: a `user_version` above the SDK's, or the `vector_rows`
+ * table that replaces `vectors_vec` upstream. On one migrated, the startup repair would read every
+ * vector row as having no vector and delete it, and the purge would stop removing vectors, both
+ * without a word. Upstream moves vectors over in steps at the old version and flips it only at the
+ * end, so an index can also be caught partway, with both tables: refused too, as this SDK would
+ * leave the copy in `vector_rows` to fall behind, deleted documents' vectors included. Rolling the
+ * image back across a QMD upgrade, or running a stock `qmd` newer than the pinned one, gets here.
+ * It reads the file before the SDK opens it, as the SDK's own setup writes to the index.
+ */
+export function requireKnownSchema(dbPath: string): void {
+  const { version, vectorRows, vectorsVec } = readSchema(dbPath);
+  if (version <= SUPPORTED_INDEX_SCHEMA && !vectorRows) return;
+  const at = `The index at ${dbPath}`;
+  const sdk = `this sidecar's SDK writes schema version ${SUPPORTED_INDEX_SCHEMA}`;
+  if (version <= SUPPORTED_INDEX_SCHEMA && vectorsVec) {
+    throw new Error(
+      `${at} is partway through a newer QMD's upgrade: it has schema version ${version} with both vector_rows and vectors_vec, and ${sdk}. ` +
+        "Serving it would let the newer copy of its vectors fall behind, deleted documents' vectors included, so the sidecar stops. " +
+        "Finish the upgrade with that QMD and run the sidecar release that matches it, or restore the index from a backup taken before.",
+    );
+  }
+  const found = vectorRows ? `schema version ${version} and a vector_rows table` : `schema version ${version}`;
+  throw new Error(
+    `${at} was migrated by a newer QMD: it has ${found}, and ${sdk}. ` +
+      "Serving it would delete its vector rows at start and leave deleted documents' vectors behind, so the sidecar stops. " +
+      "Run the sidecar release that matches the index, or restore the index from a backup taken before the migration.",
+  );
 }
 
 /**
@@ -451,6 +507,7 @@ export async function openBackend(options: OpenBackendOptions): Promise<OpenedBa
   requireSdkFixes({ ...sdkStore, ensureEmbedContexts: LlamaCpp.prototype.ensureEmbedContexts });
   const dbPath = options.dbPath ?? qmd.getDefaultDbPath();
   requireIndex(dbPath);
+  requireKnownSchema(dbPath);
   // DB-only mode: collections and contexts come from store_collections inside
   // index.sqlite, and no config file is read or written.
   const store = await qmd.createStore({ dbPath });
