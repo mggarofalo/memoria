@@ -67,6 +67,8 @@ services:
       Memoria__Sidecar__Secret: ${MEMORIA_SIDECAR_SECRET}
       Memoria__Search__RerankByDefault: "true"
       Memoria__Auth__DatabasePath: /data/control.db
+      # A key without the admin scope, made with no expiresAt, lasts a year. Admin keys never expire.
+      Memoria__Auth__DefaultKeyLifetime: "365.00:00:00"
       # Each must be an empty directory the first time ingest uses it.
       Memoria__Ingest__Collections__claude-sessions__Enabled: "true"
       Memoria__Ingest__Collections__codex-sessions__Enabled: "true"

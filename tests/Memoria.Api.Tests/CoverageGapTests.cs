@@ -39,6 +39,8 @@ public sealed class MemoriaOptionsValidatorTests
 		{ "Auth:Mode", static o => o.Auth.Mode = null },
 		{ "Auth:DatabasePath", static o => o.Auth.DatabasePath = " " },
 		{ "Auth:TrustedProxies", static o => o.Auth.TrustedProxies = ["nope"] },
+		{ "Auth:DefaultKeyLifetime", static o => o.Auth.DefaultKeyLifetime = TimeSpan.FromMinutes(5) },
+		{ "Auth:DefaultKeyLifetime", static o => o.Auth.DefaultKeyLifetime = TimeSpan.FromDays(3651) },
 		{ "Auth:FailedAuth:PermitLimit", static o => o.Auth.FailedAuth.PermitLimit = 0 },
 		{ "Auth:FailedAuth:Window", static o => o.Auth.FailedAuth.Window = TimeSpan.Zero },
 		{ "Auth:FailedAuth:MaxTrackedAddresses", static o => o.Auth.FailedAuth.MaxTrackedAddresses = 1 },
@@ -58,6 +60,7 @@ public sealed class MemoriaOptionsValidatorTests
 		static o => { o.Auth.Mode = AuthModes.Disabled; o.Auth.DatabasePath = null; },
 		static o => o.Auth.TrustedProxies = ["172.20.0.2", " ", "10.0.0.0/8"],
 		static o => o.Search.MaxMultiGetBytes = 256 * 1024 * 1024,
+		static o => o.Auth.DefaultKeyLifetime = TimeSpan.FromDays(365),
 	};
 
 	[Theory]

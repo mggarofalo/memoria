@@ -731,7 +731,7 @@
           "Admin"
         ],
         "summary": "Issue an API key",
-        "description": "Creates a key and returns its plaintext. This response is the only time the plaintext exists. `read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. Requires the `admin` scope.",
+        "description": "Creates a key and returns its plaintext. This response is the only time the plaintext exists. `read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. With `Memoria:Auth:DefaultKeyLifetime` set, a key without the `admin` scope and with no `expiresAt` expires that long after it is made. Requires the `admin` scope.",
         "operationId": "createApiKey",
         "requestBody": {
           "content": {

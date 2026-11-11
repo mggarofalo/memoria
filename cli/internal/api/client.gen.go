@@ -757,7 +757,7 @@ type ClientInterface interface {
 
 	// CreateApiKeyWithBody Issue an API key
 	//
-	// Creates a key and returns its plaintext. This response is the only time the plaintext exists. `read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. Requires the `admin` scope.
+	// Creates a key and returns its plaintext. This response is the only time the plaintext exists. `read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. With `Memoria:Auth:DefaultKeyLifetime` set, a key without the `admin` scope and with no `expiresAt` expires that long after it is made. Requires the `admin` scope.
 	//
 	// Takes any type of body and a specified content type.
 	//
@@ -766,7 +766,7 @@ type ClientInterface interface {
 
 	// CreateApiKey Issue an API key
 	//
-	// Creates a key and returns its plaintext. This response is the only time the plaintext exists. `read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. Requires the `admin` scope.
+	// Creates a key and returns its plaintext. This response is the only time the plaintext exists. `read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. With `Memoria:Auth:DefaultKeyLifetime` set, a key without the `admin` scope and with no `expiresAt` expires that long after it is made. Requires the `admin` scope.
 	//
 	// Takes a body of the `application/json` content type.
 	//
@@ -1018,7 +1018,7 @@ func (c *Client) ListApiKeys(ctx context.Context, reqEditors ...RequestEditorFn)
 
 // CreateApiKeyWithBody Issue an API key
 //
-// Creates a key and returns its plaintext. This response is the only time the plaintext exists. `read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. Requires the `admin` scope.
+// Creates a key and returns its plaintext. This response is the only time the plaintext exists. `read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. With `Memoria:Auth:DefaultKeyLifetime` set, a key without the `admin` scope and with no `expiresAt` expires that long after it is made. Requires the `admin` scope.
 //
 // Takes any type of body and a specified content type.
 //
@@ -1037,7 +1037,7 @@ func (c *Client) CreateApiKeyWithBody(ctx context.Context, contentType string, b
 
 // CreateApiKey Issue an API key
 //
-// Creates a key and returns its plaintext. This response is the only time the plaintext exists. `read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. Requires the `admin` scope.
+// Creates a key and returns its plaintext. This response is the only time the plaintext exists. `read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. With `Memoria:Auth:DefaultKeyLifetime` set, a key without the `admin` scope and with no `expiresAt` expires that long after it is made. Requires the `admin` scope.
 //
 // Takes a body of the `application/json` content type.
 //
@@ -3002,7 +3002,7 @@ type ClientWithResponsesInterface interface {
 
 	// CreateApiKeyWithBodyWithResponse Issue an API key
 	//
-	// Creates a key and returns its plaintext. This response is the only time the plaintext exists. `read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. Requires the `admin` scope.
+	// Creates a key and returns its plaintext. This response is the only time the plaintext exists. `read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. With `Memoria:Auth:DefaultKeyLifetime` set, a key without the `admin` scope and with no `expiresAt` expires that long after it is made. Requires the `admin` scope.
 	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -3011,7 +3011,7 @@ type ClientWithResponsesInterface interface {
 
 	// CreateApiKeyWithResponse Issue an API key
 	//
-	// Creates a key and returns its plaintext. This response is the only time the plaintext exists. `read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. Requires the `admin` scope.
+	// Creates a key and returns its plaintext. This response is the only time the plaintext exists. `read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. With `Memoria:Auth:DefaultKeyLifetime` set, a key without the `admin` scope and with no `expiresAt` expires that long after it is made. Requires the `admin` scope.
 	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -5561,7 +5561,7 @@ func (c *ClientWithResponses) ListApiKeysWithResponse(ctx context.Context, reqEd
 
 // CreateApiKeyWithBodyWithResponse Issue an API key
 //
-// Creates a key and returns its plaintext. This response is the only time the plaintext exists. `read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. Requires the `admin` scope.
+// Creates a key and returns its plaintext. This response is the only time the plaintext exists. `read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. With `Memoria:Auth:DefaultKeyLifetime` set, a key without the `admin` scope and with no `expiresAt` expires that long after it is made. Requires the `admin` scope.
 //
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 //
@@ -5576,7 +5576,7 @@ func (c *ClientWithResponses) CreateApiKeyWithBodyWithResponse(ctx context.Conte
 
 // CreateApiKeyWithResponse Issue an API key
 //
-// Creates a key and returns its plaintext. This response is the only time the plaintext exists. `read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. Requires the `admin` scope.
+// Creates a key and returns its plaintext. This response is the only time the plaintext exists. `read` and `ingest` keys must list `collections` or set `allCollections` to true; an empty list is refused. A key with only the `admin` scope omits both. Scopes do not imply each other: `admin` does not grant `read`. With `Memoria:Auth:DefaultKeyLifetime` set, a key without the `admin` scope and with no `expiresAt` expires that long after it is made. Requires the `admin` scope.
 //
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 //
