@@ -81,7 +81,8 @@ test("a copy left half-written is replaced, and a failed copy leaves the last on
   const last = sha256(copy);
 
   store.close();
-  assert.throws(() => store.snapshot());
+  // The copy's own error, not one from clearing up after it, as there is nothing to clear.
+  assert.throws(() => store.snapshot(), /database is not open/);
   assert.equal(sha256(copy), last);
   assert.equal(existsSync(`${copy}.partial`), false);
 });
@@ -165,6 +166,7 @@ test("POST /queue:snapshot is 409 when no file holds the jobs, and 500 when the 
     const answer = await app.inject({ method: "POST", url: "/queue:snapshot", headers: authHeaders });
     assert.equal(answer.statusCode, 409);
     assert.equal(answer.json().error, "queue_not_persistent");
+    assert.match(answer.json().message, /No file holds this sidecar's jobs/);
   } finally {
     await app.close();
   }
