@@ -24,7 +24,6 @@ function index(withVectors = true): Db {
     CREATE TABLE content (hash TEXT PRIMARY KEY, doc TEXT NOT NULL);
     CREATE TABLE documents (id INTEGER PRIMARY KEY, collection TEXT, path TEXT, hash TEXT NOT NULL, active INTEGER NOT NULL);
     CREATE TABLE content_vectors (hash TEXT NOT NULL, seq INTEGER NOT NULL, PRIMARY KEY (hash, seq));
-    CREATE TABLE memoria_dead_letters (hash TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY (hash, path));
   `);
   if (withVectors) db.exec("CREATE TABLE vectors_vec (hash_seq TEXT PRIMARY KEY)");
   for (const hash of ["gone", "shared", "kept"]) {
@@ -38,10 +37,6 @@ function index(withVectors = true): Db {
   doc(db, 2, "c", "shared.md", "shared", 0);
   doc(db, 3, "c", "copy/shared.md", "shared", 1);
   doc(db, 4, "c", "kept.md", "kept", 1);
-  db.prepare("INSERT INTO memoria_dead_letters VALUES ('gone', 'gone.md')").run();
-  db.prepare("INSERT INTO memoria_dead_letters VALUES ('kept', 'kept.md')").run();
-  // The copy's text is shared, but the set-aside named the deleted path.
-  db.prepare("INSERT INTO memoria_dead_letters VALUES ('shared', 'shared.md')").run();
   return db;
 }
 
@@ -51,16 +46,15 @@ function doc(db: Db, id: number, collection: string, path: string, hash: string,
 
 const rows = (db: Db, sql: string): unknown[] => db.prepare(sql).pluck().all();
 
-test("a deleted document's row, content, vectors and set-aside go, and nothing a live document holds", () => {
+test("a deleted document's row, content and vectors go, and nothing a live document holds", () => {
   const db = index();
-  assert.deepEqual(purgeDeleted(db as unknown as PurgeDb), { documents: 2, content: 1, vectors: 2, deadLetters: 2 });
+  assert.deepEqual(purgeDeleted(db as unknown as PurgeDb), { documents: 2, content: 1, vectors: 2 });
   assert.deepEqual(rows(db, "SELECT path FROM documents ORDER BY id"), ["copy/shared.md", "kept.md"]);
   assert.deepEqual(rows(db, "SELECT hash FROM content ORDER BY hash"), ["kept", "shared"], "shared text stays with its copy");
   assert.deepEqual(rows(db, "SELECT DISTINCT hash FROM content_vectors ORDER BY hash"), ["kept", "shared"]);
   assert.deepEqual(rows(db, "SELECT hash_seq FROM vectors_vec ORDER BY hash_seq"), ["kept_0", "kept_1", "shared_0", "shared_1"]);
-  assert.deepEqual(rows(db, "SELECT path FROM memoria_dead_letters"), ["kept.md"], "the deleted path's set-aside goes, though its text stays");
   const again = purgeDeleted(db as unknown as PurgeDb);
-  assert.deepEqual(again, { documents: 0, content: 0, vectors: 0, deadLetters: 0 }, "running it again finds nothing");
+  assert.deepEqual(again, { documents: 0, content: 0, vectors: 0 }, "running it again finds nothing");
   assert.equal(removedAny(again), false);
 });
 
@@ -74,26 +68,25 @@ test("a collection named to keep keeps every row, and what only it holds; any ot
   doc(db, 7, "emptied", "c.md", "kept", 0);
   assert.deepEqual(collectionsWithoutDocuments(db as unknown as PurgeDb).sort(), ["emptied", "unmounted"]);
   assert.deepEqual(collectionsWithDocuments(db as unknown as PurgeDb), ["c"]);
-  assert.deepEqual(purgeDeleted(db as unknown as PurgeDb, () => ["unmounted"]), { documents: 3, content: 1, vectors: 2, deadLetters: 2 }, "c's and emptied's deletes go");
+  assert.deepEqual(purgeDeleted(db as unknown as PurgeDb, () => ["unmounted"]), { documents: 3, content: 1, vectors: 2 }, "c's and emptied's deletes go");
   assert.deepEqual(rows(db, "SELECT collection || '/' || path FROM documents WHERE active = 0 ORDER BY id"), ["unmounted/a.md", "unmounted/b.md"]);
   assert.deepEqual(rows(db, "SELECT hash_seq FROM vectors_vec WHERE hash_seq = 'away_0'"), ["away_0"]);
-  assert.deepEqual(purgeDeleted(db as unknown as PurgeDb), { documents: 2, content: 1, vectors: 1, deadLetters: 0 }, "kept no longer, its deletes go too");
+  assert.deepEqual(purgeDeleted(db as unknown as PurgeDb), { documents: 2, content: 1, vectors: 1 }, "kept no longer, its deletes go too");
 });
 
-test("an index with nothing embedded, or no set-aside table, is purged all the same", () => {
+test("an index with nothing embedded is purged all the same", () => {
   const db = index(false);
-  db.exec("DROP TABLE memoria_dead_letters");
-  assert.deepEqual(purgeDeleted(db as unknown as PurgeDb), { documents: 2, content: 1, vectors: 0, deadLetters: 0 });
+  assert.deepEqual(purgeDeleted(db as unknown as PurgeDb), { documents: 2, content: 1, vectors: 0 });
   db.exec("DROP TABLE content_vectors");
   doc(db, 9, "c", "kept2.md", "kept", 0);
-  assert.deepEqual(purgeDeleted(db as unknown as PurgeDb), { documents: 1, content: 0, vectors: 0, deadLetters: 0 });
+  assert.deepEqual(purgeDeleted(db as unknown as PurgeDb), { documents: 1, content: 0, vectors: 0 });
 });
 
 test("without sqlite-vec, a chunk's two rows are both left, never one of them", () => {
   const db = index(false);
   // A vec0 table seen without the extension loaded: listed, but any read of it fails.
   db.exec("CREATE VIEW vectors_vec AS SELECT hash_seq FROM missing_vec0_module");
-  assert.deepEqual(purgeDeleted(db as unknown as PurgeDb), { documents: 2, content: 1, vectors: 0, deadLetters: 2 });
+  assert.deepEqual(purgeDeleted(db as unknown as PurgeDb), { documents: 2, content: 1, vectors: 0 });
   assert.equal(rows(db, "SELECT COUNT(*) FROM content_vectors")[0], 6, "content_vectors kept with them");
 });
 
@@ -103,7 +96,6 @@ test("a failure part way changes nothing, and is the error reported", () => {
   assert.throws(() => purgeDeleted(db as unknown as PurgeDb), /refused/);
   assert.equal(rows(db, "SELECT COUNT(*) FROM documents")[0], 4);
   assert.equal(rows(db, "SELECT COUNT(*) FROM content_vectors")[0], 6);
-  assert.equal(rows(db, "SELECT COUNT(*) FROM memoria_dead_letters")[0], 3);
   const rolledBack: PurgeDb = {
     prepare: (sql) => db.prepare(sql) as never,
     exec: (sql) => {

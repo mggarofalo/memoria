@@ -2,6 +2,7 @@ import { existsSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { isBusy } from "./sqlite-busy.ts";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import type { DeadLetterRow, DeadLetterTable } from "./dead-letters.ts";
 import type { Job, JobStore, PersistedJob } from "./jobs.ts";
 
 /**
@@ -11,9 +12,11 @@ import type { Job, JobStore, PersistedJob } from "./jobs.ts";
  *
  * A row holds a job's request, timestamps and result counts. It never holds
  * document content or credentials: the reason names a file path at most, and
- * errors are built from fixed text (src/llm/client.ts).
+ * errors are built from fixed text (src/llm/client.ts). The file also holds the
+ * documents set aside from embedding (src/dead-letters.ts), which name a path
+ * and a fixed reason, so they too outlive a rebuilt index.
  *
- * This file only holds job records, so it must never stop search: a bad row is
+ * This file only holds those records, so it must never stop search: a bad row is
  * set aside, `openJobStore` moves a truly corrupt file out of the way, and any other
  * trouble leaves the sidecar running with jobs in memory.
  *
@@ -155,7 +158,32 @@ export class SqliteJobStore implements JobStore {
         error TEXT
       );
       CREATE TABLE IF NOT EXISTS jobs_quarantine (id TEXT, data TEXT NOT NULL, reason TEXT NOT NULL, at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS dead_letters (hash TEXT NOT NULL, path TEXT NOT NULL, reason TEXT NOT NULL, at TEXT NOT NULL, worker_set TEXT NOT NULL, PRIMARY KEY (hash, path));
     `);
+  }
+
+  /**
+   * The set-aside documents, in this file. A table added beside the jobs, so the schema
+   * version stays: an older sidecar opening the file ignores it.
+   */
+  deadLetters(): DeadLetterTable {
+    const db = this.#db;
+    return {
+      all: () =>
+        (db.prepare("SELECT hash, path, reason, at, worker_set FROM dead_letters").all() as Array<{ hash: string; path: string; reason: string; at: string; worker_set: string }>).map(
+          (r): DeadLetterRow => ({ hash: r.hash, path: r.path, reason: r.reason, at: r.at, workerSet: r.worker_set }),
+        ),
+      put: (row) => {
+        db.prepare("INSERT OR REPLACE INTO dead_letters (hash, path, reason, at, worker_set) VALUES (?, ?, ?, ?, ?)").run(row.hash, row.path, row.reason, row.at, row.workerSet);
+      },
+      removeHash: (hash) => {
+        db.prepare("DELETE FROM dead_letters WHERE hash = ?").run(hash);
+      },
+      remove: (hash, path) => {
+        db.prepare("DELETE FROM dead_letters WHERE hash = ? AND path = ?").run(hash, path);
+      },
+      clear: () => Number(db.prepare("DELETE FROM dead_letters").run().changes),
+    };
   }
 
   /** One unreadable row must not cost the rest: it is set aside, with what it held. */

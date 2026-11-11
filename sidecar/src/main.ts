@@ -1,8 +1,9 @@
 import path from "node:path";
 import { homedir } from "node:os";
 import { buildApp, warmup, type App } from "./app.ts";
+import { DeadLetterBook } from "./dead-letters.ts";
 import { isLoopbackHost, loadConfig, type SidecarConfig } from "./config.ts";
-import { openJobStore, retryJobStore, queueDbPathFor } from "./queue-store.ts";
+import { openJobStore, retryJobStore, queueDbPathFor, type SqliteJobStore } from "./queue-store.ts";
 import { shutDown } from "./shutdown.ts";
 import { openBackend, type LlmOptions } from "./store.ts";
 
@@ -47,6 +48,11 @@ function llmOptionsFrom(config: SidecarConfig): LlmOptions {
   };
 }
 
+/** The queue file's set-asides, or a book in memory while that file is not ours. */
+function lettersIn(store: SqliteJobStore | null): DeadLetterBook {
+  return new DeadLetterBook(store ? store.deadLetters() : null);
+}
+
 async function main(): Promise<void> {
   const config = loadConfig();
   const dbPath = config.dbPath ?? defaultDbPath();
@@ -59,7 +65,10 @@ async function main(): Promise<void> {
   const queueFile = config.queueDbPath ?? queueDbPathFor(dbPath);
   const opened = openJobStore(queueFile, (message) => earlyWarnings.push(message));
   let jobStore = opened.store;
+  // Documents set aside from embedding live in the same file, so they too outlive a rebuilt index.
+  const deadLetters = lettersIn(jobStore);
   const backend = await openBackend({
+    deadLetters,
     dbPath,
     keepWarm: config.keepWarm,
     llm: llmOptionsFrom(config),
@@ -87,7 +96,8 @@ async function main(): Promise<void> {
     ? retryJobStore(queueFile, (store) => {
         jobStore = store;
         app.ctx.jobs.adoptStore(store);
-        app.log.warn("The job queue file came free. Jobs now persist, and its waiting jobs have joined this queue.");
+        deadLetters.adopt(store.deadLetters());
+        app.log.warn("The job queue file came free. Jobs and set-aside documents now persist, and its waiting jobs have joined this queue.");
       }, (message) => app.log.warn(message))
     : () => {};
 

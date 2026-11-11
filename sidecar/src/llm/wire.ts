@@ -1,4 +1,5 @@
 import { existsSync, readdirSync } from "node:fs";
+import type { DeadLetterBook, DeadLetterRow } from "../dead-letters.ts";
 import type { EmbedSummary } from "../jobs.ts";
 import { isBusy, withShortBusyTimeout } from "../sqlite-busy.ts";
 import type { BackendEmbedOptions, BackendSearchOptions, LlmOptions, OpenBackendOptions, SearchHit, SearchOutcome } from "../store.ts";
@@ -52,17 +53,13 @@ const DEFAULT_EMBED_BATCH_BYTES = 256 * 1024;
 const EMBED_BATCH_CHUNKS = 32;
 
 /**
- * Beside QMD's tables, not part of them. Keyed by content and path, because the path can
- * reach the text a worker sees, through the title. So changed content, or the same
- * content under a new name, is tried afresh.
+ * Where earlier builds kept set-asides: in the index, beside QMD's tables. They now live in
+ * the queue's file (src/dead-letters.ts). A table found here is moved there once, then dropped.
  */
-const DEAD_LETTER_TABLE = "CREATE TABLE IF NOT EXISTS memoria_dead_letters (hash TEXT NOT NULL, path TEXT NOT NULL, reason TEXT NOT NULL, at TEXT NOT NULL, worker_set TEXT NOT NULL, PRIMARY KEY (hash, path))";
+const LEGACY_DEAD_LETTERS = "memoria_dead_letters";
 
 /** A refusal can be the worker's doing. So it holds only for this set of workers, and not for long. */
 const DEAD_LETTER_RETRY_MS = 24 * 60 * 60 * 1000;
-
-/** Holds for this worker set, this model, and under a day. A time ahead of now is from a clock moved back, so it says nothing. */
-const LETTER_HOLDS = "l.worker_set = ? AND l.at > ? AND l.at <= ?";
 
 /**
  * Mirrors the SDK's private getPendingEmbeddingDocs, plus a force job's stale documents
@@ -86,7 +83,7 @@ const PENDING_DOCS = `
     AND (? IS NULL OR d.collection = ?)
   GROUP BY d.hash
   ) g
-  WHERE ? IS NOT NULL OR NOT EXISTS (SELECT 1 FROM memoria_dead_letters l WHERE l.hash = g.hash AND l.path = g.path AND ${LETTER_HOLDS})
+  WHERE ? IS NOT NULL OR NOT EXISTS (SELECT 1 FROM json_each(?) l WHERE json_extract(l.value, '$[0]') = g.hash AND json_extract(l.value, '$[1]') = g.path)
   ORDER BY g.path
 `;
 
@@ -142,8 +139,6 @@ export function replaceDocumentVectors(handles: SdkHandles, model: string, finge
       deleteVectors(handles.db, hash);
       const at = new Date().toISOString();
       for (const chunk of chunks) handles.insertEmbedding(hash, chunk.seq, chunk.pos, new Float32Array(chunk.vector), model, at, total, fingerprint);
-      handles.db.exec(DEAD_LETTER_TABLE);
-      handles.db.prepare("DELETE FROM memoria_dead_letters WHERE hash = ?").run(hash);
     }),
   );
 }
@@ -192,6 +187,8 @@ export interface WiredRemote {
   search(run: (options: BackendSearchOptions) => Promise<SearchHit[]>, options: BackendSearchOptions): Promise<SearchOutcome>;
   deadLetters(): DeadLetter[];
   clearDeadLetters(): number;
+  /** After a scan: set-asides of documents no row holds any more go, as their paths may be sensitive. */
+  pruneDeadLetters(): void;
   close(): void;
 }
 
@@ -210,9 +207,37 @@ function workerSetOf(llm: RemoteLlm, fingerprint: string): string {
   return `${fingerprint}:${llm.pool.cacheIdentity("embed")}`;
 }
 
-function letterParams(llm: RemoteLlm, fingerprint: string): [string, string, string] {
+/** Holds for this worker set, this model, and under a day. A time ahead of now is from a clock moved back, so it says nothing. */
+function heldLetters(letters: DeadLetterBook, llm: RemoteLlm, fingerprint: string): DeadLetterRow[] {
   const now = Date.now();
-  return [workerSetOf(llm, fingerprint), new Date(now - DEAD_LETTER_RETRY_MS).toISOString(), new Date(now).toISOString()];
+  const set = workerSetOf(llm, fingerprint);
+  const since = new Date(now - DEAD_LETTER_RETRY_MS).toISOString();
+  const until = new Date(now).toISOString();
+  return letters.all().filter((l) => l.workerSet === set && l.at > since && l.at <= until);
+}
+
+/**
+ * The one-time move of an older build's set-asides out of the index. Copied once per process,
+ * then the table is dropped; a busy index leaves the drop for the next pending query.
+ */
+function moveLegacyLetters(db: SdkDb, letters: DeadLetterBook, moved: { copied: boolean }): void {
+  if (!hasDeadLetterTable(db)) return;
+  if (!moved.copied) {
+    const rows = db.prepare(`SELECT hash, path, reason, at, worker_set FROM ${LEGACY_DEAD_LETTERS}`).all() as Array<{ hash: string; path: string; reason: string; at: string; worker_set: string }>;
+    letters.merge(rows.map((r) => ({ hash: r.hash, path: r.path, reason: r.reason, at: r.at, workerSet: r.worker_set })));
+    moved.copied = true;
+  }
+  try {
+    politeWrite(db, () => db.exec(`DROP TABLE ${LEGACY_DEAD_LETTERS}`));
+  } catch (err) {
+    if (!(err instanceof IndexBusy)) throw err;
+  }
+}
+
+/** Does any document row hold this content under this path, or with `active`, an active one? */
+function documentHolds(db: SdkDb, active: boolean): (hash: string, path: string) => boolean {
+  const statement = db.prepare(`SELECT 1 FROM documents WHERE hash = ? AND path = ?${active ? " AND active = 1" : ""}`);
+  return (hash, path) => statement.get(hash, path) !== undefined;
 }
 
 /** Every free background slot, or fewer when the operator caps it. */
@@ -220,18 +245,22 @@ export function embedCapacity(slots: number, cap: number | undefined): number {
   return cap ? Math.min(slots, cap) : slots;
 }
 
-function farmDeps(handles: SdkHandles, llm: RemoteLlm, model: string, fingerprint: string, cap: number | undefined): FarmDeps {
+interface LetterDeps {
+  letters: DeadLetterBook;
+  moved: { copied: boolean };
+}
+
+function farmDeps(handles: SdkHandles, llm: RemoteLlm, model: string, fingerprint: string, cap: number | undefined, { letters, moved }: LetterDeps): FarmDeps {
   const { db } = handles;
   const pending = (collection: string | undefined, redoBefore: string | undefined): PendingDoc[] => {
-    politeWrite(db, () => {
-      handles.migrateVectors(model);
-      db.exec(DEAD_LETTER_TABLE);
-      db.prepare("DELETE FROM memoria_dead_letters WHERE NOT EXISTS (SELECT 1 FROM documents d WHERE d.hash = memoria_dead_letters.hash AND d.path = memoria_dead_letters.path AND d.active = 1)").run();
-    });
+    politeWrite(db, () => handles.migrateVectors(model));
+    moveLegacyLetters(db, letters, moved);
+    letters.retain(documentHolds(db, true));
     const c = collection ?? null;
     const before = redoBefore ?? null;
+    const held = JSON.stringify(heldLetters(letters, llm, fingerprint).map((l) => [l.hash, l.path]));
     // Prepared here, after the migration: on an older index these columns do not exist before it.
-    return db.prepare(PENDING_DOCS).all(model, fingerprint, before, before, new Date().toISOString(), c, c, before, ...letterParams(llm, fingerprint)) as PendingDoc[];
+    return db.prepare(PENDING_DOCS).all(model, fingerprint, before, before, new Date().toISOString(), c, c, before, held) as PendingDoc[];
   };
   return {
     canEmbed: () => llm.canServe("embed", "background"),
@@ -251,19 +280,21 @@ function farmDeps(handles: SdkHandles, llm: RemoteLlm, model: string, fingerprin
     format: (text, body, path) => handles.format(text, handles.title(body, path), model),
     vectorDimensions: () => indexDimensions(db),
     resetVectors: () => politeWrite(db, handles.clearVectors),
-    replaceDocument: (hash, chunks, total) => replaceDocumentVectors(handles, model, fingerprint, hash, chunks, total),
-    deadLetter: (hash, path, reason) => {
-      politeWrite(db, () =>
-        inTransaction(db, () => {
-          // During a force job this document may hold vectors from the worker being replaced.
-          // Those carry this fingerprint. Vectors under another, such as stock QMD's, no
-          // worker of this build made, so they keep serving search until it embeds.
-          deleteVectors(db, hash, fingerprint);
-          db.prepare("INSERT OR REPLACE INTO memoria_dead_letters (hash, path, reason, at, worker_set) VALUES (?, ?, ?, ?, ?)").run(hash, path, reason, new Date().toISOString(), workerSetOf(llm, fingerprint));
-        }),
-      );
+    replaceDocument: (hash, chunks, total) => {
+      // First, as the two are in different files: should the write then fail, the document is
+      // only pending again, where the other order could leave it set aside with fresh vectors.
+      letters.removeHash(hash);
+      replaceDocumentVectors(handles, model, fingerprint, hash, chunks, total);
     },
-    setAsideCount: () => (db.prepare(`SELECT COUNT(*) AS n FROM memoria_dead_letters l WHERE ${LETTER_HOLDS}`).get(...letterParams(llm, fingerprint)) as { n: number }).n,
+    deadLetter: (hash, path, reason) => {
+      // During a force job this document may hold vectors from the worker being replaced.
+      // Those carry this fingerprint. Vectors under another, such as stock QMD's, no
+      // worker of this build made, so they keep serving search until it embeds. They go
+      // first: a busy index then sets nothing aside, and the job tries again later.
+      politeWrite(db, () => inTransaction(db, () => deleteVectors(db, hash, fingerprint)));
+      letters.put({ hash, path, reason, at: new Date().toISOString(), workerSet: workerSetOf(llm, fingerprint) });
+    },
+    setAsideCount: () => heldLetters(letters, llm, fingerprint).length,
     documentCount: () => (db.prepare("SELECT COUNT(DISTINCT hash) AS n FROM documents WHERE active = 1").get() as { n: number }).n,
     recentFailures: new Map(),
     removeOrphans: () => removeOrphanVectors(db),
@@ -285,10 +316,10 @@ export function sweepExpiredCache(db: SdkDb, onWarning: (message: string) => voi
 }
 
 function hasDeadLetterTable(db: SdkDb): boolean {
-  return db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='memoria_dead_letters'").get() !== undefined;
+  return db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='${LEGACY_DEAD_LETTERS}'`).get() !== undefined;
 }
 
-export function wireRemote(handles: SdkHandles, config: RemoteLlmConfig, options: OpenBackendOptions): WiredRemote {
+export function wireRemote(handles: SdkHandles, config: RemoteLlmConfig, options: OpenBackendOptions, letters: DeadLetterBook): WiredRemote {
   const { db, local } = handles;
   const model = local.embedModelName;
   const fingerprint = handles.fingerprint(model);
@@ -313,7 +344,9 @@ export function wireRemote(handles: SdkHandles, config: RemoteLlmConfig, options
   sweepExpiredCache(db, warn);
   const sweep = setInterval(() => sweepExpiredCache(db, warn), CACHE_SWEEP_MS);
   sweep.unref();
-  const deps = farmDeps(handles, llm, model, fingerprint, config.embedConcurrency);
+  const moved = { copied: false };
+  moveLegacyLetters(db, letters, moved);
+  const deps = farmDeps(handles, llm, model, fingerprint, config.embedConcurrency, { letters, moved });
   return {
     llm,
     embed: (o) =>
@@ -328,8 +361,12 @@ export function wireRemote(handles: SdkHandles, config: RemoteLlmConfig, options
         maxBatchChunks: EMBED_BATCH_CHUNKS,
       }),
     search: (run, o) => searchDegradable(llm, handles.validators, run, o),
-    deadLetters: () => (hasDeadLetterTable(db) ? (db.prepare(`SELECT l.hash, l.path, l.reason, l.at FROM memoria_dead_letters l WHERE ${LETTER_HOLDS} ORDER BY l.at`).all(...letterParams(llm, fingerprint)) as DeadLetter[]) : []),
-    clearDeadLetters: () => (hasDeadLetterTable(db) ? Number(db.prepare("DELETE FROM memoria_dead_letters").run().changes) : 0),
+    deadLetters: () =>
+      heldLetters(letters, llm, fingerprint)
+        .sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0))
+        .map((l): DeadLetter => ({ hash: l.hash, path: l.path, reason: l.reason, at: l.at })),
+    clearDeadLetters: () => letters.clear(),
+    pruneDeadLetters: () => void letters.retain(documentHolds(db, false)),
     close: () => {
       clearInterval(sweep);
       llm.pool.stop();

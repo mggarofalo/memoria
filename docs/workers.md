@@ -211,7 +211,7 @@ The job queue, how it persists, and its routes are in [`sidecar/README.md`](../s
 
 **A waiting job is never quiet.** A job can wait for as long as it takes, and that includes a worker that accepts the test text and refuses every real one. While it waits, `/ready` reads `degraded` and shows `jobs.stuck` with the reason and how many times it has tried, and each retry logs a warning.
 
-**A set-aside document is out of vector search, and comes back by itself.** It is recorded in `memoria_dead_letters`, a table in the index beside QMD's, and any vectors it had are dropped, so a force job cannot leave a bad worker's vector live. It can still be found lexically. The job that found it ends `failed` and counts it in `embed.docsDeadLettered`, and later jobs skip it and succeed. `/ready` shows the count in `llm.documentsSetAside`, and `/status` reports it as `documentsSetAside`, not in `needsEmbedding`.
+**A set-aside document is out of vector search, and comes back by itself.** It is recorded in the job queue's file beside the index, `index.sqlite.queue.sqlite`, not in the index, so rebuilding the index keeps the record as it keeps jobs. Any vectors it had are dropped, so a force job cannot leave a bad worker's vector live. It can still be found lexically. The job that found it ends `failed` and counts it in `embed.docsDeadLettered`, and later jobs skip it and succeed. `/ready` shows the count in `llm.documentsSetAside`, and `/status` reports it as `documentsSetAside`, not in `needsEmbedding`.
 
 It is tried again when any of these happens:
 

@@ -223,8 +223,9 @@ A delete (`DELETE /v1/documents`, or a session that replaces its own parts) take
 
 - the document's row;
 - its text, in `content`;
-- its chunks' vectors, in `content_vectors` and `vectors_vec`;
-- any record that it was set aside from embedding.
+- its chunks' vectors, in `content_vectors` and `vectors_vec`.
+
+Then any record that it was set aside from embedding goes from the job queue's file, which holds those beside the jobs.
 
 Text and vectors are kept by content, so when another document holds the same text word for word, that text and its vectors stay, as they are that document's too.
 

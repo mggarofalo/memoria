@@ -7,6 +7,7 @@ import type { BreakerOptions } from "./llm/pool.ts";
 import type { RemoteLlm } from "./llm/remote.ts";
 import { requireSdkFixes, type SdkStoreFunctions } from "./sdk-check.ts";
 import { collectionsToKeep, type CollectionRoot } from "./collection-roots.ts";
+import { DeadLetterBook } from "./dead-letters.ts";
 import { purgeDeleted, removedAny, truncateLog } from "./purge.ts";
 import { withShortBusyTimeout } from "./sqlite-busy.ts";
 import type { DeadLetter, DegradedReason, EmbeddingResult, LlmCallSink, LlmHealth, LlmSurface, PoolLoad, PoolWorkerConfig, Queryable, RerankDocument, RerankResult, WorkerView } from "./llm/types.ts";
@@ -225,6 +226,11 @@ export interface OpenBackendOptions {
   onLlmWarning?: (message: string) => void;
   /** Told how many vector rows the startup repair removed, when it removes any. */
   onVectorRepair?: (rows: number) => void;
+  /**
+   * Where documents set aside from embedding are kept: the queue file's, from the process that
+   * holds it (src/main.ts). Without one they are kept in memory, as for a tool.
+   */
+  deadLetters?: DeadLetterBook;
 }
 
 /** Direct access to the model path, bypassing `llm_cache`. For the parity benchmark. */
@@ -488,10 +494,12 @@ function disableIdleUnload(llm: LlamaLike | undefined): void {
 
 async function wire(storeInternal: unknown, holder: { llm?: LlamaLike }, config: Extract<LlmOptions, { mode: "remote" }>, options: OpenBackendOptions): Promise<WiredRemote> {
   const { wireRemote } = await import("./llm/wire.ts");
-  const wired = wireRemote(await sdkHandles(storeInternal, holder.llm as unknown as LlmSurface), config, options);
+  const letters = options.deadLetters ?? new DeadLetterBook(null);
+  const wired = wireRemote(await sdkHandles(storeInternal, holder.llm as unknown as LlmSurface), config, options, letters);
   holder.llm = wired.llm as unknown as LlamaLike;
   return wired;
 }
+
 
 /**
  * Open the real QMD store. The index must already exist — the sidecar serves
@@ -602,6 +610,7 @@ export async function openBackend(options: OpenBackendOptions): Promise<OpenedBa
     const purged = purgeDeleted(db as never, () => collectionsToKeep(db as never, rootsStatement.all() as CollectionRoot[], (message) => options.onLlmWarning?.(message)));
     if (purged === null) options.onLlmWarning?.("The index was busy, so what deleted documents left in it waits for the next scan to remove it.");
     if (removedAny(purged)) truncateLog(db as never);
+    wired?.pruneDeadLetters();
     return {
       collections: r.collections,
       indexed: r.indexed,

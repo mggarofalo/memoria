@@ -222,7 +222,7 @@ One worker runs one job at a time. Document writes do not start a scan each: the
 
 ### The job queue
 
-Reindex jobs persist in their own SQLite file beside the index (`index.sqlite.queue.sqlite`). It is not inside QMD's schema, so rebuilding the index leaves jobs alone. This uses Node's built-in `node:sqlite`, which adds no dependency.
+Reindex jobs persist in their own SQLite file beside the index (`index.sqlite.queue.sqlite`), as do the documents set aside from embedding (`GET /queue/dead-letters`). It is not inside QMD's schema, so rebuilding the index leaves both alone. An index from a build that kept set-asides inside it has them moved here at start, once, and the table dropped from the index. This uses Node's built-in `node:sqlite`, which adds no dependency.
 
 **A job accepted before a crash runs after the restart,** under the same id. A held job keeps its due time. A job that was running goes back to queued and runs again. A job found running by 5 restarts in a row, with no progress between them, is marked failed, on the assumption that it is what keeps killing the process. Retries during an outage do not count, a document reaching the index clears the count, and so does `:retry`. A clean shutdown leaves a running job queued, which does not count either.
 
@@ -232,7 +232,7 @@ Reindex jobs persist in their own SQLite file beside the index (`index.sqlite.qu
 
 **A damaged queue file does not stop search.** A row that cannot be read is moved to `jobs_quarantine`. Only a file SQLite reports as corrupt, or as not a database, is renamed to `*.corrupt-<time>`, and the last 3 of those are kept. Either way the jobs involved will not run, which a warning says. Any other trouble opening it leaves the file untouched and runs with jobs in memory, with a warning: that covers a file from a newer version and one held by another process.
 
-**One sidecar owns a queue file.** It holds an exclusive SQLite lock for as long as it runs, and the operating system releases that if the process dies. A second sidecar on the same file runs with its jobs in memory and says so, and `/ready` shows `jobs.persistent: false`. It tries again every 30 s, and when the file comes free it takes over the file and its waiting jobs.
+**One sidecar owns a queue file.** It holds an exclusive SQLite lock for as long as it runs, and the operating system releases that if the process dies. A second sidecar on the same file runs with its jobs and set-asides in memory and says so, and `/ready` shows `jobs.persistent: false`. It tries again every 30 s, and when the file comes free it takes over the file and its waiting jobs.
 
 A later write failure, such as a full disk, is logged and the queue carries on in memory, writing what it missed if the store recovers. `/ready` shows `jobs.persistent` and `GET /queue` shows `persistence`, so this cannot go unnoticed. Writes never wait on a lock, because they run on the event loop.
 
