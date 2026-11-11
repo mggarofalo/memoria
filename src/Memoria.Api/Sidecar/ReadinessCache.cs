@@ -46,30 +46,44 @@ public sealed class ReadinessCache(TimeProvider time, IOptions<MemoriaOptions> o
 		return started.Task;
 	}
 
+	/// <summary>
+	/// Runs the probe, then marks when it finished before anyone sees the outcome. The other way round, a caller resuming on another
+	/// thread could ask again in between, find no finish time, and be handed the finished task as if it were still in flight, however
+	/// old it later grows.
+	/// </summary>
 	private async Task RunAsync(Func<CancellationToken, Task<SidecarReadinessResult>> probe, TaskCompletionSource<SidecarReadinessResult> started)
 	{
+		SidecarReadinessResult? result = null;
+		Exception? failure = null;
 		try
 		{
 			using CancellationTokenSource timeout = new(options.Value.Sidecar.ReadinessTimeout, time);
-			started.SetResult(await probe(timeout.Token));
-		}
-		catch (OperationCanceledException ex)
-		{
-			started.SetCanceled(ex.CancellationToken);
+			result = await probe(timeout.Token);
 		}
 		catch (Exception ex)
 		{
-			started.SetException(ex);
+			failure = ex;
 		}
-		finally
+
+		lock (_gate)
 		{
-			lock (_gate)
+			if (_current == started.Task)
 			{
-				if (_current == started.Task)
-				{
-					_finishedAt = time.GetTimestamp();
-				}
+				_finishedAt = time.GetTimestamp();
 			}
+		}
+
+		switch (failure)
+		{
+			case null:
+				started.SetResult(result!);
+				break;
+			case OperationCanceledException canceled:
+				started.SetCanceled(canceled.CancellationToken);
+				break;
+			default:
+				started.SetException(failure);
+				break;
 		}
 	}
 }

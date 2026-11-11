@@ -557,7 +557,7 @@ Two route groups have no business being reachable from the internet, so the prox
 host refuses them for any address outside the LAN:
 
 - **`/ready`.** It needs no key, and each probe makes the sidecar scan the index.
-  The API shares one probe among all its callers for `Memoria:Sidecar:ReadinessCacheTime`
+  The API shares one probe among its callers without an admin key for `Memoria:Sidecar:ReadinessCacheTime`
   (2 s), and the sidecar shares one scan among its callers for 2 s, so a flood costs
   one scan every 2 s. Measured on an index of 50,000 documents, one scan took about
   30 ms of the sidecar's single event loop. Fifty `/ready` calls at once took 1.35 s

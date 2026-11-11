@@ -740,7 +740,7 @@ type ClientInterface interface {
 
 	// Ready Readiness
 	//
-	// Probes the memoria-qmd sidecar, at most once per `Memoria:Sidecar:ReadinessCacheTime` (2 s by default): callers in that time share one answer. 200 whenever it answers, with `status` of `ready`, `warming` or `degraded`: losing GPU workers makes search rank worse, and must not take the API out of rotation. 503 only when the sidecar cannot be reached, unless `strict=true`, which also answers 503 for anything but `ready`. Anonymous for orchestrators: without an admin key the body carries only the status word, and `not_ready` for an unreachable sidecar, with `reason` and `sidecar` null. An admin key gets the full report, including stuck jobs and documents set aside.
+	// Probes the memoria-qmd sidecar, at most once per `Memoria:Sidecar:ReadinessCacheTime` (2 s by default): callers in that time share one answer. A caller with an admin key probes on its own, so the sidecar logs the call under that request's trace id. 200 whenever it answers, with `status` of `ready`, `warming` or `degraded`: losing GPU workers makes search rank worse, and must not take the API out of rotation. 503 only when the sidecar cannot be reached, unless `strict=true`, which also answers 503 for anything but `ready`. Anonymous for orchestrators: without an admin key the body carries only the status word, and `not_ready` for an unreachable sidecar, with `reason` and `sidecar` null. An admin key gets the full report, including stuck jobs and documents set aside.
 	//
 	// Corresponds with GET /ready (the `Ready` operationId).
 	Ready(ctx context.Context, params *ReadyParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -981,7 +981,7 @@ func (c *Client) Health(ctx context.Context, reqEditors ...RequestEditorFn) (*ht
 
 // Ready Readiness
 //
-// Probes the memoria-qmd sidecar, at most once per `Memoria:Sidecar:ReadinessCacheTime` (2 s by default): callers in that time share one answer. 200 whenever it answers, with `status` of `ready`, `warming` or `degraded`: losing GPU workers makes search rank worse, and must not take the API out of rotation. 503 only when the sidecar cannot be reached, unless `strict=true`, which also answers 503 for anything but `ready`. Anonymous for orchestrators: without an admin key the body carries only the status word, and `not_ready` for an unreachable sidecar, with `reason` and `sidecar` null. An admin key gets the full report, including stuck jobs and documents set aside.
+// Probes the memoria-qmd sidecar, at most once per `Memoria:Sidecar:ReadinessCacheTime` (2 s by default): callers in that time share one answer. A caller with an admin key probes on its own, so the sidecar logs the call under that request's trace id. 200 whenever it answers, with `status` of `ready`, `warming` or `degraded`: losing GPU workers makes search rank worse, and must not take the API out of rotation. 503 only when the sidecar cannot be reached, unless `strict=true`, which also answers 503 for anything but `ready`. Anonymous for orchestrators: without an admin key the body carries only the status word, and `not_ready` for an unreachable sidecar, with `reason` and `sidecar` null. An admin key gets the full report, including stuck jobs and documents set aside.
 //
 // Corresponds with GET /ready (the `Ready` operationId).
 func (c *Client) Ready(ctx context.Context, params *ReadyParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
@@ -2969,7 +2969,7 @@ type ClientWithResponsesInterface interface {
 
 	// ReadyWithResponse Readiness
 	//
-	// Probes the memoria-qmd sidecar, at most once per `Memoria:Sidecar:ReadinessCacheTime` (2 s by default): callers in that time share one answer. 200 whenever it answers, with `status` of `ready`, `warming` or `degraded`: losing GPU workers makes search rank worse, and must not take the API out of rotation. 503 only when the sidecar cannot be reached, unless `strict=true`, which also answers 503 for anything but `ready`. Anonymous for orchestrators: without an admin key the body carries only the status word, and `not_ready` for an unreachable sidecar, with `reason` and `sidecar` null. An admin key gets the full report, including stuck jobs and documents set aside.
+	// Probes the memoria-qmd sidecar, at most once per `Memoria:Sidecar:ReadinessCacheTime` (2 s by default): callers in that time share one answer. A caller with an admin key probes on its own, so the sidecar logs the call under that request's trace id. 200 whenever it answers, with `status` of `ready`, `warming` or `degraded`: losing GPU workers makes search rank worse, and must not take the API out of rotation. 503 only when the sidecar cannot be reached, unless `strict=true`, which also answers 503 for anything but `ready`. Anonymous for orchestrators: without an admin key the body carries only the status word, and `not_ready` for an unreachable sidecar, with `reason` and `sidecar` null. An admin key gets the full report, including stuck jobs and documents set aside.
 	//
 	// Returns a wrapper object for the known response body format(s).
 	//
@@ -5516,7 +5516,7 @@ func (c *ClientWithResponses) HealthWithResponse(ctx context.Context, reqEditors
 
 // ReadyWithResponse Readiness
 //
-// Probes the memoria-qmd sidecar, at most once per `Memoria:Sidecar:ReadinessCacheTime` (2 s by default): callers in that time share one answer. 200 whenever it answers, with `status` of `ready`, `warming` or `degraded`: losing GPU workers makes search rank worse, and must not take the API out of rotation. 503 only when the sidecar cannot be reached, unless `strict=true`, which also answers 503 for anything but `ready`. Anonymous for orchestrators: without an admin key the body carries only the status word, and `not_ready` for an unreachable sidecar, with `reason` and `sidecar` null. An admin key gets the full report, including stuck jobs and documents set aside.
+// Probes the memoria-qmd sidecar, at most once per `Memoria:Sidecar:ReadinessCacheTime` (2 s by default): callers in that time share one answer. A caller with an admin key probes on its own, so the sidecar logs the call under that request's trace id. 200 whenever it answers, with `status` of `ready`, `warming` or `degraded`: losing GPU workers makes search rank worse, and must not take the API out of rotation. 503 only when the sidecar cannot be reached, unless `strict=true`, which also answers 503 for anything but `ready`. Anonymous for orchestrators: without an admin key the body carries only the status word, and `not_ready` for an unreachable sidecar, with `reason` and `sidecar` null. An admin key gets the full report, including stuck jobs and documents set aside.
 //
 // Returns a wrapper object for the known response body format(s).
 //

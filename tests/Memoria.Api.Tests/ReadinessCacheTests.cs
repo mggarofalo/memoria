@@ -138,6 +138,29 @@ public sealed class ReadinessCacheTests : IDisposable
 		Assert.Equal(2, probes);
 	}
 
+	/// <summary>
+	/// A caller resumes on another thread the moment the probe's answer is out. If the finish time were marked after that, it could
+	/// ask again first and be handed the finished probe as if still in flight. Many rounds make that window show if it is there.
+	/// </summary>
+	[Fact]
+	public async Task A_caller_who_asks_again_the_moment_an_answer_lands_gets_a_new_probe()
+	{
+		MemoriaOptions settings = new() { Sidecar = { ReadinessCacheTime = TimeSpan.Zero, ReadinessTimeout = TimeSpan.FromSeconds(5) } };
+		ReadinessCache cache = new(new SteppedClock(), Options.Create(settings));
+		int probes = 0;
+		Task<SidecarReadinessResult> Probe(CancellationToken _)
+		{
+			Interlocked.Increment(ref probes);
+			return Task.FromResult<SidecarReadinessResult>(null!);
+		}
+
+		for (int round = 1; round <= 2_000; round++)
+		{
+			await cache.GetAsync(Probe);
+			Assert.Equal(round, Volatile.Read(ref probes));
+		}
+	}
+
 	[Fact]
 	public async Task The_probe_has_its_own_timeout()
 	{
@@ -183,22 +206,54 @@ public sealed class ReadinessCacheTests : IDisposable
 		Assert.Null(await cache.GetAsync(_ => Task.FromResult<SidecarReadinessResult>(null!)));
 	}
 
-	/// <summary>The cached answer is the sidecar's own, so what each caller is shown is decided per caller, after it.</summary>
+	/// <summary>An admin has a key, and so a rate limit, and wants the sidecar to log the call under its request's trace id.</summary>
 	[Fact]
-	public async Task An_admins_full_report_is_not_what_an_anonymous_caller_gets_from_the_same_answer()
+	public async Task An_admin_probes_on_its_own_and_gets_the_full_report()
 	{
 		using AuthApiFactory auth = new();
 		using WebApplicationFactory<Program> cached = auth.WithWebHostBuilder(static builder => builder.UseSetting("Memoria:Sidecar:ReadinessCacheTime", "00:00:30"));
 		auth.Sidecar.On("GET", "/ready", HttpStatusCode.OK, SidecarFixtures.Readiness("ready", resident: true));
 		(_, string key) = await auth.IssueAsync([Memoria.Api.Http.MemoriaScopes.Admin]);
 
-		string full = await AuthApiFactory.Authorized(cached.CreateClient(), key).GetStringAsync("/ready");
 		string anonymous = await cached.CreateClient().GetStringAsync("/ready");
+		HttpClient admin = AuthApiFactory.Authorized(cached.CreateClient(), key);
+		await admin.GetStringAsync("/ready");
+		string full = await admin.GetStringAsync("/ready");
 
-		Assert.Equal(1, auth.Sidecar.Requests.Count(r => r.Uri.AbsolutePath == "/ready"));
+		Assert.Equal(3, auth.Sidecar.Requests.Count(r => r.Uri.AbsolutePath == "/ready"));
 		Assert.Contains("\"sidecar\":{", full, StringComparison.Ordinal);
 		Assert.Contains("\"sidecar\":null", anonymous, StringComparison.Ordinal);
 		Assert.Contains("\"reason\":null", anonymous, StringComparison.Ordinal);
+	}
+
+	/// <summary>Only the admin scope skips the shared probe: any other key shares it, and sees the status word alone.</summary>
+	[Fact]
+	public async Task A_key_without_the_admin_scope_shares_the_anonymous_answer()
+	{
+		using AuthApiFactory auth = new();
+		using WebApplicationFactory<Program> cached = auth.WithWebHostBuilder(static builder => builder.UseSetting("Memoria:Sidecar:ReadinessCacheTime", "00:00:30"));
+		auth.Sidecar.On("GET", "/ready", HttpStatusCode.OK, SidecarFixtures.Readiness("ready", resident: true));
+		(_, string key) = await auth.IssueAsync([Memoria.Api.Http.MemoriaScopes.Read], ["c"]);
+
+		await cached.CreateClient().GetStringAsync("/ready");
+		string word = await AuthApiFactory.Authorized(cached.CreateClient(), key).GetStringAsync("/ready");
+
+		Assert.Equal(1, auth.Sidecar.Requests.Count(r => r.Uri.AbsolutePath == "/ready"));
+		Assert.Contains("\"sidecar\":null", word, StringComparison.Ordinal);
+	}
+
+	/// <summary>Disabled mode treats every caller as trusted, but anyone who can reach the API is such a caller, so they share it.</summary>
+	[Fact]
+	public async Task Disabled_mode_shares_the_probe()
+	{
+		using WebApplicationFactory<Program> cached = _factory.WithWebHostBuilder(static builder => builder.UseSetting("Memoria:Sidecar:ReadinessCacheTime", "00:00:30"));
+		_factory.Sidecar.On("GET", "/ready", HttpStatusCode.OK, SidecarFixtures.Readiness("ready", resident: true));
+
+		HttpClient client = cached.CreateClient();
+		await client.GetStringAsync("/ready");
+		await client.GetStringAsync("/ready");
+
+		Assert.Equal(1, ReadyProbes);
 	}
 
 	/// <summary>A clock whose monotonic timestamp and wall time move apart, as when NTP steps the wall clock.</summary>
