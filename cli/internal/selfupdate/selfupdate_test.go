@@ -798,7 +798,7 @@ func TestHTTPSOnly(t *testing.T) {
 	})
 	t.Run("transport refuses http directly", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, plain.URL, nil)
-		if _, err := (httpsOnlyTransport{base: http.DefaultTransport}).RoundTrip(req); !errors.Is(err, ErrInsecureURL) {
+		if _, err := (httpsOnlyTransport{base: http.DefaultTransport}).RoundTrip(req); !errors.Is(err, ErrInsecureURL) { //nolint:bodyclose // refused before any request, so there is no response
 			t.Fatalf("err = %v", err)
 		}
 	})

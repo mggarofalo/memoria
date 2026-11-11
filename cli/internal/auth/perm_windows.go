@@ -95,7 +95,7 @@ func verifyPrivate(path string) error {
 }
 
 func verifySingleLink(path string) error {
-	f, err := os.Open(path)
+	f, err := os.Open(path) //nolint:gosec // G304: the CLI's own credentials file, opened to count its links
 	if err != nil {
 		return err
 	}
@@ -150,7 +150,7 @@ func verifyEntries(dacl *windows.ACL, trusted []*windows.SID) error {
 		if err := windows.GetAce(dacl, i, &ace); err != nil {
 			return fmt.Errorf("cannot read permissions: %w", err)
 		}
-		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart)) //nolint:gosec // G103: the Windows ACL API returns the SID by address inside the ACE
 		if err := checkEntry(ace.Header.AceType, sid, trusted); err != nil {
 			return err
 		}

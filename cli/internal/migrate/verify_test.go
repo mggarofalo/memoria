@@ -18,7 +18,7 @@ func TestCompareTextAllowsOnlyWhatRedactionExplains(t *testing.T) {
 		"a line changed":             {strings.Replace(strings.Replace(local, "sk-real", "[REDACTED:token]", 1), "three", "changed", 1), TextDifferent},
 		"a line gone":                {strings.Replace(strings.Replace(local, "sk-real", "[REDACTED:token]", 1), "three\n", "", 1), TextDifferent},
 		"a line added":               {local + "\nsomething added\n", TextDifferent},
-		"out of order":               {strings.Replace(strings.Replace(local, "one\nkey sk-real here", "key [REDACTED:token] here\none", 1), "", "", 0), TextDifferent},
+		"out of order":               {strings.Replace(local, "one\nkey sk-real here", "key [REDACTED:token] here\none", 1), TextDifferent},
 		"a mark excuses another":     {strings.Replace(local, "three", "[REDACTED:token]\nextra", 1), TextDifferent},
 		"text around a mark differs": {strings.Replace(local, "key sk-real here", "lock [REDACTED:token] there", 1), TextDifferent},
 		"cut short":                  {"---\ndate: x\n", TextDifferent},

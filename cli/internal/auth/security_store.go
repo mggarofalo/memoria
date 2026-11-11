@@ -108,7 +108,7 @@ func (s *SecurityStore) checkNames(name string) error {
 func (s *SecurityStore) run(stdin string, args ...string) securityResult {
 	ctx, cancel := context.WithTimeout(context.Background(), securityTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, s.path, args...)
+	cmd := exec.CommandContext(ctx, s.path, args...) //nolint:gosec // G204: s.path is the fixed /usr/bin/security; the key goes on stdin, never in args
 	cmd.Env = withoutAPIKey(os.Environ())
 	cmd.Stdin = strings.NewReader(stdin)
 	var stdout, stderr bytes.Buffer

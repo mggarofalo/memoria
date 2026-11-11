@@ -289,7 +289,7 @@ func TestNonASCIIRedirectIsRefusedAndGetsNoKey(t *testing.T) {
 }
 
 func TestRedirectLocationWithNonASCIIHostIsRefused(t *testing.T) {
-	var server *httptest.Server
+	var server *httptest.Server //nolint:staticcheck // the handler refers to server, so it is declared first
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Location", "https://exam%C4%B0ple.test/x")
 		w.WriteHeader(http.StatusFound)
@@ -343,7 +343,7 @@ func TestRedirectToAnotherOriginIsRefusedAndTheKeyNeverArrives(t *testing.T) {
 
 func TestSameOriginRedirectKeepsTheKey(t *testing.T) {
 	var final atomic.Value
-	var server *httptest.Server
+	var server *httptest.Server //nolint:staticcheck // the handler refers to server, so it is declared first
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/start" {
 			http.Redirect(w, r, server.URL+"/end", http.StatusFound)
@@ -368,7 +368,7 @@ func TestSameOriginRedirectKeepsTheKey(t *testing.T) {
 }
 
 func TestRedirectLoopStops(t *testing.T) {
-	var server *httptest.Server
+	var server *httptest.Server //nolint:staticcheck // the handler refers to server, so it is declared first
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, server.URL+"/again", http.StatusFound)
 	}))

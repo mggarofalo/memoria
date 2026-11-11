@@ -15,7 +15,7 @@ func ensurePrivateDir(dir string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	return os.Chmod(dir, 0o700)
+	return os.Chmod(dir, 0o700) //nolint:gosec // G302: a directory needs its execute bit; 0700 is owner-only
 }
 
 // protectFile restricts a file to its owner.

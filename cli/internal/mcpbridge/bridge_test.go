@@ -666,7 +666,8 @@ func TestSignalEndsRunEvenWithAWriteStuck(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	cancel()
 	select {
-	case <-done:
+	case err := <-done:
+		_ = err // after a cancel, how Run ends is not what this test checks: only that it ends
 	case <-time.After(shutdownGrace + 10*time.Second):
 		t.Fatal("the bridge outlived the signal")
 	}
@@ -800,7 +801,8 @@ func TestContextCancelStopsInFlightRequests(t *testing.T) {
 	<-started
 	cancel()
 	select {
-	case <-done:
+	case err := <-done:
+		_ = err // only that Run ends matters here
 	case <-time.After(10 * time.Second):
 		t.Fatal("the bridge did not stop")
 	}

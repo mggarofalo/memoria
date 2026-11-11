@@ -38,7 +38,7 @@ type qmdConfig struct {
 
 // LoadCollections reads QMD's index.yml, in name order.
 func LoadCollections(path string) ([]Collection, error) {
-	file, err := os.Open(path)
+	file, err := os.Open(path) //nolint:gosec // G304: the QMD config the user names with --qmd-config
 	if err != nil {
 		return nil, errors.New("the QMD config cannot be opened")
 	}

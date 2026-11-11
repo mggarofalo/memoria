@@ -17,7 +17,7 @@ func ReadPrivateFile(path string) ([]byte, error) {
 	case err != nil:
 		return nil, err
 	}
-	return os.ReadFile(path)
+	return os.ReadFile(path) //nolint:gosec // G304: a private file of the CLI's own, read only after its permissions were checked
 }
 
 // WritePrivateFile atomically replaces a file in this CLI's private directory.

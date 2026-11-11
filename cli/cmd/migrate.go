@@ -437,7 +437,7 @@ func exitOneIsAResult(err error) bool {
 // runDotnet runs the tool. Its stderr is left behind, because a failure there could quote a
 // path or text. An exit of 1 only says the counts are not clean, and they are still the result.
 func runDotnet(ctx context.Context, args []string, stdin []byte) ([]byte, error) {
-	command := exec.CommandContext(ctx, "dotnet", args...)
+	command := exec.CommandContext(ctx, "dotnet", args...) //nolint:gosec // G204: the dotnet the user installed runs the RedactionCheck tool they named
 	command.Stdin = bytes.NewReader(stdin)
 	var stdout bytes.Buffer
 	command.Stdout = &stdout

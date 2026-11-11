@@ -200,7 +200,7 @@ func (u *Updater) checkReplaceable(exe string) error {
 		return fmt.Errorf("%w: %s looks package-managed, so update it with that package manager, or pass --force", ErrManaged, exe)
 	}
 	if err := checkOwnedByCurrentUser(exe); err != nil {
-		return fmt.Errorf("%w: %v; pass --force to replace it anyway", ErrManaged, err)
+		return fmt.Errorf("%w: %w; pass --force to replace it anyway", ErrManaged, err)
 	}
 	return nil
 }
@@ -330,7 +330,7 @@ func removeBackup(backup string) {
 // rollback restores the backup after the new binary failed to run.
 func rollback(exe, backup string, cause error) error {
 	if err := os.Rename(backup, exe); err != nil {
-		return fmt.Errorf("the new binary failed (%v) and rollback failed (%w); the previous binary is at %s", cause, err, backup)
+		return fmt.Errorf("the new binary failed (%w) and rollback failed (%w); the previous binary is at %s", cause, err, backup)
 	}
 	return fmt.Errorf("the new binary failed, so the previous version was restored: %w", cause)
 }

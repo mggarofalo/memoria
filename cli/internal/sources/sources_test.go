@@ -1,6 +1,7 @@
 package sources
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -173,7 +174,7 @@ func TestReadRefusesWhatCannotBeSent(t *testing.T) {
 	}
 	tree := openTree(t, dir)
 	for name, want := range map[string]error{"binary.md": errNotText, "huge.md": errTooLarge, "folder.md": errNotRegular} {
-		if _, err := tree.Read(name); err != want {
+		if _, err := tree.Read(name); !errors.Is(err, want) {
 			t.Errorf("Read(%s) = %v, want %v", name, err, want)
 		}
 	}
