@@ -44,7 +44,7 @@ if [ -n "${MUTATION_CONCURRENCY:-}" ]; then
   concurrency="--concurrency $MUTATION_CONCURRENCY"
 fi
 status=0
-for config in ${MUTATION_CONFIGS:-core api security}; do
+for config in ${MUTATION_CONFIGS:-core api security security-core}; do
   # shellcheck disable=SC2086 # $concurrency, $since and $mutate are empty or meant to split
   dotnet tool run dotnet-stryker --config-file "stryker/$config.json" \
     --output "StrykerOutput/$config$output_suffix" $concurrency $since $mutate || status=1

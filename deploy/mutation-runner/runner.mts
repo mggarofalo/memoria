@@ -99,8 +99,7 @@ export function scoreOf(tally: Tally): number | null {
   return tally.valid === 0 ? null : (100 * tally.detected) / tally.valid;
 }
 
-// security-core is gone from stryker/, but a commit from before its removal still writes its reports, and it must be
-// matched before security, which its name starts with.
+// security-core must be matched before security, which its name starts with.
 const DOTNET_CONFIGS = ["security-core", "security", "core", "api"];
 
 /** The Stryker.NET config a report belongs to: StrykerOutput/<config> or StrykerOutput/<config>-<shard>. */

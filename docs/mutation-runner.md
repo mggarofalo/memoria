@@ -15,6 +15,7 @@ Every `POLL_SECONDS`, 15 minutes by default, the runner:
    - With `MUTATION_SCOPE=changed`, the default, the scripts mutate only the files changed since the last mutated commit (`MUTATION_BASE`).
    - With `MUTATION_SCOPE=package`, they mutate every file of each selected package. That takes hours for the sidecar or .NET.
    - **.NET runs as the shards in `stryker/shards.json`**, one after another, each under its config's thresholds.
+     - Core's redaction code (`src/Memoria.Core/Redaction/`) is not mutated: redaction is best-effort defence in depth, and the boundary is auth. A change there selects no shard, and the run gates nothing on it. Its unit tests still run in CI.
      - A changed-files run takes only the shards that hold a changed source file under `src/`, and each mutates just its changed files.
      - When no source file changed, as when only tests did, the plain `scripts/mutation-dotnet.sh` runs with `--since`. Stryker.NET then judges what the change touched.
      - A whole-package run takes every shard. Its score for each config counts all of that config's shards together.

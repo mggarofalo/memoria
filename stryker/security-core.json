@@ -1,0 +1,14 @@
+{
+  "stryker-config": {
+    "project": "src/Memoria.Core/Memoria.Core.csproj",
+    "test-projects": [
+      "tests/Memoria.Core.Tests/Memoria.Core.Tests.csproj",
+      "tests/Memoria.Api.Tests/Memoria.Api.Tests.csproj"
+    ],
+    "test-case-filter": "Category!=Timing",
+    "mutate": ["**/Sessions/PartGate.cs"],
+    "ignore-methods": ["ConfigureAwait"],
+    "reporters": ["cleartext", "html", "json"],
+    "thresholds": { "high": 95, "low": 90, "break": 90 }
+  }
+}
