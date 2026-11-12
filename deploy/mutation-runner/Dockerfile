@@ -11,8 +11,9 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
  && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
 COPY --from=go /usr/local/go /usr/local/go
 # git comes with the SDK image; procps gives the mutation scripts' tests ps.
+# python3, make and g++ let npm ci compile better-sqlite3, which has no prebuilt binary for every Node release.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends procps \
+ && apt-get install -y --no-install-recommends procps python3 make g++ \
  && rm -rf /var/lib/apt/lists/*
 # The runner is root and holds the token; the scripts and the tests run as this account, which cannot read it.
 # Its cache directories exist here so that the volumes compose mounts on them start out owned by it.
