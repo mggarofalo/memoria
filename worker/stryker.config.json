@@ -12,5 +12,5 @@
   "reporters": ["clear-text", "html", "json"],
   "htmlReporter": { "fileName": "worker/reports/mutation/mutation.html" },
   "jsonReporter": { "fileName": "worker/reports/mutation/mutation.json" },
-  "thresholds": { "high": 80, "low": 70, "break": 70 }
+  "thresholds": { "high": 80, "low": 76, "break": 76 }
 }

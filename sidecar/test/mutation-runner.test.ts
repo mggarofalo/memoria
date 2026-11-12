@@ -57,12 +57,11 @@ test("a changed .NET file selects the shards that mutate it, from the repository
     configs[name] = { projectDir: path.posix.dirname(raw["stryker-config"].project), mutate: raw["stryker-config"].mutate ?? [] };
   }
   const names = (changed: string[]) => shardsFor(changed, shards, configs).map((s) => s.name);
-  // security-core's files are mutated under security-core's shards, not core's.
-  assert.deepEqual(names(["src/Memoria.Core/Redaction/PemBlock.cs"]), ["security-core redaction 2"]);
-  assert.deepEqual(names(["src/Memoria.Core/Sessions/PartGate.cs", "src/Memoria.Core/Redaction/Redactor.cs"]), ["security-core redaction 4", "security-core part gate"]);
+  // Redaction is not mutated at all, and the part gate is security-core's, not core's.
+  assert.deepEqual(names(["src/Memoria.Core/Redaction/PemBlock.cs", "src/Memoria.Core/Redaction/NotNamedAnywhere.cs"]), []);
+  assert.deepEqual(names(["src/Memoria.Core/Sessions/PartGate.cs", "src/Memoria.Core/Redaction/Redactor.cs"]), ["security-core part gate"]);
   assert.deepEqual(names(["src/Memoria.Core/Sessions/ClaudeTranscript.cs"]), ["core sessions 2"]);
   // A file no shard names lands in its folder's rest shard, or the config's.
-  assert.deepEqual(names(["src/Memoria.Core/Redaction/NotNamedAnywhere.cs"]), ["security-core redaction rest"]);
   assert.deepEqual(names(["src/Memoria.Core/Sessions/NotNamedAnywhere.cs"]), ["core sessions rest"]);
   assert.deepEqual(names(["src/Memoria.Core/Search/Anything.cs"]), ["core rest"]);
   // Memoria.Api: the api shard takes it all, and the security shard the files its config names.
@@ -71,7 +70,7 @@ test("a changed .NET file selects the shards that mutate it, from the repository
   // Tests, configs and anything not C# source in a project select no shard.
   assert.deepEqual(names(["tests/Memoria.Core.Tests/RedactorTests.cs", "stryker/core.json", "src/Memoria.Core/Memoria.Core.csproj"]), []);
   // Every Core source file lands in exactly one Core shard.
-  for (const file of ["Redaction/SecretHeuristics.cs", "Redaction/X.cs", "Sessions/ClaudeTranscript.cs", "Sessions/PartGate.cs", "Sessions/Y.cs", "Z.cs"]) {
+  for (const file of ["Sessions/ClaudeTranscript.cs", "Sessions/PartGate.cs", "Sessions/Y.cs", "Z.cs"]) {
     assert.equal(names([`src/Memoria.Core/${file}`]).length, 1, file);
   }
 });

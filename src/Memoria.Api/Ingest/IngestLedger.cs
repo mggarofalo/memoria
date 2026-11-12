@@ -146,6 +146,7 @@ public sealed class SqliteIngestLedger(ControlDatabase database) : IIngestLedger
 
 	private const string Columns = "version_ticks, state, lease_until_ticks, paths, lease_owner, message_count, content_hash, messages_digest, deleted_paths";
 
+	// Stryker disable once String : an empty format is Guid's default "D", which spells the same unique id with dashes. The id is only a prefix of this process's own tokens, compared with StartsWith, so either spelling tells this process's leases from any other's.
 	private readonly string _instance = Guid.NewGuid().ToString("N");
 
 	public async Task<IngestClaim> ClaimAsync(IngestClaimRequest request, CancellationToken cancellationToken)

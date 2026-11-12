@@ -384,6 +384,7 @@ public sealed partial class SessionIngestor(
 
 	private sealed record SupersededRun(IReadOnlyList<string> Deleted, IReadOnlyList<string> Failed, IReadOnlyList<string> Kept, string? ReindexJobId, string ReindexState, bool Finished)
 	{
+		// Stryker disable once Boolean : Finished is read only from the run RemoveSupersededAsync returns (WriteAsync); None's is never read, by Report, KnownPaths or IsRetryable.
 		public static readonly SupersededRun None = new([], [], [], null, Memoria.Core.Contracts.ReindexState.NotNeeded, false);
 	}
 

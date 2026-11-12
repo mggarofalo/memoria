@@ -82,6 +82,7 @@ public sealed class ControlDatabase(string? path)
 		CREATE INDEX audit_log_key ON audit_log (key_id, timestamp);
 		""";
 
+	// Stryker disable once String : with no path, every way in throws (EnsureConfigured) before the connection string is used.
 	private readonly string _connectionString = new SqliteConnectionStringBuilder
 	{
 		DataSource = path ?? string.Empty,
@@ -142,6 +143,7 @@ public sealed class ControlDatabase(string? path)
 
 	public static DateTimeOffset ParseTimestamp(string value)
 	{
+		// Stryker disable once Bitwise : every stored timestamp is FormatTimestamp's, which ends in Z, so it parses as UTC whatever the styles say.
 		return DateTimeOffset.Parse(value, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal);
 	}
 

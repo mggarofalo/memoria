@@ -1,5 +1,5 @@
 #!/bin/sh
-# Stryker.NET for Memoria.Core, Memoria.Api, and the security-sensitive subset.
+# Stryker.NET for Memoria.Core, Memoria.Api, and the API's authentication and authorization subset.
 # With MUTATION_BASE set (the mutation runner, deploy/mutation-runner), mutates
 # only what changed since that commit. Otherwise mutates everything. Never run
 # this from a git hook. Every config runs, so one score under its threshold does

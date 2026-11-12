@@ -4,6 +4,6 @@
     "test-projects": ["tests/Memoria.Api.Tests/Memoria.Api.Tests.csproj"],
     "ignore-methods": ["ConfigureAwait"],
     "reporters": ["cleartext", "html", "json"],
-    "thresholds": { "high": 80, "low": 60, "break": 0 }
+    "thresholds": { "high": 100, "low": 98, "break": 98 }
   }
 }

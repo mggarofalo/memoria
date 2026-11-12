@@ -173,6 +173,7 @@ public static class IngestEndpoints
 			return await JsonSerializer.DeserializeAsync<DocumentIngestRequest>(body, Json, cancellationToken);
 		}
 		catch (JsonException)
+		// Stryker disable once Block : an emptied catch falls through to the method's end, where Stryker returns default, which is the same null.
 		{
 			return null;
 		}
@@ -265,11 +266,13 @@ public static class IngestEndpoints
 			return StrictUtf8.GetString(bytes.GetBuffer(), 0, (int)bytes.Length);
 		}
 		catch (DecoderFallbackException)
+		// Stryker disable once Block : an emptied catch falls through to the method's end, where Stryker returns default, which is the same null.
 		{
 			return null;
 		}
 	}
 
+	// Stryker disable once Boolean : encoderShouldEmitUTF8Identifier only changes GetPreamble, which writers read; GetString, the only use here, never does.
 	private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
 
 	private static async Task<Results<Ok<RenderedDocumentStatus>, ValidationProblem>> GetRenderedStatusAsync(

@@ -1,14 +1,6 @@
 {
-  "why": "The full .NET mutation run, split so its shards can run in parallel and be rerun one at a time. On a 4-core hosted runner the shards that finished took 50 minutes to 2 hours, and the larger redaction shards ran past 2. Paths are relative to the config's project. A shard with rest takes every file in that folder that no other shard on the same project names, and rest of \"\" takes every folder no rest shard on the project takes, so a new file always lands in some shard. Core's redaction files and PartGate are security-core's, so they are mutated once, under security-core's config, which also runs the tests core's filter leaves out. Sized from mutant counts: keep a shard near 650.",
+  "why": "The full .NET mutation run, split so its shards can run in parallel and be rerun one at a time. On a 4-core hosted runner the shards that finished took 50 minutes to 2 hours. Paths are relative to the config's project. A shard with rest takes every file in that folder that no other shard on the same project names, and rest of \"\" takes every folder no rest shard on the project takes, so a new file always lands in some shard; a config's own exclusions apply to all its shards. Core's Redaction/** is not mutated at all (core.json leaves it out): redaction is best-effort defence in depth, and the boundary is auth. Sessions/PartGate.cs is security-core's, so it is mutated once, under that config. Sized from mutant counts: keep a shard near 650.",
   "shards": [
-    { "name": "security-core redaction 1", "config": "security-core", "files": ["Redaction/SecretHeuristics.cs"] },
-    { "name": "security-core redaction 2", "config": "security-core", "files": ["Redaction/PemBlock.cs"] },
-    { "name": "security-core redaction 3", "config": "security-core", "files": ["Redaction/CommandLines.cs", "Redaction/GitleaksRuleData.cs", "Redaction/ValueShapes.cs"] },
-    { "name": "security-core redaction 4", "config": "security-core", "files": ["Redaction/RedactionRules.cs", "Redaction/Redactor.cs", "Redaction/YamlFrontmatter.cs"] },
-    { "name": "security-core redaction 5", "config": "security-core", "files": ["Redaction/LineWraps.cs", "Redaction/PemSeparators.cs"] },
-    { "name": "security-core redaction 6", "config": "security-core", "files": ["Redaction/GitleaksRules.cs", "Redaction/SecretKeyNames.cs"] },
-    { "name": "security-core redaction 7", "config": "security-core", "files": ["Redaction/CodeValues.cs", "Redaction/DetectionView.cs"] },
-    { "name": "security-core redaction rest", "config": "security-core", "rest": "Redaction" },
     { "name": "security-core part gate", "config": "security-core", "files": ["Sessions/PartGate.cs"] },
     { "name": "core sessions 1", "config": "core", "files": ["Sessions/CodexTranscript.cs", "Sessions/DocumentEnvelope.cs", "Sessions/SessionRenderer.cs"] },
     { "name": "core sessions 2", "config": "core", "files": ["Sessions/ClaudeTranscript.cs", "Sessions/SessionFrontmatter.cs"] },

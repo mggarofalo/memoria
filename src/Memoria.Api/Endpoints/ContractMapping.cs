@@ -9,22 +9,6 @@ namespace Memoria.Api.Endpoints;
 /// </summary>
 internal static class ContractMapping
 {
-	public static SearchResult ToContract(this SidecarSearchResponse response)
-	{
-		return new SearchResult(
-			response.Results.Select(ToContract).ToArray(),
-			response.Total,
-			response.TookMs,
-			new SearchQueryInfo(
-				response.Query.Collections,
-				response.Query.Rerank,
-				response.Query.Filtered,
-				response.Query.Fetched,
-				response.Query.Limit),
-			response.Degraded,
-			KnownReasons(response.DegradedReasons));
-	}
-
 	/// <summary>Only the tokens the contract names go out, so a reason can never carry backend detail.</summary>
 	public static string[] KnownReasons(IReadOnlyList<string>? reasons)
 	{

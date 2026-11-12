@@ -6,12 +6,16 @@
 // scripts/mutation-dotnet.sh reads the last form when MUTATION_SHARD is set.
 //
 // Shards of configs on one project share its files: a file that a shard of one config
-// names or takes as rest is left out of the other configs' rest shards. That is how
-// security-core's shards take Core's redaction files from core's.
+// names or takes as rest is left out of the other configs' rest shards, so a stricter
+// config can take files from a broader one on the same project. A shard with neither
+// files nor rest runs its config's own mutate list, as api and security do. A shard's
+// --mutate replaces its config's list, so the config's exclusions (core's of
+// Redaction/**) are added to every shard of it.
 import { readFileSync } from "node:fs";
 
-const projectOf = (config) =>
-  JSON.parse(readFileSync(new URL(`../stryker/${config}.json`, import.meta.url), "utf8"))["stryker-config"].project;
+const configOf = (config) => JSON.parse(readFileSync(new URL(`../stryker/${config}.json`, import.meta.url), "utf8"))["stryker-config"];
+const projectOf = (config) => configOf(config).project;
+const exclusionsOf = (config) => (configOf(config).mutate ?? []).filter((glob) => glob.startsWith("!"));
 
 function expand(shards) {
   const project = new Map(shards.map((s) => [s.config, projectOf(s.config)]));
@@ -28,7 +32,11 @@ function expand(shards) {
     const loose = named.filter((f) => !taken.some((folder) => f.startsWith(`${folder}/`)));
     return ["**/*.cs", ...taken.map((folder) => `!**/${folder}/**/*.cs`), ...loose.map((f) => `!**/${f}`)];
   };
-  return shards.map((s) => ({ name: s.name, slug: s.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase(), configs: s.config, mutate: globs(s).join(" ") }));
+  const withExclusions = (shard) => {
+    const own = globs(shard);
+    return own.length === 0 ? own : [...own, ...exclusionsOf(shard.config).filter((glob) => !own.includes(glob))];
+  };
+  return shards.map((s) => ({ name: s.name, slug: s.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase(), configs: s.config, mutate: withExclusions(s).join(" ") }));
 }
 
 const { shards } = JSON.parse(readFileSync(new URL("../stryker/shards.json", import.meta.url), "utf8"));

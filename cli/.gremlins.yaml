@@ -2,7 +2,7 @@
 unleash:
   exclude-files:
     - "\\.gen\\.go$"
-  # Phase 1 ratchet: reporting only, because main has no mutants to score yet.
+  # Just under the scores a full run reached (92.30% efficacy, 88.08% coverage), so neither can slide back.
   threshold:
-    efficacy: 0
-    mutant-coverage: 0
+    efficacy: 92
+    mutant-coverage: 88
