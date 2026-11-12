@@ -12,5 +12,5 @@
   "reporters": ["clear-text", "html", "json"],
   "htmlReporter": { "fileName": "sidecar/reports/mutation/mutation.html" },
   "jsonReporter": { "fileName": "sidecar/reports/mutation/mutation.json" },
-  "thresholds": { "high": 80, "low": 60, "break": null }
+  "thresholds": { "high": 80, "low": 78, "break": 78 }
 }
