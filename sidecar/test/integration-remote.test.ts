@@ -461,8 +461,10 @@ test("a job with no worker keeps documents searchable and finishes when one appe
     const ingest = await app.inject({ method: "POST", url: "/documents", headers: authHeaders, payload: { collection: "sessions", path: "gamma.md", content: "# Gamma\n\nzebrafinch deferral marker\n" } });
     assert.equal(ingest.statusCode, 202);
     const id = ingest.json().job.id;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    const waiting = (await app.inject({ method: "GET", url: `/reindex/jobs/${id}`, headers: authHeaders })).json().job;
+    // The scan runs on a thread it starts first, so give it the time that takes.
+    const job = async () => (await app.inject({ method: "GET", url: `/reindex/jobs/${id}`, headers: authHeaders })).json().job;
+    for (let waited = 0; (await job()).error === null && waited < 20_000; waited += 50) await new Promise((resolve) => setTimeout(resolve, 50));
+    const waiting = await job();
     assert.equal(waiting.state, "queued");
     assert.match(waiting.error, /No worker can embed/);
     const lexical = await app.inject({ method: "POST", url: "/search", headers: authHeaders, payload: { searches: [{ type: "lex", query: "zebrafinch" }], rerank: false } });

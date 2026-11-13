@@ -230,11 +230,13 @@ Keep them on a local disk, as SQLite's WAL mode does not work over a network sha
 
 ### What a delete removes, and when
 
-A delete (`DELETE /v1/documents`, or a session that replaces its own parts) takes the file out of the corpus at once, and every read route stops returning it at once. The index follows at the next scan, which the delete queues. The scan runs once the debounce window ends, or at the next start if shutdown comes first. That scan marks the document's row inactive, which takes it out of the full-text index's own copy of the text. At its end, one transaction removes:
+A delete (`DELETE /v1/documents`, or a session that replaces its own parts) takes the file out of the corpus at once, and every read route stops returning it at once. The index follows at the next scan, which the delete queues. The scan runs once the debounce window ends, or at the next start if shutdown comes first. That scan marks the document's row inactive, which takes it out of the full-text index's own copy of the text. At its end, it removes, in this order and in transactions of up to 100 rows each, so a search caching a score is never held up for long:
 
 - the document's row;
-- its text, in `content`;
-- its chunks' vectors, in `content_vectors` and `vectors_vec`.
+- its chunks' vectors, in `content_vectors` and `vectors_vec`;
+- its text, in `content`.
+
+Each removal is decided inside its own transaction. A purge cut short, by shutdown or a busy index, leaves only rows nothing reads, and the next scan finishes it.
 
 Then any record that it was set aside from embedding goes from the job queue's file, which holds those beside the jobs.
 
@@ -253,7 +255,7 @@ The marker is the only signal, so two things defeat it:
 
 Deleting the marker turns the safeguard off for that root, and makes nothing unsafe.
 
-A **busy index**, as when a `qmd` run outside the sidecar holds it, also waits: nothing is removed, a warning is logged, and the next scan tries again.
+A **busy index**, as when a `qmd` run outside the sidecar holds it, also waits: what is not yet removed stays, a warning is logged, and the next scan tries again.
 
 The sidecar writes with SQLite's `secure_delete` on, so what it deletes is overwritten in the file, not left in free pages. After a scan that removed anything, it folds the write-ahead log into the file and empties it, so old versions of those pages do not linger there either. The job queue's file does the same when it removes a set-aside. Some places can still hold deleted text for a while:
 
@@ -478,7 +480,7 @@ What the two processes hold is small. What makes `docker stats` look large is th
 | Resident memory idle | about 115 MiB | about 110 MiB |
 | `docker stats` during the scan | 520 MiB, of which 89 MiB was the process's own and 406 MiB active page cache | 229 MiB |
 
-The index took 2.1 GB for 192 MB of documents, most of it vectors. Size the host for the two processes' ceilings plus room to cache the index: the sidecar's heap is capped at 4 GiB and the API's at 1 GiB, so 6 GiB covers both at their worst, and the index's size on top keeps searches from reading the disk. Below that, searches still work, more slowly.
+The index took 2.1 GB for 192 MB of documents, most of it vectors. Size the host for the two processes' ceilings plus room to cache the index: the sidecar's heap is capped at 4 GiB, its scan thread's at 2 GiB, and the API's at 1 GiB, so 8 GiB covers them at their worst, and the index's size on top keeps searches from reading the disk. Below that, searches still work, more slowly.
 
 Run the sidecar with `--max-old-space-size=4096`. The image sets it. This is a ceiling, not a target. Node's default on a smaller host can be lower, and a search that reaches the limit kills the process.
 
@@ -500,7 +502,7 @@ It also carries the config sync fix described under [lost collection records](#l
 
 **Frontmatter.** When a key repeats, the last one wins, where it used to give no metadata. That spoofs nothing: filters read a document's own frontmatter, whoever can write that can write any value, and on a transcript the renderer writes those keys itself.
 
-**Why not a worker thread.** Running the SDK in one was evaluated and not adopted. With the scans fixed, a search within the cap stalls for under a second. It would not reliably contain an out-of-memory error either: of four allocation patterns tried, three failed only the worker and one killed the whole process. It would also mean making about 25 backend methods asynchronous and copying 21 MB bodies between threads.
+**Why searches stay on the main thread.** Running the whole SDK on a worker thread was evaluated and not adopted. With the scans fixed, a search within the cap stalls for under a second. It would not reliably contain an out-of-memory error either: of four allocation patterns tried, three failed only the worker and one killed the whole process. It would also mean making about 25 backend methods asynchronous and copying 21 MB bodies between threads. An index update scan is different: it runs for minutes on a large index, and runs on a thread of its own ([Reindex scheduling](../sidecar/README.md#reindex-scheduling)).
 
 ## Reverse proxy and TLS
 
