@@ -10,7 +10,7 @@ import { collectionsToKeep, type CollectionRoot } from "./collection-roots.ts";
 import { DeadLetterBook, documentHolds, moveLegacyLetters } from "./dead-letters.ts";
 import { purgeDeleted, removedAny, truncateLog, type PurgeDb } from "./purge.ts";
 import { ScanThreads } from "./scan.ts";
-import { inBatches } from "./scan-batches.ts";
+import { inBatches, ScanStopped } from "./scan-batches.ts";
 import { withShortBusyTimeout } from "./sqlite-busy.ts";
 import { WriteGate, yieldToMainWrites } from "./write-gate.ts";
 import type { DeadLetter, DegradedReason, EmbeddingResult, LlmCallSink, LlmHealth, LlmSurface, PoolLoad, PoolWorkerConfig, Queryable, RerankDocument, RerankResult, WorkerView } from "./llm/types.ts";
@@ -575,12 +575,25 @@ function readHeads(db: { prepare(sql: string): { all(...a: unknown[]): unknown[]
  * metadata, so that it reflects the scan. Each took over 100 ms and 3 s respectively at 52,000
  * documents, which on the main thread would be stalls of their own.
  */
-function afterScan(db: PurgeDb & { prepare(sql: string): { all(...a: unknown[]): unknown[] } }, headBytes: number | undefined): Pick<ScanResult, "warnings" | "metadata"> {
-  const warnings: string[] = [];
-  const purged = purgeDeleted(db, () => collectionsToKeep(db, db.prepare(ROOTS_SQL).all() as CollectionRoot[], (message) => warnings.push(message)));
-  if (purged === null) warnings.push(BUSY_PURGE);
+function afterScan(db: PurgeDb & { prepare(sql: string): { all(...a: unknown[]): unknown[] } }, request: ScanRequest, shouldStop: () => boolean): Pick<ScanResult, "warnings" | "metadata"> {
+  // A set: the keep list is decided again in each of the purge's transactions.
+  const warnings = new Set<string>();
+  // Before each of the purge's short transactions, a place to stop, and a write on the main
+  // thread goes first: see write-gate.ts. What is left waits for the next scan's purge.
+  const between = (): void => {
+    if (shouldStop()) throw new ScanStopped();
+    yieldToMainWrites(request.mainWrites, MAIN_WRITE_YIELD_MS);
+  };
+  between();
+  const keep = (): string[] => collectionsToKeep(db, db.prepare(ROOTS_SQL).all() as CollectionRoot[], (message) => warnings.add(message));
+  // Once whatever there is to purge: it also marks each root that holds a document (collection-roots.ts).
+  keep();
+  const purged = purgeDeleted(db, keep, { between });
+  if (purged === null || !purged.complete) warnings.add(BUSY_PURGE);
   if (removedAny(purged)) truncateLog(db);
-  return { warnings, ...(headBytes === undefined ? {} : { metadata: metadataEntries(readHeads(db, headBytes)) }) };
+  if (request.headBytes === undefined) return { warnings: [...warnings] };
+  if (shouldStop()) throw new ScanStopped();
+  return { warnings: [...warnings], metadata: metadataEntries(readHeads(db, request.headBytes)) };
 }
 
 /**
@@ -596,7 +609,7 @@ export const MAIN_WRITE_YIELD_MS = 1_000;
 export const SCAN_HEAP_MB = 2048;
 
 /** How long shutdown gives a scan to finish its document and commit before terminating its thread. */
-export const SCAN_CLOSE_GRACE_MS = 500;
+export const SCAN_CLOSE_GRACE_MS = 200;
 
 /** The scan thread's entry: the source in a checkout, what tsc built in the image. */
 const SCAN_ENTRY = new URL(import.meta.url.endsWith(".ts") ? "./scan-worker.ts" : "./scan-worker.js", import.meta.url);
@@ -611,9 +624,9 @@ export async function scanIndex(request: ScanRequest, shouldStop: () => boolean)
   try {
     // A scan overwrites and removes text, which must not linger in free pages: see openBackend.
     store.internal.db.exec("PRAGMA secure_delete = ON");
-    const r = await inBatches(store.internal.db, (afterDocument) => store.update({ ...(request.collections ? { collections: request.collections } : {}), onProgress: afterDocument }), { batchMs: request.batchMs, shouldStop, beforeGroup: () => yieldToMainWrites(request.mainWrites, MAIN_WRITE_YIELD_MS) });
+    const r = await inBatches(store.internal.db as never,(afterDocument) => store.update({ ...(request.collections ? { collections: request.collections } : {}), onProgress: afterDocument }), { batchMs: request.batchMs, shouldStop, beforeGroup: () => yieldToMainWrites(request.mainWrites, MAIN_WRITE_YIELD_MS) });
     // What the scan found deleted leaves nothing behind it: see purge.ts. Any scan can find one.
-    const after = afterScan(store.internal.db as never, request.headBytes);
+    const after = afterScan(store.internal.db as never, request, shouldStop);
     return { collections: r.collections, indexed: r.indexed, updated: r.updated, unchanged: r.unchanged, removed: r.removed, skipped: r.skipped, needsEmbedding: r.needsEmbedding, ...after };
   } finally {
     await store.close();

@@ -15,12 +15,16 @@ switch (data.mode) {
     parentPort!.postMessage({ ok: true, result: resourceLimits.maxOldGenerationSizeMb });
     break;
   case "fail":
-    parentPort!.postMessage({ ok: false, message: "the index is not there", stopped: false });
+    parentPort!.postMessage({ ok: false, failure: { message: "the index is not there", stopped: false, name: "SqliteError", code: "SQLITE_CANTOPEN", stack: "SqliteError: the index is not there\n    at the scan thread" } });
     break;
+  case "dies-when-stopped":
+    // Asked to stop, it runs out of heap before it can answer: a failure, not a stop.
+    while (!stopped()) nap(5);
+    throw new RangeError("Array buffer allocation failed");
   case "until-stopped":
     // As a scan does: work, and look at the flag after each document.
     while (!stopped()) nap(5);
-    parentPort!.postMessage({ ok: false, message: "The scan was stopped", stopped: true });
+    parentPort!.postMessage({ ok: false, failure: { message: "The scan was stopped", stopped: true } });
     break;
   case "finishes-anyway":
     // The flag came after its last document: it answers with its result.

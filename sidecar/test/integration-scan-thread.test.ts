@@ -7,6 +7,7 @@
  */
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
+import { createRequire } from "node:module";
 import { appendFile, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { monitorEventLoopDelay } from "node:perf_hooks";
@@ -25,9 +26,9 @@ const skip = process.env.MEMORIA_QMD_INTEGRATION === "1" ? false : "set MEMORIA_
 /** Enough documents that the scan takes seconds: on the main thread, that long without an answer. */
 const DOCUMENTS = 3_000;
 
-function transcript(i: number): string {
+function transcript(i: number, extraTurns = 0): string {
   const turns: string[] = [];
-  for (let t = 0; t < 12; t++) turns.push(`## ${t % 2 ? "Assistant" : "User"}\n\nTurn ${t} of session ${i} talks about the sidecar index, the worker pool and document ${i * 7}.\n`);
+  for (let t = 0; t < 12 + extraTurns; t++) turns.push(`## ${t % 2 ? "Assistant" : "User"}\n\nTurn ${t} of session ${i} talks about the sidecar index, the worker pool and document ${i * 7}.\n`);
   return `---\nsession_id: s${i}\ndate: 2026-0${1 + (i % 9)}-1${i % 10}\nproject: P${i % 5}\ngit_branch: main\ntags:\n  - project/P${i % 5}\n---\n\n# Session ${i}\n\n${turns.join("\n")}`;
 }
 
@@ -36,11 +37,11 @@ interface Index {
   dbPath: string;
 }
 
-async function index(documents = DOCUMENTS): Promise<Index> {
+async function index(documents = DOCUMENTS, extraTurns = 0): Promise<Index> {
   const root = await tempDir("memoria-scan-thread-it-");
   const corpus = path.join(root, "sessions");
   await mkdir(corpus, { recursive: true });
-  for (let i = 0; i < documents; i++) await writeFile(path.join(corpus, `s-${String(i).padStart(5, "0")}.md`), transcript(i), "utf8");
+  for (let i = 0; i < documents; i++) await writeFile(path.join(corpus, `s-${String(i).padStart(5, "0")}.md`), transcript(i, extraTurns), "utf8");
   const dbPath = path.join(root, "index.sqlite");
   const qmd = await import("@tobilu/qmd");
   const builder = await qmd.createStore({ dbPath, config: { collections: { sessions: { path: corpus, pattern: "**/*.md" } } } });
@@ -143,6 +144,62 @@ test("a reader on the main thread never sees a document half-written by the scan
   } finally {
     await backend.close();
     await reader.close();
+  }
+});
+
+/** Another process's connection, as an operator's `qmd` has: it waits up to `busyMs` for the lock. */
+const Database = createRequire(import.meta.url)("better-sqlite3") as new (file: string, options?: { timeout?: number }) => { prepare(sql: string): { run(...a: unknown[]): unknown }; close(): void };
+
+test("a scan with nothing to change takes no write lock: another connection writes as if it were not there", { skip, timeout: 600_000 }, async () => {
+  const { dbPath } = await index();
+  const backend = await open(dbPath);
+  const outsider = new Database(dbPath, { timeout: 2_000 });
+  try {
+    const insert = outsider.prepare("INSERT OR REPLACE INTO llm_cache (hash, result, created_at) VALUES (?, ?, ?)");
+    let scanning = true;
+    const scan = backend.update({}).finally(() => (scanning = false));
+    scan.catch(() => {});
+    const waits: number[] = [];
+    let n = 0;
+    while (scanning) {
+      const t = performance.now();
+      insert.run(`outsider-${n++}`, "{}", new Date().toISOString());
+      waits.push(performance.now() - t);
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    assert.equal((await scan).unchanged, DOCUMENTS);
+    assert.ok(waits.length > 20, `wrote ${waits.length} times during the scan`);
+    assert.ok(Math.max(...waits) < 100, `the longest write waited ${Math.max(...waits).toFixed(0)} ms`);
+  } finally {
+    outsider.close();
+    await backend.close();
+  }
+});
+
+test("removing thousands of deleted documents never holds a write on the main thread for long", { skip, timeout: 600_000 }, async () => {
+  // Transcripts of about 20 KB, as real ones run: removing their text with secure_delete is what takes the time.
+  const { dbPath, corpus } = await index(DOCUMENTS, 160);
+  const deleted = DOCUMENTS - 500;
+  for (let i = 0; i < deleted; i++) await rm(path.join(corpus, `s-${String(i).padStart(5, "0")}.md`));
+  const backend = await open(dbPath);
+  try {
+    let scanning = true;
+    const scan = backend.update({}).finally(() => (scanning = false));
+    scan.catch(() => {});
+    const waits: number[] = [];
+    while (scanning) {
+      const t = performance.now();
+      // A short busy timeout of its own (250 ms): it throws if a group holds the lock longer.
+      backend.purgeCache();
+      waits.push(performance.now() - t);
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    const result = await scan;
+    assert.equal(result.removed, deleted);
+    assert.ok(waits.length > 5, `wrote ${waits.length} times during the scan`);
+    assert.ok(Math.max(...waits) < 250, `the longest write waited ${Math.max(...waits).toFixed(0)} ms`);
+  } finally {
+    await backend.close();
   }
 });
 

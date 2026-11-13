@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { getEventListeners } from "node:events";
 import { test } from "node:test";
-import { answerScan, ScanThreads } from "../src/scan.ts";
+import { answerScan, errorFrom, ScanThreads } from "../src/scan.ts";
 import { ScanStopped } from "../src/scan-batches.ts";
 
 const entry = new URL("./fixtures/scan-thread.ts", import.meta.url);
@@ -135,15 +135,61 @@ test("the thread answers with the scan's result, and lets it read the stop flag"
   assert.deepEqual(seen, [false, true]);
 });
 
-test("the thread answers a stopped scan as stopped, and any other failure with its message", async () => {
+test("the thread answers a stopped scan as stopped, and any other failure with its name, code and stack", async () => {
   const stop = new Int32Array(new SharedArrayBuffer(4));
-  assert.deepEqual(await answerScan(async () => {
+  const stopped = await answerScan(async () => {
     throw new ScanStopped();
-  }, stop), { ok: false, message: "The scan was stopped", stopped: true });
-  assert.deepEqual(await answerScan(async () => {
-    throw new Error("database disk image is malformed");
-  }, stop), { ok: false, message: "database disk image is malformed", stopped: false });
+  }, stop);
+  assert.equal(stopped.ok, false);
+  assert.equal(!stopped.ok && stopped.failure.stopped, true);
+  const sqlite = Object.assign(new Error("database disk image is malformed"), { name: "SqliteError", code: "SQLITE_CORRUPT" });
+  const failed = await answerScan(async () => {
+    throw sqlite;
+  }, stop);
+  assert.deepEqual(failed, { ok: false, failure: { message: "database disk image is malformed", stopped: false, name: "SqliteError", code: "SQLITE_CORRUPT", stack: sqlite.stack } });
   assert.deepEqual(await answerScan(async () => {
     throw "a bare string";
-  }, stop), { ok: false, message: "a bare string", stopped: false });
+  }, stop), { ok: false, failure: { message: "a bare string", stopped: false } });
+  const numeric = Object.assign(new Error("odd"), { code: 5 });
+  numeric.stack = undefined as unknown as string;
+  const noStack = await answerScan(async () => {
+    throw numeric;
+  }, stop);
+  assert.deepEqual(noStack, { ok: false, failure: { message: "odd", stopped: false, name: "Error" } }, "a code that is not a string, and a missing stack, are left out");
+});
+
+test("a failure crosses back as an error with the thread's name, code and stack, and a stop as a stop", () => {
+  const err = errorFrom({ message: "disk I/O error", stopped: false, name: "SqliteError", code: "SQLITE_IOERR", stack: "SqliteError: disk I/O error\n    at thread" }) as Error & { code?: string };
+  assert.ok(!(err instanceof ScanStopped));
+  assert.deepEqual([err.message, err.name, err.code, err.stack], ["disk I/O error", "SqliteError", "SQLITE_IOERR", "SqliteError: disk I/O error\n    at thread"]);
+  const bare = errorFrom({ message: "plain", stopped: false }) as Error & { code?: string };
+  assert.deepEqual([bare.message, bare.name, bare.code], ["plain", "Error", undefined]);
+  assert.equal(Object.prototype.hasOwnProperty.call(bare, "code"), false, "no code is not a code of undefined");
+  assert.match(bare.stack ?? "", /plain/);
+  assert.ok(errorFrom({ message: "whatever", stopped: true, code: "X" }) instanceof ScanStopped);
+});
+
+test("a thread's failure keeps its code and stack across", async () => {
+  await assert.rejects(threads().run({ mode: "fail" }), (err: unknown) => {
+    const e = err as Error & { code?: string };
+    return e.name === "SqliteError" && e.code === "SQLITE_CANTOPEN" && /at the scan thread/.test(e.stack ?? "");
+  });
+});
+
+test("a thread that dies after it was asked to stop has failed, not stopped", async () => {
+  const controller = new AbortController();
+  const run = threads().run({ mode: "dies-when-stopped" }, controller.signal);
+  run.catch(() => {});
+  await sleep(50);
+  controller.abort();
+  await assert.rejects(run, (err: unknown) => !(err instanceof ScanStopped) && err instanceof Error && /Array buffer allocation failed/.test(err.message));
+});
+
+test("a thread that dies as close asks it to stop has failed too, and close still returns", async () => {
+  const scans = threads();
+  const run = scans.run({ mode: "dies-when-stopped" });
+  run.catch(() => {});
+  await sleep(50);
+  await scans.close(2_000);
+  await assert.rejects(run, (err: unknown) => !(err instanceof ScanStopped));
 });

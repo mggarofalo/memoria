@@ -281,7 +281,7 @@ test("a busy index changes nothing, and the next purge removes it all", { skip }
     const contentRows = (): number => (db.prepare("SELECT COUNT(*) AS n FROM content WHERE hash = ?").get(hash) as { n: number }).n;
     assert.equal(contentRows(), 1);
     blocker.exec("ROLLBACK");
-    assert.deepEqual(purgeDeleted(db as never), { documents: 1, content: 1, vectors: 0 });
+    assert.deepEqual(purgeDeleted(db as never), { documents: 1, content: 1, vectors: 0, complete: true });
     assert.equal(contentRows(), 0);
   } finally {
     await holder.close();

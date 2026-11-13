@@ -230,11 +230,13 @@ Keep them on a local disk, as SQLite's WAL mode does not work over a network sha
 
 ### What a delete removes, and when
 
-A delete (`DELETE /v1/documents`, or a session that replaces its own parts) takes the file out of the corpus at once, and every read route stops returning it at once. The index follows at the next scan, which the delete queues. The scan runs once the debounce window ends, or at the next start if shutdown comes first. That scan marks the document's row inactive, which takes it out of the full-text index's own copy of the text. At its end, one transaction removes:
+A delete (`DELETE /v1/documents`, or a session that replaces its own parts) takes the file out of the corpus at once, and every read route stops returning it at once. The index follows at the next scan, which the delete queues. The scan runs once the debounce window ends, or at the next start if shutdown comes first. That scan marks the document's row inactive, which takes it out of the full-text index's own copy of the text. At its end, it removes, in this order and in transactions of up to 100 rows each, so a search caching a score is never held up for long:
 
 - the document's row;
-- its text, in `content`;
-- its chunks' vectors, in `content_vectors` and `vectors_vec`.
+- its chunks' vectors, in `content_vectors` and `vectors_vec`;
+- its text, in `content`.
+
+Each removal is decided inside its own transaction. A purge cut short, by shutdown or a busy index, leaves only rows nothing reads, and the next scan finishes it.
 
 Then any record that it was set aside from embedding goes from the job queue's file, which holds those beside the jobs.
 
@@ -253,7 +255,7 @@ The marker is the only signal, so two things defeat it:
 
 Deleting the marker turns the safeguard off for that root, and makes nothing unsafe.
 
-A **busy index**, as when a `qmd` run outside the sidecar holds it, also waits: nothing is removed, a warning is logged, and the next scan tries again.
+A **busy index**, as when a `qmd` run outside the sidecar holds it, also waits: what is not yet removed stays, a warning is logged, and the next scan tries again.
 
 The sidecar writes with SQLite's `secure_delete` on, so what it deletes is overwritten in the file, not left in free pages. After a scan that removed anything, it folds the write-ahead log into the file and empties it, so old versions of those pages do not linger there either. The job queue's file does the same when it removes a set-aside. Some places can still hold deleted text for a while:
 

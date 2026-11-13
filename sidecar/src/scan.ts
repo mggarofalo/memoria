@@ -19,7 +19,33 @@ export interface ThreadData {
 }
 
 /** What the thread posts back, once. */
-export type ThreadReply<T> = { ok: true; result: T } | { ok: false; message: string; stopped: boolean };
+export type ThreadReply<T> = { ok: true; result: T } | { ok: false; failure: ThreadFailure };
+
+/** How a scan ended on its thread, as much of the error as crosses: SQLite's code and the thread's stack included. */
+export interface ThreadFailure {
+  message: string;
+  stopped: boolean;
+  name?: string;
+  code?: string;
+  stack?: string;
+}
+
+/** The thread's failure as an error here, carrying its code and its own stack. */
+export function errorFrom(failure: ThreadFailure): Error {
+  if (failure.stopped) return new ScanStopped();
+  const err = new Error(failure.message) as Error & { code?: string };
+  if (failure.name !== undefined) err.name = failure.name;
+  if (failure.code !== undefined) err.code = failure.code;
+  if (failure.stack !== undefined) err.stack = failure.stack;
+  return err;
+}
+
+/** An error thrown on the thread, as it can cross to this one. */
+export function failureOf(err: unknown): ThreadFailure {
+  if (!(err instanceof Error)) return { message: String(err), stopped: false };
+  const { code } = err as { code?: unknown };
+  return { message: err.message, stopped: err instanceof ScanStopped, name: err.name, ...(typeof code === "string" ? { code } : {}), ...(err.stack !== undefined ? { stack: err.stack } : {}) };
+}
 
 export interface ScanThreadOptions {
   /** The thread's entry module. */
@@ -31,6 +57,8 @@ export interface ScanThreadOptions {
 export class ScanThreads {
   readonly #options: ScanThreadOptions;
   readonly #running = new Map<Worker, { stop: Int32Array; exited: Promise<void> }>();
+  /** Threads `close` has asked to stop: cut off, they stopped rather than failed. */
+  readonly #closed = new WeakSet<Worker>();
 
   constructor(options: ScanThreadOptions) {
     this.#options = options;
@@ -61,12 +89,13 @@ export class ScanThreads {
     signal?.addEventListener("abort", askToStop);
     return new Promise<T>((resolve, reject) => {
       let failure: Error | undefined;
-      // The reply settles it. An exit with none, as from running out of heap, or from
-      // `close`, settles it otherwise; after a reply, settling again changes nothing.
+      // The reply settles it. An exit with none settles it otherwise; after a reply, settling
+      // again changes nothing. Only `close` cutting a thread off makes that a stop: a thread
+      // that ran out of heap or crashed failed, asked to stop or not, and says why.
       worker.once("message", (reply: ThreadReply<T>) => {
         signal?.removeEventListener("abort", askToStop);
         if (reply.ok) resolve(reply.result);
-        else reject(reply.stopped ? new ScanStopped() : new Error(reply.message));
+        else reject(errorFrom(reply.failure));
       });
       worker.once("error", (err: Error) => {
         failure = err;
@@ -74,8 +103,9 @@ export class ScanThreads {
       worker.once("exit", (code) => {
         this.#running.delete(worker);
         signal?.removeEventListener("abort", askToStop);
-        if (Atomics.load(stop, 0) === 1) reject(new ScanStopped());
-        else reject(failure ?? new Error(`The scan thread exited with code ${code} before it answered`));
+        if (failure) reject(failure);
+        else if (this.#closed.has(worker)) reject(new ScanStopped());
+        else reject(new Error(`The scan thread exited with code ${code} before it answered`));
       });
     });
   }
@@ -88,7 +118,10 @@ export class ScanThreads {
    */
   async close(graceMs: number): Promise<void> {
     const threads = [...this.#running];
-    for (const [, { stop }] of threads) Atomics.store(stop, 0, 1);
+    for (const [worker, { stop }] of threads) {
+      Atomics.store(stop, 0, 1);
+      this.#closed.add(worker);
+    }
     await Promise.all(
       threads.map(async ([worker, { exited }]) => {
         await within(exited, graceMs);
@@ -107,7 +140,7 @@ export async function answerScan<T>(scan: (shouldStop: () => boolean) => Promise
   try {
     return { ok: true, result: await scan(() => Atomics.load(stop, 0) === 1) };
   } catch (err) {
-    return { ok: false, message: err instanceof Error ? err.message : String(err), stopped: err instanceof ScanStopped };
+    return { ok: false, failure: failureOf(err) };
   }
 }
 
