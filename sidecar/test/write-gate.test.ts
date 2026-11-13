@@ -85,60 +85,67 @@ test("the cap is counted on the clock given", () => {
   assert.ok(performance.now() - started < 50);
 });
 
-test("a scan thread waits while the main thread writes, and goes on the moment it is done", async () => {
+/**
+ * A thread that runs `yieldToMainWrites` from the module itself, as the scan does. It sets
+ * `ready` once it has seen a write under way, so the test never depends on how long a thread
+ * takes to start, and posts the time it went on.
+ */
+const yielder = `
+  const { workerData, parentPort } = require("node:worker_threads");
+  const { writers, ready } = workerData;
+  while (Atomics.load(writers, 0) === 0) Atomics.wait(writers, 0, 0, 5);
+  Atomics.store(ready, 0, 1);
+  Atomics.notify(ready, 0);
+  import(workerData.module).then(({ yieldToMainWrites }) => {
+    yieldToMainWrites(writers, 10000);
+    parentPort.postMessage(Date.now());
+  });
+`;
+const gateModule = new URL("../src/write-gate.ts", import.meta.url).href;
+
+test("a scan thread waits while the main thread writes, and goes on once it is done", { timeout: 30_000 }, async () => {
   const gate = new WriteGate();
-  const source = `
-    const { workerData, parentPort } = require("node:worker_threads");
-    const writers = workerData.writers;
-    parentPort.postMessage("waiting");
-    const started = Date.now();
-    for (;;) {
-      const count = Atomics.load(writers, 0);
-      if (count === 0) break;
-      Atomics.wait(writers, 0, count, 5000);
-    }
-    parentPort.postMessage(Date.now() - started);
-  `;
-  let release = (): void => {};
-  const held = new Promise<void>((resolve) => (release = resolve));
+  const ready = new Int32Array(new SharedArrayBuffer(4));
   Atomics.add(gate.writers, 0, 1);
-  const worker = new Worker(source, { eval: true, workerData: { writers: gate.writers } });
-  const messages: unknown[] = [];
-  const waited = new Promise<number>((resolve) => worker.on("message", (m) => (m === "waiting" ? messages.push(m) : resolve(m as number))));
-  await new Promise((r) => setTimeout(r, 150));
-  assert.deepEqual(messages, ["waiting"]);
-  // As `around` ends a write: the count drops and the scan is woken.
-  setTimeout(() => {
+  const worker = new Worker(yielder, { eval: true, workerData: { writers: gate.writers, ready, module: gateModule } });
+  try {
+    const wentOn = new Promise<number>((resolve) => worker.once("message", resolve));
+    let early: number | null = null;
+    void wentOn.then((at) => (early = at));
+    for (let waited = 0; Atomics.load(ready, 0) === 0; waited += 10) {
+      assert.ok(waited < 20_000, "the thread never saw the write");
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(early, null, "it does not go on while the write is under way");
+    const released = Date.now();
     Atomics.sub(gate.writers, 0, 1);
     Atomics.notify(gate.writers, 0);
-    release();
-  }, 0);
-  await held;
-  const ms = await waited;
-  assert.ok(ms >= 100 && ms < 2_000, `the thread waited ${ms} ms`);
-  await worker.terminate();
+    const at = await wentOn;
+    assert.ok(at >= released && at - released < 2_000, `it went on ${at - released} ms after the write ended`);
+  } finally {
+    await worker.terminate();
+  }
 });
 
-test("around wakes a waiting thread when the write ends", async () => {
+test("around wakes a waiting scan thread when its write ends, not at the thread's timeout", { timeout: 30_000 }, async () => {
   const gate = new WriteGate();
-  const source = `
-    const { workerData, parentPort } = require("node:worker_threads");
-    const writers = workerData.writers;
-    while (Atomics.load(writers, 0) === 0) Atomics.wait(writers, 0, 0, 5);
-    parentPort.postMessage("saw the write");
-    const started = Date.now();
-    // Not polling: only a notify wakes this before its 10 s timeout.
-    Atomics.wait(writers, 0, 1, 10000);
-    parentPort.postMessage(Date.now() - started);
-  `;
-  const worker = new Worker(source, { eval: true, workerData: { writers: gate.writers } });
-  const messages: unknown[] = [];
-  const woken = new Promise<number>((resolve) => worker.on("message", (m) => (m === "saw the write" ? messages.push(m) : resolve(m as number))));
-  gate.around(() => {
-    const until = Date.now() + 200;
-    while (Date.now() < until && messages.length === 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
-  });
-  const ms = await woken;
-  assert.ok(ms < 2_000, `woken after ${ms} ms, not at the timeout`);
-  await worker.terminate();
+  const ready = new Int32Array(new SharedArrayBuffer(4));
+  const worker = new Worker(yielder, { eval: true, workerData: { writers: gate.writers, ready, module: gateModule } });
+  try {
+    const wentOn = new Promise<number>((resolve) => worker.once("message", resolve));
+    let ended = 0;
+    gate.around(() => {
+      // Held until the thread has seen this write, and a little more so it is waiting on it.
+      Atomics.wait(ready, 0, 0, 20_000);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
+      ended = Date.now();
+    });
+    assert.equal(Atomics.load(ready, 0), 1, "the thread saw the write");
+    const at = await wentOn;
+    assert.ok(at - ended < 2_000, `woken ${at - ended} ms after the write ended, where it would otherwise wait 10 s`);
+  } finally {
+    await worker.terminate();
+  }
 });
+
