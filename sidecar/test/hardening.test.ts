@@ -3,6 +3,8 @@ import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { connect, type Socket } from "node:net";
+import { PassThrough } from "node:stream";
+import { setTimeout as sleep } from "node:timers/promises";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -15,7 +17,7 @@ import { patchedLlm, patchedStore } from "../scripts/patch-qmd.ts";
 import { missingSdkFixes, requireSdkFixes, type SdkStoreFunctions } from "../src/sdk-check.ts";
 import { SearchBusy, SearchGate } from "../src/search-gate.ts";
 import { FakeBackend } from "./fake-backend.ts";
-import { authHeaders, makeApp, testConfig } from "./helpers.ts";
+import { authHeaders, makeApp, TEST_SECRET, testConfig } from "./helpers.ts";
 import { freePort } from "../../worker/test/ports.ts";
 
 /** Replays of what a review proved: a document or request must not freeze or crash the sidecar. */
@@ -609,6 +611,97 @@ test("keep-alive stays at Fastify's 72 s, so a pooled client does not meet a clo
   try {
     assert.equal(app.server.keepAliveTimeout, 72_000);
   } finally {
+    await app.close();
+  }
+});
+
+/** One request on a fresh socket. Resolves with the response head once its body has ended, and the socket stays open. */
+function requestOn(port: number, pathname: string): { socket: Socket; head: Promise<string> } {
+  const socket = connect(port, "127.0.0.1", () => socket.write(`GET ${pathname} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer ${TEST_SECRET}\r\n\r\n`));
+  socket.on("error", () => {});
+  let received = "";
+  const head = new Promise<string>((resolve) => {
+    socket.on("data", (chunk: Buffer) => {
+      received += chunk.toString("latin1");
+      const end = received.indexOf("\r\n\r\n");
+      if (end < 0) return;
+      const head = received.slice(0, end).toLowerCase();
+      const length = /content-length: (\d+)/.exec(head);
+      const done = length ? received.length - end - 4 >= Number(length[1]) : received.endsWith("0\r\n\r\n");
+      if (done) resolve(head);
+    });
+  });
+  return { socket, head };
+}
+
+/** An app with two test routes: one that answers when released, and one that streams until released. */
+async function shutdownApp(): Promise<{ app: App; port: number; release(): void; started: Promise<void> }> {
+  const app = await buildApp({ backend: new FakeBackend({ collections: [], docs: [] }), config: testConfig(), logger: false });
+  let release = (): void => {};
+  const released = new Promise<void>((resolve) => (release = resolve));
+  let begin = (): void => {};
+  const started = new Promise<void>((resolve) => (begin = resolve));
+  app.get("/slow", async () => {
+    begin();
+    await released;
+    return { ok: true };
+  });
+  app.get("/stream", (_request, reply) => {
+    const body = new PassThrough();
+    body.write("first part\n");
+    void released.then(() => body.end("last part\n"));
+    begin();
+    return reply.type("text/plain").send(body);
+  });
+  await app.listen({ host: "127.0.0.1", port: await freePort() });
+  return { app, port: (app.server.address() as { port: number }).port, release, started };
+}
+
+test("while serving, a response keeps its connection open for the next request", async () => {
+  const { app, port, release } = await shutdownApp();
+  release();
+  const { socket, head } = requestOn(port, "/slow");
+  try {
+    assert.match(await head, /connection: keep-alive/);
+    assert.equal(await closedOrNot(socket, 300), false, "the connection stays open after its response");
+  } finally {
+    socket.destroy();
+    await app.close();
+  }
+});
+
+test("a request in flight when closing begins answers, closes its connection, and lets close finish at once", { timeout: 20_000 }, async () => {
+  const { app, port, release, started } = await shutdownApp();
+  const { socket, head } = requestOn(port, "/slow");
+  try {
+    await started;
+    const closed = app.close();
+    await sleep(50);
+    release();
+    assert.match(await head, /connection: close/, "the answer says it is the connection's last");
+    const finished = await Promise.race([closed.then(() => true), sleep(2_000).then(() => false)]);
+    assert.equal(finished, true, "close waits for the request, not for its connection's 72 s keep-alive");
+    assert.equal(await closedOrNot(socket, 1_000), true);
+  } finally {
+    socket.destroy();
+    await app.close();
+  }
+});
+
+test("a response whose headers left before closing began closes its connection once it ends", { timeout: 20_000 }, async () => {
+  const { app, port, release, started } = await shutdownApp();
+  const { socket, head } = requestOn(port, "/stream");
+  try {
+    await started;
+    await sleep(50);
+    const closed = app.close();
+    await sleep(50);
+    release();
+    assert.match(await head, /connection: keep-alive/, "its headers were sent while serving");
+    const finished = await Promise.race([closed.then(() => true), sleep(2_000).then(() => false)]);
+    assert.equal(finished, true, "the idle connection it left is closed");
+  } finally {
+    socket.destroy();
     await app.close();
   }
 });

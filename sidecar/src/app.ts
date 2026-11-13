@@ -206,8 +206,23 @@ export async function buildApp(options: BuildAppOptions): Promise<App> {
     }
   });
 
+  // --- shutdown ---------------------------------------------------------------
+  // `app.close()` resolves only once every connection has closed, and it closes just those
+  // idle when it starts. A connection that answers a request in flight then sits idle under
+  // the 72 s keep-alive, so shutdown would wait out its whole drain for nothing. Once closing
+  // has begun, each response is its connection's last, and the connection closes with it.
+  let closing = false;
+  app.addHook("preClose", async () => {
+    closing = true;
+  });
+  app.addHook("onSend", async (_request, reply) => {
+    if (closing) reply.header("connection", "close");
+  });
+
   app.addHook("onResponse", async (request, reply) => {
     request.log.info({ method: request.method, route: request.routeOptions.url ?? "(no route)", status: reply.statusCode, durationMs: Math.round(reply.elapsedTime) }, "request");
+    // A response whose headers left before closing began kept its connection alive. Close it now it is idle.
+    if (closing) app.server.closeIdleConnections();
   });
 
   // --- errors -----------------------------------------------------------------
