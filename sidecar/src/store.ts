@@ -1,15 +1,18 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
-import type { DocumentHead, MetadataSource } from "./metadata.ts";
+import { metadataEntries, type DocumentHead, type MetadataSource, type ParsedMetadata } from "./metadata.ts";
 import type { EmbedSummary, UpdateSummary } from "./jobs.ts";
 import type { BreakerOptions } from "./llm/pool.ts";
 import type { RemoteLlm } from "./llm/remote.ts";
 import { requireSdkFixes, type SdkStoreFunctions } from "./sdk-check.ts";
 import { collectionsToKeep, type CollectionRoot } from "./collection-roots.ts";
 import { DeadLetterBook, documentHolds, moveLegacyLetters } from "./dead-letters.ts";
-import { purgeDeleted, removedAny, truncateLog } from "./purge.ts";
+import { purgeDeleted, removedAny, truncateLog, type PurgeDb } from "./purge.ts";
+import { ScanThreads } from "./scan.ts";
+import { inBatches } from "./scan-batches.ts";
 import { withShortBusyTimeout } from "./sqlite-busy.ts";
+import { WriteGate, yieldToMainWrites } from "./write-gate.ts";
 import type { DeadLetter, DegradedReason, EmbeddingResult, LlmCallSink, LlmHealth, LlmSurface, PoolLoad, PoolWorkerConfig, Queryable, RerankDocument, RerankResult, WorkerView } from "./llm/types.ts";
 import type { SdkDb, SdkHandles, WiredRemote } from "./llm/wire.ts";
 
@@ -167,7 +170,11 @@ export interface QmdBackend extends MetadataSource {
   ignorePatterns(collection: string): string[];
   listContexts(): Promise<ContextRow[]>;
   getDefaultCollectionNames(): Promise<string[]>;
-  update(options: { collections?: string[] }): Promise<UpdateSummary>;
+  /**
+   * Scan collections into the index, on a thread of its own (src/scan.ts). An abort stops it
+   * after the document it is on, and it rejects with `ScanStopped`; what it wrote stands.
+   */
+  update(options: { collections?: string[]; signal?: AbortSignal; headBytes?: number }): Promise<ScanSummary>;
   embed(options: BackendEmbedOptions): Promise<EmbedSummary>;
   getStatus(): Promise<IndexStatusInfo>;
   /** Drop every cached rerank score and expansion. Returns how many. */
@@ -527,6 +534,92 @@ function setAsides(db: unknown, options: OpenBackendOptions): { letters: DeadLet
   return { letters, tidyLetters };
 }
 
+/** What one scan is asked to do, on its thread. */
+export interface ScanRequest {
+  dbPath: string;
+  collections?: string[];
+  batchMs: number;
+  /** The main thread's count of writes under way, which the scan waits out between groups: see write-gate.ts. */
+  mainWrites: Int32Array;
+  /** Read each document's head this far and parse its frontmatter after the scan. Unset reads none. */
+  headBytes?: number;
+}
+
+/** What a scan did, as it crosses back from its thread. */
+export interface ScanResult extends UpdateSummary {
+  /** For the operator, from the removal of what deleted documents left: see purge.ts. */
+  warnings: string[];
+  metadata?: ParsedMetadata;
+}
+
+/** What `update` reports: the scan, and the documents' metadata when it was asked for. */
+export interface ScanSummary extends UpdateSummary {
+  metadata?: ParsedMetadata;
+}
+
+const HEADS_SQL = `SELECT d.collection AS collection, d.path AS path, substr(c.doc, 1, ?) AS head
+   FROM documents d JOIN content c ON c.hash = d.hash
+   WHERE d.active = 1`;
+
+/** store.listCollections() drops this column. The integration test pins it to the SDK. */
+const ROOTS_SQL = "SELECT name, path FROM store_collections";
+
+const BUSY_PURGE = "The index was busy, so what deleted documents left in it waits for the next scan to remove it.";
+
+function readHeads(db: { prepare(sql: string): { all(...a: unknown[]): unknown[] } }, maxBytes: number): DocumentHead[] {
+  return (db.prepare(HEADS_SQL).all(maxBytes) as HeadRow[]).map((r) => ({ collection: r.collection, path: r.path, head: r.head ?? "" }));
+}
+
+/**
+ * After a scan, on its thread: remove what deleted documents left (purge.ts), then read the
+ * metadata, so that it reflects the scan. Each took over 100 ms and 3 s respectively at 52,000
+ * documents, which on the main thread would be stalls of their own.
+ */
+function afterScan(db: PurgeDb & { prepare(sql: string): { all(...a: unknown[]): unknown[] } }, headBytes: number | undefined): Pick<ScanResult, "warnings" | "metadata"> {
+  const warnings: string[] = [];
+  const purged = purgeDeleted(db, () => collectionsToKeep(db, db.prepare(ROOTS_SQL).all() as CollectionRoot[], (message) => warnings.push(message)));
+  if (purged === null) warnings.push(BUSY_PURGE);
+  if (removedAny(purged)) truncateLog(db);
+  return { warnings, ...(headBytes === undefined ? {} : { metadata: metadataEntries(readHeads(db, headBytes)) }) };
+}
+
+/**
+ * How long one group of a scan's writes holds the write lock. A write on the main thread,
+ * such as a search caching a rerank score, waits up to this on its event loop.
+ */
+export const SCAN_BATCH_MS = 25;
+
+/** Longest a scan waits between groups for the main thread's writes: see yieldToMainWrites. */
+export const MAIN_WRITE_YIELD_MS = 1_000;
+
+/** The scan thread's heap ceiling. A scan holds one document at a time, so this is room for the largest. */
+export const SCAN_HEAP_MB = 2048;
+
+/** How long shutdown gives a scan to finish its document and commit before terminating its thread. */
+export const SCAN_CLOSE_GRACE_MS = 500;
+
+/** The scan thread's entry: the source in a checkout, what tsc built in the image. */
+const SCAN_ENTRY = new URL(import.meta.url.endsWith(".ts") ? "./scan-worker.ts" : "./scan-worker.js", import.meta.url);
+
+/**
+ * One scan, run where it is called: on the scan thread (src/scan-worker.ts). It opens a
+ * connection of its own, as better-sqlite3's cannot cross threads, and closes it when done.
+ */
+export async function scanIndex(request: ScanRequest, shouldStop: () => boolean): Promise<ScanResult> {
+  const qmd = await import("@tobilu/qmd");
+  const store = await qmd.createStore({ dbPath: request.dbPath });
+  try {
+    // A scan overwrites and removes text, which must not linger in free pages: see openBackend.
+    store.internal.db.exec("PRAGMA secure_delete = ON");
+    const r = await inBatches(store.internal.db, (afterDocument) => store.update({ ...(request.collections ? { collections: request.collections } : {}), onProgress: afterDocument }), { batchMs: request.batchMs, shouldStop, beforeGroup: () => yieldToMainWrites(request.mainWrites, MAIN_WRITE_YIELD_MS) });
+    // What the scan found deleted leaves nothing behind it: see purge.ts. Any scan can find one.
+    const after = afterScan(store.internal.db as never, request.headBytes);
+    return { collections: r.collections, indexed: r.indexed, updated: r.updated, unchanged: r.unchanged, removed: r.removed, skipped: r.skipped, needsEmbedding: r.needsEmbedding, ...after };
+  } finally {
+    await store.close();
+  }
+}
+
 /**
  * Open the real QMD store. The index must already exist — the sidecar serves
  * an index the host maintains with `qmd`, it does not create one.
@@ -556,6 +649,9 @@ export async function openBackend(options: OpenBackendOptions): Promise<OpenedBa
   const llm = internal.llm;
   if (llmOptions.mode === "local" && options.keepWarm) disableIdleUnload(llm);
   const db = store.internal.db;
+  // Before anything else writes through it: a scan on its thread gives way to these writes.
+  const writes = new WriteGate();
+  writes.guard(db as never);
   // A row deleted, a deleted document's text included, is overwritten on disk, not left in free pages. Set before
   // anything here deletes: the repair below, and the move of an older build's set-asides, which name paths.
   db.exec("PRAGMA secure_delete = ON");
@@ -567,13 +663,6 @@ export async function openBackend(options: OpenBackendOptions): Promise<OpenedBa
   const setAside = (): number => tolerated(() => wired?.deadLetters().length ?? 0, 0, options);
   const active = (remote ?? llm) as unknown as LlmSurface;
   const unexpanded = withholdExpansion(store.internal as unknown as ExpandingStore);
-  const headsStatement = db.prepare(
-  `SELECT d.collection AS collection, d.path AS path, substr(c.doc, 1, ?) AS head
-   FROM documents d JOIN content c ON c.hash = d.hash
-   WHERE d.active = 1`,
-);
-  // store.listCollections() drops this column. The integration test pins it to the SDK.
-  const rootsStatement = db.prepare("SELECT name, path FROM store_collections");
   const ignoreStatement = db.prepare(`SELECT ignore_patterns AS patterns FROM store_collections WHERE name = ?`);
 
   const runSearch = async (o: BackendSearchOptions): Promise<SearchHit[]> => {
@@ -609,6 +698,7 @@ export async function openBackend(options: OpenBackendOptions): Promise<OpenedBa
   };
 
   const llmHealth = (): LlmHealth => (remote ? remoteHealth(remote, setAside()) : { mode: "local", degraded: false, unavailable: [], workersUp: 0, workersTotal: 0, embedDisagreement: [], documentsSetAside: 0 });
+  const scans = new ScanThreads({ entry: SCAN_ENTRY, maxHeapMb: SCAN_HEAP_MB });
   const refsInCollection = db.prepare(`SELECT collection, path, hash FROM documents WHERE collection = ? AND active = 1 ORDER BY path`);
   const allRefs = db.prepare(`SELECT collection, path, hash FROM documents WHERE active = 1 ORDER BY collection, path`);
 
@@ -634,12 +724,11 @@ export async function openBackend(options: OpenBackendOptions): Promise<OpenedBa
   listContexts: () => store.listContexts(),
   getDefaultCollectionNames: () => store.getDefaultCollectionNames(),
   update: async (o) => {
-    const r = await store.update(o.collections ? { collections: o.collections } : {});
-    // What the scan found deleted leaves nothing behind it: see purge.ts. Any scan can find one.
-    const purged = purgeDeleted(db as never, () => collectionsToKeep(db as never, rootsStatement.all() as CollectionRoot[], (message) => options.onLlmWarning?.(message)));
-    if (purged === null) options.onLlmWarning?.("The index was busy, so what deleted documents left in it waits for the next scan to remove it.");
-    if (removedAny(purged)) truncateLog(db as never);
-    // Set-asides of documents no row holds any more go too, as their paths may be sensitive.
+    const scan: ScanRequest = { dbPath: store.dbPath, ...(o.collections ? { collections: o.collections } : {}), batchMs: SCAN_BATCH_MS, mainWrites: writes.writers, ...(o.headBytes === undefined ? {} : { headBytes: o.headBytes }) };
+    const r = await scans.run<ScanResult>(scan, o.signal);
+    for (const message of r.warnings) options.onLlmWarning?.(message);
+    // Set-asides of documents no row holds any more go too, as their paths may be sensitive. They
+    // live in the queue's file, which only this thread may hold, so this stays here: a lookup each.
     tidyLetters();
     return {
       collections: r.collections,
@@ -649,6 +738,7 @@ export async function openBackend(options: OpenBackendOptions): Promise<OpenedBa
       removed: r.removed,
       skipped: r.skipped,
       needsEmbedding: Math.max(0, r.needsEmbedding - setAside()),
+      ...(r.metadata ? { metadata: r.metadata } : {}),
     };
   },
   purgeCache: () => withShortBusyTimeout(db as never, () => Number(db.prepare("DELETE FROM llm_cache").run().changes)),
@@ -664,10 +754,7 @@ export async function openBackend(options: OpenBackendOptions): Promise<OpenedBa
     const documentsSetAside = setAside();
     return { ...status, needsEmbedding: Math.max(0, status.needsEmbedding - documentsSetAside), documentsSetAside };
   },
-  readDocumentHeads: (maxBytes: number): DocumentHead[] => {
-    const rows = headsStatement.all(maxBytes) as HeadRow[];
-    return rows.map((r) => ({ collection: r.collection, path: r.path, head: r.head ?? "" }));
-  },
+  readDocumentHeads: (maxBytes: number): DocumentHead[] => readHeads(db, maxBytes),
   snippet: (body, query, maxLen, chunkPos, chunkLen, intent) => {
     const s = qmd.extractSnippet(body, query, maxLen, chunkPos, chunkLen, intent);
     return { line: s.line, snippet: s.snippet };
@@ -677,6 +764,8 @@ export async function openBackend(options: OpenBackendOptions): Promise<OpenedBa
   stopWorkerCalls: () => remote?.lifecycle.refuseNew(),
   abortWorkerCalls: () => remote?.lifecycle.abortInFlight(),
   close: async () => {
+    // A scan still running stops at its next document, or is cut off: see ScanThreads.close.
+    await scans.close(SCAN_CLOSE_GRACE_MS);
     wired?.close();
     // store.close() disposes the SDK's own instance, which is also the fallback.
     await store.close();

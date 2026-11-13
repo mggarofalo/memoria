@@ -2,7 +2,8 @@ import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import picomatch from "picomatch";
 import type { EmbedSummary, UpdateSummary } from "../src/jobs.ts";
-import type { DocumentHead } from "../src/metadata.ts";
+import { metadataEntries, type DocumentHead } from "../src/metadata.ts";
+import { ScanStopped } from "../src/scan-batches.ts";
 import type { DeadLetter, DegradedReason, LlmHealth, PoolLoad, WorkerView } from "../src/llm/types.ts";
 import type {
   BackendEmbedOptions,
@@ -17,6 +18,7 @@ import type {
   ModelStatus,
   MultiGetEntry,
   QmdBackend,
+  ScanSummary,
   SearchHit,
 } from "../src/store.ts";
 
@@ -82,6 +84,8 @@ export class FakeBackend implements QmdBackend {
   updateDelayMs = 0;
   /** When set, update() waits on it, so a test can act while a job is mid-run. */
   updateGate: Promise<void> | null = null;
+  /** Off, update() returns no metadata, as a backend that does not read it on the scan thread. */
+  scanReadsMetadata = true;
   /** Replaces embed's default answer, so a test can defer, fail or hold a job. */
   embedImpl: ((options: BackendEmbedOptions) => Promise<EmbedSummary>) | null = null;
   degradedReasons: DegradedReason[] = [];
@@ -258,10 +262,20 @@ export class FakeBackend implements QmdBackend {
    * round-trips through the filesystem the way it does in production. A doc
    * whose file is gone is dropped, as the SDK deactivates it.
    */
-  async update(options: { collections?: string[] }): Promise<UpdateSummary> {
-    this.#record("update", options);
+  async update(options: { collections?: string[]; signal?: AbortSignal; headBytes?: number }): Promise<ScanSummary> {
+    this.#record("update", options.collections ? { collections: options.collections } : {});
     if (this.updateDelayMs > 0) await new Promise((r) => setTimeout(r, this.updateDelayMs));
     if (this.updateGate) await this.updateGate;
+    // As the real scan does: an abort stops it before the next document.
+    if (options.signal?.aborted) throw new ScanStopped();
+    const summary = await this.#scan(options.collections);
+    // As the real scan's thread does, the metadata after it, unless a test wants the old way.
+    if (options.headBytes === undefined || !this.scanReadsMetadata) return summary;
+    return { ...summary, metadata: metadataEntries(this.docs.map((d) => ({ collection: d.collection, path: d.path, head: d.body.slice(0, options.headBytes) }))) };
+  }
+
+  async #scan(collections: string[] | undefined): Promise<UpdateSummary> {
+    const options = { collections };
     const names = options.collections ?? this.collections.map((c) => c.name);
     const counts = { indexed: 0, updated: 0, unchanged: 0, removed: 0 };
     for (const name of names) {

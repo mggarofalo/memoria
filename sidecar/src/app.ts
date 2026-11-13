@@ -10,6 +10,7 @@ import { HttpError } from "./errors.ts";
 import { JobCancelled, JobPartial, JobQueue, type EmbedSummary, type JobResult, type JobRunContext, type JobScheduler, type JobStore, type ReindexRequest, type Job } from "./jobs.ts";
 import { MetadataIndex } from "./metadata.ts";
 import { registerRoutes } from "./routes.ts";
+import { ScanStopped } from "./scan-batches.ts";
 import { documentSchema, errorSchema, jobSchema, metadataSchema, workerSchema } from "./schemas.ts";
 import type { QmdBackend } from "./store.ts";
 import { resolveVersion } from "./version.ts";
@@ -82,13 +83,18 @@ export async function buildApp(options: BuildAppOptions): Promise<App> {
   };
 
   const runJob = async (request: ReindexRequest, context: JobRunContext): Promise<JobResult> => {
-    const update = await backend.update(request.collections ? { collections: request.collections } : {});
+    // A scan stops between documents when cancelled or at shutdown, which is the job's cancellation.
+    // The scan's thread also reads the metadata after it, which at 52,000 documents took 3 s.
+    const { metadata: parsed, ...update } = await backend.update({ ...(request.collections ? { collections: request.collections } : {}), signal: context.signal, headBytes: metadata.headBytes }).catch((err: unknown) => {
+      throw err instanceof ScanStopped ? new JobCancelled() : err;
+    });
     // Scanned documents are lexically searchable from here, even if embedding
     // has to wait for a worker, so refresh before anything can defer the job.
-    if (request.embed) metadata.refresh();
+    // Embedding changes no document, so this is the job's metadata.
+    const refreshed = parsed ? metadata.replace(parsed) : metadata.refresh();
     if (context.signal.aborted) throw new JobCancelled();
     const embed = request.embed ? await embedRequested(request, context) : null;
-    const result = { update, embed, metadata: metadata.refresh() };
+    const result = { update, embed, metadata: refreshed };
     // Documents left behind must not read as success. See JobPartial.
     if (embed?.docsPending) throw new JobPartial(`${embed.docsPending} of ${embed.docsProcessed} documents could not be embedded, of which ${embed.docsDeadLettered ?? 0} were set aside (GET /queue/dead-letters). The rest stay pending.`, result);
     return result;

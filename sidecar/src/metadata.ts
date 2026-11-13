@@ -209,6 +209,27 @@ export function firstCodePoints(text: string, count: number): string {
   return text.slice(0, end);
 }
 
+export interface MetadataSummary {
+  documents: number;
+  withMetadata: number;
+}
+
+/** Every document's metadata, keyed by `collection/path`, and how many documents were read. Plain data, so it crosses threads. */
+export interface ParsedMetadata {
+  documents: number;
+  entries: Array<[string, DocumentMetadata]>;
+}
+
+/** Parse each head's frontmatter. Documents with none are left out. */
+export function metadataEntries(heads: readonly DocumentHead[]): ParsedMetadata {
+  const entries: Array<[string, DocumentMetadata]> = [];
+  for (const h of heads) {
+    const meta = metadataFromText(h.head);
+    if (meta) entries.push([`${h.collection}/${h.path}`, meta]);
+  }
+  return { documents: heads.length, entries };
+}
+
 export class MetadataIndex {
   readonly #source: MetadataSource;
   readonly #headBytes: number;
@@ -220,21 +241,25 @@ export class MetadataIndex {
     this.#headBytes = headBytes;
   }
 
-  /** Rebuild from the source. Cheap: one SQL scan of document heads, no bodies. */
-  refresh(): { documents: number; withMetadata: number } {
-    const next = new Map<string, DocumentMetadata>();
-    let withMetadata = 0;
-    const heads = this.#source.readDocumentHeads(this.#headBytes);
-    for (const h of heads) {
-      const meta = metadataFromText(h.head);
-      if (meta) {
-        next.set(`${h.collection}/${h.path}`, meta);
-        withMetadata++;
-      }
-    }
-    this.#entries = next;
+  /** How many characters of each document `refresh` reads. */
+  get headBytes(): number {
+    return this.#headBytes;
+  }
+
+  /**
+   * Rebuild from the source: one SQL scan of document heads, no bodies, and their YAML.
+   * At 52,000 documents that took 3 s, all of it on the calling thread, so after a scan
+   * the scan's thread does it (`metadataEntries`) and hands the result to `replace`.
+   */
+  refresh(): MetadataSummary {
+    return this.replace(metadataEntries(this.#source.readDocumentHeads(this.#headBytes)));
+  }
+
+  /** Take a rebuild done elsewhere, as by `metadataEntries` on the scan thread. */
+  replace(parsed: ParsedMetadata): MetadataSummary {
+    this.#entries = new Map(parsed.entries);
     this.#refreshedAt = new Date();
-    return { documents: heads.length, withMetadata };
+    return { documents: parsed.documents, withMetadata: parsed.entries.length };
   }
 
   get(displayPath: string): DocumentMetadata | undefined {

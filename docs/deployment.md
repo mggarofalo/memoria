@@ -478,7 +478,7 @@ What the two processes hold is small. What makes `docker stats` look large is th
 | Resident memory idle | about 115 MiB | about 110 MiB |
 | `docker stats` during the scan | 520 MiB, of which 89 MiB was the process's own and 406 MiB active page cache | 229 MiB |
 
-The index took 2.1 GB for 192 MB of documents, most of it vectors. Size the host for the two processes' ceilings plus room to cache the index: the sidecar's heap is capped at 4 GiB and the API's at 1 GiB, so 6 GiB covers both at their worst, and the index's size on top keeps searches from reading the disk. Below that, searches still work, more slowly.
+The index took 2.1 GB for 192 MB of documents, most of it vectors. Size the host for the two processes' ceilings plus room to cache the index: the sidecar's heap is capped at 4 GiB, its scan thread's at 2 GiB, and the API's at 1 GiB, so 8 GiB covers them at their worst, and the index's size on top keeps searches from reading the disk. Below that, searches still work, more slowly.
 
 Run the sidecar with `--max-old-space-size=4096`. The image sets it. This is a ceiling, not a target. Node's default on a smaller host can be lower, and a search that reaches the limit kills the process.
 
@@ -500,7 +500,7 @@ It also carries the config sync fix described under [lost collection records](#l
 
 **Frontmatter.** When a key repeats, the last one wins, where it used to give no metadata. That spoofs nothing: filters read a document's own frontmatter, whoever can write that can write any value, and on a transcript the renderer writes those keys itself.
 
-**Why not a worker thread.** Running the SDK in one was evaluated and not adopted. With the scans fixed, a search within the cap stalls for under a second. It would not reliably contain an out-of-memory error either: of four allocation patterns tried, three failed only the worker and one killed the whole process. It would also mean making about 25 backend methods asynchronous and copying 21 MB bodies between threads.
+**Why searches stay on the main thread.** Running the whole SDK on a worker thread was evaluated and not adopted. With the scans fixed, a search within the cap stalls for under a second. It would not reliably contain an out-of-memory error either: of four allocation patterns tried, three failed only the worker and one killed the whole process. It would also mean making about 25 backend methods asynchronous and copying 21 MB bodies between threads. An index update scan is different: it runs for minutes on a large index, and runs on a thread of its own ([Reindex scheduling](../sidecar/README.md#reindex-scheduling)).
 
 ## Reverse proxy and TLS
 
