@@ -42,6 +42,13 @@ updates:
       interval: weekly
     commit-message:
       prefix: chore
+    # Memoria stays on the .NET LTS line. ASP.NET Core's major versions need the
+    # matching runtime, so they move with the SDK and base images, by hand.
+    # Packages that still ship a build for our target framework, such as
+    # Microsoft.Data.Sqlite, keep getting majors.
+    ignore:
+      - dependency-name: "Microsoft.AspNetCore.*"
+        update-types: ["version-update:semver-major"]
     groups:
       nuget:
         patterns: ["*"]
@@ -61,6 +68,10 @@ updates:
       interval: weekly
     commit-message:
       prefix: chore
+    # The .NET images stay on the LTS line with the ASP.NET Core packages above.
+    ignore:
+      - dependency-name: "dotnet/*"
+        update-types: ["version-update:semver-major"]
     # A Dockerfile's build and runtime stages share a major version, so its
     # majors come together in one pull request rather than one per image.
     groups:
