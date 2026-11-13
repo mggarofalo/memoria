@@ -23,9 +23,10 @@ interface Context {
   secret: string;
 }
 
-/** Built at run time, so no scanner mistakes this file for a leak. */
+/** Built at run time, so no scanner mistakes this file for a leak. Its letters vary, as a real token's do, so its rule's entropy floor passes it. */
 function credential(): string {
-  return "gh" + "p_" + "s".repeat(18) + "t".repeat(18);
+  const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  return "gh" + "p_" + Array.from({ length: 36 }, (_, i) => alphabet[(i * 11 + 5) % alphabet.length]).join("");
 }
 
 function write(c: Context, name: string, text: string): string {

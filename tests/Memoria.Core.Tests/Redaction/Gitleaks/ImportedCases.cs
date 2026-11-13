@@ -63,7 +63,7 @@ public static class ImportedCases
 	{
 		for (int attempt = 0; attempt < Attempts; attempt++)
 		{
-			Random random = new(TokenShapes.CellSeed(Seed + attempt, new TokenSpec(rule.Name, "", ""), TokenShape.Random));
+			Random random = new(CellSeed(Seed + attempt, rule.Name));
 			string text = RegexSampler.Sample(rule.Pattern.ToString(), random);
 
 			// A rule fires only beside one of its keywords, which some patterns do not hold, so the keyword goes first.
@@ -78,5 +78,17 @@ public static class ImportedCases
 		}
 
 		return null;
+	}
+
+	/// <summary>A seed of its own for each rule and attempt, so adding a rule does not change another's case.</summary>
+	private static int CellSeed(int seed, string rule)
+	{
+		uint hash = 2166136261u ^ (uint)seed;
+		foreach (char c in $"{rule}|||Random")
+		{
+			hash = (hash ^ c) * 16777619u;
+		}
+
+		return (int)(hash & 0x7FFFFFFF);
 	}
 }

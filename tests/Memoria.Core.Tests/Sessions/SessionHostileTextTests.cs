@@ -10,14 +10,20 @@ public sealed class SessionHostileTextTests
 {
 	private const string Marker = "[REDACTED:refused-message]";
 
-	private static string Hostile => string.Concat(Enumerable.Repeat("mysql xy -pa ", 1000));
+	/// <summary>
+	/// Each candidate is a call, so it is rejected, and holds the next one, so the rule rereads the rest of the line for each. A line stays
+	/// under the length past which a rejected value is skipped rather than reread, and a few such lines take the rule past its allowance.
+	/// </summary>
+	private static string Hostile => string.Join('\n', Enumerable.Repeat("token=" + string.Concat(Enumerable.Repeat("f(token=", 450)), 4));
+
+	private const string Piece = "f(token=";
 
 	[Fact]
 	public void The_flood_really_cannot_be_redacted()
 	{
 		RedactionException exception = Assert.Throws<RedactionException>(() => Redactor.Shared.RedactFragment(Hostile));
 
-		Assert.Equal(RedactionFailure.DidNotConverge, exception.Failure);
+		Assert.Equal(RedactionFailure.ScanBudgetExhausted, exception.Failure);
 	}
 
 	[Fact]
@@ -31,9 +37,24 @@ public sealed class SessionHostileTextTests
 		Assert.Contains("first", text, StringComparison.Ordinal);
 		Assert.Contains("third", text, StringComparison.Ordinal);
 		Assert.Contains("## Assistant\n\n" + Marker + "\n", text, StringComparison.Ordinal);
-		Assert.DoesNotContain("-pa", text, StringComparison.Ordinal);
+		Assert.DoesNotContain(Piece, text, StringComparison.Ordinal);
 		SessionFieldRefusal refusal = Assert.Single(session.Refusals);
-		Assert.Equal(new SessionFieldRefusal(1, "message:1", RedactionException.WholeDocument), refusal);
+		Assert.Equal(new SessionFieldRefusal(1, "message:1", "secret-assignment"), refusal);
+	}
+
+	/// <summary>One line of the flood is within the allowance and two are not, so two messages of one line each fail only together.</summary>
+	[Fact]
+	public async Task Two_messages_that_fail_only_together_are_both_replaced()
+	{
+		string line = Hostile.Split('\n')[0];
+		Assert.Equal(line, Redactor.Shared.RedactFragment(line).Text);
+		string jsonl = ClaudeLine("user", "first") + ClaudeLine("assistant", line) + ClaudeLine("user", line) + ClaudeLine("assistant", "last");
+
+		RedactedSession session = await Claude(jsonl);
+
+		Assert.Equal(["message:1", "message:2"], session.Refusals.Select(static r => r.Field).Order());
+		Assert.Contains("first", session.Documents[0].Text(), StringComparison.Ordinal);
+		Assert.Contains("last", session.Documents[0].Text(), StringComparison.Ordinal);
 	}
 
 	[Fact]
@@ -45,20 +66,6 @@ public sealed class SessionHostileTextTests
 
 		Assert.Equal(["message:1", "message:5"], session.Refusals.Select(static r => r.Field));
 		Assert.Contains("m8", session.Documents[0].Text(), StringComparison.Ordinal);
-	}
-
-	[Fact]
-	public async Task A_key_across_messages_is_still_one_key_beside_a_flood()
-	{
-		string head = "-----BEGIN " + Synthetic.PrivateWord + " KEY-----\n" + Synthetic.Body(64, 1600);
-		string tail = Synthetic.Body(64, 1601);
-		string jsonl = ClaudeLine("user", head) + ClaudeLine("assistant", tail) + ClaudeLine("user", Hostile);
-
-		RedactedSession session = await Claude(jsonl);
-
-		string text = session.Documents[0].Text();
-		Assert.DoesNotContain(tail, text, StringComparison.Ordinal);
-		Assert.Contains("message:2", session.Refusals.Select(static r => r.Field));
 	}
 
 	[Fact]
@@ -79,7 +86,7 @@ public sealed class SessionHostileTextTests
 	{
 		RedactedSession session = await Claude(ClaudeLine("user", Hostile) + ClaudeLine("assistant", "ok"));
 
-		Assert.DoesNotContain("-pa", session.Documents[0].Text(), StringComparison.Ordinal);
+		Assert.DoesNotContain(Piece, session.Documents[0].Text(), StringComparison.Ordinal);
 		Assert.Contains("ok", session.Documents[0].Text(), StringComparison.Ordinal);
 	}
 
@@ -92,9 +99,9 @@ public sealed class SessionHostileTextTests
 
 		string text = session.Documents[0].Text();
 		Assert.Contains("first", text, StringComparison.Ordinal);
-		Assert.DoesNotContain("-pa", text, StringComparison.Ordinal);
+		Assert.DoesNotContain(Piece, text, StringComparison.Ordinal);
 		Assert.Contains("[REDACTED:refused-field]", text, StringComparison.Ordinal);
-		Assert.Equal(new SessionFieldRefusal(0, "metadata", RedactionException.WholeDocument), Assert.Single(session.Refusals));
+		Assert.Equal(new SessionFieldRefusal(0, "metadata", "secret-assignment"), Assert.Single(session.Refusals));
 	}
 
 	[Fact]

@@ -21,17 +21,14 @@ public static class GitleaksRuleGenerator
 
 	/// <summary>
 	/// Rules left out by choice, with the reason. Rules gated on a file path are left out by <see cref="Exclusion"/>. A rule that
-	/// duplicates one of Memoria's is left out only when it undoes a decision that rule makes on purpose, which a test shows.
+	/// duplicates one of Memoria's own names that rule.
 	/// </summary>
 	private static readonly Dictionary<string, string> s_leftOut = new(StringComparer.Ordinal)
 	{
 		["generic-api-key"] = "Left out on purpose. Its only judge is entropy, which reads commit hashes, UUIDs and module checksums under a key-like name as secrets. "
-			+ "Memoria's secret-assignment rule covers the same assignments with a judge that reads the name and the value.",
-		["curl-auth-user"] = Duplicate("curl-user-password", "It replaces the user name with the password, and takes a password that reads as a word or a sample, which Memoria's rule leaves."),
-		["private-key"] = Duplicate("private-key", "It replaces a key block that is mostly a mask, such as one of x characters, which Memoria's rule leaves."),
-		["slack-webhook-url"] = Duplicate("slack-webhook", "It replaces the documentation's sample URL of zeros, and the host with the path, which Memoria's rule keeps readable."),
-		["square-access-token"] = Duplicate("square-token and square-production-token", "It takes an EAAA value of any length from 26 to 64, which includes Facebook-shaped tokens and samples Memoria's rules leave."),
-		["twilio-api-key"] = Duplicate("twilio-key", "It has no boundary after its 32 characters, so it takes the head of any longer hex run."),
+			+ "Memoria's secret-assignment rule covers the same assignments, judged by the name.",
+		["curl-auth-user"] = Duplicate("curl-user-password", "It replaces the user name with the password."),
+		["private-key"] = Duplicate("private-key", "It needs the END line, and Memoria's rule also takes a key cut off before it."),
 	};
 
 	/// <summary>

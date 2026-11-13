@@ -68,7 +68,7 @@ public sealed class SessionIngestTests(AuthApiFactory factory) : IClassFixture<A
 		Assert.DoesNotContain(token, raw, StringComparison.Ordinal);
 		Assert.All(factory.Sidecar.Requests, request => Assert.DoesNotContain(token, request.Body ?? "", StringComparison.Ordinal));
 		Assert.Contains("[REDACTED:", Assert.Single(corpus.Files).Value, StringComparison.Ordinal);
-		Assert.Equal(1, JsonDocument.Parse(raw).RootElement.GetProperty("redactions").GetProperty("github-token").GetInt32());
+		Assert.Equal(1, JsonDocument.Parse(raw).RootElement.GetProperty("redactions").GetProperty("gitleaks-github-pat").GetInt32());
 	}
 
 	// --- part 3 of 5 ---------------------------------------------------------------

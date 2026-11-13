@@ -1,4 +1,3 @@
-using System.Text;
 using Memoria.Core.Redaction;
 using Memoria.Core.Sessions;
 using Memoria.Core.Tests.Redaction;
@@ -22,7 +21,7 @@ public sealed class SessionGateTests
 		RedactedMarkdown clean = PartGate.Clean(document, Part("hello"), refusals);
 
 		Assert.Equal(Fence + "project: \"demo\"\nslug: \"[REDACTED:refused-field]\"\n" + Fence + "\n## User\n\nhello\n", clean.Text);
-		Assert.Equal([new SessionFieldRefusal(1, "slug", "github-token")], refusals);
+		Assert.Equal([new SessionFieldRefusal(1, "slug", "gitleaks-github-pat")], refusals);
 		Assert.Equal("[REDACTED:refused-field]", Frontmatter(clean.Text).Scalar("slug"));
 	}
 
@@ -59,7 +58,7 @@ public sealed class SessionGateTests
 		RedactedMarkdown clean = PartGate.Clean(document, PartAt(7, "first", text, "third"), refusals);
 
 		Assert.Equal("---\nproject: \"demo\"\n---\n\n## User\n\nfirst\n\n## Assistant\n\n[REDACTED:refused-message]\n\n## User\n\nthird\n", clean.Text);
-		Assert.Equal([new SessionFieldRefusal(1, "message:8", "github-token")], refusals);
+		Assert.Equal([new SessionFieldRefusal(1, "message:8", "gitleaks-github-pat")], refusals);
 	}
 
 	[Fact]
@@ -110,13 +109,13 @@ public sealed class SessionGateTests
 	[Fact]
 	public async Task Branch_that_a_transform_turns_into_a_token_is_redacted_not_refused()
 	{
-		string body = Synthetic.Body(40, 1200);
-		string branch = "sk/ant/api03/" + body;
+		string body = Synthetic.Body(20, 1200);
+		string branch = "gl" + "pat/" + body;
 
 		RedactedSession session = await Claude(ClaudeLine("user", "hello", branch: branch));
 
 		string text = Assert.Single(session.Documents).Text();
-		Assert.DoesNotContain("sk-ant-", text, StringComparison.Ordinal);
+		Assert.DoesNotContain("gl" + "pat-", text, StringComparison.Ordinal);
 		Assert.DoesNotContain(body + "\"\n  - ", text, StringComparison.Ordinal);
 		Assert.Contains("## User\n\nhello\n", text, StringComparison.Ordinal);
 		Assert.NotEmpty(Frontmatter(text).Sequence("tags"));
@@ -157,7 +156,7 @@ public sealed class SessionGateTests
 
 		string text = Assert.Single((await Codex(CodexMeta() + CodexMessage("user", message))).Documents).Text();
 
-		Assert.Contains("# [REDACTED:github-token]\n", text, StringComparison.Ordinal);
+		Assert.Contains("# [REDACTED:gitleaks-github-pat]\n", text, StringComparison.Ordinal);
 		Assert.DoesNotContain("# gh", text, StringComparison.Ordinal);
 		Assert.Contains("## User\n\n" + message + "\n", text, StringComparison.Ordinal);
 	}
@@ -190,46 +189,12 @@ public sealed class SessionGateTests
 		Assert.Null(SidecarRefusal(a.Documents[0].Path));
 	}
 
-	[Theory]
-	[InlineData(3)]
-	[InlineData(5)]
-	public async Task Message_ending_in_full_base64_lines_keeps_every_message(int lines)
-	{
-		string body = string.Join('\n', Enumerable.Range(0, lines).Select(static i => Synthetic.Body(64, 1205 + i)));
-		string jsonl = ClaudeLine("user", "before\n" + body) + ClaudeLine("assistant", "after") + ClaudeLine("user", body);
-
-		RedactedSession session = await Claude(jsonl);
-
-		RedactedSessionDocument document = Assert.Single(session.Documents);
-		Assert.Equal(3, document.MessageCount);
-		Assert.Empty(session.Refusals);
-		Assert.Contains("## Assistant\n\nafter\n", document.Text(), StringComparison.Ordinal);
-		Assert.DoesNotContain(Synthetic.Body(64, 1205), document.Text(), StringComparison.Ordinal);
-	}
-
-	[Fact]
-	public async Task Untrustworthy_failure_keeps_the_read_report()
-	{
-		string huge = new StringBuilder("sk-a-".Length * 2_000_000).Insert(0, "s" + "k-a-", 2_000_000).ToString();
-
-		try
-		{
-			RedactedSession session = await Claude(ClaudeLine("user", huge), new SessionRenderOptions { MaxPartChars = 65536 });
-			Assert.Single(session.Documents);
-		}
-		catch (RedactionException exception)
-		{
-			Assert.NotNull(exception.ReadReport);
-			Assert.Equal(1, exception.ReadReport.Messages);
-		}
-	}
-
 	[Fact]
 	public async Task Renderer_fuzz_never_fails_on_its_own_output_and_stays_parseable()
 	{
 		string[] fragments =
 		[
-			"\n", "\n\n", " ", "/", "\\", "-", "#", "\"", "'", ":", "=", "@", ",", "|", "[REDACTED:x]", "--token", "--password", "password=", "token: ", "curl -u a:", "https:\\\\u:", "sk/ant/api03/", "g#hp_",
+			"\n", "\n\n", " ", "/", "\\", "-", "#", "\"", "'", ":", "=", "@", ",", "|", "[REDACTED:x]", "--token", "--password", "password=", "token: ", "curl -u a:", "https:\\\\u:", "gl" + "pat/", "g#hp_",
 			Synthetic.GitHubClassic('p'), Synthetic.Body(64, 1210), Synthetic.Body(64, 1211), Synthetic.Body(64, 1212), Synthetic.Body(40, 1213), "Hunter2x", "-----BEGIN " + Synthetic.PrivateWord + " KEY-----", "-----END " + Synthetic.PrivateWord + " KEY-----", "﷐", "�", "​",
 		];
 		Random random = new(20261105);

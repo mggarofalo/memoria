@@ -25,9 +25,10 @@ interface ReportRow {
   gitleaksRan: boolean;
 }
 
-/** Built at run time, so no scanner mistakes this file for a leak. */
+/** Built at run time, so no scanner mistakes this file for a leak. Its letters vary, as a real token's do, so its rule's entropy floor passes it. */
 function credential(): string {
-  return "gh" + "p_" + "m".repeat(18) + "n".repeat(18);
+  const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  return "gh" + "p_" + Array.from({ length: 36 }, (_, i) => alphabet[(i * 7 + 3) % alphabet.length]).join("");
 }
 
 function write(root: string, name: string, text: string): void {

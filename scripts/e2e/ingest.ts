@@ -51,11 +51,13 @@ function randomLetters(length: number): string {
   return Array.from({ length }, () => ALPHABET[randomInt(52)]).join("");
 }
 
+/** Base32, the alphabet of an AWS access key id. */
 function randomUpper(length: number): string {
-  return randomText(length * 3).replace(/[a-z]/g, "").padEnd(length, "A").slice(0, length).toUpperCase();
+  const base32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  return Array.from({ length }, () => base32[randomInt(base32.length)]).join("");
 }
 
-/** One of each common shape, spelled so that the source holds none of them. */
+/** One of each common shape, in its provider's real format, spelled so that the source holds none of them. */
 function tokens(): Record<string, string> {
   return {
     github: "gh" + "p_" + randomText(36),
@@ -65,8 +67,8 @@ function tokens(): Record<string, string> {
     // every run covers what a random token only reaches now and then.
     gitlabLetters: "gl" + "pat-" + randomLetters(20),
     gitlabPieces: "gl" + "pat-" + `${randomLetters(7)}-${randomLetters(6)}_${randomLetters(5)}`.toLowerCase(),
-    anthropic: "sk-" + "ant-" + "api03-" + randomText(80),
-    openai: "s" + "k-" + randomText(48),
+    anthropic: "sk-" + "ant-" + "api03-" + randomText(93) + "AA",
+    openai: "sk-" + "proj-" + randomText(74) + "T3Blbk" + "FJ" + randomText(74),
     slack: "xo" + "xb-" + "1234567890" + "12-" + "1234567890" + "12-" + randomText(24),
     npm: "np" + "m_" + randomText(36),
   };

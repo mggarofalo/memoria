@@ -15,7 +15,7 @@ public interface IRedactor
 }
 
 /// <summary>The outcome of redacting raw text, before it is sealed into a <see cref="RedactedMarkdown"/>.</summary>
-/// <param name="Text">The text with credentials replaced by placeholders such as <c>[REDACTED:github-token]</c>.</param>
+/// <param name="Text">The text with credentials replaced by placeholders such as <c>[REDACTED:jwt]</c>.</param>
 /// <param name="CountsByRule">Replacements made, by rule name. Rules that matched nothing are absent. Never holds a matched value.</param>
 internal sealed record RedactionResult(string Text, IReadOnlyDictionary<string, int> CountsByRule)
 {

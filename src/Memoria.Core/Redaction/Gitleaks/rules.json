@@ -10,7 +10,7 @@
   "excluded": [
     {
       "id": "curl-auth-user",
-      "reason": "Covered by Memoria's curl-user-password. It replaces the user name with the password, and takes a password that reads as a word or a sample, which Memoria's rule leaves."
+      "reason": "Covered by Memoria's curl-user-password. It replaces the user name with the password."
     },
     {
       "id": "freemius-secret-key",
@@ -18,7 +18,7 @@
     },
     {
       "id": "generic-api-key",
-      "reason": "Left out on purpose. Its only judge is entropy, which reads commit hashes, UUIDs and module checksums under a key-like name as secrets. Memoria's secret-assignment rule covers the same assignments with a judge that reads the name and the value."
+      "reason": "Left out on purpose. Its only judge is entropy, which reads commit hashes, UUIDs and module checksums under a key-like name as secrets. Memoria's secret-assignment rule covers the same assignments, judged by the name."
     },
     {
       "id": "hashicorp-tf-password",
@@ -38,19 +38,7 @@
     },
     {
       "id": "private-key",
-      "reason": "Covered by Memoria's private-key. It replaces a key block that is mostly a mask, such as one of x characters, which Memoria's rule leaves."
-    },
-    {
-      "id": "slack-webhook-url",
-      "reason": "Covered by Memoria's slack-webhook. It replaces the documentation's sample URL of zeros, and the host with the path, which Memoria's rule keeps readable."
-    },
-    {
-      "id": "square-access-token",
-      "reason": "Covered by Memoria's square-token and square-production-token. It takes an EAAA value of any length from 26 to 64, which includes Facebook-shaped tokens and samples Memoria's rules leave."
-    },
-    {
-      "id": "twilio-api-key",
-      "reason": "Covered by Memoria's twilio-key. It has no boundary after its 32 characters, so it takes the head of any longer hex run."
+      "reason": "Covered by Memoria's private-key. It needs the END line, and Memoria's rule also takes a key cut off before it."
     }
   ],
   "patches": [
@@ -2255,6 +2243,17 @@
       "allowlists": []
     },
     {
+      "id": "slack-webhook-url",
+      "description": "Discovered a Slack Webhook, which could lead to unauthorized message posting and data leakage in Slack channels.",
+      "pattern": "(?:https?://)?hooks.slack.com/(?:services|workflows|triggers)/[A-Za-z0-9+/]{43,56}",
+      "upstreamPattern": "(?:https?://)?hooks.slack.com/(?:services|workflows|triggers)/[A-Za-z0-9+/]{43,56}",
+      "keywords": [
+        "hooks.slack.com"
+      ],
+      "entropy": 0,
+      "allowlists": []
+    },
+    {
       "id": "snyk-api-token",
       "description": "Uncovered a Snyk API token, potentially compromising software vulnerability scanning and code security.",
       "pattern": "(?i)[0-9A-Za-z_.-]{0,50}?(?:snyk[_.-]?(?:(?:api|oauth)[_.-]?)?(?:key|token))(?:[ \\t0-9A-Za-z_.-]{0,20})[\\t\\n\\f\\r '\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\t\\n\\f\\r =]{0,5}(?<secret>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[^0-9A-Za-z_]|\\z)",
@@ -2286,6 +2285,18 @@
         "sourcegraph"
       ],
       "entropy": 3,
+      "allowlists": []
+    },
+    {
+      "id": "square-access-token",
+      "description": "Detected a Square Access Token, risking unauthorized payment processing and financial transaction exposure.",
+      "pattern": "(?:^|[^0-9A-Za-z]|\\\\+[nrtfbv0]|\\\\u[0-9A-Fa-f]{4}|%[0-9A-Fa-f]{2})(?<secret>(?:EAAA|sq0atp-)[0-9A-Za-z_\\-]{22,60})(?:[^0-9A-Za-z_]|\\z)",
+      "upstreamPattern": "\\b((?:EAAA|sq0atp-)[\\w-]{22,60})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "keywords": [
+        "sq0atp-",
+        "eaaa"
+      ],
+      "entropy": 2,
       "allowlists": []
     },
     {
@@ -2357,6 +2368,17 @@
         "travis"
       ],
       "entropy": 0,
+      "allowlists": []
+    },
+    {
+      "id": "twilio-api-key",
+      "description": "Found a Twilio API Key, posing a risk to communication services and sensitive customer interaction data.",
+      "pattern": "SK[0-9a-fA-F]{32}",
+      "upstreamPattern": "SK[0-9a-fA-F]{32}",
+      "keywords": [
+        "sk"
+      ],
+      "entropy": 3,
       "allowlists": []
     },
     {

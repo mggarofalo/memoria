@@ -76,7 +76,7 @@ public sealed class RedactionSwitchTests : IClassFixture<AuthApiFactory>, IAsync
 		Assert.DoesNotContain(token, closedStored, StringComparison.Ordinal);
 		JsonElement closedResult = await ReadAsync(closed);
 		Assert.Equal(IngestRedaction.Enabled, closedResult.GetProperty("redaction").GetString());
-		Assert.Equal(2, closedResult.GetProperty("redactions").GetProperty("github-token").GetInt32());
+		Assert.Equal(2, closedResult.GetProperty("redactions").GetProperty("gitleaks-github-pat").GetInt32());
 	}
 
 	[Fact]

@@ -110,7 +110,7 @@ public sealed class SessionRelocatedCopyTests
 	[Fact]
 	public async Task A_credential_in_the_cwd_does_not_reach_the_path_or_change_the_comparison_output()
 	{
-		string token = "gh" + "p_" + new string('a', 36);
+		string token = Memoria.Core.Tests.Redaction.Synthetic.GitHubClassic('p');
 
 		RedactedSession session = await RenderIn(OtherFolder, ClaudeLine("user", "first", cwd: "/srv/" + token));
 

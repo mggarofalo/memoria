@@ -337,7 +337,7 @@ public sealed class UnredactedMarkdownTests
 	[Fact]
 	public async Task A_rendered_document_holds_only_redacted_text()
 	{
-		string token = "gh" + "p_" + new string('a', 36);
+		string token = Memoria.Core.Tests.Redaction.Synthetic.GitHubClassic('p');
 		RedactedSession session = await Claude(ClaudeLine("user", token));
 
 		Assert.DoesNotContain(token, session.Documents[0].ToString());

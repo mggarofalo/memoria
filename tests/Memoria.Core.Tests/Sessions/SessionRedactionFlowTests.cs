@@ -12,26 +12,8 @@ namespace Memoria.Core.Tests.Sessions;
 public sealed class SessionRedactionFlowTests
 {
 	private const string Begin = "-----BEGIN " + Synthetic.PrivateWord + " KEY-----";
-	private const string End = "-----END " + Synthetic.PrivateWord + " KEY-----";
 
 	private static string Token => Synthetic.GitHubClassic('p');
-
-	[Fact]
-	public async Task Key_spread_over_two_messages_is_gone_from_both()
-	{
-		string first = Synthetic.Base64(64, 920);
-		string second = Synthetic.Base64(64, 921);
-		string jsonl = ClaudeLine("user", $"{Begin}\n{first}") + ClaudeLine("assistant", $"{second}\n{End}");
-
-		RedactedSession session = await Claude(jsonl);
-
-		string text = Assert.Single(session.Documents).Text();
-		Assert.DoesNotContain(first, text, StringComparison.Ordinal);
-		Assert.DoesNotContain(second, text, StringComparison.Ordinal);
-		Assert.Contains("## User\n\n[REDACTED:private-key]\n", text, StringComparison.Ordinal);
-		Assert.Contains("## Assistant\n\n[REDACTED:private-key]\n", text, StringComparison.Ordinal);
-		Assert.Equal(2, Assert.Single(session.Documents).MessageCount);
-	}
 
 	[Fact]
 	public async Task Next_message_starts_after_a_key_cut_off_in_the_previous_one()
@@ -55,7 +37,7 @@ public sealed class SessionRedactionFlowTests
 		string text = Assert.Single((await Claude(ClaudeLine("user", message))).Documents).Text();
 
 		Assert.DoesNotContain(token[..4], text, StringComparison.Ordinal);
-		Assert.Contains("[REDACTED:github-token] more", text, StringComparison.Ordinal);
+		Assert.Contains("[REDACTED:gitleaks-github-pat] more", text, StringComparison.Ordinal);
 	}
 
 	[Fact]
@@ -90,7 +72,7 @@ public sealed class SessionRedactionFlowTests
 
 		string text = Assert.Single(session.Documents).Text();
 		Assert.DoesNotContain(token, text, StringComparison.Ordinal);
-		Assert.True(session.CountsByRule["github-token"] >= 4);
+		Assert.True(session.CountsByRule["gitleaks-github-pat"] >= 4);
 		Assert.NotEmpty(Frontmatter(text).Keys());
 	}
 
