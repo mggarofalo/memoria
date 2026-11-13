@@ -4,7 +4,7 @@ namespace Memoria.Core.Redaction;
 
 /// <summary>
 /// Every detector, in the order they run. Redaction is best effort, so this is a short list on purpose: private-key blocks,
-/// JWTs, passwords in URLs, the common command-line credentials, plain <c>password=</c> and <c>token:</c> assignments, and
+/// JWTs, Memoria's own API keys and Anthropic OAuth tokens, which gitleaks has no rule for, passwords in URLs, the common command-line credentials, plain <c>password=</c> and <c>token:</c> assignments, and
 /// gitleaks's default rules for formatted provider tokens. A new rule needs a real secret that got through, and a test that holds it.
 /// All patterns use <see cref="RegexOptions.NonBacktracking"/>, which rules out catastrophic backtracking and also rules out
 /// lookaround and backreferences. Context on either side of a secret is therefore consumed by the pattern and excluded from the
@@ -152,6 +152,25 @@ internal static class RedactionRules
 		literal: "eyJ");
 
 	/// <summary>
+	/// This project's own API keys, exactly as <c>ApiKeyToken</c> issues them: <c>mem_</c>, a 16-digit lower-case hex id, <c>_</c>, and a
+	/// 64-digit lower-case hex secret, with no letter, digit or <c>_</c> either side. The whole key goes, id and all. A metric name such as
+	/// <c>mem_total_bytes</c> has neither run of hex, so it stays.
+	/// </summary>
+	public static readonly RedactionRule MemoriaApiKey = new(
+		"memoria-api-key",
+		Pattern(@"(?:^|[^A-Za-z0-9_])(?<secret>mem_[0-9a-f]{16}_[0-9a-f]{64})(?:$|[^A-Za-z0-9_])"),
+		literal: "mem_");
+
+	/// <summary>
+	/// Anthropic OAuth tokens, as Claude Code holds them: <c>sk-ant-oat01-</c>, 93 characters of base64url and <c>AA</c>, shaped as
+	/// gitleaks shapes the API and admin keys it knows (<c>sk-ant-api03-</c>, <c>sk-ant-admin01-</c>).
+	/// </summary>
+	public static readonly RedactionRule AnthropicOAuthToken = new(
+		"anthropic-oauth-token",
+		Pattern(@"(?:^|[^A-Za-z0-9_\-])(?<secret>sk-ant-oat01-[A-Za-z0-9_\-]{93}AA)(?:$|[^A-Za-z0-9_\-])"),
+		literal: "sk-ant-oat01-");
+
+	/// <summary>
 	/// The password in a URL's user info, for any scheme: <c>postgres://app:x@db</c>, <c>redis://:x@cache</c>, <c>https://u:x@host</c>,
 	/// and in Go's <c>user:x@tcp(host)</c>. The user name and the host stay.
 	/// </summary>
@@ -222,6 +241,8 @@ internal static class RedactionRules
 	[
 		PrivateKey,
 		Jwt,
+		MemoriaApiKey,
+		AnthropicOAuthToken,
 		UrlPassword,
 		CurlUserPassword,
 		CommandPassword,

@@ -33,6 +33,9 @@ internal static class RedactionCases
 	/// <summary>Positive cases that depend on context: (rule, template, secret).</summary>
 	public static readonly (string Rule, string Template, string Secret)[] Contextual =
 	[
+		("memoria-api-key", "curl -H \"Authorization: Bearer {S}\" https://memoria.test/v1/search", "me" + "m_" + Synthetic.Hex(16, 120) + "_" + Synthetic.Hex(64, 121)),
+		("anthropic-oauth-token", "the login wrote {S} to the keychain", "sk-" + "ant-oat01-" + Synthetic.Body(93, 122) + "AA"),
+
 		("url-password", "postgres://app:{S}@db.internal:5432/main", Synthetic.Body(16, 64)),
 		("url-password", "postgresql+asyncpg://app:{S}@db/main", Synthetic.Body(16, 65)),
 		("url-password", "jdbc:postgresql://app:{S}@db/main", Synthetic.Body(16, 66)),
@@ -130,6 +133,9 @@ internal static class RedactionCases
 		("jwt", "header starts with eyJhbGciOiJIUzI1NiJ9 and nothing else"),
 		("jwt", "eyJ... is how a token begins"),
 		("jwt", "eyebrow.eyeshadow.color"),
+
+		("memoria-api-key", "key id me" + "m_" + Synthetic.Hex(16, 123) + "_" + Synthetic.Hex(63, 124) + " is one digit short"),
+		("anthropic-oauth-token", "sk-" + "ant-oat01-" + Synthetic.Body(92, 125) + "AA is one character short"),
 
 		("url-password", "http://localhost:8080/users/foo@example.test"),
 		("url-password", "https://example.test:443/a@b"),
