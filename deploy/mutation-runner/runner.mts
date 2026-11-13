@@ -4,8 +4,15 @@
  * Each tick fetches the branch into a clone of its own, and mutates its newest commit. Commits that arrived together are
  * coalesced: only the newest is mutated, but the packages, and with MUTATION_SCOPE=changed the files, are those changed
  * since the last mutated commit, so coalescing skips nothing. The repository's own scripts do the work
- * (scripts/mutation-*.sh, with the Stryker and Gremlins configs), so a score here means what it means in CI, and their
- * exit codes are the thresholds. The result is a commit status named `mutation`, which no ruleset requires.
+ * (scripts/mutation-*.sh, with the Stryker and Gremlins configs). The result is a commit status named `mutation`, which
+ * no ruleset requires.
+ *
+ * How a run is judged depends on its scope. A whole-package run (MUTATION_SCOPE=package, or a first run) is judged by
+ * the scripts' exit codes, which are the configs' thresholds, so a score there means what it means in CI. A
+ * changed-files run turns the thresholds off (MUTATION_NO_BREAK), so a nonzero exit means only that a tool failed.
+ * It then scores just the mutants that overlap a line `git diff -U0 <base> HEAD` adds or changes, and judges each
+ * config's changed-line score against that config's own break: a file below its package's bar can still be edited.
+ * A config with no mutant on a changed line has no score, which is not a failure.
  *
  *   node runner.mts serve              poll every POLL_SECONDS, one run at a time
  *   node runner.mts once [options]     one tick now
@@ -116,31 +123,134 @@ export function gremlinsScore(report: unknown): number | null {
   return typeof efficacy === "number" && Number.isFinite(efficacy) ? efficacy : null;
 }
 
+// --- changed lines ----------------------------------------------------------------------------------------------
+
+/** The lines a diff adds or changes, by repository path, as `git diff -U0` gives them. A pure deletion adds none. */
+export type ChangedLines = Map<string, number[]>;
+
+/** A hunk header's new lines, and how many body lines follow it. Null for any other line. */
+function hunkOf(line: string): { lines: number[]; body: number } | null {
+  const hunk = /^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
+  if (!hunk) return null;
+  const [removed, start, added] = [Number(hunk[1] ?? 1), Number(hunk[2]), Number(hunk[3] ?? 1)];
+  return { lines: Array.from({ length: added }, (_, i) => start + i), body: removed + added };
+}
+
+export function parseChangedLines(diff: string): ChangedLines {
+  const changed: ChangedLines = new Map();
+  let file: string | null = null;
+  // Lines left in the current hunk, so a body line that looks like a header is read as a body line.
+  let body = 0;
+  for (const line of diff.split("\n")) {
+    if (body > 0) {
+      if (/^[+-]/.test(line)) body--;
+      continue;
+    }
+    if (line.startsWith("+++ ")) {
+      // b/<path>, or /dev/null for a deleted file.
+      const target = line.slice(4).replace(/\r$/, "");
+      file = target.startsWith("b/") ? target.slice(2) : null;
+      continue;
+    }
+    const hunk = hunkOf(line);
+    if (!hunk) continue;
+    body = hunk.body;
+    if (file !== null && hunk.lines.length > 0) changed.set(file, [...(changed.get(file) ?? []), ...hunk.lines]);
+  }
+  return changed;
+}
+
+/** Whether a mutant spanning lines start to end, inclusive, touches a changed line. */
+export function touchesChange(lines: readonly number[] | undefined, start: number, end: number): boolean {
+  return lines?.some((n) => n >= start && n <= end) ?? false;
+}
+
+/**
+ * A report's file key as a repository path. Stryker.NET's keys are absolute, in the clone it ran in; StrykerJS's are
+ * relative to the repository; Gremlins' to its module, which `prefix` names.
+ */
+export function repoPath(key: string, work: string, prefix = ""): string {
+  const file = key.replaceAll("\\", "/");
+  const root = `${work.replaceAll("\\", "/").replace(/\/$/, "")}/`;
+  return file.startsWith(root) ? file.slice(root.length) : `${prefix}${file}`;
+}
+
+interface StrykerMutant {
+  status?: string;
+  location?: { start?: { line?: number }; end?: { line?: number } };
+}
+
+/** As strykerTally, counting only the mutants on a changed line. */
+export function strykerChangedTally(report: unknown, changed: ChangedLines, fileOf: (key: string) => string): Tally {
+  const files = (report as { files?: Record<string, { mutants?: StrykerMutant[] }> } | null)?.files;
+  if (!files || typeof files !== "object") return { detected: 0, valid: 0 };
+  const touches = (lines: number[] | undefined, m: StrykerMutant): boolean => {
+    const start = m.location?.start?.line;
+    return start !== undefined && touchesChange(lines, start, m.location?.end?.line ?? start);
+  };
+  const kept = Object.entries(files).map(([key, file]) => [key, { mutants: (file.mutants ?? []).filter((m) => touches(changed.get(fileOf(key)), m)) }]);
+  return strykerTally({ files: Object.fromEntries(kept) });
+}
+
+/**
+ * Gremlins' test efficacy as a tally, counting only the mutants on a changed line: killed over killed and lived, as
+ * gremlinsScore's test_efficacy counts. Gremlins gives each mutant one line, where it starts.
+ */
+export function gremlinsChangedTally(report: unknown, changed: ChangedLines, fileOf: (key: string) => string): Tally {
+  const files = (report as { files?: { file_name?: string; mutations?: { status?: string; line?: number }[] }[] } | null)?.files;
+  if (!Array.isArray(files)) return { detected: 0, valid: 0 };
+  const statuses = files.flatMap((f) => (f.mutations ?? []).filter((m) => m.line !== undefined && touchesChange(changed.get(fileOf(f.file_name ?? "")), m.line, m.line)).map((m) => m.status));
+  const detected = statuses.filter((s) => s === "KILLED").length;
+  return { detected, valid: detected + statuses.filter((s) => s === "LIVED").length };
+}
+
+/** cli/.gremlins.yaml's efficacy threshold, which is the one its score is: null when it sets none. */
+export function gremlinsBreak(yaml: string): number | null {
+  const match = /^[ \t]+efficacy:[ \t]*([\d.]+)[ \t]*$/m.exec(yaml);
+  return match ? Number(match[1]) : null;
+}
+
+/** The scores under their config's break. A config with no score, or no break, is not judged. */
+export function belowBreak(scores: Readonly<Record<string, number>>, breaks: Readonly<Record<string, number>>): string[] {
+  return Object.entries(scores)
+    .filter(([name, score]) => breaks[name] !== undefined && score < breaks[name])
+    .map(([name]) => name);
+}
+
 export interface PackageResult {
   package: Package;
   /** The script's exit code: nonzero means a threshold failed, or the run did. */
   exitCode: number;
   /** Scores by report, such as "mutation" and "mutation-security". */
   scores: Record<string, number>;
+  /** On a changed-lines run, where no threshold fails the script: the scores the runner found under their break. */
+  below?: string[];
+}
+
+export function passed(result: PackageResult): boolean {
+  return result.exitCode === 0 && (result.below ?? []).length === 0;
 }
 
 export type StatusState = "pending" | "success" | "failure" | "error";
 
 const DESCRIPTION_LIMIT = 140;
 
-/** One line for the commit status: each package's scores, failures first. GitHub keeps 140 characters. */
-export function describe(results: readonly PackageResult[], commits: number): string {
+/**
+ * One line for the commit status: each package's scores, failures first, and on a changed-lines run a lead that says
+ * the scores are for changed lines only. GitHub keeps 140 characters.
+ */
+export function describe(results: readonly PackageResult[], commits: number, changedLines = false): string {
   const part = (r: PackageResult): string => {
     const scores = Object.entries(r.scores).map(([name, score]) => `${name === "mutation" ? "" : `${name.replace(/^mutation-/, "")} `}${score.toFixed(1)}%`);
-    return `${r.package}${r.exitCode === 0 ? "" : " FAILED"}${scores.length > 0 ? ` ${scores.join(" ")}` : " no score"}`;
+    return `${r.package}${passed(r) ? "" : " FAILED"}${scores.length > 0 ? ` ${scores.join(" ")}` : " no score"}`;
   };
-  const ordered = [...results].sort((a, b) => Number(a.exitCode === 0) - Number(b.exitCode === 0));
-  const text = `${ordered.map(part).join("; ")}${commits > 1 ? ` (${commits} commits)` : ""}`;
+  const ordered = [...results].sort((a, b) => Number(passed(a)) - Number(passed(b)));
+  const text = `${changedLines ? "changed lines: " : ""}${ordered.map(part).join("; ")}${commits > 1 ? ` (${commits} commits)` : ""}`;
   return text.length <= DESCRIPTION_LIMIT ? text : `${text.slice(0, DESCRIPTION_LIMIT - 1)}…`;
 }
 
 export function overall(results: readonly PackageResult[]): StatusState {
-  return results.every((r) => r.exitCode === 0) ? "success" : "failure";
+  return results.every(passed) ? "success" : "failure";
 }
 
 /** owner/name from a GitHub clone URL. */
@@ -319,7 +429,8 @@ function config(env: NodeJS.ProcessEnv = process.env): Config {
 const log = (message: string): void => console.log(`${new Date().toISOString()} ${message}`);
 
 function git(dir: string, ...args: string[]): string {
-  return execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  // A big change's diff runs past execFileSync's default 1 MB.
+  return execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 256 * 1024 * 1024 }).trim();
 }
 
 /**
@@ -460,6 +571,21 @@ interface Step {
 
 const PLAIN_DOTNET: Step = { command: "sh", args: ["scripts/mutation-dotnet.sh"] };
 
+/** Whether this run mutates only what changed since its base, and is judged on the changed lines. */
+function changedScope(plan: Plan, cfg: Config): boolean {
+  return cfg.scope === "changed" && plan.base !== null;
+}
+
+/** git in the work clone. It belongs to the scripts' account by now, and git refuses a root caller there unless told it is safe. */
+function workGit(work: string, ...args: string[]): string {
+  return git(work, "-c", `safe.directory=${work}`, ...args);
+}
+
+/** The lines changed since the base, in the work clone at the target. */
+function changedLinesSince(work: string, base: string): ChangedLines {
+  return parseChangedLines(workGit(work, "-c", "core.quotePath=false", "diff", "-U0", "--no-color", "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/", base, "HEAD"));
+}
+
 /**
  * How .NET is mutated. Whole-package runs take every shard in turn. A changed-files run takes only the shards holding
  * a changed source file, each with MUTATION_BASE, so it mutates just those files. With no source file changed, as when
@@ -469,9 +595,8 @@ function dotnetSteps(work: string, plan: Plan, cfg: Config): Step[] {
   const listed = dotnetShards(work);
   if (!listed) return [PLAIN_DOTNET];
   const byShard = (shards: readonly DotnetShard[]): Step[] => shards.map((s) => ({ ...PLAIN_DOTNET, env: { MUTATION_SHARD: s.name } }));
-  if (cfg.scope === "package" || !plan.base) return byShard(listed.shards);
-  // The clone belongs to the scripts' account by now, and git refuses a root caller in it unless told it is safe.
-  const changed = git(work, "-c", `safe.directory=${work}`, "diff", "--name-only", "--diff-filter=d", plan.base, "HEAD").split("\n").filter(Boolean);
+  if (!changedScope(plan, cfg)) return byShard(listed.shards);
+  const changed = workGit(work, "diff", "--name-only", "--diff-filter=d", plan.base!, "HEAD").split("\n").filter(Boolean);
   const chosen = shardsFor(changed, listed.shards, listed.configs);
   log(`dotnet: ${chosen.length > 0 ? `shards ${chosen.map((s) => `"${s.name}"`).join(", ")}` : "no changed source file in any shard; the plain run with --since"}`);
   return chosen.length > 0 ? byShard(chosen) : [PLAIN_DOTNET];
@@ -501,11 +626,19 @@ async function runSteps(pkg: Package, work: string, logFile: string, env: NodeJS
   return worst;
 }
 
-/** A report's tally, or a score for Gremlins, or null for one that cannot be read: the exit code already judged the run. */
-function readReport(report: string): { tally: Tally } | { score: number } | null {
+/**
+ * A report's tally, or a score for a whole-package Gremlins report, or null for one that cannot be read. With changed
+ * lines, only the mutants on them count, and Gremlins' are tallied too.
+ */
+function readReport(pkg: Package, work: string, report: string, changed: ChangedLines | null): { tally: Tally } | { score: number } | null {
   try {
     const json = JSON.parse(readFileSync(report, "utf8")) as unknown;
-    if (path.basename(report) !== "gremlins.json") return { tally: strykerTally(json) };
+    const gremlins = path.basename(report) === "gremlins.json";
+    if (changed) {
+      const fileOf = (key: string): string => repoPath(key, work, gremlins ? `${pkg}/` : "");
+      return { tally: gremlins ? gremlinsChangedTally(json, changed, fileOf) : strykerChangedTally(json, changed, fileOf) };
+    }
+    if (!gremlins) return { tally: strykerTally(json) };
     const score = gremlinsScore(json);
     return score === null ? null : { score };
   } catch (err) {
@@ -514,14 +647,49 @@ function readReport(report: string): { tally: Tally } | { score: number } | null
   }
 }
 
-/** Copies a package's reports into its results, and reads the scores: one per config, its shards counted together. */
-function collectScores(pkg: Package, work: string, results: string): Record<string, number> {
+function readJson(file: string): unknown {
+  try {
+    return JSON.parse(readFileSync(file, "utf8")) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+/** Each config's break threshold, by the name collectScores gives its score, read from the commit's own configs. */
+export function breaksFor(pkg: Package, work: string): Record<string, number> {
+  const found: [string, unknown][] = pkg === "dotnet" ? dotnetBreaks(work) : pkg === "cli" ? gremlinsBreaks(work) : strykerJsBreaks(pkg, work);
+  return Object.fromEntries(found.filter((entry): entry is [string, number] => typeof entry[1] === "number"));
+}
+
+function dotnetBreaks(work: string): [string, unknown][] {
+  return DOTNET_CONFIGS.map((name) => [name, (readJson(path.join(work, "stryker", `${name}.json`)) as { "stryker-config"?: { thresholds?: { break?: unknown } } } | null)?.["stryker-config"]?.thresholds?.break]);
+}
+
+/** StrykerJS configs, named by the directory their JSON report goes to, as reportName names the report. */
+function strykerJsBreaks(pkg: Package, work: string): [string, unknown][] {
+  return readdirSync(path.join(work, pkg))
+    .filter((f) => /^stryker.*\.json$/.test(f))
+    .map((f) => readJson(path.join(work, pkg, f)) as { jsonReporter?: { fileName?: string }; thresholds?: { break?: unknown } } | null)
+    .filter((raw) => raw?.jsonReporter?.fileName)
+    .map((raw) => [reportName(raw!.jsonReporter!.fileName!), raw!.thresholds?.break]);
+}
+
+function gremlinsBreaks(work: string): [string, unknown][] {
+  const yaml = path.join(work, "cli", ".gremlins.yaml");
+  return existsSync(yaml) ? [["mutation", gremlinsBreak(readFileSync(yaml, "utf8"))]] : [];
+}
+
+/**
+ * Copies a package's reports into its results, and reads the scores: one per config, its shards counted together.
+ * With changed lines, each score counts only the mutants on them.
+ */
+function collectScores(pkg: Package, work: string, results: string, changed: ChangedLines | null): Record<string, number> {
   const scores: Record<string, number> = {};
   const tallies: Record<string, Tally> = {};
   for (const dir of STEPS[pkg].reports.map((d) => path.join(work, d)).filter((d) => existsSync(d))) {
     cpSync(dir, path.join(results, pkg, path.basename(dir)), { recursive: true });
     for (const report of findReports(dir)) {
-      const read = readReport(report);
+      const read = readReport(pkg, work, report, changed);
       const name = reportName(path.relative(work, report));
       const key = pkg === "dotnet" ? dotnetConfigOf(name) : name;
       if (read && "score" in read) scores[key] = read.score;
@@ -535,14 +703,20 @@ function collectScores(pkg: Package, work: string, results: string): Record<stri
   return scores;
 }
 
-async function mutatePackage(pkg: Package, work: string, results: string, plan: Plan, cfg: Config): Promise<PackageResult> {
-  const env: NodeJS.ProcessEnv = { ...process.env, CI: "true", ...(cfg.scope === "changed" && plan.base ? { MUTATION_BASE: plan.base } : {}) };
+/**
+ * Mutates one package. A whole-package run is judged by the scripts' exit code, which is the configs' thresholds. A
+ * changed-files run turns the thresholds off (MUTATION_NO_BREAK), so its exit code says only whether the tools ran,
+ * and judges the score of the mutants on changed lines against each config's break instead.
+ */
+async function mutatePackage(pkg: Package, work: string, results: string, plan: Plan, cfg: Config, changed: ChangedLines | null): Promise<PackageResult> {
+  const env: NodeJS.ProcessEnv = { ...process.env, CI: "true", ...(changed ? { MUTATION_BASE: plan.base!, MUTATION_NO_BREAK: "1" } : {}) };
   // The scripts and the tests they run never see the token.
   delete env.GITHUB_TOKEN;
   const exitCode = await runSteps(pkg, work, path.join(results, `${pkg}.log`), env, mutationSteps(pkg, work, plan, cfg));
-  const scores = collectScores(pkg, work, results);
-  log(`${pkg}: exit ${exitCode}${Object.entries(scores).map(([n, s]) => `, ${n} ${s.toFixed(1)}%`).join("")}`);
-  return { package: pkg, exitCode, scores };
+  const scores = collectScores(pkg, work, results, changed);
+  const below = changed ? belowBreak(scores, breaksFor(pkg, work)) : [];
+  log(`${pkg}: exit ${exitCode}${Object.entries(scores).map(([n, s]) => `, ${n} ${s.toFixed(1)}%${below.includes(n) ? " (under its break)" : ""}`).join("")}${changed ? ", on changed lines" : ""}`);
+  return { package: pkg, exitCode, scores, ...(changed ? { below } : {}) };
 }
 
 async function postStatus(cfg: Config, sha: string, state: StatusState, description: string): Promise<void> {
@@ -647,9 +821,10 @@ async function execute(plan: Plan, repo: string, cfg: Config): Promise<{ state: 
   git(work, "checkout", "--quiet", "--detach", plan.target);
   const as = childIdentity();
   if (as) execFileSync("chown", ["-R", `${as.uid}:${as.gid}`, work]);
+  const changed = changedScope(plan, cfg) ? changedLinesSince(work, plan.base!) : null;
   const outcomes: PackageResult[] = [];
-  for (const pkg of plan.packages) outcomes.push(await mutatePackage(pkg, work, results, plan, cfg));
-  const outcome = { state: overall(outcomes), description: describe(outcomes, plan.commits.length) };
+  for (const pkg of plan.packages) outcomes.push(await mutatePackage(pkg, work, results, plan, cfg, changed));
+  const outcome = { state: overall(outcomes), description: describe(outcomes, plan.commits.length, changed !== null) };
   writeFileSync(path.join(results, "summary.json"), `${JSON.stringify({ ...plan, ...outcome, results: outcomes }, null, 2)}\n`);
   return outcome;
 }

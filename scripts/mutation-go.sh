@@ -3,6 +3,8 @@
 # With MUTATION_BASE set (the mutation runner, deploy/mutation-runner), mutates
 # only the files changed since that commit. Otherwise mutates everything. Either
 # way the report is cli/reports/gremlins.json. Never run this from a git hook.
+# With MUTATION_NO_BREAK set (the mutation runner, on a changed-files run), the
+# thresholds are off, and the caller judges the report itself.
 #
 # Gremlins' own --diff is not used: with the module in a subdirectory its paths
 # never match the diff's, so it skips every mutant and reports success.
@@ -21,6 +23,10 @@ esac
 cd cli
 gremlins="go run github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0"
 mkdir -p reports
+set --
+if [ -n "${MUTATION_NO_BREAK:-}" ]; then
+  set -- --threshold-efficacy 0 --threshold-mcover 0
+fi
 
 if [ -n "${MUTATION_BASE:-}" ]; then
   changed=$(git diff --relative --name-only --diff-filter=d "$MUTATION_BASE"...HEAD -- . | { grep '\.go$' || true; })
@@ -37,5 +43,5 @@ if [ -n "${MUTATION_BASE:-}" ]; then
   $gremlins unleash --output reports/gremlins.json "$@"
 else
   # shellcheck disable=SC2086
-  $gremlins unleash --output reports/gremlins.json
+  $gremlins unleash --output reports/gremlins.json "$@"
 fi

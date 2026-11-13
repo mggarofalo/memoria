@@ -9,6 +9,8 @@
 # the sidecar's stryker.integration.json with MEMORIA_QMD_INTEGRATION=1: the store
 # and the SDK wire code, which only the integration tests reach.
 # Otherwise mutates everything, that code included. Never run this from a git hook.
+# With MUTATION_NO_BREAK set (the mutation runner, on a changed-files run), every
+# config runs without its break threshold, and the caller judges the reports itself.
 #
 # Runs from the repository root, because some sidecar tests read files elsewhere
 # in the repository, and those paths only resolve if the sandbox has the same shape.
@@ -23,9 +25,20 @@ security="$package/stryker.security.json"
 integration="$package/stryker.integration.json"
 status=0
 
-# Usage: mutate <stryker run arguments>. A failed threshold fails the script, after every run.
+# Usage: mutate <config> <stryker run arguments>. A failed threshold fails the script, after every run.
 mutate() {
-  node node_modules/@stryker-mutator/core/bin/stryker.js run "$@" || status=1
+  config_file=$1
+  shift
+  if [ -z "${MUTATION_NO_BREAK:-}" ]; then
+    node node_modules/@stryker-mutator/core/bin/stryker.js run "$config_file" "$@" || status=1
+    return
+  fi
+  # StrykerJS takes no threshold on its command line, so it runs a copy of the config without the break. Its paths
+  # are the working directory's, not the config file's, so the copy can live anywhere.
+  unbroken=$(mktemp -d)
+  node -e 'const fs = require("node:fs"); const c = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); c.thresholds = { ...c.thresholds, break: null }; fs.writeFileSync(process.argv[2], JSON.stringify(c));' "$config_file" "$unbroken/stryker.json"
+  node node_modules/@stryker-mutator/core/bin/stryker.js run "$unbroken/stryker.json" "$@" || status=1
+  rm -r "$unbroken"
 }
 
 # Usage: mutate_integrated <stryker run arguments>. As mutate, with the integration tests running.

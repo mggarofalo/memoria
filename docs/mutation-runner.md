@@ -11,22 +11,30 @@ Every `POLL_SECONDS`, 15 minutes by default, the runner:
    - A path selects its package: `src/`, `tests/` and `stryker/` select .NET; `sidecar/`, `worker/` and `cli/` select themselves; the root `package.json`, `package-lock.json` and `scripts/mutation-js.sh` select both Node packages.
    - Each `scripts/mutation-*.sh` selects the packages it mutates.
    - Markdown selects nothing. A commit that changes no package is marked mutated, with a status that says so.
-3. **Mutates, in a fresh clone at that commit**, using that commit's own scripts and configs: `scripts/mutation-dotnet.sh`, `scripts/mutation-js.sh` and `scripts/mutation-go.sh`, with the Stryker and Gremlins configs. The thresholds are those configs', and a script that exits nonzero fails the run.
+3. **Mutates, in a fresh clone at that commit**, using that commit's own scripts and configs: `scripts/mutation-dotnet.sh`, `scripts/mutation-js.sh` and `scripts/mutation-go.sh`, with the Stryker and Gremlins configs.
    - With `MUTATION_SCOPE=changed`, the default, the scripts mutate only the files changed since the last mutated commit (`MUTATION_BASE`).
    - With `MUTATION_SCOPE=package`, they mutate every file of each selected package. That takes hours for the sidecar or .NET.
-   - **.NET runs as the shards in `stryker/shards.json`**, one after another, each under its config's thresholds.
+   - **.NET runs as the shards in `stryker/shards.json`**, one after another.
      - Core's redaction code (`src/Memoria.Core/Redaction/`) is not mutated: redaction is best-effort defence in depth, and the boundary is auth. A change there selects no shard, and the run gates nothing on it. Its unit tests still run in CI.
      - A changed-files run takes only the shards that hold a changed source file under `src/`, and each mutates just its changed files.
-     - When no source file changed, as when only tests did, the plain `scripts/mutation-dotnet.sh` runs with `--since`. Stryker.NET then judges what the change touched.
+     - When no source file changed, as when only tests did, the plain `scripts/mutation-dotnet.sh` runs with `--since`.
      - A whole-package run takes every shard. Its score for each config counts all of that config's shards together.
      - `MUTATION_CONCURRENCY` sets Stryker.NET's test runners.
    - The very first run has no last mutated commit, so it mutates everything. Seed it with `--since` to avoid that (see "Run it once").
-4. **Posts the status**: `pending` when the run starts, then `success` or `failure`, with each package's scores in the description.
+4. **Judges the run.** How depends on the scope.
+   - **A whole-package run**, and the very first run, is judged as CI judges it: the thresholds are the configs', and a script that exits nonzero fails the run.
+   - **A changed-files run is judged on the changed lines.** Each config's `break` was set for its whole package, and a changed file can sit below that bar before anyone touches it, so judging the whole file would fail a one-line edit. Instead the runner sets `MUTATION_NO_BREAK`, which turns the scripts' thresholds off, and then:
+     - takes the lines `git diff -U0 <last mutated commit> HEAD` adds or changes. A pure deletion changes no line;
+     - scores, for each config, only the mutants whose span overlaps one of those lines, counted as the whole score is: for Stryker, killed and timed out over those plus survived and uncovered, and for Gremlins its efficacy, killed over killed and lived. Gremlins gives a mutant one line, where it starts;
+     - fails the run when a config's changed-line score is below that config's own `break` (for Gremlins, its `efficacy` threshold).
+   - On a changed-files run, a config with no mutant on a changed line has no score, which is not a failure. A change to tests or comments alone usually has none.
+   - A script that still exits nonzero failed for a reason other than a threshold, and that fails the run.
+5. **Posts the status**: `pending` when the run starts, then `success` or `failure`, with each package's scores in the description. A changed-files run's description starts with `changed lines:`, as its scores are for those lines only.
    - **When the runner itself fails** mid-run, it posts `error`, and the commit stays queued for the next poll. Examples: a failed `npm ci`, a step the OOM killer stopped, or a missing tool.
    - **After three errors on one commit,** it records and posts a `failure` and moves on, so a fault that repeats cannot rerun forever.
    - **A failed fetch** comes before there is a commit to mark, so it is only logged, and the next poll tries again.
    - **A status GitHub refuses** is logged. The run's result is kept regardless.
-5. **Keeps the reports** under `results/<commit>/` in the state volume: each package's reports, its log, and `summary.json`.
+6. **Keeps the reports** under `results/<commit>/` in the state volume: each package's reports, its log, and `summary.json`.
 
 Only one run goes at a time. A lock in the state volume keeps the service and any `docker compose run` apart. Its holder touches it every minute, and a lock untouched for ten minutes counts as a dead run's.
 
