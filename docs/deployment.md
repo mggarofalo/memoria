@@ -31,7 +31,8 @@ The API and the sidecar are two images and two compose services on the Linux API
 This section is about the workers. The sidecar runs from its image, under compose.
 
 `worker/scripts/install-service.ps1` installs a worker as a Windows service, using
-`deploy/windows/MemoriaService.psm1`. **It has not been run on a real install.**
+`deploy/windows/MemoriaService.psm1`. It has been run on one real install; see
+[Confirmed on a real install](#confirmed-on-a-real-install).
 It accepts `-WhatIf`, which prints every step, needs no elevation and changes
 nothing.
 
@@ -76,33 +77,43 @@ data locations are the ones above unless you passed others.
 
 **NSSM version.** 2.24, the last stable release, fails to start services on
 Windows 10 Creators Update or newer, according to nssm.cc, which recommends
-2.24-101 or later. The script warns about 2.24. `winget`'s version was not checked.
+2.24-101 or later. The script warns about 2.24. `winget install NSSM.NSSM` installs
+2.24-101 (checked 2026-11-13).
 
 **macOS.** `worker/scripts/install-launchd.sh` writes the token to a mode 600 file
 in a mode 700 directory, and the plist (also mode 600) holds the path. The agent
 runs as you, so there is no privilege boundary to design around. launchd does not
 rotate logs.
 
+### Confirmed on a real install
+
+On 2026-11-13 the worker was installed with this script on a Windows 11 desktop with
+an RTX 5080: NSSM 2.24-101 from `winget`, llama.cpp b12360 (CUDA 13.5) under
+`%ProgramFiles%`, the models under the user's profile, bound to loopback.
+
+- `sc.exe config <service> obj= "NT SERVICE\<service>"` works on an NSSM-registered
+  service. NSSM, the worker and all three `llama-server`s ran as
+  `NT SERVICE\memoria-worker`, and the worker's output reached its log under
+  `%ProgramData%`. (NSSM's documentation describes `ObjectName` as needing a password
+  and does not mention virtual accounts, which is why the script uses `sc.exe`.)
+- **GPU access from the virtual account works.** All three models loaded on CUDA,
+  taking about 9.6 GB of VRAM, the worker read VRAM through `nvidia-smi`, and the
+  smoke script passed 8 of 8 against the service. `nvidia-smi` in the user's own
+  session lists no processes from the service's session, only the totals.
+- Reading the models through a user profile works: the account relied on the default
+  "bypass traverse checking" right and loaded every model. `-ModelDir` under
+  `%ProgramData%` is still the stronger setup, for the reason above.
+- The account's profile, `C:\Windows\ServiceProfiles\<service>`, was created and
+  written to on first start.
+- The `Log on as a service` right came from `NT SERVICE\ALL SERVICES`
+  (`S-1-5-80-0`). A group policy can remove it.
+- Stopping the service sends the worker SIGINT. It logged its shutdown, the service
+  stopped in 0.8 s, no `llama-server` was left, and the VRAM was released.
+
 ### Not confirmed
 
-These need a real install, and none has been done:
-
-- `sc.exe config <service> obj= "NT SERVICE\<service>"` on an NSSM-registered
-  service, and NSSM starting its child and writing and rotating logs under that
-  account. NSSM's documentation describes `ObjectName` as needing a password and
-  does not mention virtual accounts, though a commit in its repository appears to
-  add them, which is why the script uses `sc.exe`.
-- **GPU access from the virtual account.** CUDA for `llama-server` has only ever
-  been used in an interactive session. `nvidia-smi` under the account is also unproven. If it
-  fails, this is the one thing that may force a different account.
-- Reading the models through a user profile. The account has no rights on
-  `C:\Users\<you>` itself and relies on the default "bypass traverse checking"
-  right. Anything that walks the parent directories could fail, which `-ModelDir`
-  under `%ProgramData%` would avoid.
-- That the account's own profile, `C:\Windows\ServiceProfiles\<service>`, is created
-  and writable, since temp files may use it.
-- The `Log on as a service` right, which virtual accounts normally hold through
-  `NT SERVICE\ALL SERVICES`. A group policy can remove it.
+- NSSM rotating the log under the account. It is configured, but a 10 MiB log was not
+  reached.
 - The launchd script on a Mac: `launchctl bootstrap` with the mode 600 plist, the
   `Umask` key's effect on the log files, and the worker reading the token file.
 

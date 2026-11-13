@@ -41,7 +41,7 @@ The scripts have not been run on a real install.
 .\scripts\uninstall-service.ps1
 ```
 
-It installs to `%ProgramFiles%\Memoria\memoria-worker` and runs as `NT SERVICE\memoria-worker`, with the token in a file only that account and Administrators can read. Logs land in `%ProgramData%\memoria-worker\logs` and rotate at 10 MiB. The script refuses a `llama-server` that anyone but administrators can change, because the service runs it. **GPU access under this account has not been confirmed.** [`docs/deployment.md`](../docs/deployment.md#running-as-a-service) has the details.
+It installs to `%ProgramFiles%\Memoria\memoria-worker` and runs as `NT SERVICE\memoria-worker`, with the token in a file only that account and Administrators can read. Logs land in `%ProgramData%\memoria-worker\logs` and rotate at 10 MiB. The script refuses a `llama-server` that anyone but administrators can change, because the service runs it. GPU access under this account has been confirmed on an RTX 5080. [`docs/deployment.md`](../docs/deployment.md#running-as-a-service) has the details.
 
 **Mac (launchd).** Installs a user agent, which runs while you are logged in. The token goes to a mode 600 file in `~/Library/Application Support/memoria-worker`, and the plist holds only its path. launchd does not rotate logs, so prune `~/Library/Logs/memoria-worker` yourself. The script has not been run on a Mac; its files and modes are checked by tests with `--dry-run`, which loads nothing.
 
