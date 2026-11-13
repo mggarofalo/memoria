@@ -315,6 +315,21 @@ On the GPU, with no sidecar involved: one short embedding takes about 77 ms, a b
 
 Rerank latency had a median of 1,761 ms in-process and 896 ms on the worker, and search with rerank 1,992 ms and 1,622 ms. The decision stands.
 
+**Run again on 2026-11-13,** on a newer llama.cpp: the official b12360 CUDA 13.5 build, installed fresh from its release zip with both archives checked against the release's SHA-256, on driver 616.92. The smoke script passed 8 of 8 and `test:live` 5 of 5 first. The worker served QMD's default models, which match the index copy (1,603 documents, 58,429 vectors), and the copy was taken with SQLite's online backup. It took 7 min 41 s, with no query errors and no worker restarts:
+
+| Measurement | Mean | Minimum | Median |
+|---|---|---|---|
+| Rerank rank correlation | 0.978 | 0.785 | 0.992 |
+| Rerank top-10 overlap | 0.958 | 0.800 | 1.000 |
+| Rerank mean score difference | 0.0036 | | 0.0017 |
+| Rerank largest score difference | 0.026 | | 0.013 |
+| End-to-end top-10 overlap | 0.954 | 0.900 | 1.000 |
+| End-to-end rank correlation | 0.973 | 0.758 | 0.988 |
+| Embedding cosine, query | 0.9998 | 0.9997 | 0.9998 |
+| Embedding cosine, candidate chunks | 0.9995 | 0.9994 | 0.9995 |
+
+The lowest rank correlation, 0.785, is the `no-match` query, whose candidates all score near zero: the order the `/completion` transport loses below its listed probabilities, as above. Without it the minimum is 0.933. Rerank latency had a median of 1,769 ms in-process and 885 ms on the worker, and search with rerank 2,001 ms and 1,486 ms. Expansion agreed across sides at 0.208, between the in-process 0.230 and the worker's 0.193. The decision stands, and b12360 changed none of the routes the worker relies on.
+
 ### Two-hour soak
 
 Sustained rerank and embed load on the real GPU, using real document text from a copy of the index.
@@ -467,7 +482,8 @@ The benchmark reports numbers and sets no thresholds. [The decision](#the-decisi
 | An index from before the newer vector columns works | Run: a fixture rebuilt to the old shape, not a real old index. |
 | Interactive latency under real embedding load | Run once, on one worker with `maxConcurrent: 4`: reranked searches through the API took 6.3 to 11.1 s while the same GPU embedded a corpus, and 1 s without reranking. Not compared with an idle GPU in the same run. |
 | The sidecar and API on a real worker | Run: `deploy/compose.yaml` built from source on Docker Desktop, reaching a worker on the host at `host.docker.internal`, through a rehearsal migration of the real corpus, search over REST, MCP and the CLI, and a worker killed mid-search (answered `no_rerank`). On SIGTERM the API drained and exited 0. The sidecar, with an embedding job running and a search in flight, overran compose's 15 s grace and was killed, and its jobs resumed on restart. That run predates the bound on the sidecar's shutdown, the drain plus at most 3 s, which `sidecar/test/integration-shutdown.test.ts` checks by sending SIGTERM to the real process mid-embed and mid-search. This compose run has not been repeated since. Not over WireGuard. |
-| llama-server accepts these flags and routes | Run on Windows with llama.cpp b12110 on CUDA: smoke script and `npm run test:live`. |
+| llama-server accepts these flags and routes | Run on Windows with llama.cpp b12110 and b12360 on CUDA: smoke script and `npm run test:live`. |
+| The sidecar and API on a real worker, outside Docker | Run on 2026-11-13: the worker, the sidecar from `sidecar/dist` in remote mode as compose configures it, and `Memoria.Api` on the same Windows desktop, over loopback. A migration of a copy of the real corpus embedded on the worker, then search over REST, MCP and the CLI, scoped keys, and the worker killed 1 s into a reranked search, which answered `no_rerank`. With the worker down, `/ready` showed `models.resident: false` and `warmup.done: false`, and the sidecar recovered 11 s after the worker restarted. A real Ctrl+C reached each process: the worker exited 0 in 1.3 s and took its three `llama-server`s with it; the API answered its search in flight and exited 0 in 2.0 s; the sidecar, mid-embed, exited in 2.3 s, or 11.6 s with a search in flight, and its job resumed on the next start. |
 | Scores match in-process QMD | Run: the benchmark above, on one machine. Close, not identical. |
 | GPU loading on CUDA | Run: `nvidia-smi` shows VRAM, utilization and power rising during requests. |
 | GPU loading on Metal | **Not run.** |
