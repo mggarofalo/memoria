@@ -7,7 +7,7 @@
  * Opt in with MEMORIA_QMD_INTEGRATION=1 (CI sets it; `npm test` does not).
  */
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createInterface } from "node:readline";
@@ -26,6 +26,7 @@ const DRAIN_MS = 3_000;
 /** Past the drain, what the rest of shutdown takes at most: two final waits and closing up. */
 const AFTER_DRAIN_MS = 3_000;
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+const headers = { authorization: `Bearer ${SECRET}`, "content-type": "application/json" };
 
 async function index(): Promise<string> {
   const root = await tempDir("memoria-shutdown-it-");
@@ -56,9 +57,16 @@ async function slowWorker(ms: number): Promise<{ mock: MockWorker; arrivals: num
   return { mock, arrivals };
 }
 
-test("stopped mid-embed with a reranked search in flight, it calls no worker after, keeps the job, and exits 0 in time", { skip }, async () => {
-  const dbPath = await index();
-  const { mock, arrivals } = await slowWorker(1_500);
+interface Sidecar {
+  base: string;
+  /** Everything it has logged so far. */
+  output(): string;
+  exited: Promise<number | null>;
+  child: ChildProcess;
+}
+
+/** The real sidecar in remote mode, listening, with its model work on `mock`. */
+async function startSidecar(dbPath: string, mock: MockWorker, drainMs: number): Promise<Sidecar> {
   const port = await freePort();
   const child = spawn(process.execPath, [mainEntry], {
     env: {
@@ -72,40 +80,51 @@ test("stopped mid-embed with a reranked search in flight, it calls no worker aft
       MEMORIA_QMD_EMBED_DIMENSIONS: "8",
       MEMORIA_QMD_LLM_FALLBACK: "0",
       MEMORIA_QMD_EMBED_BATCH_BYTES: "4096",
-      MEMORIA_QMD_SHUTDOWN_DRAIN_MS: String(DRAIN_MS),
+      MEMORIA_QMD_SHUTDOWN_DRAIN_MS: String(drainMs),
     },
     stdio: ["ignore", "pipe", "inherit"],
   });
   const exited = new Promise<number | null>((resolve) => child.once("exit", (code) => resolve(code)));
   let output = "";
   const listening = new Promise<void>((resolve) => {
-    createInterface({ input: child.stdout }).on("line", (line) => {
+    createInterface({ input: child.stdout! }).on("line", (line) => {
       output += `${line}\n`;
       if (line.includes("memoria-qmd listening")) resolve();
     });
   });
-  const base = `http://127.0.0.1:${port}`;
-  const headers = { authorization: `Bearer ${SECRET}`, "content-type": "application/json" };
+  await Promise.race([listening, sleep(30_000)]);
+  assert.match(output, /memoria-qmd listening/, output);
+  return { base: `http://127.0.0.1:${port}`, output: () => output, exited, child };
+}
+
+/** SIGTERM it, and wait for it to exit: with what code, and when. */
+async function terminate(sidecar: Sidecar, drainMs: number): Promise<{ code: number | null | "still running"; signalled: number; exitedAt: number }> {
+  const signalled = Date.now();
+  sidecar.child.kill("SIGTERM");
+  const code = await Promise.race([sidecar.exited, sleep(drainMs + AFTER_DRAIN_MS + 5_000).then(() => "still running" as const)]);
+  return { code, signalled, exitedAt: Date.now() };
+}
+
+test("stopped mid-embed with a reranked search in flight, it calls no worker after, keeps the job, and exits 0 in time", { skip }, async () => {
+  const dbPath = await index();
+  const { mock, arrivals } = await slowWorker(1_500);
+  const sidecar = await startSidecar(dbPath, mock, DRAIN_MS);
   try {
-    await Promise.race([listening, sleep(30_000)]);
-    assert.match(output, /memoria-qmd listening/, output);
-    const queued = await fetch(`${base}/reindex`, { method: "POST", headers, body: JSON.stringify({ embed: true }) });
+    const queued = await fetch(`${sidecar.base}/reindex`, { method: "POST", headers, body: JSON.stringify({ embed: true }) });
     assert.equal(queued.status, 202);
     for (let waited = 0; arrivals.length === 0 && waited < 20_000; waited += 100) await sleep(100);
     assert.ok(arrivals.length > 0, "the job reached the worker");
-    const search = fetch(`${base}/search`, { method: "POST", headers, body: JSON.stringify({ query: "AuthenticationHandler", rerank: true, limit: 3 }) }).then((r) => r.status, () => 0);
+    const search = fetch(`${sidecar.base}/search`, { method: "POST", headers, body: JSON.stringify({ query: "AuthenticationHandler", rerank: true, limit: 3 }) }).then((r) => r.status, () => 0);
     await sleep(300);
 
-    const signalled = Date.now();
-    child.kill("SIGTERM");
-    const code = await Promise.race([exited, sleep(DRAIN_MS + AFTER_DRAIN_MS + 5_000).then(() => "still running" as const)]);
-    const took = Date.now() - signalled;
-    assert.equal(code, 0, output);
+    const { code, signalled, exitedAt } = await terminate(sidecar, DRAIN_MS);
+    const took = exitedAt - signalled;
+    assert.equal(code, 0, sidecar.output());
     assert.ok(took < DRAIN_MS + AFTER_DRAIN_MS, `exited after ${took} ms`);
     // A call can start in the moment between the signal and its handler, but none after.
     const late = arrivals.filter((at) => at > signalled + 250);
     assert.deepEqual(late, [], "no worker call started once shutdown had begun");
-    assert.match(output, /shutting down/);
+    assert.match(sidecar.output(), /shutting down/);
     await search;
 
     const store = new SqliteJobStore(queueDbPathFor(dbPath));
@@ -117,8 +136,37 @@ test("stopped mid-embed with a reranked search in flight, it calls no worker aft
       store.close();
     }
   } finally {
-    child.kill("SIGKILL");
-    await exited;
+    sidecar.child.kill("SIGKILL");
+    await sidecar.exited;
+    await mock.stop();
+  }
+});
+
+test("a search in flight at shutdown answers, and the process exits soon after, not at the end of the drain", { skip }, async () => {
+  // A drain long enough that waiting it out could not pass for exiting promptly.
+  const drainMs = 10_000;
+  const dbPath = await index();
+  const { mock, arrivals } = await slowWorker(1_500);
+  const sidecar = await startSidecar(dbPath, mock, drainMs);
+  try {
+    // On a pooled keep-alive connection, as Memoria.Api sends it, so the connection outlives the answer.
+    const search = fetch(`${sidecar.base}/search`, { method: "POST", headers, body: JSON.stringify({ query: "AuthenticationHandler", rerank: true, limit: 3 }) }).then(async (r) => {
+      await r.arrayBuffer();
+      return { status: r.status, at: Date.now() };
+    });
+    for (let waited = 0; arrivals.length === 0 && waited < 20_000; waited += 50) await sleep(50);
+    assert.ok(arrivals.length > 0, "the search reached the worker");
+
+    const { code, signalled, exitedAt } = await terminate(sidecar, drainMs);
+    const answered = await search;
+    assert.equal(answered.status, 200, sidecar.output());
+    assert.equal(code, 0, sidecar.output());
+    assert.ok(exitedAt - signalled < drainMs / 2, `exited ${exitedAt - signalled} ms after the signal, against a ${drainMs} ms drain`);
+    assert.ok(exitedAt - answered.at < 1_500, `exited ${exitedAt - answered.at} ms after the search answered`);
+    assert.doesNotMatch(sidecar.output(), /requests still open at shutdown/);
+  } finally {
+    sidecar.child.kill("SIGKILL");
+    await sidecar.exited;
     await mock.stop();
   }
 });
