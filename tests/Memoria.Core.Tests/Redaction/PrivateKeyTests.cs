@@ -41,6 +41,11 @@ public sealed class PrivateKeyTests
 			{ "yaml block", $"key: |\n  {Begin}\n  {Line1}\n  {Short}\n  {End}\nnext: 1", $"key: |\n  {Placeholder}\nnext: 1" },
 			{ "flattened by env dump", $"KEY={Begin} {Line1} {Short} {End} NEXT=1", $"KEY={Placeholder} NEXT=1" },
 			{ "two keys", $"{key}\n{key}", $"{Placeholder}\n{Placeholder}" },
+			{ "pgp with comment headers", $"-----BEGIN PGP {Synthetic.PrivateWord} KEY BLOCK-----\nVersion: GnuPG v1.4.11 (GNU/Linux)\nComment: https://gpgtools.org\n\n{Line1}\n-----END PGP {Synthetic.PrivateWord} KEY BLOCK-----\nafter", $"{Placeholder}\nafter" },
+			{ "quoted lines", $"> {Begin}\n> {Line1}\n> {End}\n\nnext", $"> {Placeholder}\n\nnext" },
+			{ "commented lines", $"# {Begin}\n# {Line1}\n# {End}\nnext", $"# {Placeholder}\nnext" },
+			{ "python strings joined", $"key = ('{Begin}\\n'\n    '{Line1}\\n'\n    '{End}\\n')", $"key = ('{Placeholder}\\n')" },
+			{ "javascript strings joined", $"key = \"{Begin}\\n\" +\n  \"{Line1}\\n\" +\n  \"{End}\\n\";", $"key = \"{Placeholder}\\n\";" },
 		};
 	}
 

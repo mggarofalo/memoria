@@ -7,7 +7,7 @@ internal static class SecretKeyNames
 	private static readonly HashSet<string> DescriptiveSuffixes = new(StringComparer.OrdinalIgnoreCase)
 	{
 		"count", "counts", "type", "types", "name", "names", "url", "uri", "path", "paths", "file", "files", "dir", "length", "len", "limit", "limits", "size",
-		"expiry", "expires", "expiration", "ttl", "field", "label", "prefix", "budget", "usage", "header", "policy", "provider", "endpoint", "mode", "format",
+		"expiry", "expires", "expiration", "ttl", "field", "label", "prefix", "budget", "usage", "policy", "provider", "endpoint", "mode", "format",
 		"version", "enabled", "required", "stdin", "env", "var", "ref", "arn", "source", "store", "manager", "helper", "service", "handler", "class", "command", "prompt",
 		"regex", "pattern", "rule", "rules", "error", "errors", "message", "description", "hint", "placeholder", "schema", "validator", "input", "id", "ids",
 	};
@@ -103,7 +103,7 @@ internal static class SecretKeyNames
 	{
 		string word = words[index];
 		string? before = index > 0 ? words[index - 1] : null;
-		if (EndsWithAny(word, PasswordWords) || IsUpperPassSuffix(word))
+		if (EndsWithAny(word, PasswordWords) || IsUpperPassSuffix(word) || IsPassWord(words, word))
 		{
 			return before is null || !PasswordActions.Contains(before);
 		}
@@ -114,6 +114,12 @@ internal static class SecretKeyNames
 		}
 
 		return ExactSecretWords.Contains(word);
+	}
+
+	/// <summary><c>pass</c> beside another word, as in <c>DB_PASS</c>, <c>user_pass</c> or <c>pass_phrase</c>. Alone it is Python's keyword, a count or a verb.</summary>
+	private static bool IsPassWord(List<string> words, string word)
+	{
+		return words.Count > 1 && word.Equals("pass", StringComparison.OrdinalIgnoreCase);
 	}
 
 	/// <summary><c>SSHPASS</c> and <c>MYSQLPASS</c>. Upper case only, because <c>compass</c> and <c>firstpass</c> are ordinary words.</summary>

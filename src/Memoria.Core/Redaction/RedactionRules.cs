@@ -81,23 +81,56 @@ internal static class RedactionRules
 	private const string KeyBodyEnd = @"(?:[A-Za-z0-9+/=:,\\]|-[A-Za-z0-9])";
 
 	/// <summary>
-	/// A PEM private key: the BEGIN line, the body, and the END line. A key cut off before its END line goes to the end of its body,
-	/// and perhaps a few words after it, which costs less than leaving the key. A marker with no key material after it, as when code
-	/// or prose names one, stays. Certificates and public keys do not match.
+	/// A PEM private key: the BEGIN line, the body, and the END line. When an END line follows, everything up to it goes, whatever
+	/// stands between: PGP's comment headers, quote or comment markers before each line, a string split and joined in code. A key
+	/// cut off before its END line goes to the end of its body, and perhaps a few words after it, which costs less than leaving the
+	/// key. A marker with no key material after it, as when code or prose names one, stays. Certificates and public keys do not match.
 	/// </summary>
 	public static readonly RedactionRule PrivateKey = new(
 		"private-key",
 		Pattern(@"-----BEGIN" + KeyMarker + "(?:" + KeyBody + "*" + KeyBodyEnd + @")?(?:\s*-----END" + KeyMarker + ")?"),
-		c => HasKeyMaterial(c.Value),
+		c => HasKeyMaterial(c.Input.AsSpan(c.Secret.Index, KeyEnd(c) - c.Secret.Index)),
+		extend: KeyEnd,
 		literal: "PRIVATE KEY");
+
+	/// <summary>How far ahead an END line is looked for. A real key, even RSA at 8192 bits, is well inside it.</summary>
+	private const int MaxKeyBlock = 16384;
+
+	/// <summary>The end of the END line that closes this block, when the match stopped short of it and no other BEGIN comes first.</summary>
+	private static int KeyEnd(SecretCandidate candidate)
+	{
+		if (candidate.Value.Contains("-----END", StringComparison.Ordinal))
+		{
+			return candidate.End;
+		}
+
+		string input = candidate.Input;
+		int limit = Math.Min(input.Length - candidate.End, MaxKeyBlock);
+		int end = input.IndexOf("-----END", candidate.End, limit, StringComparison.Ordinal);
+		int begin = input.IndexOf("-----BEGIN", candidate.End, limit, StringComparison.Ordinal);
+		if (end < 0 || (begin >= 0 && begin < end))
+		{
+			return candidate.End;
+		}
+
+		Match marker = EndMarker().Match(input, end);
+		return marker.Success && marker.Index == end ? marker.Index + marker.Length : candidate.End;
+	}
+
+	private static Regex EndMarker()
+	{
+		return s_endMarker.Value;
+	}
+
+	private static readonly Lazy<Regex> s_endMarker = new(() => Pattern("-----END" + KeyMarker));
 
 	/// <summary>The shortest run of base64 that shows a body is a key. A real key's lines are 64 characters, and prose has no such run.</summary>
 	private const int MinKeyRun = 32;
 
-	private static bool HasKeyMaterial(string block)
+	private static bool HasKeyMaterial(ReadOnlySpan<char> block)
 	{
 		int run = 0;
-		foreach (char c in block.AsSpan("-----BEGIN".Length))
+		foreach (char c in block["-----BEGIN".Length..])
 		{
 			run = char.IsAsciiLetterOrDigit(c) || c is '+' or '/' or '=' ? run + 1 : 0;
 			if (run >= MinKeyRun)
@@ -169,18 +202,20 @@ internal static class RedactionRules
 	public static readonly RedactionRule SecretFlag = new(
 		"secret-flag",
 		Pattern(@"(?:^|[\s""'`\[,])(?<key>-{1,2}[A-Za-z0-9\-]*(?i:password|passwd|pwd|passphrase|pass|token|secret|auth|key|api-?key)[A-Za-z0-9\-]*)(?:[""'][ \t]*,[ \t]*|[ \t]+)" + Value),
-		c => SecretKeyNames.IsSecretFlag(c.Match.Groups["key"].Value) && PlainValues.IsReplaceable(c.Value));
+		c => SecretKeyNames.IsSecretFlag(c.Match.Groups["key"].Value) && AssignedValues.IsSecret(c),
+		extend: AssignedValues.End);
 
 	/// <summary>
 	/// The catch-all: <c>password=</c>, <c>api_key:</c>, <c>API key:</c>, <c>token":"..."</c>, <c>.env</c> lines,
 	/// <c>export FOO_SECRET=</c>, <c>Authorization: Bearer</c>, markdown table rows, and YAML values on the next line. The name
 	/// decides, through <see cref="SecretKeyNames"/>, so <c>max_tokens: 4096</c> stays; the value need only not be a reference such
-	/// as <c>$TOKEN</c> or <c>getPassword()</c>.
+	/// as <c>$TOKEN</c> or <c>getPassword()</c>. <see cref="AssignedValues"/> says how far an unquoted value runs.
 	/// </summary>
 	public static readonly RedactionRule SecretAssignment = new(
 		"secret-assignment",
 		Pattern(@"(?i:" + SecretKey + @")" + Close + @"(?:" + Operator + @"|[ \t]{0,4}\|[ \t]{0,4})" + Scheme + Value),
-		c => SecretKeyNames.IsSecretName(c.Match.Groups["key"].Value) && PlainValues.IsReplaceable(c.Value));
+		c => SecretKeyNames.IsSecretName(c.Match.Groups["key"].Value) && AssignedValues.IsSecret(c),
+		extend: AssignedValues.End);
 
 	/// <summary>The rules, in execution order. The imported rules run last, on what ours left.</summary>
 	public static readonly IReadOnlyList<RedactionRule> All =

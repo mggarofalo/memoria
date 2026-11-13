@@ -4,8 +4,8 @@ using Memoria.Core.Redaction;
 namespace Memoria.Core.Tests.Redaction;
 
 /// <summary>
-/// A replacement that runs over a message boundary in joined text keeps the boundary, so the renderer gets every message back. No
-/// built-in rule's match crosses one, so a rule made here does.
+/// A replacement that runs over a message boundary in joined text keeps the boundary, so the renderer gets every message back. A
+/// rule made here crosses one on purpose; a few built-in command rules can read their context across one too.
 /// </summary>
 public sealed class MessageBoundaryTests
 {

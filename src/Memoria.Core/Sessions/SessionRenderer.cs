@@ -286,7 +286,7 @@ internal abstract class SessionTranscript(SessionSource source, SessionRenderOpt
 	}
 
 	/// <summary>
-	/// Redacts all message text as one string, with a boundary no rule's match crosses between messages. Runs before
+	/// Redacts all message text as one string, with a boundary between messages that a replacement keeps. Runs before
 	/// the title, digest, sizing, and split, which therefore only ever see redacted text.
 	/// </summary>
 	protected void RedactMessages()

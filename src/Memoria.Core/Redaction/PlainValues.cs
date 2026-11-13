@@ -22,12 +22,13 @@ internal static partial class PlainValues
 
 	/// <summary>
 	/// For a value known only by the name before it: replaced unless it is under three characters, a stand-in word such as
-	/// <c>string</c> or <c>required</c>, or not a value at all (see <see cref="IsLiteral"/>).
+	/// <c>string</c> or <c>required</c>, or not a value at all (see <see cref="IsLiteral"/>). Where no shell expands it, as in
+	/// single quotes, a <c>$</c> is a character of the value and not a variable.
 	/// </summary>
-	public static bool IsReplaceable(string value)
+	public static bool IsReplaceable(string value, bool shellExpands = true)
 	{
 		string trimmed = Trimmed(value);
-		return trimmed.Length >= MinAssignedLength && IsLiteral(trimmed) && !StandIns.Contains(trimmed);
+		return trimmed.Length >= MinAssignedLength && IsLiteral(trimmed, shellExpands) && !StandIns.Contains(trimmed);
 	}
 
 	/// <summary>
@@ -37,7 +38,7 @@ internal static partial class PlainValues
 	public static bool IsPassword(string value)
 	{
 		string trimmed = Trimmed(value);
-		return trimmed.Length > 0 && IsLiteral(trimmed);
+		return trimmed.Length > 0 && IsLiteral(trimmed, shellExpands: true);
 	}
 
 	/// <summary><c>8080:80</c> or <c>127.0.0.1:5432:5432</c>, which a port flag takes. Never a password.</summary>
@@ -48,7 +49,8 @@ internal static partial class PlainValues
 
 	private static string Trimmed(string value)
 	{
-		return value.Trim().Trim('*', '`', '"', '\'', ',', ';', '.');
+		// A sentence's full stop ends a value, but a leading dot starts a path such as ./token.
+		return value.Trim().Trim('*', '`', '"', '\'', ',', ';').TrimEnd('.');
 	}
 
 	/// <summary>
@@ -56,12 +58,12 @@ internal static partial class PlainValues
 	/// placeholder has already lost its secret, and what follows it, such as the host after a URL's password, is context. A placeholder
 	/// later in a value does not save it, so no piece of a secret around one survives.
 	/// </summary>
-	private static bool IsLiteral(string trimmed)
+	private static bool IsLiteral(string trimmed, bool shellExpands)
 	{
 		return !trimmed.StartsWith("[REDACTED:", StringComparison.Ordinal)
 			&& HasLetterOrDigit(Placeholder().Replace(trimmed, ""))
 			&& !IsMask(trimmed)
-			&& !IsReference(trimmed);
+			&& !IsReference(trimmed, shellExpands);
 	}
 
 	/// <summary>One character over and over, as documentation writes <c>xxxx</c> where a secret goes.</summary>
@@ -73,12 +75,13 @@ internal static partial class PlainValues
 	/// <summary>
 	/// A whole variable or template (<c>$TOKEN</c>, <c>${TOKEN}</c>, <c>$(cat f)</c>, <c>%TOKEN%</c>, <c>{{ token }}</c>), a placeholder in
 	/// angle brackets (<c>&lt;token&gt;</c>, whose closing bracket ends an unquoted value), an environment read, a call
-	/// (<c>getPassword()</c>), or where a value is kept: a file path or a URL. A URL holding a password is
+	/// (<c>getPassword()</c>), or where a value is kept: a relative or home path, a Windows path, or a URL. A value that starts with
+	/// <c>/</c> goes, as base64 can start with one. A URL holding a password is
 	/// <see cref="RedactionRules.UrlPassword"/>'s. A variable with a literal joined to it, as in <c>${PREFIX}abc123</c>, is a value.
 	/// </summary>
-	private static bool IsReference(string value)
+	private static bool IsReference(string value, bool shellExpands)
 	{
-		return IsVariable(value) || EnvironmentRead().IsMatch(value) || Call().IsMatch(value) || Location().IsMatch(value);
+		return (shellExpands && IsVariable(value)) || EnvironmentRead().IsMatch(value) || Call().IsMatch(value) || Location().IsMatch(value);
 	}
 
 	private static bool IsVariable(string value)
@@ -117,6 +120,6 @@ internal static partial class PlainValues
 	[GeneratedRegex(@"^[A-Za-z_][A-Za-z0-9_.]*\(.*\)?$", RegexOptions.CultureInvariant)]
 	private static partial Regex Call();
 
-	[GeneratedRegex(@"^(?:/|\./|\.\./|~/|[A-Za-z]:\\|[A-Za-z][A-Za-z0-9+.\-]*://)", RegexOptions.CultureInvariant)]
+	[GeneratedRegex(@"^(?:\./|\.\./|~/|[A-Za-z]:\\|[A-Za-z][A-Za-z0-9+.\-]*://)", RegexOptions.CultureInvariant)]
 	private static partial Regex Location();
 }
