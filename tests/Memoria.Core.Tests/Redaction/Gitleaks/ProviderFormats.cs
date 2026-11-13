@@ -4,6 +4,8 @@ namespace Memoria.Core.Tests.Redaction.Gitleaks;
 /// Tokens of providers known through gitleaks's rules, each written to the provider's documented format by hand rather than drawn from the
 /// rule's own pattern, as <see cref="ImportedCases"/> draws its samples. A sample drawn from a pattern always matches it, so those only show
 /// the import kept the rules; these show the rules know the tokens. Each value is put together here, so this repository's own scan finds none.
+/// A provider whose upstream rule knows its token only beside the provider's name, such as Telegram, Mailgun or New Relic, is not here:
+/// such a token is caught under a credential's name, by <c>secret-assignment</c>, and not alone in a sentence.
 /// </summary>
 public static class ProviderFormats
 {
@@ -31,26 +33,17 @@ public static class ProviderFormats
 		("grafana service account token", "gl" + "sa_" + Of(Base62, 32, 17) + "_" + Synthetic.Hex(8, 18)),
 		("sentry user token", "sntr" + "yu_" + Synthetic.Hex(64, 19)),
 		("square access token", "sq0" + "atp-" + Of(Base64Url, 22, 20)),
-		("telegram bot token", Synthetic.Digits(10, 21) + ":" + "AA" + Of(Base64Url, 33, 22)),
 		("age secret key", "AGE-" + "SECRET-KEY-1" + Of(Bech32, 58, 23)),
 		("pypi upload token", "pyp" + "i-AgEIcHlwaS5vcmc" + Of(Base64Url, 70, 24)),
 		("atlassian api token", "ATA" + "TT3" + Of(Base64Url, 186, 25)),
 		("dynatrace api token", "dt0" + "c01." + Of(UpperAlnum, 24, 26) + "." + Of(UpperAlnum, 64, 27)),
-		("figma personal access token", "fi" + "gd_" + Of(Base64Url, 40, 28)),
-		("mailgun private key", "ke" + "y-" + Synthetic.Hex(32, 29)),
-		("new relic user api key", "NR" + "AK-" + Of(UpperAlnum, 27, 30)),
-		("new relic admin key", "NR" + "AA-" + Of(UpperAlnum, 27, 40)),
-		("new relic insert key", "NR" + "II-" + Of(Base64Url.Replace("_", "", StringComparison.Ordinal), 32, 41)),
-		("new relic browser key", "NR" + "JS-" + Synthetic.Hex(19, 42)),
-		("new relic license key", Synthetic.Hex(36, 43) + "NR" + "AL"),
-		("supabase access token", "sb" + "p_" + Synthetic.Hex(40, 31)),
 		("planetscale token", "pscale" + "_tkn_" + Of(Base62, 43, 32)),
 		("prefect api key", "pn" + "u_" + Of(Base62, 36, 33)),
 		("readme api key", "rd" + "me_" + Synthetic.Hex(70, 34)),
 		("rubygems api key", "ruby" + "gems_" + Synthetic.Hex(48, 35)),
 		("clojars token", "CLOJ" + "ARS_" + Of(Base62, 60, 36)),
 		("azure ad client secret", Of(Base62, 3, 37) + "8Q~" + Of(Base64Url, 34, 38)),
-		("1password service account token", "ops" + "_eyJ" + Of(Base64Url, 180, 39)),
+		("1password service account token", "ops" + "_eyJ" + Of(Base62, 600, 39)),
 	];
 
 	/// <summary>Where a transcript puts a token: an export, a JSON value, a YAML value, a sentence, and a code span.</summary>

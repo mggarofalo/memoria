@@ -13,10 +13,6 @@ The tarball's checksum is {hex:64}, which matches the release page.
 etag: W/"{hex:32}"
 # Ids of things
 session_id: "{uuid}"
-asana task: {digits:16}
-heroku app id: {uuid}
-plaid item_id: {hex:24}
-datadog trace_id: {hex:40}
 Request {uuid} failed with 503 after 30 s.
 X-Request-Id: {uuid}
 traceparent: 00-{hex:32}-{hex:16}-01

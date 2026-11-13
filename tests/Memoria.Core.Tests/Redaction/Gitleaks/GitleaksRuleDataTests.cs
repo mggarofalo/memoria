@@ -87,7 +87,7 @@ public sealed class GitleaksRuleDataTests
 		Assert.DoesNotContain(data.Rules, static rule => rule.Id == "generic-api-key");
 		Assert.Contains(data.Excluded, static exclusion => exclusion.Id == "generic-api-key");
 		Assert.Equal(
-			["curl-auth-user", "freemius-secret-key", "generic-api-key", "hashicorp-tf-password", "kubernetes-secret-yaml", "nuget-config-password", "pkcs12-file", "private-key", "slack-webhook-url", "square-access-token", "twilio-api-key"],
+			["curl-auth-user", "freemius-secret-key", "generic-api-key", "hashicorp-tf-password", "kubernetes-secret-yaml", "nuget-config-password", "pkcs12-file", "private-key"],
 			data.Excluded.Select(static exclusion => exclusion.Id).Order(StringComparer.Ordinal));
 		Assert.All(data.Excluded, static exclusion => Assert.False(string.IsNullOrWhiteSpace(exclusion.Reason)));
 	}

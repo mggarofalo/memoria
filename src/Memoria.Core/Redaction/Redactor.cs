@@ -17,8 +17,7 @@ public sealed class Redactor : IRedactor
 	/// <summary>
 	/// Marks a message boundary in joined text. A non-character, so no real text needs it, and input
 	/// holding one is repaired first. <see cref="MessageSeparator"/> wraps it in newlines so every value
-	/// stops at a boundary, while the key walker alone reads past it: a key spread over two messages
-	/// is one key.
+	/// stops at a boundary.
 	/// </summary>
 	internal const char MessageBoundary = '﷐';
 
@@ -31,10 +30,8 @@ public sealed class Redactor : IRedactor
 	private static readonly TimeSpan DefaultBudget = TimeSpan.FromMinutes(5);
 
 	private readonly IReadOnlyList<RedactionRule> _rules;
-	private readonly IReadOnlyList<RedactionRule> _lineRules;
-	private readonly IReadOnlyList<RedactionRule> _tokenRules;
-	private readonly IReadOnlyList<RedactionRule> _backstopRules;
 	private readonly IReadOnlyList<RedactionRule> _ownRules;
+	private readonly IReadOnlyList<RedactionRule> _backstopRules;
 	private readonly TimeSpan _budget;
 
 	/// <summary>Creates a redactor over the built-in rules.</summary>
@@ -47,10 +44,8 @@ public sealed class Redactor : IRedactor
 	internal Redactor(IReadOnlyList<RedactionRule> rules, TimeSpan budget)
 	{
 		_rules = rules;
-		_lineRules = [.. rules.Where(static rule => rule.LinesMatter)];
-		_tokenRules = [.. rules.Where(static rule => !rule.LinesMatter && !rule.Backstop)];
-		_backstopRules = [.. rules.Where(static rule => rule.Backstop)];
 		_ownRules = [.. rules.Where(static rule => !rule.Backstop)];
+		_backstopRules = [.. rules.Where(static rule => rule.Backstop)];
 		_budget = budget;
 	}
 
@@ -111,51 +106,30 @@ public sealed class Redactor : IRedactor
 	internal GateHit? FindFirstHit(string text)
 	{
 		Stopwatch clock = Stopwatch.StartNew();
-		ViewBuffers buffers = new();
-
-		// With no wrapped line the joined view is the plain one, which the first round has already read with every rule.
-		foreach (bool join in LineWraps.Any(text) ? new[] { false, true } : [false])
+		foreach (RedactionRule rule in _rules)
 		{
-			Dictionary<string, int> unused = [];
-			ViewCache views = new(join, buffers);
-			foreach (RedactionRule rule in join ? _tokenRules.Concat(_backstopRules) : _rules)
+			GateHit? hit = Guarded(rule, () =>
 			{
-				GateHit? hit = FindGuarded(rule, text, views, clock);
-				if (hit is not null)
-				{
-					return hit;
-				}
+				ScanGuard guard = new(rule, text.Length, clock, _budget);
+				return rule.TryFindNext(text, 0, guard, out int start, out int end) ? new GateHit(rule.Name, start, end) : null;
+			});
+			if (hit is not null)
+			{
+				return hit;
 			}
 		}
 
 		return null;
 	}
 
-	private GateHit? FindGuarded(RedactionRule rule, string text, ViewCache views, Stopwatch clock)
-	{
-		return Guarded(rule, () =>
-		{
-			DetectionView? view = views.Get(text);
-			ScanGuard guard = new(rule, text.Length, clock, _budget);
-			if (!rule.TryFindNext(view?.Text ?? text, 0, guard, out int start, out int end))
-			{
-				return null;
-			}
-
-			(int originalStart, int originalEnd) = view?.ToOriginal(start, end) ?? (start, end);
-			return new GateHit(rule.Name, originalStart, originalEnd);
-		});
-	}
-
 	private RedactionResult Run(string text, bool quoteFrontmatter)
 	{
 		Stopwatch clock = Stopwatch.StartNew();
 		Dictionary<string, int> counts = [];
-		ViewBuffers buffers = new();
 		string current = text;
 		for (int pass = 0; pass < MaxPasses; pass++)
 		{
-			string next = RunPass(current, quoteFrontmatter, clock, counts, buffers);
+			string next = RunPass(current, quoteFrontmatter, clock, counts);
 			if (ReferenceEquals(next, current))
 			{
 				return new RedactionResult(current, counts);
@@ -167,36 +141,21 @@ public sealed class Redactor : IRedactor
 		throw new RedactionException(RedactionException.WholeDocument, RedactionFailure.DidNotConverge);
 	}
 
-	/// <summary>
-	/// Rules that read lines first. Then the view with wrapped lines joined, while a wrapped token is still
-	/// whole: replacing its first line alone would move the line off its column and strand the tail. Then every
-	/// rule of ours on the noise-free view. Then the imported rules, once every rule of ours has had both views: on the joined view
-	/// first, so a wrapped token only they know goes whole, then on the plain one, for a token a wrong join hid. Then quoting.
-	/// </summary>
-	private string RunPass(string text, bool quoteFrontmatter, Stopwatch clock, Dictionary<string, int> counts, ViewBuffers buffers)
+	/// <summary>Every rule of ours, then the imported rules on whatever ours left, then quoting.</summary>
+	private string RunPass(string text, bool quoteFrontmatter, Stopwatch clock, Dictionary<string, int> counts)
 	{
-		string current = Sweep(_lineRules, text, joinWrappedLines: false, clock, counts, buffers);
-		current = Sweep(_tokenRules, current, joinWrappedLines: true, clock, counts, buffers);
-		current = Sweep(_ownRules, current, joinWrappedLines: false, clock, counts, buffers);
-
-		// With no wrapped line the joined view is the plain one, and reading it twice would only double the cost.
-		if (LineWraps.Any(current))
-		{
-			current = Sweep(_backstopRules, current, joinWrappedLines: true, clock, counts, buffers);
-		}
-
-		current = Sweep(_backstopRules, current, joinWrappedLines: false, clock, counts, buffers);
+		string current = Sweep(_ownRules, text, clock, counts);
+		current = Sweep(_backstopRules, current, clock, counts);
 		string quoted = quoteFrontmatter ? YamlFrontmatter.QuotePlaceholders(current) : current;
 		return quoted == text ? text : quoted;
 	}
 
-	private string Sweep(IReadOnlyList<RedactionRule> rules, string text, bool joinWrappedLines, Stopwatch clock, Dictionary<string, int> counts, ViewBuffers buffers)
+	private string Sweep(IReadOnlyList<RedactionRule> rules, string text, Stopwatch clock, Dictionary<string, int> counts)
 	{
 		string current = text;
-		ViewCache views = new(joinWrappedLines, buffers);
 		foreach (RedactionRule rule in rules)
 		{
-			current = Guarded(rule, () => Apply(rule, current, views, clock, counts));
+			current = Guarded(rule, () => Apply(rule, current, clock, counts));
 		}
 
 		return current;
@@ -229,27 +188,23 @@ public sealed class Redactor : IRedactor
 		}
 	}
 
-	private string Apply(RedactionRule rule, string input, ViewCache views, Stopwatch clock, Dictionary<string, int> counts)
+	private string Apply(RedactionRule rule, string input, Stopwatch clock, Dictionary<string, int> counts)
 	{
-		DetectionView? view = views.Get(input);
-		string searched = view?.Text ?? input;
-		ScanGuard guard = new(rule, searched.Length, clock, _budget);
+		ScanGuard guard = new(rule, input.Length, clock, _budget);
 		StringBuilder? output = null;
 		int copied = 0;
 		int position = 0;
 		int hits = 0;
 
 		guard.ThrowIfOverBudget();
-		while (rule.TryFindNext(searched, position, guard, out int start, out int end))
+		while (rule.TryFindNext(input, position, guard, out int start, out int end))
 		{
 			guard.ThrowIfOverBudget();
 			position = end;
-			(int originalStart, int originalEnd) = view?.ToOriginal(start, end) ?? (start, end);
-
 			output ??= new StringBuilder(input.Length);
-			output.Append(input, copied, originalStart - copied);
-			AppendReplacement(output, input, originalStart, originalEnd, rule.Placeholder);
-			copied = originalEnd;
+			output.Append(input, copied, start - copied);
+			AppendReplacement(output, input, start, end, rule.Placeholder);
+			copied = end;
 			hits++;
 		}
 
@@ -289,7 +244,7 @@ public sealed class Redactor : IRedactor
 	private static int NextBoundary(string input, int start, int end)
 	{
 		int boundary = input.IndexOf(MessageBoundary, start, end - start);
-		while (boundary >= 0 && !DetectionView.IsSeparatorBoundary(input, boundary))
+		while (boundary >= 0 && !IsSeparatorBoundary(input, boundary))
 		{
 			boundary = input.IndexOf(MessageBoundary, boundary + 1, end - boundary - 1);
 		}
@@ -297,29 +252,16 @@ public sealed class Redactor : IRedactor
 		return boundary;
 	}
 
+	private static bool IsSeparatorBoundary(string input, int index)
+	{
+		return index > 0 && input[index - 1] == '\n' && index + 1 < input.Length && input[index + 1] == '\n';
+	}
+
 	private static void AppendPiece(StringBuilder output, string input, int start, int end, string placeholder)
 	{
 		if (!input.AsSpan(start, end - start).IsWhiteSpace())
 		{
 			output.Append(placeholder);
-		}
-	}
-
-	/// <summary>The view of the text a sweep is on. Built when a rule first needs it, inside the guard, so running out of memory is a typed refusal.</summary>
-	private sealed class ViewCache(bool join, ViewBuffers buffers)
-	{
-		private string? _text;
-		private DetectionView? _view;
-
-		public DetectionView? Get(string text)
-		{
-			if (!ReferenceEquals(_text, text))
-			{
-				_view = DetectionView.Create(text, join, buffers);
-				_text = text;
-			}
-
-			return _view;
 		}
 	}
 }

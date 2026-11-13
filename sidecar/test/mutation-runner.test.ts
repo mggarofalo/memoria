@@ -58,7 +58,7 @@ test("a changed .NET file selects the shards that mutate it, from the repository
   }
   const names = (changed: string[]) => shardsFor(changed, shards, configs).map((s) => s.name);
   // Redaction is not mutated at all, and the part gate is security-core's, not core's.
-  assert.deepEqual(names(["src/Memoria.Core/Redaction/PemBlock.cs", "src/Memoria.Core/Redaction/NotNamedAnywhere.cs"]), []);
+  assert.deepEqual(names(["src/Memoria.Core/Redaction/GitleaksRules.cs", "src/Memoria.Core/Redaction/NotNamedAnywhere.cs"]), []);
   assert.deepEqual(names(["src/Memoria.Core/Sessions/PartGate.cs", "src/Memoria.Core/Redaction/Redactor.cs"]), ["security-core part gate"]);
   assert.deepEqual(names(["src/Memoria.Core/Sessions/ClaudeTranscript.cs"]), ["core sessions 2"]);
   // A file no shard names lands in its folder's rest shard, or the config's.

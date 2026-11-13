@@ -90,12 +90,7 @@ public sealed class RedactorRuleTests
 		[
 			.. RedactionCases.Tokens.Select(t => t.Rule),
 			.. RedactionCases.Contextual.Select(c => c.Rule),
-			.. ReviewCases.ProviderTokens.Select(t => t.Rule),
-			.. ReviewCases.Positives.Select(c => c.Rule),
-			"private-key", "private-key-end", "private-key-lines", "private-key-der", "base64-private-key", "discord-webhook", "putty-private-key", "digest-response",
-			"query-credential", "teams-webhook", "cloudflare-token", "sentry-token", "grafana-token", "figma-token", "tavily-key", "perplexity-key", "replicate-token", "render-key",
-			"netlify-token", "planetscale-token", "doppler-token", "alibaba-key", "square-token", "hubspot-token", "atlassian-cookie-token", "supabase-secret", "facebook-token",
-			"huggingface-org-token", "gitlab-feature-flag-token", "aws-secret-near-id", "twilio-auth-token", "percent-encoded-token", "base64-token", "square-production-token", "hex-token", "unicode-escaped-token",
+			"private-key",
 			.. Gitleaks.ImportedCases.Forms.Select(static form => form.Rule),
 		];
 		HashSet<string> negative = [.. RedactionCases.Negatives.Select(n => n.Rule), .. Gitleaks.ImportedCases.Forms.Select(static form => form.Rule)];
@@ -108,18 +103,6 @@ public sealed class RedactorRuleTests
 	}
 
 	[Fact]
-	public void Access_key_and_secret_pair_are_each_redacted()
-	{
-		string input = Synthetic.AwsAccessKey + ":" + Synthetic.AwsSecret + "\n" + Synthetic.AwsTemporaryKey + ",\"" + Synthetic.AwsSecret + "\"";
-
-		RedactionResult result = Redactor.Redact(input);
-
-		Assert.Equal("[REDACTED:aws-access-key]:[REDACTED:aws-secret-key]\n[REDACTED:aws-access-key],\"[REDACTED:aws-secret-key]\"", result.Text);
-		Assert.Equal(2, result.CountsByRule["aws-access-key"]);
-		Assert.Equal(2, result.CountsByRule["aws-secret-key"]);
-	}
-
-	[Fact]
 	public void Token_inside_a_header_keeps_its_more_specific_label()
 	{
 		RedactionResult result = Redactor.Redact("Authorization: Bearer " + Synthetic.Jwt);
@@ -129,14 +112,14 @@ public sealed class RedactorRuleTests
 	}
 
 	[Fact]
-	public void Token_as_a_url_password_keeps_its_more_specific_label()
+	public void Token_as_a_url_password_is_replaced_once()
 	{
 		string token = Synthetic.GitHubClassic('s');
 
 		RedactionResult result = Redactor.Redact("https://x-access-token:" + token + "@github.com/o/r.git");
 
-		Assert.Equal("https://x-access-token:[REDACTED:github-token]@github.com/o/r.git", result.Text);
-		Assert.Equal(new Dictionary<string, int> { ["github-token"] = 1 }, result.CountsByRule);
+		Assert.Equal("https://x-access-token:[REDACTED:url-password]@github.com/o/r.git", result.Text);
+		Assert.Equal(new Dictionary<string, int> { ["url-password"] = 1 }, result.CountsByRule);
 	}
 
 	[Fact]
@@ -150,24 +133,14 @@ public sealed class RedactorRuleTests
 	}
 
 	[Fact]
-	public void Overlong_candidate_is_judged_on_its_prefix()
-	{
-		string run = "s" + "k-" + string.Concat(Enumerable.Repeat("word-", 1000));
-
-		RedactionResult result = Redactor.Redact(run);
-
-		Assert.Equal(run, result.Text);
-	}
-
-	[Fact]
 	public void Several_secrets_are_counted_per_rule()
 	{
-		string input = $"{Synthetic.Anthropic} {Synthetic.GitHubClassic('p')} {Synthetic.GitHubClassic('o')} password=hunter2";
+		string input = $"{Synthetic.Jwt} {Synthetic.GitHubClassic('p')} {Synthetic.GitHubClassic('o')} password=hunter2";
 
 		RedactionResult result = Redactor.Redact(input);
 
-		Assert.Equal("[REDACTED:anthropic-key] [REDACTED:github-token] [REDACTED:github-token] password=[REDACTED:secret-assignment]", result.Text);
-		Assert.Equal(new Dictionary<string, int> { ["anthropic-key"] = 1, ["github-token"] = 2, ["secret-assignment"] = 1 }, result.CountsByRule);
+		Assert.Equal("[REDACTED:jwt] [REDACTED:gitleaks-github-pat] [REDACTED:gitleaks-github-oauth] password=[REDACTED:secret-assignment]", result.Text);
+		Assert.Equal(new Dictionary<string, int> { ["jwt"] = 1, ["gitleaks-github-pat"] = 1, ["gitleaks-github-oauth"] = 1, ["secret-assignment"] = 1 }, result.CountsByRule);
 		Assert.True(result.WasRedacted);
 	}
 

@@ -4,11 +4,11 @@ using System.Text.RegularExpressions;
 namespace Memoria.Core.Redaction;
 
 /// <summary>
-/// Gitleaks's default rules, from <see cref="GitleaksRuleData"/>, as ordinary rules of this engine. Each runs on the same cleaned
-/// view of the text as every other rule, with the same budgets, and replaces only its <c>secret</c> group. It fires only when the
-/// text holds one of its keywords. A candidate is rejected as upstream rejects it: its Shannon entropy is at or below the rule's
-/// threshold, or an allowlist or a stopword covers it. It is also rejected when it reads as a placeholder or a sample, as every
-/// other provider rule's is. Names are <c>gitleaks-</c> and the upstream id, so a count says where a rule came from.
+/// Gitleaks's default rules, from <see cref="GitleaksRuleData"/>, as ordinary rules of this engine. Each runs on the same text as
+/// every other rule, with the same budgets, and replaces only its <c>secret</c> group. It fires only when the text holds one of its
+/// keywords. A candidate is rejected as upstream rejects it: its Shannon entropy is at or below the rule's threshold, or an allowlist
+/// or a stopword covers it. It is also rejected when it is one character over and over, a mask. Names are <c>gitleaks-</c> and the
+/// upstream id, so a count says where a rule came from.
 /// </summary>
 internal static class GitleaksRules
 {
@@ -18,15 +18,15 @@ internal static class GitleaksRules
 
 	/// <summary>
 	/// The built-in rules: those that know a token by its own format first, then those that know a value by the name before it, each in
-	/// upstream's order. A rule of the second kind can take the head of a longer token that one of the first knows whole, as
-	/// <c>twitter-api-key</c> takes 25 characters of a bearer token after <c>twitter:</c>.
+	/// upstream's order, except that a routable GitLab token's rule goes before the plain one's. A rule of the second kind can take the
+	/// head of a longer token that one of the first knows whole, as <c>twitter-api-key</c> takes 25 characters of a bearer token after
+	/// <c>twitter:</c>.
 	/// </summary>
 	public static IReadOnlyList<RedactionRule> All { get; } = [.. s_builtIn.Select(static pair => pair.Rule)];
 
 	/// <summary>
-	/// The rules that know a secret by its own format, which may look inside decoded text. A rule made from upstream's assignment
-	/// template, a keyword then <c>=</c> or <c>:</c> then a value, knows it by what surrounds it, so it stays out: percent-encoded
-	/// prose saying <c>asana task: 1203456789012345</c> is not a token.
+	/// The rules that know a secret by its own format. A rule made from upstream's assignment template, a keyword then <c>=</c> or
+	/// <c>:</c> then a value, knows it by what surrounds it, so it is not one of these.
 	/// </summary>
 	public static IReadOnlyList<RedactionRule> SelfEvident { get; } = [.. s_builtIn.Where(static pair => !IsAssignmentTemplate(pair.Spec)).Select(static pair => pair.Rule)];
 
@@ -44,7 +44,9 @@ internal static class GitleaksRules
 	private static (GitleaksRuleSpec Spec, RedactionRule Rule)[] BuildPairs(GitleaksRuleData data)
 	{
 		CompiledAllowlist global = new(data.GlobalAllowlist);
-		IEnumerable<GitleaksRuleSpec> ordered = data.Rules.Where(static spec => !IsAssignmentTemplate(spec)).Concat(data.Rules.Where(IsAssignmentTemplate));
+		// A routable GitLab token is the plain one with a dotted part after it, so its rule goes first, or the plain one would take only its head.
+		IEnumerable<GitleaksRuleSpec> formats = data.Rules.Where(static spec => !IsAssignmentTemplate(spec)).OrderBy(static spec => spec.Id.EndsWith("-routable", StringComparison.Ordinal) ? 0 : 1);
+		IEnumerable<GitleaksRuleSpec> ordered = formats.Concat(data.Rules.Where(IsAssignmentTemplate));
 		return [.. ordered.Select(spec => (spec, Rule(spec, global)))];
 	}
 
@@ -57,74 +59,14 @@ internal static class GitleaksRules
 		bool padded = secret.Contains("={0,", StringComparison.Ordinal);
 		string pattern = IsAssignmentTemplate(spec) || separators.Contains('_', StringComparison.Ordinal) ? spec.Pattern : EndingAtUnderscore(spec.Pattern);
 		bool underscoreEnds = !string.Equals(pattern, spec.Pattern, StringComparison.Ordinal);
-		bool assignment = IsAssignmentTemplate(spec);
 		return new RedactionRule(
 			Prefix + spec.Id,
 			null,
-			candidate => Accept(candidate, spec.Entropy, global, own) && !(underscoreEnds && IsNameBeforeUnderscore(candidate)) && !(assignment && NamesAnIdentifier(candidate, spec.Keywords)),
+			candidate => Accept(candidate, spec.Entropy, global, own),
 			extend: candidate => ThroughGluedText(candidate, separators, new Ending(fixedToken, padded, underscoreEnds)),
 			keywords: spec.Keywords,
 			backstop: true,
 			buildPattern: () => RedactionRules.Pattern(pattern));
-	}
-
-	/// <summary>Words that name a thing with an id of its own and hold no credential. Alone after the keyword, or before an id word, they say the value is that id.</summary>
-	private static readonly HashSet<string> ThingWords = new(StringComparer.OrdinalIgnoreCase)
-	{
-		"task", "tasks", "item", "items", "trace", "span", "project", "projects", "org", "organization", "team", "workspace", "issue", "ticket",
-		"order", "job", "build", "run", "commit", "page", "document", "folder", "channel", "thread", "customer", "invoice", "deployment", "release",
-		"device", "node", "site",
-	};
-
-	/// <summary>Words that name a thing a credential can belong to, such as a service account. Only an id word after them says the value is an id.</summary>
-	private static readonly HashSet<string> HolderWords = new(StringComparer.OrdinalIgnoreCase)
-	{
-		"app", "apps", "application", "account", "accounts", "user", "users",
-	};
-
-	private static readonly HashSet<string> IdWords = new(StringComparer.OrdinalIgnoreCase) { "id", "ids", "uuid", "guid" };
-
-	/// <summary>
-	/// An assignment rule matches a name, its keyword, up to 20 more name characters, then an operator and the value, and accepts the
-	/// value by its shape alone: 24 of upstream's accept only digits, hex or a UUID. When all that follows the keyword names a thing, as
-	/// <c>asana task: </c> does before digits, or a thing's id, as <c>heroku app id: </c> does before a UUID and <c>plaid item_id: </c>
-	/// before hex, and no word of the name is a credential's, the value is that id. Nothing else may follow: <c>heroku app token</c>,
-	/// <c>HEROKU_APP_TOKEN2</c>, <c>heroku app bearer</c>, <c>asana_app_pat</c> and <c>asana_service_account</c> may name credentials the
-	/// word lists do not know, so their values still go. So do a bare <c>heroku id</c>, which names no thing, and <c>heroku user</c>, as
-	/// a user, an app or an account can hold a credential, and only <c>user id</c> says the value is its id.
-	/// </summary>
-	internal static bool NamesAnIdentifier(SecretCandidate candidate, IReadOnlyList<string> keywords)
-	{
-		string before = candidate.Input[candidate.Match.Index..candidate.Secret.Index];
-		int operatorAt = before.IndexOfAny(['=', ':', '>', '|', '?', ',', '\'', '"', '`']);
-		string name = (operatorAt < 0 ? before : before[..operatorAt]).Trim();
-		int keywordEnd = keywords
-			.Select(keyword => (At: name.LastIndexOf(keyword, StringComparison.OrdinalIgnoreCase), keyword.Length))
-			.Where(static found => found.At >= 0)
-			.Select(static found => found.At + found.Length)
-			.DefaultIfEmpty(-1)
-			.Max();
-		return keywordEnd >= 0 && EndsByNamingAThing(SecretKeyNames.SplitWords(name[keywordEnd..])) && SecretKeyNames.Classify(name) == KeyKind.NotSecret;
-	}
-
-	/// <summary>
-	/// <c>task</c>, <c>task id</c> or <c>app id</c>, and nothing more: a thing's word alone, or a thing's or a holder's word and then an id
-	/// word. A number after it, as in <c>task 1203</c>, is the thing's own and names nothing, so it is passed over. <c>TOKEN2</c> is one
-	/// word, not a number.
-	/// </summary>
-	private static bool EndsByNamingAThing(List<string> words)
-	{
-		while (words.Count > 0 && words[^1].All(char.IsAsciiDigit))
-		{
-			words.RemoveAt(words.Count - 1);
-		}
-
-		return words.Count switch
-		{
-			1 => ThingWords.Contains(words[0]),
-			2 => IdWords.Contains(words[1]) && (ThingWords.Contains(words[0]) || HolderWords.Contains(words[0])),
-			_ => false,
-		};
 	}
 
 	/// <summary>The ending the translator draws for upstream's <c>\b</c> or common ending: any character but a letter, a digit or <c>_</c>.</summary>
@@ -139,29 +81,6 @@ internal static class GitleaksRules
 	{
 		return pattern.EndsWith(WordEnd, StringComparison.Ordinal) ? pattern[..^WordEnd.Length] + @"(?:[^0-9A-Za-z]|\z)" : pattern;
 	}
-
-	/// <summary>
-	/// A match that stops at an underscore, upstream's <c>\b</c> or not, and reads as words, is a snake_case name such as
-	/// <c>sk_test_connection_timeout</c>, not a token followed by one.
-	/// </summary>
-	private static bool IsNameBeforeUnderscore(SecretCandidate candidate)
-	{
-		string value = candidate.Value;
-		return candidate.End < candidate.Input.Length && candidate.Input[candidate.End] == '_'
-			&& (ValueShapes.IsWordy(value) || ValueShapes.ReadsAsIdentifierWithDigits(value) || HasNoRandomPart(value));
-	}
-
-	/// <summary>
-	/// A token's random part between underscores is long and holds digits, as a Stripe key's 24 characters or a MaxMind key's 29 do,
-	/// whatever literal follows it. When every part is short or has fewer than two digits, the parts are words of a name:
-	/// <c>findUserById</c>, <c>v2endpoint</c>.
-	/// </summary>
-	private static bool HasNoRandomPart(string value)
-	{
-		return value.Contains('_', StringComparison.Ordinal) && !value.Split('_').Any(static part => part.Length >= RandomPartLength && part.Count(char.IsAsciiDigit) >= 2);
-	}
-
-	private const int RandomPartLength = 16;
 
 	/// <summary>
 	/// What a rule's format says about where its token ends. <paramref name="FixedToken"/>: a format known by itself, at an exact count.
@@ -244,7 +163,7 @@ internal static class GitleaksRules
 		ReadOnlySpan<char> rest = input.AsSpan(end + 1, runEnd - end - 1);
 		foreach (Range piece in rest.SplitAny("-.%+/_="))
 		{
-			if (rest[piece].Length >= MinRandomPiece && ValueShapes.IsRandomSegment(rest[piece]))
+			if (rest[piece].Length >= MinRandomPiece && LooksRandom(rest[piece]))
 			{
 				return runEnd;
 			}
@@ -254,6 +173,12 @@ internal static class GitleaksRules
 	}
 
 	private const int MinRandomPiece = 8;
+
+	/// <summary>A piece of a token, not a word: it mixes letters and digits. Words after a separator, such as <c>-backup-copy</c>, stay.</summary>
+	private static bool LooksRandom(ReadOnlySpan<char> piece)
+	{
+		return piece.IndexOfAnyInRange('0', '9') >= 0 && (piece.IndexOfAnyInRange('a', 'z') >= 0 || piece.IndexOfAnyInRange('A', 'Z') >= 0);
+	}
 
 	private const string Separators = "-.%+/_";
 
@@ -362,7 +287,7 @@ internal static class GitleaksRules
 		while (runEnd + 3 < input.Length && input[runEnd] == '%' && IsEncodedBase64Symbol(input[runEnd + 1], input[runEnd + 2]) && char.IsAsciiLetterOrDigit(input[runEnd + 3]))
 		{
 			int pieceEnd = AlphanumericEnd(input, runEnd + 3);
-			random |= pieceEnd - runEnd - 3 >= MinRandomPiece && ValueShapes.IsRandomSegment(input.AsSpan(runEnd + 3, pieceEnd - runEnd - 3));
+			random |= pieceEnd - runEnd - 3 >= MinRandomPiece && LooksRandom(input.AsSpan(runEnd + 3, pieceEnd - runEnd - 3));
 			runEnd = pieceEnd;
 		}
 
@@ -422,12 +347,18 @@ internal static class GitleaksRules
 	private static bool Accept(SecretCandidate candidate, double entropy, CompiledAllowlist global, CompiledAllowlist[] own)
 	{
 		string secret = candidate.Value;
-		if (ValueShapes.IsPlaceholder(secret) || (entropy > 0 && ShannonEntropy(secret) <= entropy))
+		if (IsMask(secret) || (entropy > 0 && ShannonEntropy(secret) <= entropy))
 		{
 			return false;
 		}
 
 		return !global.Allows(candidate) && !own.Any(allowlist => allowlist.Allows(candidate));
+	}
+
+	/// <summary>One character over and over, as documentation writes <c>xxxx</c> where a secret goes. A rule with no entropy threshold would take it.</summary>
+	private static bool IsMask(string secret)
+	{
+		return secret.AsSpan().IndexOfAnyExcept(secret[0]) < 0;
 	}
 
 	/// <summary>Bits per character, as upstream computes it over the secret.</summary>

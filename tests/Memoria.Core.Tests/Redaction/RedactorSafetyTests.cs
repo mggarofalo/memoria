@@ -140,9 +140,9 @@ public sealed class RedactorSafetyTests
 
 		TimeSpan spent = ThreadCpuTime.Now() - started;
 		Assert.True(spent < LargeTranscriptBudget, $"A 50 MB transcript took {spent.TotalSeconds:F1} s of CPU, over the budget of {LargeTranscriptBudget.TotalSeconds:F0} s.");
-		Assert.Equal(blocks, result.CountsByRule["github-token"]);
+		Assert.Equal(blocks, result.CountsByRule["gitleaks-github-pat"]);
 		Assert.DoesNotContain(token, result.Text, StringComparison.Ordinal);
-		Assert.Equal(new[] { "github-token" }, result.CountsByRule.Keys);
+		Assert.Equal(new[] { "gitleaks-github-pat" }, result.CountsByRule.Keys);
 	}
 
 	[Fact]
@@ -284,22 +284,22 @@ public sealed class RedactorSafetyTests
 
 		RedactionResult result = Redactor.Redact(input);
 
-		Assert.Equal("---\ntitle: '[REDACTED:github-token] rotated, it''s done'\nproject: Memoria\n---\n\n[REDACTED:github-token]\n", result.Text);
-		Assert.Equal(2, result.CountsByRule["github-token"]);
+		Assert.Equal("---\ntitle: '[REDACTED:gitleaks-github-pat] rotated, it''s done'\nproject: Memoria\n---\n\n[REDACTED:gitleaks-github-pat]\n", result.Text);
+		Assert.Equal(2, result.CountsByRule["gitleaks-github-pat"]);
 		Assert.Equal(result.Text, Redactor.Redact(result.Text).Text);
 	}
 
 	[Theory]
-	[InlineData("---\ntitle: fix {S} now\n---\n", "---\ntitle: fix [REDACTED:github-token] now\n---\n")]
-	[InlineData("---\ntags:\n  - {S}\n---\n", "---\ntags:\n  - '[REDACTED:github-token]'\n---\n")]
-	[InlineData("---\r\ntitle: {S}  \r\n---\r\n", "---\r\ntitle: '[REDACTED:github-token]'  \r\n---\r\n")]
-	[InlineData("---\ntitle: {S}", "---\ntitle: '[REDACTED:github-token]'")]
-	[InlineData("---\ntitle: ok\n---\ntitle: {S}\n", "---\ntitle: ok\n---\ntitle: [REDACTED:github-token]\n")]
-	[InlineData("title: {S}\n", "title: [REDACTED:github-token]\n")]
-	[InlineData("---{S}", "---[REDACTED:github-token]")]
-	[InlineData("---\n{S}\n---\n", "---\n[REDACTED:github-token]\n---\n")]
-	[InlineData("---\ntitle:{S}\n---\n", "---\ntitle:[REDACTED:github-token]\n---\n")]
-	[InlineData("---\ntitle = {S}\n---\n", "---\ntitle = [REDACTED:github-token]\n---\n")]
+	[InlineData("---\ntitle: fix {S} now\n---\n", "---\ntitle: fix [REDACTED:gitleaks-github-pat] now\n---\n")]
+	[InlineData("---\ntags:\n  - {S}\n---\n", "---\ntags:\n  - '[REDACTED:gitleaks-github-pat]'\n---\n")]
+	[InlineData("---\r\ntitle: {S}  \r\n---\r\n", "---\r\ntitle: '[REDACTED:gitleaks-github-pat]'  \r\n---\r\n")]
+	[InlineData("---\ntitle: {S}", "---\ntitle: '[REDACTED:gitleaks-github-pat]'")]
+	[InlineData("---\ntitle: ok\n---\ntitle: {S}\n", "---\ntitle: ok\n---\ntitle: [REDACTED:gitleaks-github-pat]\n")]
+	[InlineData("title: {S}\n", "title: [REDACTED:gitleaks-github-pat]\n")]
+	[InlineData("---{S}", "---[REDACTED:gitleaks-github-pat]")]
+	[InlineData("---\n{S}\n---\n", "---\n[REDACTED:gitleaks-github-pat]\n---\n")]
+	[InlineData("---\ntitle:{S}\n---\n", "---\ntitle:[REDACTED:gitleaks-github-pat]\n---\n")]
+	[InlineData("---\ntitle = {S}\n---\n", "---\ntitle = [REDACTED:gitleaks-github-pat]\n---\n")]
 	public void Frontmatter_values_are_quoted_only_where_yaml_needs_it(string template, string expected)
 	{
 		string input = template.Replace("{S}", Synthetic.GitHubClassic('p'), StringComparison.Ordinal);

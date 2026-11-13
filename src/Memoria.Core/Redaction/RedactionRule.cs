@@ -9,9 +9,6 @@ internal readonly record struct SecretCandidate(string Input, Match Match, Group
 {
 	public string Value => Secret.Value;
 
-	/// <summary>The value plus any closing delimiter just past it, so a template or a call is judged whole.</summary>
-	public string JudgedValue => ValueShapes.ExtendToCloser(Input, Secret.Index, Secret.Index + Secret.Length, Value);
-
 	public int End => Secret.Index + Secret.Length;
 }
 
@@ -72,8 +69,7 @@ internal sealed class ScanGuard
 /// <summary>
 /// One detector. The pattern finds candidates: the <c>secret</c> group, or the
 /// whole match when the group is absent, is the span replaced. Text around that
-/// group is left alone. <c>accept</c> can veto a candidate, <c>findSpan</c> can
-/// replace the span with one a regular language cannot describe, and <c>extend</c>
+/// group is left alone. <c>accept</c> can veto a candidate, and <c>extend</c>
 /// can lengthen an accepted span.
 /// </summary>
 internal sealed class RedactionRule
@@ -86,6 +82,9 @@ internal sealed class RedactionRule
 
 	private const string SecretGroup = "secret";
 
+	/// <summary>A placeholder is at most its opening and a 64-character name.</summary>
+	private const int MaxPlaceholder = 76;
+
 	private readonly SearchValues<string>? _prefilter;
 	private readonly SearchValues<string>? _keywords;
 	private readonly Lazy<Regex> _pattern;
@@ -94,11 +93,8 @@ internal sealed class RedactionRule
 		string name,
 		Regex? pattern,
 		Func<SecretCandidate, bool>? accept = null,
-		Func<string, Match, (int Start, int End)?>? findSpan = null,
 		Func<SecretCandidate, int>? extend = null,
 		string? literal = null,
-		bool linesMatter = false,
-		bool skipRejected = false,
 		IReadOnlyList<string>? keywords = null,
 		bool backstop = false,
 		Func<Regex>? buildPattern = null)
@@ -109,10 +105,7 @@ internal sealed class RedactionRule
 			? new Lazy<Regex>(pattern)
 			: new Lazy<Regex>(buildPattern ?? throw new ArgumentNullException(nameof(pattern)), LazyThreadSafetyMode.PublicationOnly);
 		Accept = accept;
-		FindSpan = findSpan;
 		Extend = extend;
-		LinesMatter = linesMatter;
-		SkipRejected = skipRejected;
 		Placeholder = $"[REDACTED:{name}]";
 		Literal = literal;
 		Keywords = keywords ?? [];
@@ -136,19 +129,11 @@ internal sealed class RedactionRule
 
 	public Func<SecretCandidate, bool>? Accept { get; }
 
-	public Func<string, Match, (int Start, int End)?>? FindSpan { get; }
-
 	public Func<SecretCandidate, int>? Extend { get; }
 
-	/// <summary>True for a rule that reads line structure, so it runs before lines holding one wrapped token are joined.</summary>
-	public bool LinesMatter { get; }
-
-	/// <summary>True when a rejected candidate is rejected as a whole, so its inside need not be searched again.</summary>
-	public bool SkipRejected { get; }
-
 	/// <summary>
-	/// True for an imported rule, which reads only what this engine's own rules left. It runs only once they have had both views,
-	/// joined and plain, so it never takes a token one of ours would label.
+	/// True for an imported rule, which reads only what this engine's own rules left. It runs after them, so it never takes a
+	/// token one of ours would label, and it never takes a placeholder one of ours wrote.
 	/// </summary>
 	public bool Backstop { get; }
 
@@ -192,17 +177,27 @@ internal sealed class RedactionRule
 		return false;
 	}
 
+	/// <summary>True for exactly a placeholder this engine writes, such as <c>[REDACTED:jwt]</c>.</summary>
+	public static bool IsPlaceholder(ReadOnlySpan<char> text)
+	{
+		const string Open = "[REDACTED:";
+		if (text.Length <= Open.Length + 1 || !text.StartsWith(Open, StringComparison.Ordinal) || text[^1] != ']')
+		{
+			return false;
+		}
+
+		ReadOnlySpan<char> name = text[Open.Length..^1];
+		return name.Length is > 0 and <= MaxPlaceholder - 12 && !name.ContainsAnyExcept(PlaceholderNameChars);
+	}
+
+	private static readonly SearchValues<char> PlaceholderNameChars = SearchValues.Create("abcdefghijklmnopqrstuvwxyz0123456789-");
+
 	/// <summary>
 	/// From the rejected span's start, not past it: a real secret can sit inside a rejected
 	/// candidate, as in token_count=api_key=&lt;value&gt;. The match start still moves forward.
 	/// </summary>
-	private int NextPosition(Match match, Group secret)
+	private static int NextPosition(Match match, Group secret)
 	{
-		if (SkipRejected)
-		{
-			return secret.Index + secret.Length;
-		}
-
 		int resume = secret.Length > LongCandidate ? secret.Index + LongCandidate - ResumeOverlap : secret.Index;
 		return Math.Max(resume, match.Index + 1);
 	}
@@ -222,11 +217,6 @@ internal sealed class RedactionRule
 	/// <summary>The span to replace, or null when the candidate is rejected.</summary>
 	private (int Start, int End)? Resolve(string input, Match match, Group secret)
 	{
-		if (FindSpan is not null)
-		{
-			return FindSpan(input, match);
-		}
-
 		SecretCandidate candidate = new(input, match, secret);
 		if (Accept is not null && !Accept(candidate))
 		{
@@ -238,23 +228,19 @@ internal sealed class RedactionRule
 	}
 
 	/// <summary>
-	/// True when the span touches a placeholder a rule already wrote. Our own rules take a value with a placeholder inside it on
-	/// purpose, so a secret around one cannot survive in pieces. An imported rule has no such judgement, and could take a
-	/// placeholder with its neighbour, or split one, as <c>user:pass</c> splits <c>[REDACTED:x]</c>, so it is held to this.
+	/// True when the span touches a placeholder a rule already wrote. An imported rule could take a placeholder with its
+	/// neighbour, or split one, as <c>user:pass</c> splits <c>[REDACTED:x]</c>, so it is held to this.
 	/// </summary>
-	private const int MaxPlaceholder = 76;
-
 	private static bool OverlapsPlaceholder(string input, int start, int end)
 	{
 		const string Open = "[REDACTED:";
-		int from = Math.Max(0, start - 72);
+		int from = Math.Max(0, start - MaxPlaceholder);
 		int limit = Math.Min(input.Length, end + Open.Length);
 		int open = input.IndexOf(Open, from, limit - from, StringComparison.Ordinal);
 		while (open >= 0 && open < end)
 		{
-			// A placeholder is at most its opening and a 64-character name, so the close is looked for only that far.
 			int close = input.IndexOf(']', open, Math.Min(MaxPlaceholder, input.Length - open));
-			if (close >= start && ValueShapes.IsRedactedForm(input[open..(close + 1)]))
+			if (close >= start && IsPlaceholder(input.AsSpan(open, close + 1 - open)))
 			{
 				return true;
 			}

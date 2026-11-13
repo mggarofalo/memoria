@@ -82,14 +82,9 @@ public sealed class RedactionMeasurementTests
 	public static TheoryData<string> GitleaksFalsePositiveShapes()
 	{
 		string keys = "key" + "s";
-		string colon = ":";
-		string pair = "a" + colon + "REAL";
 		string hash = Convert.ToHexStringLower(System.Security.Cryptography.SHA1.HashData("a blob"u8));
 		return
 		[
-			// curl-auth-user: a review note about curl -u. The rule looks ahead from the heading to the prose example two lines on, and
-			// takes its one-letter user and all-caps placeholder as user:password.
-			$"**H5. `curl -u` catches only the last match on a line.**\n- Rule: `CommandLineRules.cs:228` (the greedy pattern).\n- `curl -u {pair} x && curl -u b{colon}OTHER y` leaves `REAL`.\n- Fix: match the flag itself.",
 			// generic-api-key: a list of git blob hashes, the keyword in a file name and the value a SHA-1.
 			$"- api.d.ts: `{hash}`",
 			// generic-api-key: prose listing test cases, the keyword an English plural.

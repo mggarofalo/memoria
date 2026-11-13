@@ -169,7 +169,7 @@ public sealed class SessionMessageSplitTests
 		string joined = string.Concat(session.Documents.Select(static document => document.Text()));
 		Assert.DoesNotContain(token, joined, StringComparison.Ordinal);
 		Assert.DoesNotContain(token[..20], joined, StringComparison.Ordinal);
-		Assert.Equal(1, session.CountsByRule["github-token"]);
+		Assert.Equal(1, session.CountsByRule["gitleaks-github-pat"]);
 	}
 
 	[Fact]
@@ -240,8 +240,8 @@ public sealed class SessionMessageSplitTests
 
 		new DocumentEnvelope("s", "i", Title: token, Tags: [token, "plain"]).Render("body", found);
 
-		Assert.Contains(new EnvelopeFieldRedaction("title", "github-token", 1), found);
-		Assert.Contains(new EnvelopeFieldRedaction("tags", "github-token", 1), found);
+		Assert.Contains(new EnvelopeFieldRedaction("title", "gitleaks-github-pat", 1), found);
+		Assert.Contains(new EnvelopeFieldRedaction("tags", "gitleaks-github-pat", 1), found);
 		Assert.Equal(2, found.Count);
 	}
 

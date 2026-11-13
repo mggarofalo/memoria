@@ -286,7 +286,7 @@ internal abstract class SessionTranscript(SessionSource source, SessionRenderOpt
 	}
 
 	/// <summary>
-	/// Redacts all message text as one string, so a key spread across messages is one key. Runs before
+	/// Redacts all message text as one string, with a boundary no rule's match crosses between messages. Runs before
 	/// the title, digest, sizing, and split, which therefore only ever see redacted text.
 	/// </summary>
 	protected void RedactMessages()
@@ -351,7 +351,7 @@ internal abstract class SessionTranscript(SessionSource source, SessionRenderOpt
 	/// <summary>
 	/// Halves a range known to fail until it finds the messages that fail alone. When both halves pass, the two together are what
 	/// fails, so the messages either side of the split go. Nothing here is kept: the whole text is redacted again as one string
-	/// afterwards, so a key spread across messages is still one key.
+	/// afterwards.
 	/// </summary>
 	private void RefuseFailing(string[] texts, int start, int count, RedactionException failure, Stopwatch clock)
 	{

@@ -46,7 +46,7 @@ public sealed class DocumentIngestTests(AuthApiFactory factory) : IClassFixture<
 		Assert.Contains("[REDACTED:", Assert.Single(corpus.Files).Value, StringComparison.Ordinal);
 
 		JsonElement result = JsonDocument.Parse(raw).RootElement;
-		Assert.Equal(1, result.GetProperty("redactions").GetProperty("github-token").GetInt32());
+		Assert.Equal(1, result.GetProperty("redactions").GetProperty("gitleaks-github-pat").GetInt32());
 		Assert.StartsWith("job-", result.GetProperty("jobId").GetString(), StringComparison.Ordinal);
 	}
 
@@ -64,8 +64,8 @@ public sealed class DocumentIngestTests(AuthApiFactory factory) : IClassFixture<
 		JsonElement result = JsonDocument.Parse(raw).RootElement;
 		JsonElement refusal = Assert.Single(result.GetProperty("refusals").EnumerateArray());
 		Assert.Equal("title", refusal.GetProperty("field").GetString());
-		Assert.Equal("github-token", refusal.GetProperty("rule").GetString());
-		Assert.Equal(1, result.GetProperty("redactions").GetProperty("github-token").GetInt32());
+		Assert.Equal("gitleaks-github-pat", refusal.GetProperty("rule").GetString());
+		Assert.Equal(1, result.GetProperty("redactions").GetProperty("gitleaks-github-pat").GetInt32());
 	}
 
 	[Fact]
@@ -82,13 +82,17 @@ public sealed class DocumentIngestTests(AuthApiFactory factory) : IClassFixture<
 		Assert.DoesNotContain(token, Assert.Single(corpus.Files).Value, StringComparison.Ordinal);
 	}
 
-	/// <summary>What an encoding does to redaction, stated rather than hidden. Invisible characters are seen through, and base64 and percent-encoding are decoded to check them. The forms marked false are known gaps, stored as they came.</summary>
+	/// <summary>
+	/// What an encoding does to redaction, stated rather than hidden. Redaction reads text as it is written and decodes nothing, so a
+	/// credential in any of these forms is stored as it came: the plain token is the control.
+	/// </summary>
 	[Theory]
-	[InlineData("zero-width-joined", true)]
-	[InlineData("base64", true)]
-	[InlineData("url-encoded", true)]
-	[InlineData("literal-json-escapes", true)]
-	[InlineData("hex", true)]
+	[InlineData("plain", true)]
+	[InlineData("zero-width-joined", false)]
+	[InlineData("base64", false)]
+	[InlineData("url-encoded", false)]
+	[InlineData("literal-json-escapes", false)]
+	[InlineData("hex", false)]
 	[InlineData("reversed", false)]
 	public async Task What_an_encoding_does_to_redaction_is_pinned(string encoding, bool caught)
 	{
@@ -101,7 +105,8 @@ public sealed class DocumentIngestTests(AuthApiFactory factory) : IClassFixture<
 			"url-encoded" => string.Concat(token.Select(static c => $"%{(int)c:X2}")),
 			"literal-json-escapes" => string.Concat(token.Select(static c => $"\\u{(int)c:x4}")),
 			"hex" => Convert.ToHexStringLower(Encoding.UTF8.GetBytes(token)),
-			_ => new string([.. token.Reverse()]),
+			"reversed" => new string([.. token.Reverse()]),
+			_ => token,
 		};
 
 		JsonElement result = await ReadAsync(await PostDocumentAsync(await WriterAsync(), sourceId: UniqueId(), body: encoded));

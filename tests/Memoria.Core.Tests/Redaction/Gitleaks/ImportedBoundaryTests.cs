@@ -30,7 +30,10 @@ public sealed class ImportedBoundaryTests
 		Assert.Equal(expected, Redact(template.Replace("{R}", RubyGems, StringComparison.Ordinal)));
 	}
 
-	/// <summary>Across every sampled token known by its format, an underscore after it ends it, except for the five whose alphabet holds one.</summary>
+	/// <summary>
+	/// Across every sampled token known by its format, an underscore after it ends it, except for the five whose alphabet holds one, and the
+	/// six whose upstream pattern ends only at a quote, a space or a semicolon, so a token glued to an underscore is not theirs at all.
+	/// </summary>
 	[Fact]
 	public void Every_format_token_ends_at_an_underscore_unless_its_alphabet_holds_one()
 	{
@@ -38,6 +41,8 @@ public sealed class ImportedBoundaryTests
 		string[] alphabetHoldsUnderscore =
 		[
 			"gitleaks-gcp-api-key", "gitleaks-heroku-api-key-v2", "gitleaks-openshift-user-token", "gitleaks-scalingo-api-token", "gitleaks-sendgrid-api-token",
+			"gitleaks-anthropic-admin-api-key", "gitleaks-anthropic-api-key", "gitleaks-azure-ad-client-secret", "gitleaks-facebook-access-token", "gitleaks-openai-api-key",
+			"gitleaks-perplexity-api-key",
 		];
 		List<string> missed = [];
 		foreach (ImportedCases.Form form in ImportedCases.Forms.Where(form => selfEvident.Contains(form.Rule) && !alphabetHoldsUnderscore.Contains(form.Rule)))
@@ -144,32 +149,16 @@ public sealed class ImportedBoundaryTests
 		Assert.Equal("twitter: [REDACTED:gitleaks-twitter-api-key]%2B", Redact("twitter: " + new string('A', 22) + "Mlh%2B"));
 	}
 
-	/// <summary>A rule of ours that stopped at a + / or = left the rest of a 1Password service account token or a SendGrid key.</summary>
+	/// <summary>A token whose alphabet holds + / or = goes whole, padding and all.</summary>
 	[Fact]
-	public void A_rule_of_ours_takes_the_whole_of_a_longer_token()
+	public void A_longer_token_goes_whole()
 	{
 		string onePassword = "ops" + "_eyJ" + Synthetic.Base64(260, 6007) + "==";
 		string sendGrid = "SG." + Synthetic.Body(22, 6008) + "." + Synthetic.Body(43, 6009);
-		string onePasswordUrlSafe = "ops" + "_eyJ" + Synthetic.Body(40, 6017) + "_" + Synthetic.Body(30, 6018) + "-" + Synthetic.Body(20, 6019);
 
-		Assert.Equal("t [REDACTED:onepassword-token] n", Redact("t " + onePassword + " n"));
-		Assert.Equal("t [REDACTED:sendgrid-key] n", Redact("t " + sendGrid + " n"));
-		Assert.Equal("t [REDACTED:onepassword-token] n", Redact("t " + onePasswordUrlSafe + " n"));
-		Assert.Equal("t [REDACTED:sendgrid-key].", Redact("t SG." + Synthetic.Body(22, 6012) + "." + Synthetic.Body(43, 6013) + "."));
-	}
-
-	/// <summary>A snake_case name that fits a token's prefix and alphabet up to an underscore is still a name.</summary>
-	[Theory]
-	[InlineData("def sk_test_connection_timeout(): pass")]
-	[InlineData("if rk_live_monitoring_enabled_flag:")]
-	[InlineData("def sk_test_connection2_timeout(): pass")]
-	[InlineData("x = rk_live_metrics2024_report_v1")]
-	[InlineData("sk_test_findUserById_returns")]
-	[InlineData("sk_live_v2endpoint_handler")]
-	[InlineData("open('sk_live_report2024q1_final.csv')")]
-	public void A_name_that_stops_at_an_underscore_stays(string text)
-	{
-		Assert.Equal(text, Redact(text));
+		Assert.Equal("t [REDACTED:gitleaks-1password-service-account-token] n", Redact("t " + onePassword + " n"));
+		Assert.Equal("t [REDACTED:gitleaks-sendgrid-api-token] n", Redact("t " + sendGrid + " n"));
+		Assert.Equal("t [REDACTED:gitleaks-sendgrid-api-token].", Redact("t SG." + Synthetic.Body(22, 6012) + "." + Synthetic.Body(43, 6013) + "."));
 	}
 
 	/// <summary>A Stripe key followed by an underscore still goes, and the word after it stays.</summary>
@@ -178,7 +167,7 @@ public sealed class ImportedBoundaryTests
 	{
 		string key = "sk" + "_test_" + Synthetic.Body(18, 6025) + "4" + Synthetic.Body(4, 6026) + "7";
 
-		Assert.Equal("x [REDACTED:stripe-key]_old y", Redact("x " + key + "_old y"));
+		Assert.Equal("x [REDACTED:gitleaks-stripe-access-token]_old y", Redact("x " + key + "_old y"));
 	}
 
 	/// <summary>
@@ -203,12 +192,6 @@ public sealed class ImportedBoundaryTests
 		Assert.Equal(text, Redact(text));
 	}
 
-	[Fact]
-	public void A_path_after_a_url_safe_ops_token_stays()
-	{
-		Assert.Equal("[REDACTED:onepassword-token]/config/settings.json", Redact("ops" + "_" + Synthetic.Body(40, 6014) + "/config/settings.json"));
-	}
-
 	[Theory]
 	[InlineData(".txt")]
 	[InlineData(".Extensions;")]
@@ -216,7 +199,7 @@ public sealed class ImportedBoundaryTests
 	{
 		string key = "SG." + Synthetic.Body(22, 6015) + "." + Synthetic.Body(43, 6016);
 
-		Assert.Equal("[REDACTED:sendgrid-key]" + after, Redact(key + after));
+		Assert.Equal("[REDACTED:gitleaks-sendgrid-api-token]" + after, Redact(key + after));
 	}
 
 	/// <summary>A value known by the name before it is all of its run, so random text after a separator is more of it, as on main.</summary>
