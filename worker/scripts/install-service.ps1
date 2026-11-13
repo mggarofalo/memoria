@@ -22,9 +22,9 @@
     llama-server must already be somewhere only administrators can change,
     because the service runs it. The script refuses it otherwise.
 
-    GPU access under this account has not been confirmed: run the smoke script
-    after installing. docs/deployment.md lists what could not be checked without
-    installing.
+    GPU access under this account was confirmed on an RTX 5080 desktop; run
+    the smoke script after installing to check it on yours. docs/deployment.md
+    lists what a real install confirmed and what it has not.
 
 .EXAMPLE
     .\scripts\install-service.ps1 -BindHost 192.168.1.20 -LlamaServer "C:\Program Files\llama\llama-server.exe" -TokenFile .\token.txt -WhatIf

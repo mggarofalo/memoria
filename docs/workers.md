@@ -488,6 +488,6 @@ The benchmark reports numbers and sets no thresholds. [The decision](#the-decisi
 | GPU loading on CUDA | Run: `nvidia-smi` shows VRAM, utilization and power rising during requests. |
 | GPU loading on Metal | **Not run.** |
 | A worker pool, or a worker on another machine | **Not run for real.** Everything here was one worker, on loopback or reached from containers on the same host. |
-| The NSSM and launchd scripts work | **Not run for real.** Dry-run plans and ACL helpers are tested; see [what is unconfirmed](deployment.md#not-confirmed). |
+| The NSSM and launchd scripts work | NSSM: run on the Windows desktop on 2026-11-13, CUDA working under the virtual account and the smoke script passing against the service; see [what was confirmed](deployment.md#confirmed-on-a-real-install). launchd: **not run for real**; see [what is unconfirmed](deployment.md#not-confirmed). |
 | Windows VRAM reading | Run: the parser's result matched real `nvidia-smi` output on one GPU. |
 | macOS thermal reading | Parsing tested against sample output, not against the real tool. |
