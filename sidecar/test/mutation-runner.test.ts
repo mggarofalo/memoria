@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, utimesSync } from "node:fs";
 import path from "node:path";
 import { test } from "node:test";
-import { addTally, describe, dotnetConfigOf, gremlinsScore, judged, scoreOf, shardsFor, strykerTally, type DotnetConfig, type DotnetShard, Lock, MAX_ATTEMPTS, overall, packagesFor, parseArgs, parsePackages, planRun, recordRun, repositoryOf, reportName, strykerScore, type RunRecord, type State } from "../../deploy/mutation-runner/runner.mts";
+import { addTally, belowBreak, breaksFor, describe, dotnetConfigOf, gremlinsBreak, gremlinsChangedTally, gremlinsScore, judged, parseChangedLines, passed, repoPath, scoreOf, shardsFor, strykerChangedTally, strykerTally, touchesChange, type DotnetConfig, type DotnetShard, Lock, MAX_ATTEMPTS, overall, packagesFor, parseArgs, parsePackages, planRun, recordRun, repositoryOf, reportName, strykerScore, type RunRecord, type State } from "../../deploy/mutation-runner/runner.mts";
 import { tempDir } from "./helpers.ts";
 
 test("a changed path selects the packages whose mutation it can change, and markdown selects none", () => {
@@ -105,6 +105,109 @@ test("the status line puts failures first, and fits GitHub's 140 characters", ()
   const long = describe(Array.from({ length: 12 }, () => results[0]!), 1);
   assert.equal(long.length, 140);
   assert.ok(long.endsWith("…"));
+});
+
+test("a diff's changed lines are the lines it adds or changes in each file, and a deletion adds none", () => {
+  const diff = [
+    "diff --git a/src/A.cs b/src/A.cs",
+    "index 1..2 100644",
+    "--- a/src/A.cs",
+    "+++ b/src/A.cs",
+    "@@ -289 +289 @@ class A",
+    "-\told\r",
+    "+\tnew\r",
+    "@@ -300,2 +300,0 @@",
+    "-gone",
+    "-gone too",
+    "@@ -310,0 +309,3 @@",
+    // Body lines that look like headers stay body lines.
+    "++++ b/not/a/file.ts",
+    "+@@ -1 +1 @@",
+    "+added",
+    "diff --git a/old.ts b/old.ts",
+    "deleted file mode 100644",
+    "--- a/old.ts",
+    "+++ /dev/null",
+    "@@ -1,2 +0,0 @@",
+    "-x",
+    "-y",
+    "diff --git a/sidecar/src/new.ts b/sidecar/src/new.ts",
+    "--- /dev/null",
+    "+++ b/sidecar/src/new.ts",
+    "@@ -0,0 +1,2 @@",
+    "+a",
+    "+b",
+    "",
+  ].join("\n");
+  assert.deepEqual(parseChangedLines(diff), new Map([
+    ["src/A.cs", [289, 309, 310, 311]],
+    ["sidecar/src/new.ts", [1, 2]],
+  ]));
+  assert.deepEqual(parseChangedLines(""), new Map());
+});
+
+test("a mutant counts on a changed-lines run only when its span overlaps a changed line", () => {
+  assert.ok(touchesChange([10], 10, 10));
+  assert.ok(touchesChange([12], 10, 14), "a block whose middle changed");
+  assert.ok(!touchesChange([9, 15], 10, 14));
+  assert.ok(!touchesChange(undefined, 1, 100), "a file with no changed line");
+  // Report keys become repository paths: Stryker.NET's are absolute in the clone, Gremlins' are the module's.
+  assert.equal(repoPath("/state/work/src/Memoria.Core/Sessions/SessionRenderer.cs", "/state/work"), "src/Memoria.Core/Sessions/SessionRenderer.cs");
+  assert.equal(repoPath("C:\\w\\src\\A.cs", "C:\\w\\"), "src/A.cs");
+  assert.equal(repoPath("sidecar/src/jobs.ts", "/state/work"), "sidecar/src/jobs.ts");
+  assert.equal(repoPath("internal/api/x.go", "/state/work", "cli/"), "cli/internal/api/x.go");
+
+  const changed = new Map([["src/A.cs", [5, 20]], ["src/B.cs", [1]]]);
+  const at = (status: string, start: number, end = start) => ({ status, location: { start: { line: start, column: 1 }, end: { line: end, column: 9 } } });
+  const report = {
+    files: {
+      "/w/src/A.cs": { mutants: [at("Killed", 5), at("Survived", 3, 7), at("NoCoverage", 20), at("Survived", 6), at("Ignored", 5), at("Killed", 21)] },
+      "/w/src/B.cs": { mutants: [at("Timeout", 1), { status: "Survived" }] },
+      "/w/src/C.cs": { mutants: [at("Survived", 1)] },
+    },
+  };
+  // Killed@5, Survived 3-7 and NoCoverage@20 in A; Timeout@1 in B. Not the unchanged line 6, the line 21, C, or a mutant with no location.
+  assert.deepEqual(strykerChangedTally(report, changed, (key) => repoPath(key, "/w")), { detected: 2, valid: 4 });
+  assert.deepEqual(strykerChangedTally(null, changed, (key) => key), { detected: 0, valid: 0 });
+
+  const gremlins = {
+    test_efficacy: 50,
+    files: [
+      { file_name: "cmd/a.go", mutations: [{ status: "KILLED", line: 4 }, { status: "LIVED", line: 4 }, { status: "NOT COVERED", line: 4 }, { status: "TIMED OUT", line: 4 }, { status: "LIVED", line: 5 }] },
+      { file_name: "cmd/b.go", mutations: [{ status: "LIVED", line: 4 }] },
+    ],
+  };
+  // Killed over killed and lived, as Gremlins' own efficacy: not covered and timed out count for neither.
+  assert.deepEqual(gremlinsChangedTally(gremlins, new Map([["cli/cmd/a.go", [4]]]), (key) => repoPath(key, "/w", "cli/")), { detected: 1, valid: 2 });
+  assert.deepEqual(gremlinsChangedTally({}, new Map(), (key) => key), { detected: 0, valid: 0 });
+});
+
+test("a changed-lines score is judged against its config's break, and no score is no failure", () => {
+  assert.deepEqual(belowBreak({ core: 89.9, api: 98, "security-core": 100 }, { core: 90, api: 98, "security-core": 90, security: 98 }), ["core"]);
+  assert.deepEqual(belowBreak({}, { core: 90 }), [], "no mutant on a changed line");
+  assert.deepEqual(belowBreak({ mutation: 10 }, {}), [], "a config with no break");
+  assert.equal(gremlinsBreak("unleash:\n  threshold:\n    efficacy: 92\n    mutant-coverage: 88\n"), 92);
+  assert.equal(gremlinsBreak(readFileSync(path.resolve(import.meta.dirname, "../../cli/.gremlins.yaml"), "utf8")) !== null, true, "the repository's own config");
+  assert.equal(gremlinsBreak("unleash:\n  exclude-files: []\n"), null);
+
+  // Each break is found under the name its config's score goes by, from the repository's own configs.
+  const root = path.resolve(import.meta.dirname, "../..");
+  const keys = (pkg: Parameters<typeof breaksFor>[0]) => Object.keys(breaksFor(pkg, root)).sort();
+  assert.deepEqual(keys("dotnet"), ["api", "core", "security", "security-core"]);
+  assert.deepEqual(keys("sidecar"), ["mutation", "mutation-integration", "mutation-security"]);
+  assert.deepEqual(keys("worker"), ["mutation", "mutation-security"]);
+  assert.deepEqual(keys("cli"), ["mutation"]);
+  for (const pkg of ["dotnet", "sidecar", "worker", "cli"] as const) for (const value of Object.values(breaksFor(pkg, root))) assert.ok(value > 0 && value <= 100, `${pkg} ${value}`);
+
+  const ran = { package: "dotnet" as const, exitCode: 0, scores: { core: 80 }, below: ["core"] };
+  const fine = { package: "cli" as const, exitCode: 0, scores: {}, below: [] };
+  const broke = { package: "worker" as const, exitCode: 1, scores: {}, below: [] };
+  assert.ok(!passed(ran), "under its break");
+  assert.ok(passed(fine));
+  assert.ok(!passed(broke), "a tool that failed still fails the run");
+  assert.equal(overall([fine]), "success");
+  assert.equal(overall([fine, ran]), "failure");
+  assert.equal(describe([fine, ran, broke], 1, true), "changed lines: dotnet FAILED core 80.0%; worker FAILED no score; cli no score");
 });
 
 test("the repository comes from the clone URL", () => {

@@ -12,6 +12,9 @@
 # `node scripts/mutation-dotnet-shards.mjs --names` lists them. With MUTATION_BASE
 # too, a shard mutates only its own files that changed.
 #
+# With MUTATION_NO_BREAK set (the mutation runner, on a changed-files run), no
+# config's break threshold fails the run, and the caller judges the reports itself.
+#
 # Lower level: MUTATION_CONFIGS names the configs to run, space-separated, and
 # MUTATION_MUTATE narrows what they mutate, as space-separated globs passed as --mutate,
 # where a leading ! excludes.
@@ -20,6 +23,11 @@ set -euf # -f: the globs are Stryker's, not the shell's
 since=""
 if [ -n "${MUTATION_BASE:-}" ]; then
   since="--since:$MUTATION_BASE"
+fi
+
+break_at=""
+if [ -n "${MUTATION_NO_BREAK:-}" ]; then
+  break_at="--break-at 0"
 fi
 
 output_suffix=""
@@ -45,8 +53,8 @@ if [ -n "${MUTATION_CONCURRENCY:-}" ]; then
 fi
 status=0
 for config in ${MUTATION_CONFIGS:-core api security security-core}; do
-  # shellcheck disable=SC2086 # $concurrency, $since and $mutate are empty or meant to split
+  # shellcheck disable=SC2086 # $concurrency, $since, $break_at and $mutate are empty or meant to split
   dotnet tool run dotnet-stryker --config-file "stryker/$config.json" \
-    --output "StrykerOutput/$config$output_suffix" $concurrency $since $mutate || status=1
+    --output "StrykerOutput/$config$output_suffix" $concurrency $since $break_at $mutate || status=1
 done
 exit "$status"
